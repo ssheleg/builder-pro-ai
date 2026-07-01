@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+dist-ssr/
+build/
+*.local
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/
+**/*.rs.bk
+
+# Env / secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+AuthKey_*.p8
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Local runtime state (daemon sockets, dev DBs)
+*.db
+*.db-wal
+*.db-shm
+*.sock
