@@ -6,7 +6,18 @@
 use std::collections::VecDeque;
 
 /// Cap the in-progress escape carry so a malicious/garbled stream can't grow it unbounded.
+/// This bound applies to sequences NOT YET identified as a recognized strippable OSC (see
+/// `RECOGNIZED_OSC_CAP` below for those) — once a sequence exceeds this cap without being
+/// classified, it fails open (flushed verbatim) so genuine long user output is never lost.
 const CARRY_CAP: usize = 256;
+
+/// Once a partial sequence is identified as a recognized strippable OSC (title 0/1/2,
+/// OSC-7 cwd, OSC-133 semantic marks — spec §11), it must never fail open: leaking it would
+/// let a replayed snapshot re-trigger the title/cwd side effect on a reattached terminal.
+/// Instead we keep consuming and dropping bytes until the terminator, bounded only by this
+/// larger safety cap (matches `osc_parser`'s cap) to protect against adversarial/unterminated
+/// input growing the carry unboundedly.
+const RECOGNIZED_OSC_CAP: usize = 8192;
 
 pub struct ScrollbackRing {
     cap: usize,
@@ -84,8 +95,19 @@ impl Sanitizer {
             self.carry.push(b);
             match classify(&self.carry) {
                 Verdict::Incomplete => {
-                    if self.carry.len() > CARRY_CAP {
-                        // Give up on this sequence: fail open, flush verbatim, reset.
+                    if is_recognized_strippable_osc_prefix(&self.carry) {
+                        // A recognized side-effecting OSC (title/OSC-7/OSC-133): it must
+                        // NEVER fail open, since leaking it would let a replayed snapshot
+                        // re-trigger the side effect (spec §11). Keep dropping bytes until
+                        // the terminator, bounded only by the larger safety cap.
+                        if self.carry.len() > RECOGNIZED_OSC_CAP {
+                            // Adversarial/unterminated input: give up waiting for the
+                            // terminator, but discard (not flush) — never leak.
+                            self.carry.clear();
+                        }
+                    } else if self.carry.len() > CARRY_CAP {
+                        // Not a recognized strippable sequence: give up, fail open, flush
+                        // verbatim so genuine long user output is never silently lost.
                         out.extend(self.carry.drain(..));
                     }
                 }
@@ -98,6 +120,35 @@ impl Sanitizer {
             }
         }
         out
+    }
+}
+
+/// True once `seq` is unambiguously the start of a recognized strippable OSC — i.e. it has
+/// a complete leading identifier (`0`, `1`, `2`, `7`, `133`) followed by `;`, or is exactly
+/// one of those idents so far while still possibly accumulating more ident digits. Used to
+/// decide, before termination, whether a not-yet-complete OSC must be held (drop-until-
+/// terminator, spec §11) rather than allowed to fail open past the small carry cap.
+fn is_recognized_strippable_osc_prefix(seq: &[u8]) -> bool {
+    if seq.len() < 2 || seq[0] != ESC || seq[1] != b']' {
+        return false;
+    }
+    let body = &seq[2..];
+    let ident_end = body.iter().position(|&c| c == b';');
+    let ident = match ident_end {
+        Some(end) => &body[..end],
+        None => body, // no ';' yet — ident still accumulating
+    };
+    match ident_end {
+        // Identifier terminated by ';': must be an exact recognized match.
+        Some(_) => matches!(ident, b"0" | b"1" | b"2" | b"7" | b"133"),
+        // Identifier still open: recognized only while it remains a valid prefix of one of
+        // the recognized idents (so "13" while awaiting "133;" counts; "9" does not).
+        None => {
+            !ident.is_empty()
+                && [b"0".as_slice(), b"1", b"2", b"7", b"133"]
+                    .iter()
+                    .any(|full| full.starts_with(ident))
+        }
     }
 }
 
@@ -291,5 +342,61 @@ mod tests {
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn strips_title_osc_longer_than_carry_cap() {
+        // Title OSC (ident "2") whose payload exceeds CARRY_CAP (256 bytes) must still be
+        // fully stripped — it must NOT fail-open and leak into the snapshot, since replaying
+        // a leaked title would re-trigger the title side effect on reattach (spec §11).
+        let mut payload = b"a".repeat(300);
+        let mut input = b"pre\x1b]2;".to_vec();
+        input.append(&mut payload);
+        input.push(BEL);
+        input.extend_from_slice(b"post");
+        let snap = strip(&input);
+        assert!(!contains(&snap, b"\x1b]2;"), "long title OSC prefix leaked");
+        assert!(
+            !snap.windows(50).any(|w| w.iter().all(|&b| b == b'a')),
+            "long title OSC payload leaked"
+        );
+        assert_eq!(snap, b"prepost".to_vec());
+    }
+
+    #[test]
+    fn strips_osc_7_longer_than_carry_cap() {
+        // OSC-7 (cwd) whose payload exceeds CARRY_CAP (256 bytes) — e.g. a long cwd path —
+        // must still be fully stripped; leaking it would re-trigger the cwd side effect.
+        let mut payload = b"a".repeat(300);
+        let mut input = b"pre\x1b]7;file://host/".to_vec();
+        input.append(&mut payload);
+        input.push(BEL);
+        input.extend_from_slice(b"post");
+        let snap = strip(&input);
+        assert!(!contains(&snap, b"\x1b]7;"), "long OSC-7 prefix leaked");
+        assert!(
+            !contains(&snap, b"file://host/"),
+            "long OSC-7 payload leaked"
+        );
+        assert_eq!(snap, b"prepost".to_vec());
+    }
+
+    #[test]
+    fn unrecognized_long_partial_escape_still_fails_open() {
+        // A long run of bytes that merely starts with ESC but never resolves to a
+        // recognized/complete sequence (never hits '[' or ']') must still fail-open and be
+        // preserved verbatim once it exceeds CARRY_CAP — genuine data must not be silently
+        // dropped just because it started with an ESC byte.
+        let mut r = ScrollbackRing::new(1 << 20);
+        let mut chunk = vec![ESC];
+        chunk.extend(std::iter::repeat(b'Q').take(300));
+        r.push(&chunk);
+        r.push(b"tail");
+        let snap = r.snapshot();
+        assert!(
+            contains(&snap, &vec![b'Q'; 300]),
+            "unrecognized long partial escape must fail open (be preserved)"
+        );
+        assert!(contains(&snap, b"tail"), "trailing text lost");
     }
 }
