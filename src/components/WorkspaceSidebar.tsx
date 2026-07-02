@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { useAppStore } from "../store/store";
 import { pickFolder, createWorkspace } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";

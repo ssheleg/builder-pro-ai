@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type JSX } from "react";
 import type { SessionId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
 import { theme } from "../theme";

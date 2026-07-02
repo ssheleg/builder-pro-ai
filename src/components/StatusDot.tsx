@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { SessionLifecycle } from "../ipc/types";
 import { theme } from "../theme";
 

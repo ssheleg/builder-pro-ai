@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { useAppStore } from "../store/store";
 import { theme } from "../theme";
 
