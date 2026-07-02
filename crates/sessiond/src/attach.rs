@@ -494,10 +494,17 @@ mod tests {
     #[tokio::test]
     async fn detach_stops_output_session_stays_alive() {
         let sup = Arc::new(Supervisor::new());
+        // The script blocks on a third `read` after printing AFTER so the child process is still
+        // running (and `is_active` still true) for as long as this test needs it — without this,
+        // the shell exits and gets reaped immediately after `printf 'AFTER'`, racing the
+        // `sup.meta(&id).is_active` assertion below under CPU load/scheduling pressure (this raced
+        // and failed intermittently: confirmed via repeated runs under synthetic CPU stress, see
+        // Task 25 report). Keeping the child parked on stdin makes "the PTY is still alive when we
+        // check" a fact of the test setup, not a race against the child's own exit timing.
         let id = sup
             .create(spec(vec![
                 "-c".into(),
-                "read _go; printf 'BEFORE\\n'; read _go2; printf 'AFTER\\n'".into(),
+                "read _go; printf 'BEFORE\\n'; read _go2; printf 'AFTER\\n'; read _go3".into(),
             ]))
             .expect("create");
 
@@ -622,6 +629,73 @@ mod tests {
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // ---- LiveOscStripper: an OSC-133 marker split across two strip() calls must be fully
+    // dropped, including the terminator delivered in the second call — nothing leaks. ----
+    //
+    // This is a direct unit test of the struct (no PTY/tokio needed), exercising the same
+    // split-sequence path `read()`-chunked live PTY output takes in production: a real terminal
+    // emulator can hand `strip()` an OSC-133 sequence broken at an arbitrary byte boundary between
+    // two separate reads. `carry` must accumulate across calls and `discarding_until_terminator`
+    // (once the prefix is unambiguously recognized as OSC-133/OSC-7) must persist across the call
+    // boundary so the terminator arriving in the NEXT call is still swallowed, not re-entered as
+    // ground state and echoed to the client.
+    #[test]
+    fn live_osc_stripper_drops_osc133_marker_split_across_two_strip_calls() {
+        let mut s = LiveOscStripper::new();
+
+        // First call: text, then an OSC-133 "C" mark broken mid-sequence (no terminator yet).
+        let out1 = s.strip(b"prompt$ \x1b]133;C");
+        assert_eq!(
+            out1, b"prompt$ ",
+            "plain text before the split marker must pass through immediately"
+        );
+
+        // Second call: the rest of the identifier plus the BEL terminator, followed by more text.
+        let out2 = s.strip(b"\x07cmd output\n");
+        assert_eq!(
+            out2, b"cmd output\n",
+            "the OSC-133 marker's tail + terminator (delivered in the second strip() call) must \
+             be fully dropped — nothing of \\x1b]133;C\\x07 may leak into the second call's output"
+        );
+
+        let mut combined = out1.clone();
+        combined.extend_from_slice(&out2);
+        assert!(
+            !contains(&combined, b"\x1b]133;"),
+            "OSC-133 prefix leaked across the strip() call boundary: {combined:?}"
+        );
+        assert!(
+            !combined.contains(&BEL),
+            "OSC-133 terminator (BEL) leaked across the strip() call boundary: {combined:?}"
+        );
+        assert_eq!(combined, b"prompt$ cmd output\n".to_vec());
+    }
+
+    // ---- Same split-across-calls scenario for OSC-7 (cwd mark), ST-terminated this time. ----
+    #[test]
+    fn live_osc_stripper_drops_osc7_marker_split_across_two_strip_calls_st_terminated() {
+        let mut s = LiveOscStripper::new();
+
+        // First call ends mid-payload, no terminator yet.
+        let out1 = s.strip(b"a\x1b]7;file://host/some/very/long/pa");
+        assert_eq!(out1, b"a");
+
+        // Second call: rest of the payload + the two-byte ST terminator (ESC \\), split so the
+        // ESC and '\\' themselves arrive together — then trailing text.
+        let out2 = s.strip(b"th\x1b\\b");
+        assert_eq!(
+            out2, b"b",
+            "OSC-7 payload tail + ST terminator (split across calls) must be fully dropped, only \
+             the trailing 'b' survives"
+        );
+
+        let mut combined = out1.clone();
+        combined.extend_from_slice(&out2);
+        assert!(!contains(&combined, b"\x1b]7;"), "OSC-7 prefix leaked: {combined:?}");
+        assert!(!contains(&combined, b"file://host"), "OSC-7 payload leaked: {combined:?}");
+        assert_eq!(combined, b"ab".to_vec());
     }
 
     // ---- a superseded/detached forwarder does not leak a spawn_blocking OS thread. ----
