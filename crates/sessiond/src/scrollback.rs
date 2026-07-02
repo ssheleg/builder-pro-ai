@@ -259,4 +259,37 @@ mod tests {
         r.push(b"49hpost");
         assert_eq!(r.snapshot(), b"prepost".to_vec());
     }
+
+    #[test]
+    fn replay_of_past_vim_session_has_no_side_effecting_sequences() {
+        let mut r = ScrollbackRing::new(1 << 20);
+        // Simulate: prompt marks, run `vim` (alt-screen + title), quit, back to prompt.
+        r.push(b"\x1b]133;A\x07\x1b]7;file://h/home/u\x07me@host:~$ ");
+        r.push(b"\x1b]133;B\x07vim file.txt\n\x1b]133;C\x07");
+        r.push(b"\x1b]0;VIM - file.txt\x07"); // title set by vim
+        r.push(b"\x1b[?1049h"); // enter alt-screen
+        r.push(b"\x1b[?2004h~ editing ~\x1b[?2004l"); // paste toggles inside vim
+        r.push(b"\x1b[?1049l"); // leave alt-screen
+        r.push(b"\x1b]133;D;0\x07"); // command finished
+        r.push(b"\x1b]133;A\x07me@host:~$ "); // fresh prompt
+        let snap = r.snapshot();
+
+        // None of the side-effecting sequences survive.
+        assert!(!contains(&snap, b"\x1b[?1049h"), "alt-screen enter leaked");
+        assert!(!contains(&snap, b"\x1b[?1049l"), "alt-screen leave leaked");
+        assert!(!contains(&snap, b"\x1b[?2004h"), "bracketed-paste enter leaked");
+        assert!(!contains(&snap, b"\x1b[?2004l"), "bracketed-paste leave leaked");
+        assert!(!contains(&snap, b"\x1b]0;"), "title OSC leaked");
+        assert!(!contains(&snap, b"\x1b]133;"), "OSC-133 mark leaked");
+        assert!(!contains(&snap, b"\x1b]7;"), "OSC-7 mark leaked");
+
+        // Normal-buffer text + the interior vim text survive.
+        assert!(contains(&snap, b"me@host:~$ "), "prompt text lost");
+        assert!(contains(&snap, b"vim file.txt"), "command echo lost");
+        assert!(contains(&snap, b"~ editing ~"), "interior text lost");
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
 }
