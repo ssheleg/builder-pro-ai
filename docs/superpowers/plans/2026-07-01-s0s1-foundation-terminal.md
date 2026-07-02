@@ -17,7 +17,7 @@
 Every task's requirements implicitly include this section. Values are copied verbatim from the spec.
 
 - **Platform:** macOS only; universal binary (arm64 + x86_64). **Rust ≥ 1.77.2.**
-- **Version pins (spec §3):** `tauri` ^2 (record 2.11.4), `@tauri-apps/api` ^2, plugins `store`/`dialog`/`fs`/`shell` major `2`; `portable-pty` = 0.9.0; `alacritty_terminal` pinned exact (0.24/0.25 — confirm at task time); `rusqlite` 0.32 (feature `bundled`); `bincode` = **1.3.3**; `tokio` 1.x (features `net,io-util,rt-multi-thread,macros,sync,time`); `rustix` (features `fs,net`); `uuid` v4; `tracing` + `tracing-subscriber`; `ts-rs`. Frontend: React 19, Vite 6/7, TypeScript 5, Zustand 5, `@xterm/xterm` 6.0.0 + addons `fit`0.11/`webgl`0.19/`search`0.15/`web-links`0.11/`serialize`0.13 (scoped `@xterm/*` only).
+- **Version pins (spec §3):** `tauri` ^2 (record 2.11.4), `@tauri-apps/api` ^2, plugins `store`/`dialog`/`fs`/`shell` major `2`; `portable-pty` = 0.9.0; `alacritty_terminal` pinned exact (0.24/0.25 — confirm at task time); `rusqlite` 0.32 (feature `bundled`); `bincode` = **1.3.3**; `tokio` 1.x (features `net,io-util,rt-multi-thread,macros,sync,time`); `rustix` (features `fs,net`); `uuid` v4; `tracing` + `tracing-subscriber`; `ts-rs`. Frontend: React 19, Vite 6/7, TypeScript 5, Zustand 5, `@xterm/xterm` 6.0.0 + addons `fit`0.11/`webgl`0.19/`search`0.16/`web-links`0.12/`serialize`0.14 (scoped `@xterm/*` only; search/web-links/serialize bumped one patch — the 0.15/0.11/0.13 releases peer-require xterm ^5 and break `npm install` against xterm 6.0.0, found in Task 1).
 - **Naming (locked):** bundle id `ai.builderpro.desktop`; product `Builder Pro AI`; daemon binary `bpa-sessiond`; LaunchAgent label `ai.builderpro.desktop.sessiond`; hook fns `_bpa_precmd`/`_bpa_preexec`; env flag `BPA_INJECTION`; wire `MAGIC = 0x4250_4131`, `PROTO_VERSION = 1`; socket `$XDG_RUNTIME_DIR/bpa/d.sock` else `/tmp/bpa-<uid>/d.sock`; lockfile `d.lock`; `APP_SUPPORT = ~/Library/Application Support/ai.builderpro.desktop`; DB `{APP_SUPPORT}/bpa.db`.
 - **Cargo workspace** at repo root; members `["src-tauri", "crates/protocol", "crates/sessiond"]`.
 - **TDD mandatory:** every task = write failing test → run (confirm FAIL) → minimal impl → run (confirm PASS) → commit. Conventional commits, frequently.
@@ -116,8 +116,9 @@ Run these **sequential** glue tasks so leaf tasks only ever create their own lea
   `run()` entry. G4 leaf tasks create ONLY their own `.rs`.
 - **Frontend manifests** (T1 owns): `package.json` includes the FULL frontend dep + devDep set,
   including `@testing-library/{react,jest-dom,user-event,dom}` and `jsdom` (so T22 adds none), and
-  the addon pins `@xterm/addon-fit@0.11`, `@xterm/addon-webgl@0.19`, `@xterm/addon-serialize@0.13`
-  (spec §3 is authoritative over the research file's older 0.10/0.18 numbers). `src/ipc` has **no
+  the addon pins `@xterm/addon-fit@0.11`, `@xterm/addon-webgl@0.19`, `@xterm/addon-search@0.16`,
+  `@xterm/addon-web-links@0.12`, `@xterm/addon-serialize@0.14` (search/web-links/serialize bumped one
+  patch in Task 1 for xterm-6 peer-dep compatibility). `src/ipc` has **no
   barrel**; consumers import concrete module paths (`../ipc/commands`, `../ipc/channel`,
   `../ipc/events`, `../ipc/types`).
 
