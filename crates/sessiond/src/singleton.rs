@@ -3,7 +3,7 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Error, ErrorKind};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{flock, FlockOperation};
@@ -87,6 +87,42 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
 /// Ensure the resolved socket directory exists at mode 0700 owned by us (spec §8.1–§8.2).
 pub fn ensure_socket_dir() -> io::Result<()> {
     ensure_dir(&socket_dir())
+}
+
+/// Owns the exclusively-flocked lockfile for the daemon's whole lifetime.
+/// Dropping the guard releases the advisory lock.
+#[derive(Debug)]
+pub struct LockGuard {
+    _file: File,
+}
+
+fn acquire_lock_at(path: &Path) -> io::Result<LockGuard> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    match flock(file.as_fd(), FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(LockGuard { _file: file }),
+        Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => Err(
+            Error::new(ErrorKind::WouldBlock, "another daemon holds the single-instance lock"),
+        ),
+        Err(e) => Err(Error::from_raw_os_error(e.raw_os_error())),
+    }
+}
+
+/// Acquire the single-instance advisory lock at the resolved lockfile (spec §8.2).
+/// A second daemon that cannot take the lock gets `ErrorKind::WouldBlock` and must exit.
+pub fn acquire_single_instance_lock() -> io::Result<LockGuard> {
+    acquire_lock_at(&resolve_lockfile())
+}
+
+/// Set the bound socket file to mode 0600 (spec §8.2).
+pub fn set_socket_mode(sock: &Path) -> io::Result<()> {
+    use std::fs::Permissions;
+    std::fs::set_permissions(sock, Permissions::from_mode(0o600))
 }
 
 #[cfg(test)]
@@ -176,5 +212,36 @@ mod tests {
         std::fs::write(&path, b"not a dir").unwrap();
         let err = ensure_dir(&path).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn second_flock_on_same_lockfile_would_block() {
+        let base = tempfile::tempdir().unwrap();
+        let lock = base.path().join("d.lock");
+        let g1 = acquire_lock_at(&lock).expect("first lock ok");
+        let err = acquire_lock_at(&lock).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        drop(g1);
+        // After the first guard drops, the lock is re-acquirable.
+        let _g2 = acquire_lock_at(&lock).expect("re-lock after drop ok");
+    }
+
+    #[test]
+    fn lockfile_created_mode_0600() {
+        let base = tempfile::tempdir().unwrap();
+        let lock = base.path().join("d.lock");
+        let _g = acquire_lock_at(&lock).unwrap();
+        let md = std::fs::metadata(&lock).unwrap();
+        assert_eq!(md.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn set_socket_mode_applies_0600() {
+        let base = tempfile::tempdir().unwrap();
+        let sock = base.path().join("d.sock");
+        std::fs::write(&sock, b"").unwrap();
+        set_socket_mode(&sock).unwrap();
+        let md = std::fs::metadata(&sock).unwrap();
+        assert_eq!(md.permissions().mode() & 0o777, 0o600);
     }
 }
