@@ -125,6 +125,39 @@ pub fn set_socket_mode(sock: &Path) -> io::Result<()> {
     std::fs::set_permissions(sock, Permissions::from_mode(0o600))
 }
 
+/// Read the effective uid of the peer connected to `fd` via `getpeereid(2)` (POSIX/macOS).
+fn peer_euid(fd: BorrowedFd<'_>) -> io::Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: fd is a valid borrowed AF_UNIX socket fd for the duration of the call;
+    // uid/gid are valid out-pointers.
+    let rc = unsafe { libc::getpeereid(fd.as_raw_fd(), &mut uid, &mut gid) };
+    if rc != 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(uid as u32)
+}
+
+/// Compare the peer euid to `expected`; refuse on mismatch.
+fn check_peer_cred_against(fd: BorrowedFd<'_>, expected: u32) -> io::Result<()> {
+    let peer = peer_euid(fd)?;
+    if peer != expected {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("peer euid {peer} != daemon euid {expected}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Verify the connecting peer's effective uid equals the daemon's euid (spec §8.2, §16).
+/// Refuse otherwise. `fd` must be an accepted AF_UNIX stream socket.
+pub fn check_peer_cred(fd: BorrowedFd<'_>) -> io::Result<()> {
+    let euid = rustix::process::geteuid().as_raw();
+    check_peer_cred_against(fd, euid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +276,24 @@ mod tests {
         set_socket_mode(&sock).unwrap();
         let md = std::fs::metadata(&sock).unwrap();
         assert_eq!(md.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn peer_cred_accepts_same_uid_over_socketpair() {
+        use std::os::unix::net::UnixStream;
+        let (a, _b) = UnixStream::pair().unwrap();
+        // Our own connection: peer euid == our euid → accepted.
+        check_peer_cred(a.as_fd()).expect("same-uid peer accepted");
+    }
+
+    #[test]
+    fn peer_cred_rejects_foreign_uid_simulated() {
+        use std::os::unix::net::UnixStream;
+        let (a, _b) = UnixStream::pair().unwrap();
+        let real = peer_euid(a.as_fd()).expect("read peer euid");
+        // Simulate a foreign peer by comparing against a deliberately-wrong expected uid.
+        let foreign = real.wrapping_add(1);
+        let err = check_peer_cred_against(a.as_fd(), foreign).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }
