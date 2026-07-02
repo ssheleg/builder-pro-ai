@@ -149,6 +149,12 @@ mod tests {
     // Spawn a shell through a raw PTY (via portable-pty) using the recipe from write_session_assets,
     // drive one command, and assert the emitted OSC bytes appear in the locked order.
     fn drive_shell_capture(kind: ShellKind, program: &str) -> Option<String> {
+        drive_shell_capture_cmd(kind, program, b"printf hi\n")
+    }
+
+    // Same as `drive_shell_capture`, but lets the caller pick the driven command line (e.g. a
+    // subshell-fronted command) instead of the default `printf hi`.
+    fn drive_shell_capture_cmd(kind: ShellKind, program: &str, command_line: &[u8]) -> Option<String> {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
         if !std::path::Path::new(program).exists() {
             return None; // shell not installed on this box — skip
@@ -203,7 +209,7 @@ mod tests {
 
         // Give the shell time to print its first prompt (A/B/OSC7), then run one command.
         std::thread::sleep(Duration::from_millis(400));
-        writer.write_all(b"printf hi\n").unwrap();
+        writer.write_all(command_line).unwrap();
         writer.flush().unwrap();
 
         let start = Instant::now();
@@ -265,6 +271,67 @@ mod tests {
         match drive_shell_capture(ShellKind::Bash, "/bin/bash") {
             Some(out) => assert_osc_order(&out),
             None => eprintln!("skipping bash OSC test: /bin/bash not present"),
+        }
+    }
+
+    // Count occurrences of a byte-string marker in `out` (non-overlapping-window scan; markers
+    // never overlap themselves so this is exact).
+    fn count_occurrences(out: &str, marker: &str) -> usize {
+        out.as_bytes()
+            .windows(marker.len())
+            .filter(|w| *w == marker.as_bytes())
+            .count()
+    }
+
+    // Regression test for the bash DEBUG-trap subshell blind spot: bash does NOT propagate the
+    // DEBUG trap into a subshell `(...)` unless `set -o functrace` (`set -T`) is enabled. A
+    // top-level command whose form is a subshell — e.g. `(exit 37)` — must still emit exactly one
+    // `133;C` (command-running marker), followed by `133;D;37` (the subshell's exit code). Before
+    // the fix (no `set -o functrace` in bpa-bash.sh), the DEBUG trap never fires inside `(...)`,
+    // so `133;C` never appears for this whole class of real, common commands (subshells, e.g.
+    // `(cd /tmp && echo hi)`, `(export X=1; cmd)`) — breaking the `Running` lifecycle state
+    // (spec §10.3) and `waiting_for_input` (§10.4) for them.
+    #[test]
+    fn bash_subshell_command_emits_c_exactly_once_then_correct_exit_code() {
+        match drive_shell_capture_cmd(ShellKind::Bash, "/bin/bash", b"(exit 37)\n") {
+            Some(out) => {
+                // Exactly one `133;C` for this single top-level subshell command (functrace must
+                // not cause the guarded-once semantics to double-fire across the subshell's own
+                // simple commands).
+                let c_count = count_occurrences(&out, "\x1b]133;C");
+                assert_eq!(
+                    c_count, 1,
+                    "expected exactly one OSC 133;C for `(exit 37)`, got {c_count} in {out:?}"
+                );
+                let c = out.find("\x1b]133;C").expect("OSC 133;C present for subshell command");
+                // The exit code 37 from the subshell must be captured in the following D mark.
+                let d_rel = out[c..]
+                    .find("\x1b]133;D;37\x07")
+                    .expect("OSC 133;D;37 present after C for `(exit 37)`");
+                assert!(d_rel > 0, "D must come strictly after C");
+            }
+            None => eprintln!(
+                "skipping bash subshell functrace test: /bin/bash not present"
+            ),
+        }
+    }
+
+    // Guard against functrace over-firing: an ordinary pipeline (multiple simple commands joined
+    // by `|`) is still ONE top-level command and must still yield exactly one `133;C`, not one per
+    // pipeline stage. This must stay green after enabling `set -o functrace`.
+    #[test]
+    fn bash_pipeline_command_emits_c_exactly_once() {
+        match drive_shell_capture_cmd(ShellKind::Bash, "/bin/bash", b"echo hi | cat | cat\n") {
+            Some(out) => {
+                let c_count = count_occurrences(&out, "\x1b]133;C");
+                assert_eq!(
+                    c_count, 1,
+                    "expected exactly one OSC 133;C for a 3-stage pipeline, got {c_count} in {out:?}"
+                );
+            }
+            None => eprintln!(
+                "skipping bash pipeline no-double-C test: /bin/bash not present"
+            ),
         }
     }
 }
