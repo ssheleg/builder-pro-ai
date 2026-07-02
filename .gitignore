@@ -13,6 +13,7 @@ build/
 target/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/binaries/bpa-sessiond-*
 **/*.rs.bk
 
 # Env / secrets — never commit
