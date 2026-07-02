@@ -172,7 +172,24 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Process-wide env vars (e.g. `XDG_RUNTIME_DIR`) are global mutable state shared by every
+    /// test in this binary. `cargo test` runs tests from the same file concurrently on separate
+    /// threads by default, so two tests calling `with_env` at the same time can interleave their
+    /// set/read/restore sequences and observe each other's value — a real, reproducible flake
+    /// (confirmed: `socket_path_uses_xdg_runtime_dir_when_set` / `socket_path_falls_back_to_tmp_*`
+    /// fail intermittently under `--test-threads` > 1, especially under CPU load). This lock
+    /// serializes every env-touching test in this module so exactly one of them mutates
+    /// `XDG_RUNTIME_DIR` at a time; it protects test-process env hygiene only and is NOT part of
+    /// the daemon's production single-instance/env-allowlist contract (that's `pty_supervisor.rs`'s
+    /// `env_clear`, unrelated to this).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn with_env<F: FnOnce()>(key: &str, val: Option<&str>, f: F) {
+        // Held for the whole set→run→restore sequence so no other env-mutating test in this file
+        // can observe or clobber the value while it's temporarily changed. `.unwrap_or_else` (not
+        // `.unwrap()`) recovers the guard even if a previous test panicked while holding the lock
+        // (poisoning must not cascade-fail every subsequent env test).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev = std::env::var_os(key);
         match val {
             Some(v) => std::env::set_var(key, v),
