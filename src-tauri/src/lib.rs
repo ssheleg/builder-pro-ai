@@ -1,6 +1,8 @@
 //! Builder Pro AI — Tauri core (broker). S0 scaffold: plugin init + a smoke command.
 //! The daemon-broker command surface (spec §6) is added in T14–T18.
 
+pub mod socket_client;
+
 /// Trivial invoke smoke command; proves the JS⇄Rust IPC round-trip works.
 #[tauri::command]
 fn ping() -> String {

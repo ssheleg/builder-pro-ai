@@ -254,6 +254,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bpa-protocol",
+ "libc",
  "serde",
  "serde_json",
  "tauri",
