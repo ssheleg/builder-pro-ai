@@ -119,6 +119,14 @@ pub fn acquire_single_instance_lock() -> io::Result<LockGuard> {
     acquire_lock_at(&resolve_lockfile())
 }
 
+/// Test-support wrapper exposing [`acquire_lock_at`] to integration tests (Task 13 boot
+/// tests) without widening the crate's real single-instance entry point beyond
+/// [`acquire_single_instance_lock`]. Not part of the daemon boot contract.
+#[doc(hidden)]
+pub fn acquire_lock_at_for_test(path: &Path) -> io::Result<LockGuard> {
+    acquire_lock_at(path)
+}
+
 /// Set the bound socket file to mode 0600 (spec §8.2).
 pub fn set_socket_mode(sock: &Path) -> io::Result<()> {
     use std::fs::Permissions;

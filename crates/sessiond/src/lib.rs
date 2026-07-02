@@ -1,5 +1,4 @@
 //! bpa-sessiond — Builder Pro AI session daemon (library surface for integration tests).
-//! S0 skeleton: re-export the shared protocol crate. Modules land in Task 4–Task 13.
 
 pub use bpa_protocol as protocol;
 
@@ -12,3 +11,8 @@ pub mod scrollback;
 pub mod shell_integration;
 pub mod singleton;
 pub mod socket_server;
+
+mod boot;
+/// Testable daemon boot core (spec §8.1-8.3, §13): bind, wire deps, run `serve` until
+/// shutdown, then drain. `main.rs` is a thin process-concerns wrapper over this.
+pub use boot::run;
