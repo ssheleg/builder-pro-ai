@@ -25,4 +25,5 @@ thiserror = "1"
 libc = "0.2"
 tempfile = "3"
 
-# alacritty_terminal is pinned exact (0.24/0.25) by T8 at task time (spec §15 re-verify).
+# alacritty_terminal is pinned exact (grid model leaks into behavior; spec §3/§15).
+alacritty_terminal = "=0.25.0"

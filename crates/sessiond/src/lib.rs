@@ -3,6 +3,7 @@
 
 pub use bpa_protocol as protocol;
 
+pub mod live_grid;
 pub mod osc_parser;
 pub mod persistence;
 pub mod scrollback;
