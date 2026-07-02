@@ -1,0 +1,16 @@
+[package]
+name = "bpa-protocol"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+name = "bpa_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+ts-rs = { workspace = true }
+uuid = { workspace = true }

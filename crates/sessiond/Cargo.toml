@@ -1,0 +1,29 @@
+[package]
+name = "bpa-sessiond"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+name = "bpa_sessiond"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bpa-sessiond"
+path = "src/main.rs"
+
+[dependencies]
+bpa-protocol = { workspace = true }
+portable-pty = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { workspace = true }
+bincode = { workspace = true }
+rustix = { workspace = true }
+libc = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
