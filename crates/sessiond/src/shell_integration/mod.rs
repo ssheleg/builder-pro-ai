@@ -142,4 +142,129 @@ mod tests {
         assert_eq!(env.get("BPA_INJECTION").map(String::as_str), Some("1"));
         assert!(script.is_file(), "bpa-bash.sh written");
     }
+
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    // Spawn a shell through a raw PTY (via portable-pty) using the recipe from write_session_assets,
+    // drive one command, and assert the emitted OSC bytes appear in the locked order.
+    fn drive_shell_capture(kind: ShellKind, program: &str) -> Option<String> {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        if !std::path::Path::new(program).exists() {
+            return None; // shell not installed on this box — skip
+        }
+        // NOTE: the runtime dir (ZDOTDIR for zsh) and HOME must be DISTINCT directories. The
+        // generated `.zshenv` stub falls back to sourcing `${ZDOTDIR:-$HOME}/.zshenv` once it
+        // restores/unsets ZDOTDIR; if HOME were the same directory as the runtime dir, that
+        // fallback would source the stub itself again (infinite self-recursion / "recursion
+        // limit exceeded"). A real session's runtime dir is never the user's actual $HOME, so a
+        // separate `home_dir` here matches real usage and avoids that self-reference.
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = tempfile::tempdir().unwrap();
+        let spawn = write_session_assets(dir.path(), kind).unwrap();
+
+        let pty = native_pty_system();
+        let pair = pty
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(program);
+        cmd.env_clear();
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()));
+        cmd.env("HOME", home_dir.path().to_string_lossy().into_owned());
+        cmd.env("HOSTNAME", "localhost");
+        cmd.env("HOST", "localhost");
+        for (k, v) in &spawn.env {
+            cmd.env(k, v);
+        }
+        for a in &spawn.args {
+            cmd.arg(a);
+        }
+        cmd.cwd(dir.path());
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+
+        // Collect output on a thread until we see a D mark or time out.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Give the shell time to print its first prompt (A/B/OSC7), then run one command.
+        std::thread::sleep(Duration::from_millis(400));
+        writer.write_all(b"printf hi\n").unwrap();
+        writer.flush().unwrap();
+
+        let start = Instant::now();
+        let mut acc: Vec<u8> = Vec::new();
+        while start.elapsed() < Duration::from_secs(6) {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                acc.extend_from_slice(&chunk);
+                // Stop only once we have seen BOTH a C mark (our command was dispatched) and a
+                // SUBSEQUENT D mark (that command finished). The very first prompt (shell
+                // startup) already emits its own D/A/OSC7 cycle before we ever send `printf hi`,
+                // so gating on "any D" alone stops the capture too early — before the typed
+                // command's own C/D pair (and the OSC 7 emitted with its prompt) ever arrives.
+                if let Some(c_pos) = acc.windows(7).position(|w| w == b"\x1b]133;C") {
+                    if acc[c_pos..].windows(7).any(|w| w == b"\x1b]133;D") {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = child.kill();
+        let s = String::from_utf8_lossy(&acc).into_owned();
+        if std::env::var_os("BPA_DEBUG_TEST").is_some() {
+            eprintln!("CAPTURED[{kind:?}]: {s:?}");
+        }
+        Some(s)
+    }
+
+    fn assert_osc_order(out: &str) {
+        // The capture spans TWO prompt cycles: the shell's own startup prompt (emitted before we
+        // ever type anything) and the cycle for the `printf hi` command we drive. The very first
+        // `D` in the whole capture belongs to the STARTUP cycle (it closes the implicit "startup"
+        // pseudo-command), so ordering must be checked relative to `C` (which only ever appears
+        // once we actually dispatch a real command) rather than by first-occurrence-anywhere.
+        //
+        // Order within the driven command's cycle: A (prompt) < B (prompt end) < C (exec) <
+        // D (done), where A/B/C are the LATEST occurrences at-or-before C's cycle and D is the
+        // first occurrence AFTER C.
+        let c = out.find("\x1b]133;C").expect("OSC 133;C present");
+        let a = out[..c].rfind("\x1b]133;A").expect("OSC 133;A present before C");
+        let b = out[..c].rfind("\x1b]133;B").expect("OSC 133;B present before C");
+        let d = c + out[c..].find("\x1b]133;D").expect("OSC 133;D present after C");
+        assert!(out.contains("\x1b]7;file://"), "OSC 7 cwd present");
+        // Order within one prompt+command cycle: A (prompt) < B (prompt end) < C (exec) < D (done).
+        assert!(a < c, "A must precede C ({a} < {c})");
+        assert!(b < c, "B must precede C ({b} < {c})");
+        assert!(c < d, "C must precede D ({c} < {d})");
+    }
+
+    #[test]
+    fn zsh_emits_osc_sequence_in_order() {
+        match drive_shell_capture(ShellKind::Zsh, "/bin/zsh") {
+            Some(out) => assert_osc_order(&out),
+            None => eprintln!("skipping zsh OSC test: /bin/zsh not present"),
+        }
+    }
+
+    #[test]
+    fn bash_emits_osc_sequence_in_order() {
+        match drive_shell_capture(ShellKind::Bash, "/bin/bash") {
+            Some(out) => assert_osc_order(&out),
+            None => eprintln!("skipping bash OSC test: /bin/bash not present"),
+        }
+    }
 }

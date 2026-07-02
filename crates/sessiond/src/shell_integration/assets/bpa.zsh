@@ -19,16 +19,26 @@ _bpa_precmd() {
   _bpa_osc133_d "$code"         # D;<code>
   _bpa_osc133 A                 # A prompt start
   _bpa_osc7                     # OSC 7 cwd
+  # Re-assert the B marker at the end of PS1 on every prompt render. This must live in precmd
+  # (not a one-time append at source time) because `.zshenv` runs BEFORE `/etc/zshrc` and the
+  # user's `.zshrc`, either of which may reassign PS1 wholesale and would otherwise clobber a
+  # source-time append. %{...%} tells zsh the enclosed bytes are non-printing (zero-width) so
+  # line-length/wrap math stays correct. Idempotent via a remembered suffix: only append when
+  # PS1 does not already end with the marker we last applied (covers both a fresh/reassigned
+  # PS1 and a PS1 that already carries our marker from a previous precmd run).
+  if [ -z "${_bpa_ps1_marker-}" ]; then
+    _bpa_ps1_marker="%{$(_bpa_osc133 B)%}"
+  fi
+  case "$PS1" in
+    *"$_bpa_ps1_marker") ;; # already current, nothing to do
+    *) PS1="${PS1}${_bpa_ps1_marker}" ;;
+  esac
 }
 
 # --- preexec: command dispatched, output begins --------------------------
 _bpa_preexec() {
   _bpa_osc133 C                 # C exactly once per command
 }
-
-# --- embed B (command start / prompt end) at the END of PS1, zero-width ---
-# %{...%} tells zsh the enclosed bytes are non-printing so line length stays correct.
-PS1="${PS1}%{$(_bpa_osc133 B)%}"
 
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _bpa_precmd
