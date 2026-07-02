@@ -11,3 +11,4 @@ pub mod pty_supervisor;
 pub mod scrollback;
 pub mod shell_integration;
 pub mod singleton;
+pub mod socket_server;
