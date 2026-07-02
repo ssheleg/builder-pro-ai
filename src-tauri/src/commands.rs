@@ -160,6 +160,16 @@ pub async fn create_session(
     workspace_id: WorkspaceId,
     opts: Option<CreateOpts>,
 ) -> Result<SessionMeta, CommandError> {
+    // Defense in depth (spec §13/§16): reject an invalid cwd BEFORE brokering, mirroring
+    // create_workspace's root_path pre-flight. Only when explicitly provided — an empty/omitted cwd
+    // means "daemon defaults to $HOME", so we must not validate-and-reject that here. The daemon
+    // re-validates (and canonicalizes) independently.
+    if let Some(cwd) = opts.as_ref().and_then(|o| o.cwd.as_deref()).filter(|c| !c.is_empty()) {
+        crate::paths::validate_dir(std::path::Path::new(cwd)).map_err(|e| CommandError::Daemon {
+            code: e.code().to_string(),
+            message: e.to_string(),
+        })?;
+    }
     let req = build_create_session(workspace_id, opts);
     expect_session(state.client.request(req).await?)
 }
@@ -599,6 +609,23 @@ mod commands_over_stub_daemon {
         let path_err = crate::paths::validate_dir(bad_path).unwrap_err();
         let expected_message = path_err.to_string();
         let err = CommandError::Daemon { code: path_err.code().to_string(), message: expected_message.clone() };
+        assert_eq!(err, CommandError::Daemon { code: "RelativePath".into(), message: expected_message });
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_bad_cwd_before_any_request() {
+        // Mirrors create_workspace_rejects_bad_path_before_any_request: `create_session`'s core-side
+        // pre-flight (spec §13/§16 defense in depth) validates a non-empty cwd via the same shared
+        // `paths::validate_dir` and reshapes any failure into a `CommandError::Daemon` with the
+        // path error's wire code — BEFORE ever touching the daemon. No stub daemon is started; if
+        // the guard forwarded first this would hang connecting to a socket nobody is listening on.
+        let bad_cwd = std::path::Path::new("relative/not/absolute");
+        let path_err = crate::paths::validate_dir(bad_cwd).unwrap_err();
+        let expected_message = path_err.to_string();
+        let err = CommandError::Daemon {
+            code: path_err.code().to_string(),
+            message: expected_message.clone(),
+        };
         assert_eq!(err, CommandError::Daemon { code: "RelativePath".into(), message: expected_message });
     }
 
