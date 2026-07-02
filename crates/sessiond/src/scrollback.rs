@@ -458,6 +458,51 @@ mod tests {
     }
 
     #[test]
+    fn recognized_osc_st_terminator_split_across_two_pushes_in_discard_mode_never_leaks() {
+        // Regression guard, committed (a prior reviewer's probe covered this shape but it was
+        // never checked in — see Task 25). Distinct from
+        // `recognized_osc_exceeding_cap_across_multiple_pushes_never_leaks_payload_or_terminator`
+        // above: that test uses a BEL (single-byte) terminator arriving whole in one `push()`.
+        // This test specifically targets the ST terminator (`ESC` `\`, TWO bytes) being split
+        // across the `discarding_until_terminator` state boundary itself — `ESC` lands in one
+        // `push()` call and the closing `\` lands in the NEXT `push()` call. The
+        // `discarding_until_terminator` one-byte lookback (`self.carry` reused as a 0/1-length
+        // scratch buffer, see `Sanitizer::filter`) must survive across the call boundary so the
+        // second call's leading `\` is still recognized as completing the ST terminator rather
+        // than being treated as a fresh, unrelated byte (which would either leak it or fail to
+        // exit discard mode, corrupting everything after).
+        let mut r = ScrollbackRing::new(1 << 20);
+        // Enter discard-until-terminator mode: a title OSC (ident "0") whose payload exceeds
+        // RECOGNIZED_OSC_CAP (8192 bytes) within a single push().
+        r.push(b"pre\x1b]0;");
+        r.push(&[b'X'; RECOGNIZED_OSC_CAP + 100]); // carry.clear() + discarding_until_terminator=true
+        // Now split the two-byte ST terminator itself across two separate push() calls: ESC in
+        // this call, with NOTHING after it (so this push() ends mid-terminator).
+        r.push(&[ESC]);
+        // The closing '\' arrives in the NEXT push() call, followed by trailing normal text.
+        r.push(b"\\post");
+        let snap = r.snapshot();
+
+        assert!(
+            !contains(&snap, b"\x1b]0;"),
+            "title OSC prefix leaked into snapshot: {snap:?}"
+        );
+        assert!(
+            !snap.windows(20).any(|w| w.iter().all(|&b| b == b'X')),
+            "over-long recognized OSC payload leaked into snapshot: {snap:?}"
+        );
+        assert!(
+            !contains(&snap, &[ESC, b'\\']),
+            "ST terminator (split across two push() calls) leaked into snapshot: {snap:?}"
+        );
+        assert_eq!(
+            snap,
+            b"prepost".to_vec(),
+            "only the text before and after the discarded OSC must survive, got: {snap:?}"
+        );
+    }
+
+    #[test]
     fn unrecognized_long_partial_escape_still_fails_open() {
         // A long run of bytes that merely starts with ESC but never resolves to a
         // recognized/complete sequence (never hits '[' or ']') must still fail-open and be
