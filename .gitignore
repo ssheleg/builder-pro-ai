@@ -48,3 +48,6 @@ coverage/
 *.db-wal
 *.db-shm
 *.sock
+
+# Subagent-driven-development scratch (ledger, briefs, reports)
+.superpowers/

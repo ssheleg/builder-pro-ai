@@ -182,7 +182,7 @@ declare it. Leaf tasks touch only their own leaf source + test files.
 
 
 
-### Task T1: Scaffold Tauri 2 + React + Vite + TS app (pinned, Tauri-flavored configs)
+### Task 1: Scaffold Tauri 2 + React + Vite + TS app (pinned, Tauri-flavored configs)
 
 **Files:**
 - Create — `package.json`, `vite.config.ts`, `tsconfig.json`, `tsconfig.node.json`, `index.html`, `src/main.tsx`, `src/App.tsx`, `src/vite-env.d.ts`
@@ -680,7 +680,7 @@ git add .gitignore package.json vite.config.ts tsconfig.json tsconfig.node.json 
 
 ---
 
-### Task T2: Cargo workspace + crate skeletons (`protocol` lib, `sessiond` bin)
+### Task 2: Cargo workspace + crate skeletons (`protocol` lib, `sessiond` bin)
 
 **Files:**
 - Create — `Cargo.toml` (repo-root `[workspace]`)
@@ -882,7 +882,7 @@ git add Cargo.toml crates/ src-tauri/Cargo.toml && git commit -m "feat(workspace
 - `bpa-sessiond` binary name matches the `externalBin ['binaries/bpa-sessiond']` entry from T1.
 
 
-### Task T3: Shared protocol crate (types + wire framing + generated TS)
+### Task 3: Shared protocol crate (types + wire framing + generated TS)
 
 **Files:**
 - Create — `crates/protocol/Cargo.toml`
@@ -1581,7 +1581,7 @@ git commit -m "feat(protocol): shared wire types, bincode framing, generated TS 
 - `bincode` is pinned to `=1.3.3` in `crates/protocol/Cargo.toml` (spec §3/§7).
 
 
-### Task T4: `singleton.rs` — socket path resolution, single-instance flock, dir/socket perms, peer-cred
+### Task 4: `singleton.rs` — socket path resolution, single-instance flock, dir/socket perms, peer-cred
 
 **Files:**
 - Create: `crates/sessiond/src/singleton.rs`
@@ -2017,7 +2017,7 @@ Expected: PASS (peer-cred accept + reject green).
 
 ---
 
-### Task T5: `osc_parser.rs` — streaming OSC-133/OSC-7 tokenizer + lifecycle state machine
+### Task 5: `osc_parser.rs` — streaming OSC-133/OSC-7 tokenizer + lifecycle state machine
 
 **Files:**
 - Create: `crates/sessiond/src/osc_parser.rs`
@@ -2636,7 +2636,7 @@ Expected: PASS. (Exercises existing tokenizer; if any assertion fails, fix the t
 
 ---
 
-### Task T6: `scrollback.rs` — sanitizing scrollback ring (replay source)
+### Task 6: `scrollback.rs` — sanitizing scrollback ring (replay source)
 
 **Files:**
 - Create: `crates/sessiond/src/scrollback.rs`
@@ -3890,7 +3890,7 @@ The task's Step 4 begins with a **compile-probe** that pins the exact symbol pat
 - `LiveGrid` is **never serialized** and does not depend on `protocol` — it is a pure in-memory status structure (spec §11).
 
 
-### Task T9: `pty_supervisor.rs` — PTY lifecycle, process-group kill, env hygiene, waiting-for-input
+### Task 9: `pty_supervisor.rs` — PTY lifecycle, process-group kill, env hygiene, waiting-for-input
 
 **Files:**
 - Create: `crates/sessiond/src/pty_supervisor.rs`
@@ -4859,7 +4859,7 @@ Expected: PASS for all three. (Failure of the `cat` case usually means the ticke
 
 ---
 
-### Task T10: `shell_integration/` — zsh + bash OSC-133/OSC-7 injection assets + installer
+### Task 10: `shell_integration/` — zsh + bash OSC-133/OSC-7 injection assets + installer
 
 **Files:**
 - Create: `crates/sessiond/src/shell_integration/mod.rs`, `crates/sessiond/src/shell_integration/assets/bpa.zsh`, `crates/sessiond/src/shell_integration/assets/bpa-bash.sh`
@@ -5311,7 +5311,7 @@ Expected: PASS (on macOS `/bin/zsh` and `/bin/bash` are present, so the assertio
 - Assets are embedded via `include_str!` and materialized per session into the caller-provided runtime dir; the produced `ShellSpawn { program, args, env }` is exactly what T9 `Supervisor::create` consumes (T9 sets `spec.shell`/`spec.args`/`spec.env` from it).
 
 
-### Task T11: `attach.rs` — per-session single-attach registry + replay orchestration
+### Task 11: `attach.rs` — per-session single-attach registry + replay orchestration
 
 **Files:**
 - Create: `crates/sessiond/src/attach.rs`
@@ -5686,7 +5686,7 @@ Expected: PASS (replay-before-output; supersede aborts prior sink; detach stops 
 
 ---
 
-### Task T12: `socket_server.rs` — tokio `UnixListener`, per-client task, handshake, correlation, bounded outq, dispatch
+### Task 12: `socket_server.rs` — tokio `UnixListener`, per-client task, handshake, correlation, bounded outq, dispatch
 
 **Files:**
 - Create: `crates/sessiond/src/socket_server.rs`
@@ -6287,7 +6287,7 @@ Expected: PASS (handshake happy path; magic/version/non-Hello reject + close; co
 
 ---
 
-### Task T13: `sessiond/main.rs` — daemon boot, flock, tracing, listener bind, wire deps, run serve, SIGTERM drain
+### Task 13: `sessiond/main.rs` — daemon boot, flock, tracing, listener bind, wire deps, run serve, SIGTERM drain
 
 **Files:**
 - Create/Modify: `crates/sessiond/src/main.rs`
@@ -6637,7 +6637,7 @@ Expected: PASS (socket binds; Hello→Welcome; CreateWorkspace then CreateSessio
 - SIGTERM/SIGINT → drain: `attach.detach_all()`, `supervisor.shutdown_all()` (killpg sessions, spec §9.8), best-effort `db.checkpoint()`, socket unlink; exit `SUCCESS` so `KeepAlive{Crashed}` leaves it down (spec §8.3, §13).
 
 
-### Task T14: `socket_client.rs` — Hop-B daemon client (connect, handshake, correlated request/response, push fan-out, reconnect)
+### Task 14: `socket_client.rs` — Hop-B daemon client (connect, handshake, correlated request/response, push fan-out, reconnect)
 
 **Files:**
 - Create: `src-tauri/src/socket_client.rs`
@@ -7267,7 +7267,7 @@ git add src-tauri/src/socket_client.rs src-tauri/Cargo.toml src-tauri/src/lib.rs
 
 ---
 
-### Task T15: `paths.rs` — workspace-root / cwd validation (canonicalize, absolute, exists, is-dir, no symlink-escape)
+### Task 15: `paths.rs` — workspace-root / cwd validation (canonicalize, absolute, exists, is-dir, no symlink-escape)
 
 **Files:**
 - Create: `src-tauri/src/paths.rs`
@@ -7524,7 +7524,7 @@ git add src-tauri/src/paths.rs src-tauri/src/lib.rs src-tauri/Cargo.toml && git 
 
 ---
 
-### Task T16: `launchd.rs` — LaunchAgent install / bootstrap / kickstart / is-loaded with degradation
+### Task 16: `launchd.rs` — LaunchAgent install / bootstrap / kickstart / is-loaded with degradation
 
 **Files:**
 - Create: `src-tauri/src/launchd.rs`
