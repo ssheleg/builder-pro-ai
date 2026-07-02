@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -136,13 +136,41 @@ enum ClientCmd {
 type PushCb = dyn Fn(Push) + Send;
 type ConnCb = dyn Fn(ConnState) + Send;
 
+/// Current `ConnState` plus every registered `on_conn` callback, behind a single `Mutex` so
+/// "read the current state" and "subscribe to future changes" happen atomically (fixes the
+/// initial-`Connected`-can-be-lost gap: a callback registered any time after `connect()` returns —
+/// even racing the connection task's first `fire_conn(Connected)` — is guaranteed to either see
+/// that transition go through `fire_conn` normally, or be invoked immediately with the state
+/// `fire_conn` already recorded here before it got the lock).
+struct ConnCbState {
+    current: ConnState,
+    cbs: Vec<Box<ConnCb>>,
+}
+
+/// State shared between `DaemonClient` (the cheap public handle) and `connection_task` (the
+/// background task that owns the actual socket). Grouped into one struct — rather than three
+/// separate `Arc` fields threaded individually through `connection_task`'s parameter list — purely
+/// to keep that function's arity manageable; each field's own docs (below) still describe its
+/// individual contract.
+struct SharedState {
+    push_cb: Mutex<Vec<Box<PushCb>>>,
+    conn_cb: Mutex<ConnCbState>,
+    /// `true` only while `run_connection` is actively serving a live connection; `false` while the
+    /// client is between a lost connection and a successful reconnect (inside
+    /// `connect_with_backoff`), and on shutdown. `request()` checks this *before* enqueuing so a
+    /// call made during the reconnect gap fails immediately with `Disconnected` instead of
+    /// silently queuing on the command channel and blocking on its reply for up to
+    /// `REQUEST_TIMEOUT` — and possibly resolving on a *different*, newly-reconnected connection
+    /// than the one the caller thought they were talking to.
+    live: AtomicBool,
+}
+
 /// Handle to the daemon connection. Cheap to clone (wraps an `Arc` internally via its channel
 /// sender); the actual socket, framing, and correlation state live in a background task spawned by
 /// `connect()`.
 pub struct DaemonClient {
     cmd_tx: mpsc::Sender<ClientCmd>,
-    push_cb: Arc<Mutex<Vec<Box<PushCb>>>>,
-    conn_cb: Arc<Mutex<Vec<Box<ConnCb>>>>,
+    shared: Arc<SharedState>,
 }
 
 // Manual impl: the callback vecs hold `dyn Fn`, which is not `Debug`; this still gives a useful
@@ -176,20 +204,25 @@ impl DaemonClient {
             .map_err(|_| ClientError::Disconnected)?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<ClientCmd>(CMD_CHANNEL_CAP);
-        let push_cb: Arc<Mutex<Vec<Box<PushCb>>>> = Arc::new(Mutex::new(Vec::new()));
-        let conn_cb: Arc<Mutex<Vec<Box<ConnCb>>>> = Arc::new(Mutex::new(Vec::new()));
+        // Seeded at `Connected`/`live=true` here — synchronously, before `tokio::spawn` even
+        // schedules `connection_task` to run — because the handshake above already completed: the
+        // connection genuinely *is* live at this point. Deferring this seed to the first statement
+        // inside `connection_task` (as an alternative design) would reopen exactly the race this
+        // fix closes: `connect_at` could return to a caller that immediately calls `request()`
+        // before the freshly-spawned task ever gets scheduled, observing a stale `live == false`
+        // and failing with a spurious `Disconnected` on a connection that is, in fact, up.
+        // `connection_task` itself must NOT re-fire `Connected`/re-set `live` as its first act —
+        // that would double-fire the initial transition to any callback registered in the (tiny)
+        // window between `DaemonClient` being constructed and `on_conn` being called.
+        let shared = Arc::new(SharedState {
+            push_cb: Mutex::new(Vec::new()),
+            conn_cb: Mutex::new(ConnCbState { current: ConnState::Connected, cbs: Vec::new() }),
+            live: AtomicBool::new(true),
+        });
 
-        tokio::spawn(connection_task(
-            socket_path,
-            client_build,
-            stream,
-            reader,
-            cmd_rx,
-            push_cb.clone(),
-            conn_cb.clone(),
-        ));
+        tokio::spawn(connection_task(socket_path, client_build, stream, reader, cmd_rx, shared.clone()));
 
-        Ok(DaemonClient { cmd_tx, push_cb, conn_cb })
+        Ok(DaemonClient { cmd_tx, shared })
     }
 
     /// Allocate a monotonic id, send `Request { id, .. }`, and await the correlated `Response`.
@@ -197,7 +230,20 @@ impl DaemonClient {
     /// mid-reconnect, or the client has been dropped), returns `Err(ClientError::Disconnected)`
     /// rather than hanging. Times out after `REQUEST_TIMEOUT` as a last-resort safety net against a
     /// daemon that accepted the request but never replies.
+    ///
+    /// Checks the `live` liveness flag *before* enqueuing: while the client is between a lost
+    /// connection and a successful reconnect, `cmd_tx.send` would otherwise still succeed (the
+    /// channel stays open and buffered) and the caller would silently block on the reply oneshot
+    /// for up to `REQUEST_TIMEOUT` — worse, if reconnect succeeds inside that window the request
+    /// would be sent on the *new* connection with no indication to the caller that a disconnect
+    /// ever happened. Honest degradation means failing immediately here instead (spec §13). A
+    /// request that *is* in flight when the connection drops still resolves to `Disconnected` via
+    /// the existing `pending` drain in `connection_task`, unaffected by this check.
     pub async fn request(&self, req: Request) -> Result<Response, ClientError> {
+        if !self.shared.live.load(Ordering::Acquire) {
+            return Err(ClientError::Disconnected);
+        }
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
             .send(ClientCmd::Request { req, reply: reply_tx })
@@ -219,14 +265,26 @@ impl DaemonClient {
     /// registered; each receives every push. Callbacks must not block (they run inline on the
     /// connection task) — hand off to a channel/spawn for anything slow.
     pub fn on_push(&self, cb: impl Fn(Push) + Send + 'static) {
-        self.push_cb.lock().unwrap().push(Box::new(cb));
+        self.shared.push_cb.lock().unwrap().push(Box::new(cb));
     }
 
     /// Register a callback invoked on every connect/disconnect transition (spec §6.3, §13: the
     /// broker maps these to `daemon://disconnected` / `daemon://reconnected`). Multiple callbacks
     /// may be registered. Callbacks must not block, per `on_push`.
+    ///
+    /// Invokes `cb` immediately with the *current* `ConnState` before subscribing it to future
+    /// transitions — both under the same lock, so there is no window in which a transition could
+    /// fire between "read current state" and "start listening for changes" and be missed. This
+    /// closes the gap where `connect()` spawns `connection_task`, which fires the initial
+    /// `Connected` as its first act, but a caller registering `on_conn` after `connect()` returns
+    /// (with no synchronization) could previously race that first firing and never observe it. A
+    /// callback registered any time after `connect()` returns is now guaranteed to observe
+    /// `Connected` — either via this immediate replay, or via the normal `fire_conn` call if it
+    /// registers before the connection task gets there first.
     pub fn on_conn(&self, cb: impl Fn(ConnState) + Send + 'static) {
-        self.conn_cb.lock().unwrap().push(Box::new(cb));
+        let mut guard = self.shared.conn_cb.lock().unwrap();
+        cb(guard.current);
+        guard.cbs.push(Box::new(cb));
     }
 }
 
@@ -370,8 +428,14 @@ async fn connect_with_backoff(
 // frame reads, correlation, push fan-out, and reconnect-on-drop.
 // ---------------------------------------------------------------------------------------------
 
-fn fire_conn(cbs: &Mutex<Vec<Box<ConnCb>>>, state: ConnState) {
-    for cb in cbs.lock().unwrap().iter() {
+/// Record the new state and fan it out to every registered callback, all under one lock — so a
+/// concurrent `on_conn` registration (which also takes this lock to read-then-subscribe) can never
+/// interleave with a transition and observe a stale `current` after subscribing, or miss a
+/// callback that was mid-registration.
+fn fire_conn(cbs: &Mutex<ConnCbState>, state: ConnState) {
+    let mut guard = cbs.lock().unwrap();
+    guard.current = state;
+    for cb in guard.cbs.iter() {
         cb(state);
     }
 }
@@ -399,7 +463,7 @@ async fn run_connection(
     cmd_rx: &mut mpsc::Receiver<ClientCmd>,
     next_id: &AtomicU64,
     pending: &Mutex<HashMap<u64, oneshot::Sender<Result<Response, ClientError>>>>,
-    push_cb: &Arc<Mutex<Vec<Box<PushCb>>>>,
+    push_cb: &Mutex<Vec<Box<PushCb>>>,
 ) -> LoopEnd {
     loop {
         tokio::select! {
@@ -461,16 +525,25 @@ async fn connection_task(
     mut stream: UnixStream,
     mut reader: FrameReader,
     mut cmd_rx: mpsc::Receiver<ClientCmd>,
-    push_cb: Arc<Mutex<Vec<Box<PushCb>>>>,
-    conn_cb: Arc<Mutex<Vec<Box<ConnCb>>>>,
+    shared: Arc<SharedState>,
 ) {
-    fire_conn(&conn_cb, ConnState::Connected);
-
+    // NOTE: the *initial* `Connected`/`live=true` transition is seeded synchronously by
+    // `DaemonClient::connect_at` before this task is even spawned (not fired here) — the
+    // handshake is already done by the time `connect_at` constructs `shared`, so seeding there
+    // closes the race where a caller's `request()` or `on_conn()` could otherwise run before this
+    // task gets scheduled for the first time. This loop only fires transitions for *subsequent*
+    // disconnect/reconnect events.
     let next_id = AtomicU64::new(1); // id 0 is reserved for Hello
     let pending: Mutex<HashMap<u64, oneshot::Sender<Result<Response, ClientError>>>> = Mutex::new(HashMap::new());
 
     loop {
-        let end = run_connection(&mut stream, &mut reader, &mut cmd_rx, &next_id, &pending, &push_cb).await;
+        let end =
+            run_connection(&mut stream, &mut reader, &mut cmd_rx, &next_id, &pending, &shared.push_cb).await;
+        // `run_connection` returned: the connection is no longer serving requests, whether because
+        // it dropped (`ConnectionLost`, about to reconnect) or the client is shutting down
+        // (`ClientDropped`). Clear liveness *before* draining `pending` / firing `Disconnected` so
+        // any `request()` racing this teardown never observes a stale `live == true`.
+        shared.live.store(false, Ordering::Release);
 
         // Honest degradation (spec §13): every in-flight request fails now rather than hanging or
         // faking success, regardless of why the connection ended.
@@ -482,14 +555,17 @@ async fn connection_task(
             return;
         }
 
-        fire_conn(&conn_cb, ConnState::Disconnected);
+        fire_conn(&shared.conn_cb, ConnState::Disconnected);
         tracing::warn!("daemon connection lost; reconnecting");
 
         match connect_with_backoff(&socket_path, &client_build).await {
             Ok((s, r)) => {
                 stream = s;
                 reader = r;
-                fire_conn(&conn_cb, ConnState::Connected);
+                // Mark live again only once we're about to loop back into `run_connection` (i.e.
+                // actually ready to serve `cmd_rx`), same rationale as the initial seed.
+                shared.live.store(true, Ordering::Release);
+                fire_conn(&shared.conn_cb, ConnState::Connected);
             }
             Err(HandshakeError::Incompatible { min, max }) => {
                 tracing::error!(min, max, client = PROTO_VERSION, "daemon became incompatible; giving up reconnect");
@@ -877,5 +953,106 @@ mod tests {
     /// codepath `connect()` uses in production.
     async fn connect_at(socket_path: PathBuf, client_build: String) -> Result<DaemonClient, ClientError> {
         DaemonClient::connect_at(socket_path, client_build).await
+    }
+
+    // ---- Defect 1: request() must fail promptly (not silently queue) during the reconnect gap ---
+
+    #[tokio::test]
+    async fn request_during_reconnect_gap_fails_promptly() {
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            // connection #1: handshake, then immediately drop — never accept again, so the
+            // client sits in the reconnect backoff loop for the rest of the test.
+            let (mut s, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut s).await.unwrap(); // Hello
+            write_stub_frame(
+                &mut s,
+                &Frame::Response {
+                    id: 0,
+                    res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "stub".into() },
+                },
+            )
+            .await;
+            drop(s);
+            // Never accept connection #2: the client stays stuck in connect_with_backoff.
+            std::future::pending::<()>().await;
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+
+        // Wait for the client to observe the drop and enter the reconnect gap.
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+        for _ in 0..100 {
+            if states.lock().unwrap().contains(&ConnState::Disconnected) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            states.lock().unwrap().contains(&ConnState::Disconnected),
+            "test setup: client never observed the disconnect"
+        );
+
+        // Now request() while the client is stuck in connect_with_backoff (reconnect gap, no live
+        // connection). This must fail promptly with Disconnected, not silently enqueue and hang
+        // for up to REQUEST_TIMEOUT (30s).
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.request(Request::KillSession { session_id: "x".into() }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        let err = result
+            .unwrap_or_else(|_| panic!("request() did not return within 1s (took > {elapsed:?}); it silently queued during the reconnect gap"))
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Disconnected), "expected Disconnected, got {err:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "request() took {elapsed:?} to fail; expected a prompt failure, not a queued/timed-out one"
+        );
+    }
+
+    // ---- Defect 2: a late-registered on_conn callback must observe the current ConnState -------
+
+    #[tokio::test]
+    async fn late_registered_on_conn_observes_current_connected_state() {
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        spawn_stub(path.clone(), ready.clone());
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+
+        // Force the race the review flagged: yield back to the scheduler (and give the connection
+        // task a moment to run) *before* registering on_conn, so the initial `fire_conn(Connected)`
+        // in `connection_task` has every opportunity to have already fired and been missed by a
+        // callback that isn't registered yet.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        // The callback must be replayed with the CURRENT state immediately upon registration —
+        // no further `.await` should be required to observe it.
+        let s = states.lock().unwrap().clone();
+        assert_eq!(
+            s.first(),
+            Some(&ConnState::Connected),
+            "a callback registered after connect() (with an intervening await) must observe \
+             ConnState::Connected immediately, got {s:?}"
+        );
     }
 }
