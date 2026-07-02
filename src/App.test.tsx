@@ -226,6 +226,44 @@ describe("App", () => {
     expect(disposeMock).not.toHaveBeenCalled();
   });
 
+  it("daemon reconnect re-attaches the active session's terminal (spec §13)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.created(meta()); // s1 becomes active; TerminalPane mounts + attach()'s once
+    });
+    const attachMock = fakeManager.attach as unknown as ReturnType<typeof vi.fn>;
+    const callsBeforeReconnect = attachMock.mock.calls.filter((c) => c[0] === "s1").length;
+    expect(callsBeforeReconnect).toBeGreaterThan(0);
+
+    await act(async () => {
+      cbs.disc(null);
+    });
+    await act(async () => {
+      cbs.recon(null);
+    });
+
+    const callsAfterReconnect = attachMock.mock.calls.filter((c) => c[0] === "s1").length;
+    expect(callsAfterReconnect).toBeGreaterThan(callsBeforeReconnect);
+    // The active pane must NOT have been disposed/remounted to achieve this.
+    expect(disposeMock).not.toHaveBeenCalled();
+  });
+
+  it("hydrate restores an active workspace so + New terminal is enabled without a sidebar click", async () => {
+    listWorkspacesMock.mockResolvedValue([{ id: "w1", name: "proj", rootPath: "/p" }]);
+    listSessionsMock.mockResolvedValue([]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    const newTerminalBtn = screen.getByRole("button", { name: /new terminal/i });
+    expect(newTerminalBtn).not.toHaveProperty("disabled", true);
+    await act(async () => {
+      newTerminalBtn.click();
+    });
+    expect(createSessionMock).toHaveBeenCalledWith("w1", { cols: 80, rows: 24 });
+  });
+
   it("clicking a workspace in the sidebar sets it as the active workspace for new-terminal", async () => {
     useAppStore.setState({
       sessions: {},

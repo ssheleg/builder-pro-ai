@@ -66,8 +66,20 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     track(
       onDaemonReconnected(() => {
         useAppStore.getState().setDaemonConnected(true);
-        // Re-hydrate after a reconnect (spec §13: re-list sessions/workspaces).
-        void hydrate(0);
+        // Re-hydrate after a reconnect (spec §13: re-list sessions/workspaces), then
+        // re-attach the visible session so its byte stream is actually live again — a
+        // daemon crash kills the shell and scrollback replay only covers up to the last
+        // flush, so the mounted pane needs a FRESH attach (new Replay + live Output).
+        // TerminalPane's own attach guard (`attachedRef`) latches after the first mount
+        // and never resets across this disconnect/reconnect cycle (the pane itself never
+        // unmounts), so App must re-invoke `manager.attach()` directly.
+        void hydrate(0).then(() => {
+          if (disposed) return;
+          const id = useAppStore.getState().activeSessionId;
+          if (id !== null && manager.isOpened(id)) {
+            void manager.attach(id);
+          }
+        });
       }),
     );
 
@@ -88,6 +100,16 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           s.setActiveSession(ss[0].id);
         }
         s.setDaemonConnected(true);
+        // Default the active workspace so "+ New terminal" isn't stuck disabled after a
+        // fresh launch that restores existing workspaces (no sidebar click has happened
+        // yet). Prefer the active session's workspace; else the first hydrated workspace.
+        setActiveWorkspaceId((current) => {
+          if (current !== null) return current;
+          const activeId = useAppStore.getState().activeSessionId;
+          const activeMeta = activeId ? useAppStore.getState().sessions[activeId] : undefined;
+          if (activeMeta) return activeMeta.workspaceId;
+          return ws.length > 0 ? ws[0].id : null;
+        });
       } catch {
         if (disposed) return;
         useAppStore.getState().setDaemonConnected(false);
