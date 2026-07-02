@@ -63,6 +63,16 @@ const BEL: u8 = 0x07;
 struct Sanitizer {
     /// Bytes of an in-progress escape sequence not yet classified.
     carry: Vec<u8>,
+    /// Set once a recognized strippable OSC's carry has exceeded `RECOGNIZED_OSC_CAP` without
+    /// finding its terminator. While true, we have abandoned tracking the sequence's exact
+    /// bytes (the carry itself is cleared to bound memory) but we must NOT fail open like the
+    /// unrecognized-sequence path does — that would leak the tail of a recognized OSC
+    /// (including its terminator) into `out`/`snapshot()` (spec §11). Instead every
+    /// subsequent byte, in this call and any later `push()` calls, is dropped — never pushed
+    /// to `carry` or `out` — until the terminator (BEL or ESC `\`) is found, at which point we
+    /// drop it too and return to ground state. This mirrors the `overflowed` flag pattern in
+    /// the sibling `osc_parser.rs`.
+    discarding_until_terminator: bool,
 }
 
 #[derive(PartialEq)]
@@ -77,12 +87,35 @@ enum Verdict {
 
 impl Sanitizer {
     fn new() -> Self {
-        Sanitizer { carry: Vec::new() }
+        Sanitizer {
+            carry: Vec::new(),
+            discarding_until_terminator: false,
+        }
     }
 
     fn filter(&mut self, chunk: &[u8]) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(chunk.len());
         for &b in chunk {
+            if self.discarding_until_terminator {
+                // Abandoned an over-long recognized OSC: drop every byte (never push to
+                // `carry` or `out`) while scanning only for its terminator. BEL is a single
+                // terminator byte; ST is the two-byte `ESC \` — since we're not accumulating
+                // into `carry` here, we detect ST by looking for `\` immediately after we've
+                // already seen an ESC in this discarded stream. We track that with a tiny
+                // one-byte lookback via `carry` reused as a 0/1-length scratch buffer.
+                if b == BEL {
+                    self.discarding_until_terminator = false;
+                } else if b == b'\\' && self.carry.last() == Some(&ESC) {
+                    self.discarding_until_terminator = false;
+                    self.carry.clear();
+                } else if b == ESC {
+                    self.carry.clear();
+                    self.carry.push(ESC);
+                } else {
+                    self.carry.clear();
+                }
+                continue;
+            }
             if self.carry.is_empty() {
                 if b == ESC {
                     self.carry.push(b);
@@ -101,9 +134,14 @@ impl Sanitizer {
                         // re-trigger the side effect (spec §11). Keep dropping bytes until
                         // the terminator, bounded only by the larger safety cap.
                         if self.carry.len() > RECOGNIZED_OSC_CAP {
-                            // Adversarial/unterminated input: give up waiting for the
-                            // terminator, but discard (not flush) — never leak.
+                            // Adversarial/unterminated input: give up tracking the exact
+                            // bytes (bound memory by clearing the carry), but do NOT return
+                            // to ground state — enter discard-until-terminator mode so every
+                            // remaining byte of this same in-flight OSC (including its
+                            // eventual terminator), in this call or later push() calls, is
+                            // dropped rather than leaked into `out`.
                             self.carry.clear();
+                            self.discarding_until_terminator = true;
                         }
                     } else if self.carry.len() > CARRY_CAP {
                         // Not a recognized strippable sequence: give up, fail open, flush
@@ -379,6 +417,44 @@ mod tests {
             "long OSC-7 payload leaked"
         );
         assert_eq!(snap, b"prepost".to_vec());
+    }
+
+    #[test]
+    fn recognized_osc_exceeding_cap_across_multiple_pushes_never_leaks_payload_or_terminator() {
+        // Regression guard for the "clear() on cap overflow" bug: a recognized strippable
+        // OSC (title, ident "0") whose payload exceeds RECOGNIZED_OSC_CAP (8 KiB), fed across
+        // MANY push() calls, must be fully discarded — including its eventual terminator —
+        // even though the terminator arrives long after the cap was exceeded. If the carry is
+        // merely `clear()`-ed at the cap, the per-byte dispatch treats the (now-empty) carry
+        // as ground state and starts flushing the rest of the in-flight OSC (payload +
+        // terminator) straight into `out`, leaking it into the snapshot. That must not happen.
+        let mut r = ScrollbackRing::new(1 << 20);
+        r.push(b"\x1b]0;"); // recognized title OSC prefix
+        // 85 * 100 = 8500 bytes, comfortably past the 8192-byte RECOGNIZED_OSC_CAP, fed in
+        // many separate push() calls to exercise the carry-across-push path.
+        for _ in 0..85 {
+            r.push(&[b'A'; 100]);
+        }
+        r.push(&[BEL]); // the (still in-flight, now-late) terminator
+        r.push(b"prompt$ "); // trailing normal text after the OSC finally terminates
+        let snap = r.snapshot();
+
+        assert!(
+            !contains(&snap, b"AAAAAAAAAA"),
+            "over-long recognized OSC payload leaked into snapshot"
+        );
+        assert!(
+            !snap.contains(&BEL),
+            "OSC terminator (BEL) leaked into snapshot"
+        );
+        assert!(
+            !contains(&snap, b"\x1b]0;"),
+            "title OSC prefix leaked into snapshot"
+        );
+        assert!(
+            contains(&snap, b"prompt$ "),
+            "trailing prompt text after the OSC was lost"
+        );
     }
 
     #[test]
