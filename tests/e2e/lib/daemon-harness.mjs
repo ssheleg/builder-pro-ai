@@ -321,10 +321,19 @@ export function connect(sockPath) {
   });
 }
 
+// Request ids start at 1 because id 0 is RESERVED for the handshake `Hello` frame (spec §7):
+// the daemon's handshake gate (`crates/sessiond/src/socket_server.rs`) pattern-matches the
+// very first frame as literally `Frame::Request { id: 0, req: Request::Hello { .. } }` and
+// always replies `Frame::Response { id: 0, .. }` for it — an id other than 0 on that first
+// frame means the daemon's `matches!` guard fails, so it treats the frame as a non-Hello first
+// message, replies `Incompatible` (still framed as `id: 0`), and closes. A client that used the
+// shared auto-incrementing id counter for `Hello` too would send `id: 1`, get back a `Response
+// { id: 0, .. }` it can never correlate against its own `id: 1` waiter, and hang until its
+// request timeout fires — exactly the `request Hello timed out` failure this harness hit before
+// `hello()` was pinned to id 0 explicitly.
 let nextId = 1;
 
-export function request(conn, req) {
-  const id = nextId++;
+export function request(conn, req, id = nextId++) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       conn.pending = conn.pending.filter((p) => p.id !== id);
@@ -342,8 +351,10 @@ export function request(conn, req) {
   });
 }
 
+/** The handshake `Hello` MUST be sent with request id 0 (spec §7) — see the comment above
+ * `nextId` for why the daemon silently hangs the caller if this isn't pinned to 0. */
 export function hello(conn) {
-  return request(conn, { t: "Hello", magic: MAGIC, protoVersion: PROTO_VERSION, clientBuild: "e2e-harness" });
+  return request(conn, { t: "Hello", magic: MAGIC, protoVersion: PROTO_VERSION, clientBuild: "e2e-harness" }, 0);
 }
 
 /**
@@ -410,12 +421,48 @@ export function pidAlive(pid) {
   }
 }
 
-/** Spawn `bpa-sessiond` detached (out-of-band, as launchd would) bound to `sockPath`. */
-export function spawnDaemon(binPath, sockPath) {
+/**
+ * Spawn `bpa-sessiond` detached (out-of-band, as launchd would) bound to `sockPath`, in its own
+ * process group (`detached: true` on POSIX also makes the child its own session/group leader —
+ * `setsid()` under the hood — so `killProcessGroup` below can signal the whole group, including any
+ * shell children spawned under it, via a single negative-PID `kill`).
+ *
+ * `envOverrides` (e.g. `{ XDG_RUNTIME_DIR: <tmp>/xdg }`) is merged over `process.env` so tests can
+ * fully isolate the daemon's lockfile/socket-dir resolution (`crates/sessiond/src/singleton.rs`
+ * `socket_dir()`) from the real user path, even though `--socket sockPath` already pins the
+ * *socket* itself — the single-instance lockfile and log dir are derived independently and would
+ * otherwise still collide with a real running daemon on this machine.
+ */
+export function spawnDaemon(binPath, sockPath, envOverrides = {}) {
   fs.mkdirSync(path.dirname(sockPath), { recursive: true, mode: 0o700 });
-  const child = spawn(binPath, ["--socket", sockPath], { stdio: "ignore", detached: true });
+  const child = spawn(binPath, ["--socket", sockPath], {
+    stdio: "ignore",
+    detached: true,
+    env: { ...process.env, ...envOverrides },
+  });
   child.unref();
   return child;
+}
+
+/**
+ * Kill an entire process group by its leader pid (negative-PID `kill`, POSIX) — used to reap a
+ * `spawnDaemon`-started daemon AND every child it spawned (the session's shell, and anything the
+ * shell itself forked) in one signal, rather than relying on the daemon's own SIGTERM handler to
+ * cascade the kill (which it deliberately does NOT do for live sessions — spec §7/§13 "sessions
+ * keep running" on a client disconnect, but a leaked daemon during test cleanup must not leave its
+ * shell orphaned either). Falls back to a single-pid kill if the group signal fails (e.g. already
+ * reaped) — never throws, since this only runs during best-effort cleanup.
+ */
+export function killProcessGroup(pid, signal = "SIGTERM") {
+  try {
+    process.kill(-Number(pid), signal);
+  } catch {
+    try {
+      process.kill(Number(pid), signal);
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 /** `launchctl kickstart gui/$UID/<label>` — used by the launchd-managed harness variant. */

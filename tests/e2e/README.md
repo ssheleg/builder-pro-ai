@@ -27,8 +27,14 @@ encoding for the Hop-B wire protocol (spec §7) directly in Node — no Rust bri
 test-runner dependency, no WKWebView. It drives a locally-spawned `bpa-sessiond`
 through the full lifecycle:
 
-- **phase0** — spawn the daemon on a scratch socket, connect, `Hello` → `Welcome`
-  handshake.
+- **phase0** — spawn the daemon on a scratch socket **isolated from the real user socket**
+  (a fresh `mkdtemp` dir with its own `XDG_RUNTIME_DIR`, so it can never collide with — or
+  during cleanup, signal — an actual running daemon at `/tmp/bpa-<uid>` or
+  `$XDG_RUNTIME_DIR/bpa`), connect, `Hello` → `Welcome` handshake. The `Hello` request is
+  sent with the fixed request id `0` (spec §7) — the daemon's handshake gate
+  (`crates/sessiond/src/socket_server.rs`) matches the first frame as literally `id: 0` and
+  always replies `Response { id: 0, .. }` for it; any other id on that first frame silently
+  desyncs response correlation and manifests as `request Hello timed out`.
 - **phase1** — `CreateWorkspace` (rooted in a fresh temp dir under `target/`),
   `CreateSession` (a real `/bin/zsh`).
 - **phase2** — `AttachSession` → first push is `Replay`; `WriteStdin` an
@@ -58,7 +64,7 @@ actionable message and a non-zero exit code.
 - A real (not placeholder-stub) `bpa-sessiond` binary. Build it with:
   ```sh
   export PATH="$HOME/.cargo/bin:$PATH"   # if cargo isn't already on PATH
-  cargo build -p sessiond --bin bpa-sessiond
+  cargo build -p bpa-sessiond --bin bpa-sessiond
   ```
   The harness refuses to run against the S0 scaffold placeholder (a `sh` stub that
   always exits 1, left at `target/debug/bpa-sessiond` before T13 lands a real build)
@@ -206,45 +212,55 @@ signed bundle (T24/T25) as an input and does not fit the disk budget available w
 authoring this task — the CSS-selector/session-teardown specifics belong in that
 follow-up automation, not guessed at here.
 
-## Disk-scoping decision (why this harness is a Node script, not a Rust integration test)
+## History: authoring under a disk constraint, then verifying against the real daemon
 
-At the time this harness was authored, the workspace `target/` directory was already
-~8.7 GB and the volume had **under 1 GB free** — the task's hard constraint forbids
-`cargo build -p bpa-sessiond` (or any full/incremental workspace build) in that state,
-since even an incremental link can tip a near-full disk into "No space left on
-device". Consequences of that constraint for this deliverable:
+This harness (`tests/e2e/*.mjs`) is a dependency-free Node ESM script — no Rust bridge,
+no `npm install` — rather than a `crates/sessiond/tests/*.rs` integration test. It was
+originally authored on a machine with the workspace `target/` directory already ~8.7 GB
+and **under 1 GB free**, where `cargo build -p bpa-sessiond` was off the table (even an
+incremental link risks "No space left on device"). At that point the harness could only
+be validated by `node --check` (syntax) and by running it against the **S0 scaffold
+placeholder** binary (a one-line `sh` stub that always `exit 1`s) and confirming
+`assertRealBinary()` caught it with the correct diagnostic — proving the harness fails
+loudly rather than passing vacuously, but NOT proving the wire codec was actually
+correct against the real daemon.
 
-- The harness is authored as a dependency-free Node ESM script (`tests/e2e/*.mjs`)
-  rather than a `crates/sessiond/tests/*.rs` integration test, so that **authoring
-  and syntax-checking it required zero Rust compilation**. `node --check` was used to
-  confirm both files parse; `node tests/e2e/survive-restart.mjs` was run directly
-  against this machine's actual `target/debug/bpa-sessiond` (all it takes to invoke
-  the harness is `node`, already installed — no `npm install` needed either, since
-  the harness has no dependencies).
-- On this machine `target/debug/bpa-sessiond` was found to be the **S0 scaffold
-  placeholder** — a one-line `sh` stub that prints a message and `exit 1`s — not a
-  real build (T13's real binary was verified manually per this task's brief, but that
-  verification did not leave a persisted real binary at this path on this checkout).
-  Running the harness against it was expected to fail, and did: `assertRealBinary()`
-  in `survive-restart.mjs` caught it immediately with a specific diagnostic
-  (`daemon binary … is the S0 scaffold placeholder shell script, not a real build —
-  run: cargo build -p sessiond`) and exit code 1 — proving the harness fails loudly
-  and correctly rather than passing vacuously, per the Definition of Done.
-- No `cargo build` (incremental or otherwise) was run as part of authoring this
-  harness, in keeping with the hard constraint. **To actually observe `phase0
-  ... phase4b OK` / `ALL PHASES PASSED`, build the daemon first** on a machine with
-  sufficient disk:
-  ```sh
-  export PATH="$HOME/.cargo/bin:$PATH"
-  cargo build -p sessiond --bin bpa-sessiond
-  npm run e2e:survive
-  ```
-- The harness's own correctness was instead verified by re-deriving the wire codec
-  directly from the authoritative source (`crates/protocol/src/lib.rs`,
-  `crates/protocol/src/framing.rs`) rather than trusting the task brief's inline
-  reference implementation verbatim — that cross-check caught and fixed one real bug:
-  the brief's reference `decLifecycle` read a raw `u32` enum discriminant, but
-  `SessionLifecycle`'s actual wire representation (per the "Dual-codec note" doc
-  comment in `crates/protocol/src/lib.rs`) is a length-prefixed JSON **string** even
-  under bincode. The harness in this directory decodes it correctly (string + `JSON.parse`);
-  see the comment above `decLifecycle` in `daemon-harness.mjs`.
+It was not: once disk pressure was resolved and the harness ran against a real
+`cargo build -p bpa-sessiond` binary, phase0 failed with `request Hello timed out`. Root
+cause (Task 23 follow-up fix) — **not** a daemon bug:
+
+- `daemon-harness.mjs`'s `hello()` sent the handshake `Hello` frame through the same
+  auto-incrementing request-id counter as every other request, so it went out with
+  `id: 1`. The daemon's handshake gate
+  (`crates/sessiond/src/socket_server.rs::handle_client`) pattern-matches the very
+  first frame as literally `Frame::Request { id: 0, req: Request::Hello { .. } }` and
+  always replies `Frame::Response { id: 0, .. }` for it. An `id: 1` Hello therefore
+  failed that `matches!` guard, so the daemon replied `Incompatible` (still framed as
+  `id: 0`) and closed the connection — a reply the harness could never correlate
+  against its own `id: 1` waiter, so it just sat there until the 10 s request timeout
+  fired. Fix: `hello()` now calls `request(conn, req, 0)`, pinning the Hello frame's id
+  to 0 explicitly (see the comment above `nextId` in `daemon-harness.mjs`).
+- Separately, the harness was hardened to spawn its daemon on an **isolated** socket
+  (a fresh `mkdtemp` dir with its own `XDG_RUNTIME_DIR`) instead of the real user path
+  (`/tmp/bpa-<uid>` or `$XDG_RUNTIME_DIR/bpa`), and to tear down the spawned daemon's
+  whole process group (`killProcessGroup` in `daemon-harness.mjs`) plus the temp dir on
+  every exit path — success, a failed assertion, or a timeout — via a `finally` block
+  in `survive-restart.mjs`. A prior failed run (while phase0 was still broken) had left
+  a stray `bpa-sessiond` running on the real socket path; this closes that gap.
+
+With both fixes, `npm run e2e:survive` passes all phases (`phase0` through `phase4b`,
+`ALL PHASES PASSED`, exit code 0) against a real `cargo build -p bpa-sessiond` binary,
+and `pgrep -fl bpa-sessiond` finds nothing left running afterward. The bincode codec
+itself (the part validated by re-deriving it from `crates/protocol/src/lib.rs` /
+`framing.rs` at authoring time) needed no changes — the `SessionLifecycle` dual-codec
+handling (`decLifecycle` reads a length-prefixed JSON **string**, not a raw `u32` enum
+discriminant — see the "Dual-codec note" in `crates/protocol/src/lib.rs`) was correct
+from the start; the bug was the handshake request id, not frame encoding.
+
+Build the daemon and run the harness with:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo build -p bpa-sessiond --bin bpa-sessiond
+npm run e2e:survive
+```
