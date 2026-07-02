@@ -35,7 +35,8 @@
     "externalBin": ["binaries/bpa-sessiond"],
     "macOS": {
       "entitlements": "entitlements.plist",
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "12.0"
     }
   }
 }
