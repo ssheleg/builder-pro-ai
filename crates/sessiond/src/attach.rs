@@ -69,6 +69,11 @@ impl std::error::Error for AttachError {}
 
 /// One live attachment's cancellable forwarder handle.
 struct AttachEntry {
+    /// The connection that currently owns this session's single attachment. Teardown on a
+    /// client disconnect / DetachSession is scoped to entries this connection owns, so one
+    /// client's lifecycle never tears down another client's live stream. `attach` still
+    /// supersedes across connections (single-attach per session, spec §7).
+    conn_id: u64,
     /// Aborts the `spawn_blocking` forwarder task. Aborting a `spawn_blocking` task does not
     /// preempt it mid-`recv()`, so we also flip `cancel` — the forwarder polls it after every
     /// `recv()` wakeup, including the wakeup caused by the std sender being dropped when a fresh
@@ -92,14 +97,21 @@ impl AttachRegistry {
         }
     }
 
-    /// (Re)register `sink` as the single consumer for `session_id`, superseding any prior attach.
-    /// Sends a fresh `Push::Replay` (sanitized snapshot at current cols/rows) into `sink` first,
-    /// then spawns a forwarder that streams live `Push::Output` (with injected OSC-133/OSC-7
-    /// marks stripped) until detach, supersede, or `sink` closes.
-    pub async fn attach(&self, session_id: &SessionId, sink: PushSink) -> Result<(), AttachError> {
+    /// (Re)register `sink` as the single consumer for `session_id`, superseding any prior attach
+    /// (from any connection — single-attach is per-session, spec §7). `conn_id` records which
+    /// connection now owns the attachment so teardown can be scoped per-connection. Sends a fresh
+    /// `Push::Replay` (sanitized snapshot at current cols/rows) into `sink` first, then spawns a
+    /// forwarder that streams live `Push::Output` (with injected OSC-133/OSC-7 marks stripped)
+    /// until detach, supersede, or `sink` closes.
+    pub async fn attach(
+        &self,
+        conn_id: u64,
+        session_id: &SessionId,
+        sink: PushSink,
+    ) -> Result<(), AttachError> {
         // Stop any prior attachment for this session BEFORE subscribing a new std sink, so the
         // supervisor holds exactly one live sink at a time and the old forwarder is not racing
-        // the new one for the same underlying subscription slot.
+        // the new one for the same underlying subscription slot. Supersede is owner-agnostic.
         self.abort_existing(session_id);
 
         // Bridge: std channel fed by the supervisor's blocking reader thread.
@@ -165,24 +177,63 @@ impl AttachRegistry {
 
         self.entries.lock().unwrap().insert(
             session_id.clone(),
-            AttachEntry { handle, cancel },
+            AttachEntry { conn_id, handle, cancel },
         );
         Ok(())
     }
 
-    /// Stop `Output` forwarding for `session_id`. The PTY keeps running and its ring keeps
-    /// filling (spec §7 keep-alive) — this only tears down the client-facing forwarder.
-    pub fn detach(&self, session_id: &SessionId) {
-        self.abort_existing(session_id);
+    /// Stop `Output` forwarding for `session_id`, but ONLY if `conn_id` currently owns the
+    /// attachment. A detach from a connection that no longer owns the session (another client
+    /// superseded it) is a no-op, so one client's `DetachSession` can never tear down another
+    /// client's live stream. The PTY keeps running and its ring keeps filling (spec §7 keep-alive).
+    pub fn detach(&self, conn_id: u64, session_id: &SessionId) {
+        let mut map = self.entries.lock().unwrap();
+        if map.get(session_id).map(|e| e.conn_id) == Some(conn_id) {
+            if let Some(entry) = map.remove(session_id) {
+                entry.cancel.store(true, std::sync::atomic::Ordering::Release);
+                entry.handle.abort();
+            }
+        }
     }
 
-    /// Drop every attach entry (client disconnect / daemon shutdown drain).
+    /// Drop every attach entry (daemon shutdown drain). Used by `serve()` shutdown and boot's
+    /// belt-and-braces drain — a whole-daemon teardown, not a per-client one.
     pub fn detach_all(&self) {
         let mut map = self.entries.lock().unwrap();
         for (_id, entry) in map.drain() {
             entry.cancel.store(true, std::sync::atomic::Ordering::Release);
             entry.handle.abort();
         }
+    }
+
+    /// Drop every attach entry OWNED BY `conn_id` — called when that client disconnects. Entries
+    /// owned by other live connections keep streaming (teardown is per-connection; single-attach is
+    /// per-session).
+    pub fn detach_all_for_conn(&self, conn_id: u64) {
+        let mut map = self.entries.lock().unwrap();
+        let owned: Vec<SessionId> = map
+            .iter()
+            .filter(|(_, e)| e.conn_id == conn_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in owned {
+            if let Some(entry) = map.remove(&id) {
+                entry.cancel.store(true, std::sync::atomic::Ordering::Release);
+                entry.handle.abort();
+            }
+        }
+    }
+
+    /// Tear down any attachment for `session_id` regardless of which connection owns it — used when
+    /// the session itself ends (KillSession or natural child exit), so a dead session never leaves an
+    /// orphaned registry entry (unbounded-growth guard across create/kill churn).
+    pub fn remove_session(&self, session_id: &SessionId) {
+        self.abort_existing(session_id);
+    }
+
+    /// Number of live attachments (observability + test hook).
+    pub fn attachment_count(&self) -> usize {
+        self.entries.lock().unwrap().len()
     }
 
     fn abort_existing(&self, session_id: &SessionId) {
@@ -393,7 +444,7 @@ mod tests {
 
         let reg = AttachRegistry::new(sup.clone());
         let (sink, mut client) = mpsc::channel::<Push>(64);
-        reg.attach(&id, sink).await.expect("attach");
+        reg.attach(1, &id, sink).await.expect("attach");
 
         // First frame: Replay with the session's current dims and (empty, nothing written yet)
         // sanitized scrollback content.
@@ -444,15 +495,17 @@ mod tests {
 
         let reg = AttachRegistry::new(sup.clone());
 
+        // A on conn 1, B on conn 2: proves cross-connection supersede still works — B supersedes A
+        // even though A (a different connection) owns the entry.
         let (sink_a, mut client_a) = mpsc::channel::<Push>(64);
-        reg.attach(&id, sink_a).await.expect("attach a");
+        reg.attach(1, &id, sink_a).await.expect("attach a");
         assert!(matches!(
             recv_timeout(&mut client_a, 2000).await.expect("replay a"),
             Push::Replay { .. }
         ));
 
         let (sink_b, mut client_b) = mpsc::channel::<Push>(64);
-        reg.attach(&id, sink_b).await.expect("attach b");
+        reg.attach(2, &id, sink_b).await.expect("attach b");
         assert!(matches!(
             recv_timeout(&mut client_b, 2000).await.expect("replay b"),
             Push::Replay { .. }
@@ -510,7 +563,7 @@ mod tests {
 
         let reg = AttachRegistry::new(sup.clone());
         let (sink, mut client) = mpsc::channel::<Push>(64);
-        reg.attach(&id, sink).await.expect("attach");
+        reg.attach(1, &id, sink).await.expect("attach");
         assert!(matches!(
             recv_timeout(&mut client, 2000).await.expect("replay"),
             Push::Replay { .. }
@@ -534,7 +587,7 @@ mod tests {
         }
         assert!(collected.windows(6).any(|w| w == b"BEFORE"));
 
-        reg.detach(&id);
+        reg.detach(1, &id);
 
         sup.write_stdin(&id, b"go2\n").expect("write go2");
         // No further Output should reach the detached client.
@@ -559,7 +612,7 @@ mod tests {
         let sup = Arc::new(Supervisor::new());
         let reg = AttachRegistry::new(sup);
         let (sink, _client) = mpsc::channel::<Push>(4);
-        let err = reg.attach(&"ghost-session".to_string(), sink).await.unwrap_err();
+        let err = reg.attach(1, &"ghost-session".to_string(), sink).await.unwrap_err();
         assert_eq!(err, AttachError::NoSuchSession);
     }
 
@@ -586,7 +639,7 @@ mod tests {
 
         let reg = AttachRegistry::new(sup.clone());
         let (sink, mut client) = mpsc::channel::<Push>(256);
-        reg.attach(&id, sink).await.expect("attach");
+        reg.attach(1, &id, sink).await.expect("attach");
         assert!(matches!(
             recv_timeout(&mut client, 2000).await.expect("replay"),
             Push::Replay { .. }
@@ -716,7 +769,7 @@ mod tests {
         // (each prior forwarder aborted, not accumulated).
         for _ in 0..5 {
             let (sink, _client) = mpsc::channel::<Push>(16);
-            reg.attach(&id, sink).await.expect("attach");
+            reg.attach(1, &id, sink).await.expect("attach");
             assert_eq!(
                 reg.entries.lock().unwrap().len(),
                 1,
@@ -737,13 +790,124 @@ mod tests {
         // Exercise the real public `detach()` path on a fresh attach and prove it also removes
         // the entry (no dangling handle left in the registry to ever leak).
         let (sink, _client) = mpsc::channel::<Push>(16);
-        reg.attach(&id, sink).await.expect("attach again");
-        reg.detach(&id);
+        reg.attach(1, &id, sink).await.expect("attach again");
+        reg.detach(1, &id);
         assert!(
             reg.entries.lock().unwrap().is_empty(),
             "detach must remove the entry so no forwarder handle lingers in the registry"
         );
 
         let _ = sup.kill(&id);
+    }
+
+    // ---- Blocker A (attach.rs unit proof): detach_all_for_conn tears down ONLY the given
+    // connection's entries; a second connection's attachment for a DIFFERENT session keeps
+    // streaming live Output. This is the per-connection teardown that stops one client's disconnect
+    // from corrupting another client's live stream (spec §7 single-attach is per-session, teardown
+    // is per-connection). ----
+    #[tokio::test]
+    async fn detach_all_for_conn_only_removes_that_conns_entries() {
+        let sup = Arc::new(Supervisor::new());
+        // sa: conn 1 owns it, a plain long-lived sleep — its forwarder is what conn-1 teardown drops.
+        let sa = sup
+            .create(spec(vec!["-c".into(), "sleep 5".into()]))
+            .expect("create sa");
+        // sb: conn 2 owns it, blocked on a go-signal so we can prove it still streams AFTER conn-1
+        // teardown by releasing it and observing SB_LIVE.
+        let sb = sup
+            .create(spec(vec!["-c".into(), "read _go; printf 'SB_LIVE\\n'; read _hold".into()]))
+            .expect("create sb");
+
+        let reg = AttachRegistry::new(sup.clone());
+
+        let (sink_a, _client_a) = mpsc::channel::<Push>(64);
+        reg.attach(1, &sa, sink_a).await.expect("attach sa on conn 1");
+        let (sink_b, mut client_b) = mpsc::channel::<Push>(64);
+        reg.attach(2, &sb, sink_b).await.expect("attach sb on conn 2");
+        // Drain sb's Replay first.
+        assert!(matches!(
+            recv_timeout(&mut client_b, 2000).await.expect("replay sb"),
+            Push::Replay { .. }
+        ));
+        assert_eq!(reg.attachment_count(), 2, "both attachments live before teardown");
+
+        // Tear down ONLY conn 1: sa's entry is dropped, sb's remains.
+        reg.detach_all_for_conn(1);
+        assert_eq!(
+            reg.attachment_count(),
+            1,
+            "only conn 1's entry removed; conn 2's must remain"
+        );
+        assert!(
+            reg.entries.lock().unwrap().contains_key(&sb),
+            "sb (conn 2) must still be attached"
+        );
+        assert!(
+            !reg.entries.lock().unwrap().contains_key(&sa),
+            "sa (conn 1) must be gone"
+        );
+
+        // sb's forwarder is STILL LIVE: release its go-signal and observe live Output reach conn 2.
+        sup.write_stdin(&sb, b"go\n").expect("release sb");
+        let mut collected = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match recv_timeout(&mut client_b, 500).await {
+                Some(Push::Output { bytes, .. }) => {
+                    collected.extend_from_slice(&bytes);
+                    if collected.windows(7).any(|w| w == b"SB_LIVE") {
+                        break;
+                    }
+                }
+                Some(_) => continue,
+                None => continue,
+            }
+        }
+        assert!(
+            collected.windows(7).any(|w| w == b"SB_LIVE"),
+            "sb's forwarder must still deliver live Output after conn 1's teardown, got: {collected:?}"
+        );
+
+        // A fresh attach for sa on conn 1 re-inserts (proves the slot was genuinely freed).
+        let (sink_a2, _client_a2) = mpsc::channel::<Push>(64);
+        reg.attach(1, &sa, sink_a2).await.expect("re-attach sa");
+        assert_eq!(reg.attachment_count(), 2, "re-attach of sa restores two entries");
+
+        let _ = sup.kill(&sa);
+        let _ = sup.kill(&sb);
+    }
+
+    // ---- Blocker A (attach.rs unit proof): detach from a NON-owner connection is a no-op; only the
+    // owning connection can detach. Prevents one client's DetachSession from tearing down another
+    // client's attachment for the same session after a supersede. ----
+    #[tokio::test]
+    async fn detach_from_non_owner_is_a_noop() {
+        let sup = Arc::new(Supervisor::new());
+        let s = sup
+            .create(spec(vec!["-c".into(), "sleep 5".into()]))
+            .expect("create s");
+
+        let reg = AttachRegistry::new(sup.clone());
+        let (sink, _client) = mpsc::channel::<Push>(16);
+        reg.attach(1, &s, sink).await.expect("attach on conn 1");
+        assert_eq!(reg.attachment_count(), 1);
+
+        // conn 2 does not own the entry: detach is a no-op.
+        reg.detach(2, &s);
+        assert_eq!(
+            reg.attachment_count(),
+            1,
+            "detach from a non-owner connection must NOT remove the entry"
+        );
+
+        // The owner (conn 1) can detach it.
+        reg.detach(1, &s);
+        assert_eq!(
+            reg.attachment_count(),
+            0,
+            "detach from the owning connection removes the entry"
+        );
+
+        let _ = sup.kill(&s);
     }
 }

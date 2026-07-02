@@ -141,7 +141,7 @@ pub async fn serve(
     let mut next_conn_id: u64 = 1;
 
     // ---- Wire supervisor callbacks → Push fan-out (spec §7). Registered ONCE. ----
-    install_push_callbacks(&deps.supervisor, broadcaster.clone());
+    install_push_callbacks(&deps.supervisor, &deps.attach, broadcaster.clone());
 
     // ---- Best-effort periodic scrollback persistence (spec §11). ----
     let flush_task = spawn_scrollback_flusher(deps.clone(), shutdown.clone());
@@ -192,7 +192,21 @@ pub async fn serve(
 }
 
 /// Register the supervisor's status/created/exited callbacks so each becomes a broadcast `Push`.
-fn install_push_callbacks(supervisor: &Arc<Supervisor>, broadcaster: Broadcaster) {
+/// The `attach` registry is passed so a session that ends drops its attach entry (orphan cleanup)
+/// before the `ChildExited` push is built — keeping the registry from growing unbounded across
+/// create/kill churn.
+///
+/// The `on_exited` closure holds a `Weak<AttachRegistry>`, NOT a strong `Arc`: the registry itself
+/// owns an `Arc<Supervisor>`, and the supervisor owns this callback, so a strong reference here
+/// would form a `Supervisor ⇄ AttachRegistry` cycle that leaks the supervisor (and its live PTY
+/// sessions) forever. That leak would keep an attach forwarder's std channel alive across a test's
+/// runtime drop, hanging `Runtime` teardown. Upgrading the `Weak` per call is cheap and yields
+/// `None` only once the daemon is already tearing down (nothing left to clean up).
+fn install_push_callbacks(
+    supervisor: &Arc<Supervisor>,
+    attach: &Arc<AttachRegistry>,
+    broadcaster: Broadcaster,
+) {
     let b_created = broadcaster.clone();
     supervisor.on_created(move |meta: SessionMeta| {
         b_created.broadcast(Push::SessionCreated { meta });
@@ -209,7 +223,16 @@ fn install_push_callbacks(supervisor: &Arc<Supervisor>, broadcaster: Broadcaster
     });
 
     let b_exited = broadcaster;
+    let attach_exited = Arc::downgrade(attach);
     supervisor.on_exited(move |session_id, code, signal| {
+        // A session that ends (kill or natural exit, both reaped by the wait thread) drops its
+        // attach entry so the registry can't grow unbounded across create/kill churn. Do this
+        // BEFORE building the `Push::ChildExited` below, which moves `session_id`. `Weak::upgrade`
+        // is `None` only if the whole daemon is already gone, in which case there is nothing to
+        // reap.
+        if let Some(attach) = attach_exited.upgrade() {
+            attach.remove_session(&session_id);
+        }
         b_exited.broadcast(Push::ChildExited { session_id, code, signal });
     });
 }
@@ -358,7 +381,7 @@ async fn handle_client(
             frame = reader.next(&mut rd) => {
                 match frame {
                     Ok(Some(Frame::Request { id, req })) => {
-                        let res = dispatch(&deps, &push_sink, req).await;
+                        let res = dispatch(&deps, conn_id, &push_sink, req).await;
                         // Enqueue the reply without blocking; a full queue means the client stopped
                         // reading ⇒ drop + disconnect it (spec §13).
                         if out_tx.try_send(Frame::Response { id, res }).is_err() {
@@ -379,11 +402,12 @@ async fn handle_client(
         }
     };
 
-    // ---- Cleanup: deregister from fan-out, tear down this client's attach forwarders (its GUI is
-    // the single consumer, so dropping its sinks stops its pumps; sessions keep running — spec §7),
-    // and let the writer drain/exit. ----
+    // ---- Cleanup: deregister from fan-out, tear down ONLY THIS connection's attach forwarders
+    // (per-connection teardown — spec §7: another client's attachment for an unrelated session must
+    // keep streaming; a global detach_all here would corrupt it). Sessions keep running (§7
+    // keep-alive). Then let the writer drain/exit. ----
     broadcaster.deregister(conn_id);
-    deps.attach.detach_all();
+    deps.attach.detach_all_for_conn(conn_id);
     drop(push_sink);
     drop(out_tx);
     let _ = writer.await;
@@ -458,7 +482,14 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
 }
 
 /// Dispatch one `Request` to the right subsystem and produce the correlated `Response` (spec §7).
-async fn dispatch(deps: &Arc<ServerDeps>, push_sink: &PushSink, req: Request) -> Response {
+/// `conn_id` identifies the calling connection so attach/detach ownership is connection-scoped
+/// (spec §7: single-attach per session, but teardown per connection).
+async fn dispatch(
+    deps: &Arc<ServerDeps>,
+    conn_id: u64,
+    push_sink: &PushSink,
+    req: Request,
+) -> Response {
     match req {
         Request::Hello { .. } => Response::Error {
             code: "UnexpectedHello".into(),
@@ -572,7 +603,7 @@ async fn dispatch(deps: &Arc<ServerDeps>, push_sink: &PushSink, req: Request) ->
         }
 
         Request::AttachSession { session_id } => {
-            match deps.attach.attach(&session_id, push_sink.clone()).await {
+            match deps.attach.attach(conn_id, &session_id, push_sink.clone()).await {
                 Ok(()) => Response::Ack,
                 Err(AttachError::NoSuchSession) => Response::Error {
                     code: "NoSuchSession".into(),
@@ -586,7 +617,7 @@ async fn dispatch(deps: &Arc<ServerDeps>, push_sink: &PushSink, req: Request) ->
         }
 
         Request::DetachSession { session_id } => {
-            deps.attach.detach(&session_id);
+            deps.attach.detach(conn_id, &session_id);
             Response::Ack
         }
 
@@ -1441,5 +1472,255 @@ mod tests {
             }
             other => panic!("expected CwdMissing for symlink-escaping cwd, got {other:?}"),
         }
+    }
+
+    /// Minimal deterministic `SessionSpec` for a `/bin/sh -c <script>` shell (mirrors the `spec()`
+    /// helper in attach.rs tests): a real cwd, a minimal TERM/PATH/HOME env, 80x24.
+    fn sh_spec(script: &str) -> SessionSpec {
+        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        SessionSpec {
+            workspace_id: "ws-test".into(),
+            shell: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: vec![
+                ("TERM".into(), "xterm-256color".into()),
+                ("PATH".into(), path),
+                ("HOME".into(), std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())),
+            ],
+            cols: 80,
+            rows: 24,
+            title: "sh".into(),
+        }
+    }
+
+    // ---- Orphan-cleanup (folded-in deferred item): a session that is killed drops its attach
+    // registry entry, so the registry cannot grow unbounded across create/kill churn. Deterministic:
+    // `kill()` joins the wait thread, which runs `on_exited` → `remove_session` before it returns. ----
+    #[tokio::test]
+    async fn killed_session_attach_entry_is_reaped() {
+        let (deps, _rt) = test_deps();
+        install_push_callbacks(&deps.supervisor, &deps.attach, Broadcaster::default());
+
+        // Create a live session directly via the supervisor (a long sleep so it stays alive).
+        let id = deps.supervisor.create(sh_spec("sleep 5")).expect("create");
+
+        // Attach it (a bounded mpsc sink stands in for a client's push queue).
+        let (sink, _client) = mpsc::channel::<Push>(16);
+        deps.attach.attach(1, &id, sink).await.expect("attach");
+        assert_eq!(deps.attach.attachment_count(), 1, "attach registered one entry");
+
+        // Kill joins the wait thread, so on_exited → remove_session has run by the time kill returns.
+        deps.supervisor.kill(&id).expect("kill");
+        assert_eq!(
+            deps.attach.attachment_count(),
+            0,
+            "killed session's attach entry must be reaped (no orphan)"
+        );
+    }
+
+    // ---- Blocker A end-to-end (the verdict's required two-client regression): client A's
+    // disconnect must NOT tear down client B's live stream for an UNRELATED session. Under the
+    // unfixed code, A's disconnect called `detach_all()` and killed B's forwarder too, so B never
+    // receives B_AFTER. ----
+    #[tokio::test]
+    async fn client_disconnect_does_not_teardown_a_second_clients_attached_session() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+
+        // ---- Client A: connect, create SA, attach (drain its Ack + Replay). ----
+        let mut a = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(hello(&mut a).await, Response::Welcome { .. }));
+        send_frame(
+            &mut a,
+            &Frame::Request {
+                id: 1,
+                req: Request::CreateSession {
+                    workspace_id: "ws".into(),
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some("/tmp".into()),
+                    env_overrides: vec![],
+                    cols: 80,
+                    rows: 24,
+                },
+            },
+        )
+        .await;
+        let sa_id = loop {
+            match recv_frame_t(&mut a).await {
+                Frame::Response { id: 1, res: Response::Session(m) } => break m.id,
+                Frame::Response { id: 1, res: Response::Error { code, message } } => {
+                    panic!("A create failed: {code}: {message}")
+                }
+                Frame::Push(_) => continue,
+                other => panic!("A unexpected {other:?}"),
+            }
+        };
+        send_frame(
+            &mut a,
+            &Frame::Request { id: 2, req: Request::AttachSession { session_id: sa_id.clone() } },
+        )
+        .await;
+        // Drain A's Ack + first Replay.
+        let (mut a_ack, mut a_replay) = (false, false);
+        for _ in 0..4 {
+            match recv_frame_t(&mut a).await {
+                Frame::Response { id: 2, res: Response::Ack } => a_ack = true,
+                Frame::Push(Push::Replay { .. }) => a_replay = true,
+                Frame::Push(_) => continue,
+                other => panic!("A unexpected before attach settle {other:?}"),
+            }
+            if a_ack && a_replay {
+                break;
+            }
+        }
+        assert!(a_ack && a_replay, "A must Ack + Replay its attach");
+
+        // ---- Client B: connect, create SB, prime it, attach, prove it is streaming (B_BEFORE). ----
+        let mut b = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(hello(&mut b).await, Response::Welcome { .. }));
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 1,
+                req: Request::CreateSession {
+                    workspace_id: "ws".into(),
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some("/tmp".into()),
+                    env_overrides: vec![],
+                    cols: 80,
+                    rows: 24,
+                },
+            },
+        )
+        .await;
+        let sb_id = loop {
+            match recv_frame_t(&mut b).await {
+                Frame::Response { id: 1, res: Response::Session(m) } => break m.id,
+                Frame::Response { id: 1, res: Response::Error { code, message } } => {
+                    panic!("B create failed: {code}: {message}")
+                }
+                Frame::Push(_) => continue,
+                other => panic!("B unexpected {other:?}"),
+            }
+        };
+        // Prime SB to block on a go-signal, then print B_BEFORE (drain its Ack).
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 2,
+                req: Request::WriteStdin {
+                    session_id: sb_id.clone(),
+                    bytes: b"read _go; printf 'B_BEFORE\\n'\n".to_vec(),
+                },
+            },
+        )
+        .await;
+        loop {
+            match recv_frame_t(&mut b).await {
+                Frame::Response { id: 2, res: Response::Ack } => break,
+                Frame::Push(_) => continue,
+                other => panic!("B expected Ack for prime write, got {other:?}"),
+            }
+        }
+        // Attach SB (drain Ack + Replay).
+        send_frame(
+            &mut b,
+            &Frame::Request { id: 3, req: Request::AttachSession { session_id: sb_id.clone() } },
+        )
+        .await;
+        let (mut b_ack, mut b_replay) = (false, false);
+        for _ in 0..4 {
+            match recv_frame_t(&mut b).await {
+                Frame::Response { id: 3, res: Response::Ack } => b_ack = true,
+                Frame::Push(Push::Replay { session_id, .. }) if session_id == sb_id => b_replay = true,
+                Frame::Push(_) => continue,
+                other => panic!("B unexpected before attach settle {other:?}"),
+            }
+            if b_ack && b_replay {
+                break;
+            }
+        }
+        assert!(b_ack && b_replay, "B must Ack + Replay its attach");
+        // Release SB; collect B's Output until it contains B_BEFORE (proves B is streaming).
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 4,
+                req: Request::WriteStdin { session_id: sb_id.clone(), bytes: b"go\n".to_vec() },
+            },
+        )
+        .await;
+        let mut b_out = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b)).await {
+                Ok(Frame::Push(Push::Output { session_id, bytes })) if session_id == sb_id => {
+                    b_out.extend_from_slice(&bytes);
+                    if b_out.windows(8).any(|w| w == b"B_BEFORE") {
+                        break;
+                    }
+                }
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            b_out.windows(8).any(|w| w == b"B_BEFORE"),
+            "B must be streaming Output before A disconnects, got: {b_out:?}"
+        );
+
+        // ---- A disconnects: closes its socket → handle_client cleanup → detach_all_for_conn(A).
+        // Under the unfixed code this called detach_all() and tore down SB's forwarder too. ----
+        drop(a);
+
+        // ---- Prove B STILL receives live Output for SB after A's disconnect (B_AFTER). ----
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 5,
+                req: Request::WriteStdin {
+                    session_id: sb_id.clone(),
+                    bytes: b"read _go2; printf 'B_AFTER\\n'\n".to_vec(),
+                },
+            },
+        )
+        .await;
+        // Drain the Ack for id 5 (Output may interleave).
+        loop {
+            match recv_frame_t(&mut b).await {
+                Frame::Response { id: 5, res: Response::Ack } => break,
+                Frame::Push(_) => continue,
+                other => panic!("B expected Ack for post-disconnect write, got {other:?}"),
+            }
+        }
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 6,
+                req: Request::WriteStdin { session_id: sb_id.clone(), bytes: b"go\n".to_vec() },
+            },
+        )
+        .await;
+        let mut b_out2 = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b)).await {
+                Ok(Frame::Push(Push::Output { session_id, bytes })) if session_id == sb_id => {
+                    b_out2.extend_from_slice(&bytes);
+                    if b_out2.windows(7).any(|w| w == b"B_AFTER") {
+                        break;
+                    }
+                }
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            b_out2.windows(7).any(|w| w == b"B_AFTER"),
+            "B's stream must survive A's disconnect (blocker A): expected B_AFTER, got: {b_out2:?}"
+        );
+
+        // Clean up: kill SB over B (SA went away with A).
+        send_frame(&mut b, &Frame::Request { id: 7, req: Request::KillSession { session_id: sb_id } }).await;
     }
 }
