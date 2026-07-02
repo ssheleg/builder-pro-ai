@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- WKWebView (the Tauri window) needs the JIT/unsigned-executable-memory exceptions to run JS
+       under the hardened runtime; without these the webview process cannot allocate executable
+       pages for its JS engine and the app fails to render (spec §14.3). -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- Tauri/WebKit dynamically load a handful of Apple-signed-but-not-Developer-ID-Application
+       system frameworks at runtime; the hardened runtime's default library validation would
+       reject those, so it must be relaxed here (standard Tauri macOS entitlement). -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- WebKit's process-launch machinery relies on DYLD environment variables internally; the
+       hardened runtime strips them by default unless this is set (standard Tauri/WebKit macOS
+       entitlement). -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <!-- Same entitlements set is applied to the embedded bpa-sessiond sidecar via `codesign --deep`
+       (Task 24); the daemon fork/execs user shells over a PTY (spec §9), and those child
+       processes must inherit the parent's sandbox/entitlement context rather than losing it. -->
+  <key>com.apple.security.inherit</key>
+  <true/>
+</dict>
+</plist>
