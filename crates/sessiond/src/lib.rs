@@ -7,4 +7,5 @@ pub mod live_grid;
 pub mod osc_parser;
 pub mod persistence;
 pub mod scrollback;
+// TEMP (review-only, will revert): pub mod shell_integration;
 pub mod singleton;
