@@ -4,4 +4,5 @@
 pub use bpa_protocol as protocol;
 
 pub mod osc_parser;
+pub mod scrollback;
 pub mod singleton;
