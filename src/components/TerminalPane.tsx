@@ -4,10 +4,12 @@ import type { TerminalManager } from "../terminal/terminal-manager";
 import { theme } from "../theme";
 
 /**
- * Hosts one session's xterm Terminal. The DOM container is always mounted while its
- * session exists in the store (App only unmounts a pane when the session is removed);
- * only `display` toggles when it isn't the active tab, so a hidden Terminal keeps
- * buffering incoming bytes (spec §12 keep-alive).
+ * Hosts one session's xterm Terminal. App mounts exactly one `TerminalPane` — the ACTIVE
+ * session's — at a time; switching tabs unmounts the old pane and mounts the new one. The
+ * underlying `Terminal` instance itself is NOT tied to this component's lifecycle: it lives
+ * in the non-reactive `TerminalManager` map, so a hidden/unmounted pane's terminal keeps
+ * buffering incoming bytes in the background (spec §12 keep-alive) and is instantly re-shown
+ * (scrollback + all) the next time its session's tab becomes active again.
  *
  * On mount: `ensure()` (idempotent — returns the existing Terminal if already created,
  * which makes React 19 StrictMode's double-invoke of effects safe), `attach()` once
