@@ -4,6 +4,7 @@ pub use bpa_protocol as protocol;
 
 pub mod attach;
 pub mod live_grid;
+pub mod logging;
 pub mod osc_parser;
 pub mod persistence;
 pub mod pty_supervisor;
