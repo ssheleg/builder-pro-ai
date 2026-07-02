@@ -2,6 +2,7 @@
 //! The daemon-broker command surface (spec §6) is added in T14–T18.
 
 pub mod broker;
+pub mod commands;
 pub mod launchd;
 pub mod paths;
 pub mod socket_client;
