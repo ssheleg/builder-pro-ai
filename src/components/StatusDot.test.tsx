@@ -1,0 +1,81 @@
+// @vitest-environment jsdom
+import { describe, it, expect, afterEach } from "vitest";
+import { render, screen, cleanup } from "@testing-library/react";
+import { StatusDot, dotStateOf } from "./StatusDot";
+import { theme } from "../theme";
+import type { SessionLifecycle } from "../ipc/types";
+
+afterEach(cleanup);
+
+describe("dotStateOf", () => {
+  it("atPrompt (not waiting) -> idle", () => {
+    expect(dotStateOf({ kind: "atPrompt" }, false)).toBe("idle");
+  });
+
+  it("typing (not waiting) -> idle (Typing maps to AtPrompt color per spec §5)", () => {
+    expect(dotStateOf({ kind: "typing" }, false)).toBe("idle");
+  });
+
+  it("running (not waiting) -> running", () => {
+    expect(dotStateOf({ kind: "running" }, false)).toBe("running");
+  });
+
+  it("running + waitingForInput -> waiting (overrides running)", () => {
+    expect(dotStateOf({ kind: "running" }, true)).toBe("waiting");
+  });
+
+  it("exited (not waiting) -> exited", () => {
+    const lc: SessionLifecycle = { kind: "exited", code: 0, signal: null };
+    expect(dotStateOf(lc, false)).toBe("exited");
+  });
+
+  it("exited + waitingForInput -> exited (exit wins over stale waiting flag)", () => {
+    const lc: SessionLifecycle = { kind: "exited", code: 1, signal: null };
+    expect(dotStateOf(lc, true)).toBe("exited");
+  });
+
+  it("atPrompt + waitingForInput -> idle (waiting only applies while running)", () => {
+    expect(dotStateOf({ kind: "atPrompt" }, true)).toBe("idle");
+  });
+});
+
+describe("StatusDot rendering", () => {
+  it("renders the idle color + data-state for atPrompt", () => {
+    render(<StatusDot lifecycle={{ kind: "atPrompt" }} waitingForInput={false} />);
+    const dot = screen.getByRole("img", { name: /idle/i });
+    expect(dot.getAttribute("data-state")).toBe("idle");
+    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusIdle));
+  });
+
+  it("renders the running color for running", () => {
+    render(<StatusDot lifecycle={{ kind: "running" }} waitingForInput={false} />);
+    const dot = screen.getByRole("img", { name: /running/i });
+    expect(dot.getAttribute("data-state")).toBe("running");
+    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusRunning));
+  });
+
+  it("renders the waiting color for running+waitingForInput", () => {
+    render(<StatusDot lifecycle={{ kind: "running" }} waitingForInput={true} />);
+    const dot = screen.getByRole("img", { name: /waiting for input/i });
+    expect(dot.getAttribute("data-state")).toBe("waiting");
+    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusWaiting));
+  });
+
+  it("renders the exited color for exited", () => {
+    render(
+      <StatusDot lifecycle={{ kind: "exited", code: 0, signal: null }} waitingForInput={false} />,
+    );
+    const dot = screen.getByRole("img", { name: /exited/i });
+    expect(dot.getAttribute("data-state")).toBe("exited");
+    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusExited));
+  });
+});
+
+// jsdom serializes inline background-color as rgb(...); convert #rrggbb for comparison.
+function hexToRgb(hex: string): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgb(${r}, ${g}, ${b})`;
+}
