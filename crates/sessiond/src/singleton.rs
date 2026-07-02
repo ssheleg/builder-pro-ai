@@ -46,10 +46,54 @@ pub fn assert_socket_path_len(p: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Verify an existing socket dir is a directory owned by the current euid with mode 0700,
+/// or create it fresh with mode 0700. Guards the `/tmp` squatting race (spec §8.2).
+fn ensure_dir(dir: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(md) => {
+            let euid = rustix::process::geteuid().as_raw();
+            if !md.is_dir() {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!("socket dir path is not a directory: {}", dir.display()),
+                ));
+            }
+            if md.uid() != euid {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!("socket dir {} not owned by uid {euid}", dir.display()),
+                ));
+            }
+            if md.mode() & 0o777 != 0o700 {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!(
+                        "socket dir {} mode {:o} != 0700",
+                        dir.display(),
+                        md.mode() & 0o777
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            DirBuilder::new().mode(0o700).create(dir)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Ensure the resolved socket directory exists at mode 0700 owned by us (spec §8.1–§8.2).
+pub fn ensure_socket_dir() -> io::Result<()> {
+    ensure_dir(&socket_dir())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
 
     fn with_env<F: FnOnce()>(key: &str, val: Option<&str>, f: F) {
         let prev = std::env::var_os(key);
@@ -100,5 +144,37 @@ mod tests {
         assert!(long.as_os_str().as_bytes().len() >= 104);
         let err = assert_socket_path_len(&long).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn ensure_dir_creates_with_0700() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("bpa");
+        ensure_dir(&dir).expect("create ok");
+        let md = std::fs::metadata(&dir).unwrap();
+        assert!(md.is_dir());
+        assert_eq!(md.permissions().mode() & 0o777, 0o700);
+        assert_eq!(md.uid(), rustix::process::geteuid().as_raw());
+        // Idempotent: second call on our own 0700 dir succeeds.
+        ensure_dir(&dir).expect("idempotent ok");
+    }
+
+    #[test]
+    fn ensure_dir_refuses_world_writable_squat() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("bpa");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = ensure_dir(&dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn ensure_dir_refuses_non_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("bpa");
+        std::fs::write(&path, b"not a dir").unwrap();
+        let err = ensure_dir(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }
