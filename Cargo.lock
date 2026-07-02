@@ -188,6 +188,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bpa-paths"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "bpa-protocol"
 version = "0.1.0"
 dependencies = [
@@ -204,6 +212,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "bincode",
+ "bpa-paths",
  "bpa-protocol",
  "libc",
  "portable-pty",
@@ -253,6 +262,7 @@ name = "builder-pro-ai"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bpa-paths",
  "bpa-protocol",
  "libc",
  "serde",

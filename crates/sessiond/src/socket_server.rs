@@ -646,25 +646,11 @@ fn err(code: &str, e: impl std::fmt::Display) -> Response {
     Response::Error { code: code.into(), message: e.to_string() }
 }
 
-/// Canonicalize `path` and require it to be an absolute, existing directory (spec §16). Returns the
-/// canonical path string on success. Canonicalization resolves symlinks so a symlink-escape is
-/// disallowed by construction.
-fn validate_dir(path: &str) -> Result<String, std::io::Error> {
-    let canonical = std::fs::canonicalize(path)?; // fails if the path does not exist
-    if !canonical.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotADirectory,
-            "path is not a directory",
-        ));
-    }
-    if !canonical.is_absolute() {
-        // canonicalize() always returns absolute paths, but assert the contract defensively.
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path is not absolute",
-        ));
-    }
-    Ok(canonical.to_string_lossy().into_owned())
+/// Validate a workspace root / session cwd via the shared `bpa-paths` validator (spec §16):
+/// absolute + exists + is-a-directory + no symlink-escape of the lexical parent — byte-for-byte
+/// the same rule the core enforces. Returns the canonical path string on success.
+fn validate_dir(path: &str) -> Result<String, bpa_paths::PathError> {
+    bpa_paths::validate_dir(std::path::Path::new(path)).map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Resolve a protocol `CreateSession` into a fully-specified [`SessionSpec`] (spec §9.3/§16):
@@ -1378,5 +1364,82 @@ mod tests {
         let mut c = UnixStream::connect(&path).await.unwrap();
         // If peer-cred wrongly rejected our own euid, the handshake would never complete.
         assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+    }
+
+    /// Build a real escaping-symlink layout under a fresh tempdir and return `(tempdir, link_path)`.
+    /// Mirrors `bpa_paths::validate_dir`'s `symlink_escaping_parent_is_rejected`:
+    ///   base/outside/         (real dir, OUTSIDE `named`)
+    ///   base/named/link -> ../outside
+    /// The `link` canonicalizes to `base/outside`, whose parent (`base`) != the canonical parent of
+    /// the input (`base/named`) → symlink-escape. The tempdir MUST be kept alive by the caller for
+    /// the duration of the assertion (dropping it deletes the layout out from under the daemon).
+    fn escaping_symlink_layout() -> (tempfile::TempDir, String) {
+        let base = tempfile::tempdir().unwrap();
+        let outside = base.path().join("outside");
+        let named = base.path().join("named");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(&named).unwrap();
+        let link = named.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let link_str = link.to_string_lossy().into_owned();
+        (base, link_str)
+    }
+
+    // ---- §16 daemon path validation: a symlink that escapes its lexical parent must be rejected
+    // as a workspace root, exactly as the core (and `bpa-paths`) reject it. The naive
+    // `canonicalize()`-only validator ACCEPTS this (it silently resolves the escaping link), so on
+    // the pre-fix daemon this returns `Response::Workspace` and the test FAILS. ----
+    #[tokio::test]
+    async fn create_workspace_rejects_symlink_escaping_root() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+        let (_layout, link) = escaping_symlink_layout();
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 9,
+                req: Request::CreateWorkspace { name: "esc".into(), root_path: link },
+            },
+        )
+        .await;
+        match recv_frame_t(&mut c).await {
+            Frame::Response { id: 9, res: Response::Error { code, .. } } => {
+                assert_eq!(code, "InvalidWorkspaceRoot");
+            }
+            other => panic!("expected InvalidWorkspaceRoot for symlink-escaping root, got {other:?}"),
+        }
+    }
+
+    // ---- Same escaping-symlink layout as a session cwd: must be rejected with CwdMissing (the
+    // wire code the cwd call site maps every validation failure to). Pre-fix: the session is
+    // created and this FAILS. ----
+    #[tokio::test]
+    async fn create_session_rejects_symlink_escaping_cwd() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+        let (_layout, link) = escaping_symlink_layout();
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 1,
+                req: Request::CreateSession {
+                    workspace_id: "ws".into(),
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some(link),
+                    env_overrides: vec![],
+                    cols: 80,
+                    rows: 24,
+                },
+            },
+        )
+        .await;
+        match recv_frame_t(&mut c).await {
+            Frame::Response { id: 1, res: Response::Error { code, .. } } => {
+                assert_eq!(code, "CwdMissing");
+            }
+            other => panic!("expected CwdMissing for symlink-escaping cwd, got {other:?}"),
+        }
     }
 }
