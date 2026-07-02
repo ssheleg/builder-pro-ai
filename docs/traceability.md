@@ -8,8 +8,9 @@ this repository at the time of writing (Task 25) — none are aspirational. Run
 
 Crate name note: the daemon crate's package name is `bpa-sessiond` (lib name `bpa_sessiond`); the
 Tauri core crate's package name is `builder-pro-ai` (lib name `builder_pro_ai_lib`); the shared
-wire-types crate is `bpa-protocol` (lib name `bpa_protocol`). Commands below use `-p <package
-name>`.
+wire-types crate is `bpa-protocol` (lib name `bpa_protocol`); the shared directory-validation crate
+is `bpa-paths` (lib name `bpa_paths`) — one `validate_dir` used byte-for-byte by both the core and
+the daemon (spec §16). Commands below use `-p <package name>`.
 
 | Contract (spec §) | Test (command) |
 |---|---|
@@ -41,12 +42,14 @@ name>`.
 | Stale-socket file unlink + rebind (§13) | `cargo test -p bpa-sessiond --test boot_integration stale_socket_file_is_unlinked_and_rebound` |
 | Oversized/garbage frame rejection at the socket layer (§7) | `cargo test -p bpa-sessiond --lib socket_server::tests::oversized_frame_is_rejected` |
 | Backpressure / slow-client — one slow client disconnected without stalling others (§13) | `cargo test -p bpa-sessiond --lib socket_server::tests::slow_client_is_disconnected_without_stalling_a_second_client` |
-| Attach model: single-attach supersede + fresh Replay (§7) | `cargo test -p bpa-sessiond --lib attach::tests::second_attach_supersedes_first attach::tests::attach_sends_replay_first_then_live_output socket_server::tests::attach_first_push_is_replay_then_output` |
+| Attach model: single-attach supersede + fresh Replay (§7) | `cargo test -p bpa-sessiond --lib attach::tests::second_attach_supersedes_first attach::tests::attach_sends_replay_first_then_live_output socket_server::tests::attach_first_push_is_replay_then_output` (`second_attach_supersedes_first` supersedes cross-connection: A on conn 1, B on conn 2) |
 | Attach model: `DetachSession` stops Output, PTY keeps running (keep-alive) (§7) | `cargo test -p bpa-sessiond --lib attach::tests::detach_stops_output_session_stays_alive` |
+| Attach model: connection-aware teardown — one client's detach/disconnect never tears down another client's live stream (§7, §13 isolation) | `cargo test -p bpa-sessiond --lib attach::tests::detach_from_non_owner_is_a_noop attach::tests::detach_all_for_conn_only_removes_that_conns_entries socket_server::tests::client_disconnect_does_not_teardown_a_second_clients_attached_session` |
 | Attach: superseded/detached forwarder does not leak a thread (§7, resource hygiene) | `cargo test -p bpa-sessiond --lib attach::tests::superseded_forwarder_does_not_leak_thread` |
+| Attach: a killed/exited session drops its attach entry — no orphaned registry growth across create/kill churn (§7, resource hygiene) | `cargo test -p bpa-sessiond --lib socket_server::tests::killed_session_attach_entry_is_reaped` |
 | Attach: unknown-session error path (§7) | `cargo test -p bpa-sessiond --lib attach::tests::attach_unknown_session_errors socket_server::tests::write_resize_kill_unknown_session_errors` |
 | Detach integration: kill the client, child stays alive (pgrep), reconnect, scrollback replays (§14.1) | `npm run e2e:survive` (phase4a: `pgrepDaemon`/`pgrepShell` after client quit; phase4b: reattach + scrollback intact) |
-| Path validation: missing/not-a-dir/relative/symlink-escape/root-deleted-before-create (§16) | `cargo test -p builder-pro-ai --lib paths::tests::missing_path_is_missing paths::tests::file_is_not_a_directory paths::tests::relative_path_is_rejected_before_fs paths::tests::symlink_escaping_parent_is_rejected paths::tests::symlink_within_parent_is_allowed paths::tests::ok_real_directory_canonicalizes paths::tests::root_path_is_allowed` + daemon-side path validation `cargo test -p bpa-sessiond --lib socket_server::tests::create_session_rejects_missing_cwd socket_server::tests::create_session_rejects_relative_cwd socket_server::tests::create_workspace_rejects_missing_dir` |
+| Path validation: missing/not-a-dir/relative/symlink-escape/root-deleted-before-create (§16) | Shared validator (used byte-for-byte by BOTH core and daemon) `cargo test -p bpa-paths` (`missing_path_is_missing`, `file_is_not_a_directory`, `relative_path_is_rejected_before_fs`, `symlink_escaping_parent_is_rejected`, `symlink_within_parent_is_allowed`, `ok_real_directory_canonicalizes`, `root_path_is_allowed`) + daemon-side path validation over the wire `cargo test -p bpa-sessiond --lib socket_server::tests::create_session_rejects_missing_cwd socket_server::tests::create_session_rejects_relative_cwd socket_server::tests::create_workspace_rejects_missing_dir socket_server::tests::create_workspace_rejects_symlink_escaping_root socket_server::tests::create_session_rejects_symlink_escaping_cwd` + core-side `create_session` cwd pre-flight `cargo test -p builder-pro-ai --lib commands::commands_over_stub_daemon::create_session_rejects_bad_cwd_before_any_request` |
 | launchd install/bootstrap idempotency/kickstart/dir-missing/hard-failure (§8.3, §13) | `cargo test -p builder-pro-ai --lib launchd::tests::install_creates_dirs_and_writes_plist launchd::tests::bootstrap_already_bootstrapped_is_success launchd::tests::bootstrap_clean_success_no_bootout launchd::tests::kickstart_cmd_shape launchd::tests::hard_failure_surfaces_install_error launchd::tests::is_loaded_reads_print_exit_code launchd::tests::render_plist_has_locked_keys` + `npm run e2e:survive` (real launchd path documented in `scripts/smoke-clean-vm.sh` via `BPA_E2E_EXTERNAL_DAEMON=1`) |
 | Daemon boot: bind, wire deps, serve until shutdown, drain (spec §8.1–§8.3, §13) | `cargo test -p bpa-sessiond --test boot_integration boot_handshake_create_session_and_clean_shutdown` |
 | Daemon-crash / logout truth table (§13) | Documented (not independently testable without killing the OS session) — see README.md "Survival truth table"; the socket-disconnect half of "daemon crash → live shells die" is implied by process-group kill semantics already proven by `kill_terminates_whole_process_group`; the "daemon restart survives via rehydrate" half is proven end-to-end by `npm run e2e:survive`. |
@@ -62,12 +65,16 @@ name>`.
 
 None. Every §14.2 row above resolves to at least one real, currently-passing test.
 
-## Test totals as of this task (Task 25)
+## Test totals as of this task (Task 25 + blocker-fixes)
 
-- Rust workspace (`cargo test --workspace`): **194 tests**, 0 failed (protocol: 18, sessiond lib:
-  108, sessiond `boot_integration`: 3, sessiond `skeleton`: 1, sessiond `no_secrets_in_logs`: 1,
-  core lib (`builder_pro_ai_lib`): 57, core `capabilities`: 5, core `invoke_smoke`: 1; doc-tests: 0
-  across all three crates).
+- Rust workspace (`cargo test --workspace`): **201 tests**, 0 failed (`bpa-paths`: 7 — the shared
+  path validator, moved verbatim from the core crate; protocol: 18, sessiond lib: 114, sessiond
+  `boot_integration`: 3, sessiond `skeleton`: 1, sessiond `no_secrets_in_logs`: 1, core lib
+  (`builder_pro_ai_lib`): 51, core `capabilities`: 5, core `invoke_smoke`: 1; doc-tests: 0 across
+  all four crates). Delta vs. Task 25 (194): the 7 `paths` tests moved from the core crate into the
+  new `bpa-paths` crate (core lib 57 → 51, +1 new `create_session_rejects_bad_cwd_before_any_request`
+  core-side pre-flight test); sessiond lib 108 → 114 (+2 daemon symlink-escape tests, +2
+  connection-aware attach tests, +2 socket_server tests — orphan reap + two-client isolation).
 - TypeScript (`npx vitest run`): **92 tests**, 12 test files, 0 failed.
 - E2E (`npm run e2e:survive`): green (5 phases, socket-harness variant); launchd-managed variant
   (`BPA_E2E_EXTERNAL_DAEMON=1`) and full-GUI variant documented in `tests/e2e/README.md` and
