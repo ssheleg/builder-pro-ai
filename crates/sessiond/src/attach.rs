@@ -224,11 +224,15 @@ impl AttachRegistry {
         }
     }
 
-    /// Tear down any attachment for `session_id` regardless of which connection owns it — used when
-    /// the session itself ends (KillSession or natural child exit), so a dead session never leaves an
-    /// orphaned registry entry (unbounded-growth guard across create/kill churn).
-    pub fn remove_session(&self, session_id: &SessionId) {
-        self.abort_existing(session_id);
+    /// Remove `session_id`'s attach entry when the session itself has ENDED (KillSession or natural
+    /// child exit). Graceful: does NOT cancel/abort the forwarder — the reader thread drops the
+    /// session's sink on its own exit, so the forwarder drains every remaining byte and terminates
+    /// on `Disconnected`. Cancelling here instead would race the reader thread and truncate the
+    /// session's final output to the attached client (a real, user-visible loss).
+    /// Returns the forwarder's `JoinHandle` (production callers drop it — the task is detached and
+    /// self-terminating; tests await it to prove termination).
+    pub fn remove_session(&self, session_id: &SessionId) -> Option<JoinHandle<()>> {
+        self.entries.lock().unwrap().remove(session_id).map(|e| e.handle)
     }
 
     /// Number of live attachments (observability + test hook).
@@ -909,5 +913,177 @@ mod tests {
         );
 
         let _ = sup.kill(&s);
+    }
+
+    // ---- Item 1 (BLOCKER regression): a session whose child exits NATURALLY must deliver its
+    // trailing output to the attached client before the entry is reaped. Pre-fix, the wait thread
+    // fired `on_exited` → `remove_session` → `abort_existing` (cancel + abort) the instant
+    // `child.wait()` returned, racing the reader thread that was still draining the kernel PTY
+    // buffer — so the final line (`FINAL_MARKER`) was sporadically dropped and never re-delivered.
+    //
+    // This is a RACE, so we loop several iterations: a single pass can pass by luck even against the
+    // buggy code. The fix makes the reader thread drop the sink on its own exit, so the forwarder
+    // drains every queued byte and terminates on `Disconnected` (graceful end-of-stream), while
+    // `remove_session` only removes the map entry without cancelling. ----
+    #[tokio::test]
+    async fn natural_exit_final_output_reaches_attached_client_and_entry_is_reaped() {
+        // 8 reps: this is a race — a single pass can succeed by luck even pre-fix. Pre-fix flake
+        // rate measured at ~42% per 20-rep run (5/12 runs failed); see the fix report's RED section.
+        for iter in 0..8 {
+            let sup = Arc::new(Supervisor::new());
+            let reg = Arc::new(AttachRegistry::new(sup.clone()));
+
+            // Wire the production teardown by hand (mirrors socket_server::install_push_callbacks):
+            // when the child exits, the wait thread calls `remove_session` — the exact path that
+            // regressed. A `Weak` avoids a Supervisor⇄AttachRegistry cycle (same reasoning as prod).
+            let reg_weak = Arc::downgrade(&reg);
+            sup.on_exited(move |session_id, _code, _signal| {
+                if let Some(reg) = reg_weak.upgrade() {
+                    let _ = reg.remove_session(&session_id);
+                }
+            });
+
+            // Child prints FINAL_MARKER and exits immediately (no trailing `read`): the reader
+            // thread is still draining when `child.wait()` returns in the wait thread.
+            let id = sup
+                .create(spec(vec![
+                    "-c".into(),
+                    "read _go; printf 'FINAL_MARKER\\n'".into(),
+                ]))
+                .expect("create");
+
+            let (sink, mut client) = mpsc::channel::<Push>(256);
+            reg.attach(1, &id, sink).await.expect("attach");
+            assert!(
+                matches!(
+                    recv_timeout(&mut client, 2000).await.expect("replay"),
+                    Push::Replay { .. }
+                ),
+                "iter {iter}: expected Replay first"
+            );
+
+            // Release the child; it prints then exits. The trailing output MUST reach the client.
+            sup.write_stdin(&id, b"go\n").expect("write go");
+
+            let mut collected = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                match recv_timeout(&mut client, 200).await {
+                    Some(Push::Output { bytes, .. }) => {
+                        collected.extend_from_slice(&bytes);
+                        if contains(&collected, b"FINAL_MARKER") {
+                            break;
+                        }
+                    }
+                    Some(_) => continue,
+                    // Channel closed after the forwarder terminated: stop waiting.
+                    None if reg.attachment_count() == 0 => break,
+                    None => continue,
+                }
+            }
+
+            // (a) The trailing output reached the client (this is the assertion that failed
+            // sporadically pre-fix).
+            assert!(
+                contains(&collected, b"FINAL_MARKER"),
+                "iter {iter}: trailing output lost on natural exit, got: {collected:?}"
+            );
+
+            // (b) The attach entry is reaped within the deadline (forwarder self-terminated on the
+            // reader's sink drop, then remove_session removed the map entry).
+            let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while reg.attachment_count() != 0 && std::time::Instant::now() < reap_deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(
+                reg.attachment_count(),
+                0,
+                "iter {iter}: attach entry must be reaped after natural exit"
+            );
+
+            // (c) A fresh remove_session returns None — the entry is genuinely gone.
+            assert!(
+                reg.remove_session(&id).is_none(),
+                "iter {iter}: entry must already be gone (remove_session returns None)"
+            );
+
+            let _ = sup.kill(&id);
+        }
+    }
+
+    // ---- Item 1 (deterministic half): `remove_session` is GRACEFUL — it must NOT cancel/abort the
+    // forwarder. After the session ends (here via `kill`, which joins the reader thread ⇒ the reader
+    // drops the sink ⇒ the std channel closes), the forwarder drains and terminates ON ITS OWN.
+    // `remove_session` returns the forwarder's JoinHandle so we can prove it completes — the no-leak
+    // half of the guarantee (a graceful teardown that never hangs). ----
+    #[tokio::test]
+    async fn remove_session_lets_forwarder_drain_then_terminate() {
+        let sup = Arc::new(Supervisor::new());
+        let reg = AttachRegistry::new(sup.clone());
+
+        let id = sup
+            .create(spec(vec!["-c".into(), "read _hold".into()]))
+            .expect("create");
+
+        let (sink, _client) = mpsc::channel::<Push>(64);
+        reg.attach(1, &id, sink).await.expect("attach");
+        assert_eq!(reg.attachment_count(), 1);
+
+        // `kill` joins the reader thread; the reader drops the sink on exit, closing the std channel
+        // so the forwarder observes `Disconnected` and returns of its own accord.
+        sup.kill(&id).expect("kill");
+
+        let handle = reg.remove_session(&id).expect("remove_session returns the forwarder handle");
+        let joined = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(
+            joined.is_ok(),
+            "graceful remove_session must let the forwarder self-terminate — a hang means the \
+             reader never dropped the sink (leak)"
+        );
+
+        // Entry is gone; a second remove is a no-op returning None.
+        assert!(reg.remove_session(&id).is_none(), "entry must be removed exactly once");
+    }
+
+    // ---- Item 1 step 4 guard: after a natural exit the session lingers in the supervisor map
+    // (only `kill`/rehydrate prunes it) but its reader thread has exited and DROPPED the sink's only
+    // producer. A fresh `attach` here must be refused — otherwise the new forwarder's std channel
+    // would never see a producer drop and would poll forever (leak). `subscribe_output` returns
+    // `NoSuchSession` once `!is_active`, which the attach layer maps to `AttachError::NoSuchSession`. ----
+    #[tokio::test]
+    async fn attach_on_naturally_exited_session_errors_no_such_session() {
+        let sup = Arc::new(Supervisor::new());
+        // Exits immediately on release; NOT killed, so it stays in the map with is_active=false.
+        let id = sup
+            .create(spec(vec!["-c".into(), "read _go; printf 'BYE\\n'".into()]))
+            .expect("create");
+        sup.write_stdin(&id, b"go\n").expect("write go");
+
+        // Wait until the wait thread has recorded the exit (is_active=false) but do NOT kill (so the
+        // session is still present in the supervisor map — the exited-but-unreaped window).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match sup.meta(&id) {
+                Ok(m) if !m.is_active => break,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                Err(e) => panic!("session vanished before we could observe the exited window: {e}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never recorded its exit within the deadline"
+            );
+        }
+
+        let reg = AttachRegistry::new(sup.clone());
+        let (sink, _client) = mpsc::channel::<Push>(16);
+        let err = reg.attach(1, &id, sink).await.unwrap_err();
+        assert_eq!(
+            err,
+            AttachError::NoSuchSession,
+            "attach on an exited-but-unreaped session must be refused (no forever-polling forwarder)"
+        );
+        assert_eq!(reg.attachment_count(), 0, "no entry may be inserted for a refused attach");
+
+        let _ = sup.kill(&id);
     }
 }

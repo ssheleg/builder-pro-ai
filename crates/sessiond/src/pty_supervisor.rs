@@ -343,6 +343,14 @@ impl Supervisor {
                     }
                 }
                 *reader_shared.is_active.lock().unwrap() = false;
+                // Reader is the only producer into the subscribed sink. Dropping it here closes the
+                // std channel, so an attached forwarder drains every queued byte and then observes
+                // `Disconnected` — graceful end-of-stream instead of truncation (child EOF ⇒ all
+                // output already read from the kernel buffer ⇒ everything is in the channel or
+                // already forwarded). PTY EOF is guaranteed after child exit (the slave fd is
+                // dropped at spawn, spec §9), so this single reader-exit tail always runs — both the
+                // `Ok(0)` (EOF) and `Err` (EIO) loop-break arms fall through to here.
+                reader_shared.sink.lock().unwrap().take();
             })
             .map_err(|e| SupervisorError::Spawn(format!("reader thread: {e}")))?;
 
@@ -473,8 +481,18 @@ impl Supervisor {
 
     /// Register (or replace) the live output sink for this session. Single-attach: a new sink
     /// supersedes any previous one (spec §7 attach model).
+    ///
+    /// Refuses an exited-but-unreaped session (`!is_active`): after natural child exit the session
+    /// lingers in the map until a `kill`/rehydrate prunes it, but its reader thread has already
+    /// exited and DROPPED the sink slot's only producer. Subscribing a fresh sink here would wire a
+    /// std channel that never sees a producer drop, so the attach forwarder would poll forever
+    /// (leak). Returning `NoSuchSession` maps to `AttachError::NoSuchSession` at the attach layer —
+    /// the client sees the same "session is gone" it would for a killed one.
     pub fn subscribe_output(&self, id: &str, sink: OutputSink) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
+        if !*s.shared.is_active.lock().unwrap() {
+            return Err(SupervisorError::NoSuchSession(id.to_string()));
+        }
         *s.shared.sink.lock().unwrap() = Some(sink);
         Ok(())
     }

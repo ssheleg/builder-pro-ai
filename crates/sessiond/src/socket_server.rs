@@ -194,7 +194,9 @@ pub async fn serve(
 /// Register the supervisor's status/created/exited callbacks so each becomes a broadcast `Push`.
 /// The `attach` registry is passed so a session that ends drops its attach entry (orphan cleanup)
 /// before the `ChildExited` push is built — keeping the registry from growing unbounded across
-/// create/kill churn.
+/// create/kill churn. The drop is GRACEFUL (`remove_session` removes the map entry without
+/// cancelling the forwarder): the reader thread closes the sink on its own exit, so the forwarder
+/// delivers the session's trailing output and then self-terminates rather than being truncated.
 ///
 /// The `on_exited` closure holds a `Weak<AttachRegistry>`, NOT a strong `Arc`: the registry itself
 /// owns an `Arc<Supervisor>`, and the supervisor owns this callback, so a strong reference here
@@ -226,12 +228,17 @@ fn install_push_callbacks(
     let attach_exited = Arc::downgrade(attach);
     supervisor.on_exited(move |session_id, code, signal| {
         // A session that ends (kill or natural exit, both reaped by the wait thread) drops its
-        // attach entry so the registry can't grow unbounded across create/kill churn. Do this
+        // attach entry so the registry can't grow unbounded across create/kill churn. This is a
+        // GRACEFUL detach: `remove_session` only removes the map entry — it does NOT cancel/abort
+        // the forwarder. The reader thread drops the session's sink on its own exit, so the
+        // forwarder drains every remaining byte and self-terminates on `Disconnected`, delivering
+        // the session's trailing output to the attached client before the stream ends. The returned
+        // `JoinHandle` is intentionally dropped (the task is detached and self-terminating). Do this
         // BEFORE building the `Push::ChildExited` below, which moves `session_id`. `Weak::upgrade`
         // is `None` only if the whole daemon is already gone, in which case there is nothing to
         // reap.
         if let Some(attach) = attach_exited.upgrade() {
-            attach.remove_session(&session_id);
+            let _ = attach.remove_session(&session_id);
         }
         b_exited.broadcast(Push::ChildExited { session_id, code, signal });
     });
