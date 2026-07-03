@@ -331,4 +331,87 @@ describe("TerminalManager", () => {
     expect(m.has("s2")).toBe(false);
     expect(terminals.every((t) => t.disposed)).toBe(true);
   });
+
+  // ---- A1: per-session attach tracking (dead-pane fix) ----
+
+  it("attach() is idempotent per session: a second attach for the same id is a no-op", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    await m.attach("s1");
+    await m.attach("s1");
+    // deduped: only ONE daemon-side attach / one Channel wired for s1
+    expect(attachSessionMock).toHaveBeenCalledTimes(1);
+    expect(newTerminalChannelMock).toHaveBeenCalledTimes(1);
+    expect(m.isAttached("s1")).toBe(true);
+  });
+
+  it("attach() tracks each session independently (s2 attaches even though s1 already did)", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    m.ensure("s2");
+    await m.attach("s1");
+    await m.attach("s2");
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+    expect(attachSessionMock.mock.calls.map((c) => c[0])).toEqual(["s1", "s2"]);
+    expect(m.isAttached("s1")).toBe(true);
+    expect(m.isAttached("s2")).toBe(true);
+  });
+
+  it("a FAILED attach is not recorded and is retryable", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    attachSessionMock.mockRejectedValueOnce(new Error("daemon down"));
+    await expect(m.attach("s1")).rejects.toThrow("daemon down");
+    expect(m.isAttached("s1")).toBe(false);
+    // retry succeeds and this time records the attachment
+    await m.attach("s1");
+    expect(m.isAttached("s1")).toBe(true);
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("resetAttachment(id) clears one session's flag so the next attach re-runs (fresh Replay)", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    await m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(1);
+    m.resetAttachment("s1");
+    expect(m.isAttached("s1")).toBe(false);
+    await m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(2); // re-attached after reset
+  });
+
+  it("resetAllAttachments() clears every session's flag (reconnect: all re-attach fresh)", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    m.ensure("s2");
+    await m.attach("s1");
+    await m.attach("s2");
+    m.resetAllAttachments();
+    expect(m.isAttached("s1")).toBe(false);
+    expect(m.isAttached("s2")).toBe(false);
+    // both re-attach (visible one eagerly, hidden one lazily) with a fresh Replay
+    await m.attach("s1");
+    await m.attach("s2");
+    expect(attachSessionMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("dispose() clears attach state so a same-id session recreated later does not false-dedup", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    await m.attach("s1");
+    m.dispose("s1");
+    expect(m.isAttached("s1")).toBe(false);
+    // recreate a session that happens to reuse the id -> must attach again, not dedup
+    m.ensure("s1");
+    await m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+    expect(m.isAttached("s1")).toBe(true);
+  });
+
+  it("attach() on an unknown (never-ensured / disposed) session is a no-op, records nothing", async () => {
+    const m = new TerminalManager();
+    await m.attach("ghost");
+    expect(attachSessionMock).not.toHaveBeenCalled();
+    expect(m.isAttached("ghost")).toBe(false);
+  });
 });

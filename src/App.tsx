@@ -66,13 +66,16 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     track(
       onDaemonReconnected(() => {
         useAppStore.getState().setDaemonConnected(true);
-        // Re-hydrate after a reconnect (spec §13: re-list sessions/workspaces), then
-        // re-attach the visible session so its byte stream is actually live again — a
-        // daemon crash kills the shell and scrollback replay only covers up to the last
-        // flush, so the mounted pane needs a FRESH attach (new Replay + live Output).
-        // TerminalPane's own attach guard (`attachedRef`) latches after the first mount
-        // and never resets across this disconnect/reconnect cycle (the pane itself never
-        // unmounts), so App must re-invoke `manager.attach()` directly.
+        // A daemon crash kills every shell; scrollback replay only covers up to the last
+        // flush, so EVERY session needs a FRESH attach (new Replay + live Output) — not
+        // just the visible one. Attach state now lives per-session in the manager (A1), so:
+        //   1. resetAllAttachments() clears every session's attach flag up front, and
+        //   2. we eagerly re-attach the VISIBLE session here (its pane never unmounts, so
+        //      nothing else would trigger it). manager.attach() is a no-op if the flag were
+        //      still set, hence the reset MUST precede it.
+        // HIDDEN sessions re-attach LAZILY: their next tab-switch re-mounts the pane, whose
+        // effect calls attach() unconditionally and the manager (flag now cleared) honors it.
+        manager.resetAllAttachments();
         void hydrate(0).then(() => {
           if (disposed) return;
           const id = useAppStore.getState().activeSessionId;

@@ -59,6 +59,8 @@ the daemon (spec §16). Commands below use `-p <package name>`.
 | Frontend: `daemon://disconnected` → banner (§12, §13) | `npx vitest run src/components/DaemonBanner.test.tsx` |
 | Frontend: terminal-manager keep-alive (no dispose on unmount; dispose on close), StrictMode double-init guard (§12) | `npx vitest run src/terminal/terminal-manager.test.ts` (`ensure/create is idempotent and StrictMode-safe`, `keep-alive: nothing is disposed when a panel merely unmounts`, `dispose() only on real close`) |
 | Frontend: Channel → `term.write` path; bytes never enter the store; Replay-before-open ordering (§12) | `npx vitest run src/terminal/terminal-manager.test.ts` (`applyReplay writes replay content BEFORE open()`, `attach() wires the Channel and applies Replay before Output, never touching the store`, `writeOutput goes straight to term.write`) |
+| Frontend: per-session attach tracking — second and later tabs are NOT dead panes; manager-owned dedup; failed attach retryable; dispose clears attach state (§12, A1) | `npx vitest run src/terminal/terminal-manager.test.ts` (`attach() is idempotent per session: a second attach for the same id is a no-op`, `attach() tracks each session independently (s2 attaches even though s1 already did)`, `a FAILED attach is not recorded and is retryable`, `resetAttachment(id) clears one session's flag so the next attach re-runs (fresh Replay)`, `resetAllAttachments() clears every session's flag (reconnect: all re-attach fresh)`, `dispose() clears attach state so a same-id session recreated later does not false-dedup`, `attach() on an unknown (never-ensured / disposed) session is a no-op, records nothing`) + `npx vitest run src/App.test.tsx` (`A1: switching to a second tab attaches that session's terminal (no dead pane)`) |
+| Frontend: `daemon://reconnected` → reset-all-then-re-attach (visible eager, hidden lazy); no pane dispose/remount (§12, §13, A1) | `npx vitest run src/App.test.tsx` (`daemon reconnect resets ALL attach flags then re-attaches the visible session (spec §13)`, `daemon reconnect: a hidden session lazily re-attaches when its tab is next shown (spec §13)`) |
 | E2E survive-restart (§14.1, §13 core promise) | `npm run e2e:survive` (`tests/e2e/survive-restart.mjs`, phases 0–4) |
 
 ## Uncovered rows
@@ -76,7 +78,13 @@ None. Every §14.2 row above resolves to at least one real, currently-passing te
   graceful `remove_session`, and attach-on-exited-session refused); core lib 51 → 52 (the two
   tautological path pre-flight tests replaced by 3 real unit tests of the extracted `preflight_cwd`
   / `preflight_workspace_root` guards).
-- TypeScript (`npx vitest run`): **92 tests**, 12 test files, 0 failed.
+- TypeScript (`npx vitest run`): **101 tests**, 12 test files, 0 failed (delta +9 vs. the prior
+  92: A1 dead-pane fix — per-session attach tracking in `TerminalManager` [terminal-manager.test.ts
+  +7: idempotent per-session attach, independent per-session tracking, failed-attach-retryable,
+  `resetAttachment`, `resetAllAttachments`, dispose-clears-attach-state, unknown-session no-op] and
+  the App-level dead-pane + reconnect reset/lazy-re-attach coverage [App.test.tsx +2: the
+  second-tab-attaches assertion, and the reconnect test split into an eager-visible-re-attach and a
+  lazy-hidden-re-attach case]).
 - E2E (`npm run e2e:survive`): green (5 phases, socket-harness variant); launchd-managed variant
   (`BPA_E2E_EXTERNAL_DAEMON=1`) and full-GUI variant documented in `tests/e2e/README.md` and
   `docs/build-macos.md` as human/CI steps requiring a signed `.app`.

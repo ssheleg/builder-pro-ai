@@ -37,6 +37,17 @@ interface TerminalEntry {
   resizeTimer: ReturnType<typeof setTimeout> | undefined;
   /** True once `open()` has been called at least once (survives `hide()`/re-`open()`). */
   opened: boolean;
+  /**
+   * True once `attach()` has SUCCESSFULLY wired the daemon firehose for this session
+   * (spec §12 / A1). Owned per-session by the manager, NOT by the React pane — panes are
+   * reused across tab switches (App renders a single `TerminalPane` with no `key`), so a
+   * pane-instance guard would latch on the first session and leave every later tab a dead
+   * pane. Set only on a resolved `attach_session`; a failed attach leaves it false so the
+   * attach is retryable. Cleared by `resetAttachment`/`resetAllAttachments` (reconnect) and
+   * by `dispose` (real close), so a re-shown or reconnected session re-attaches with a
+   * fresh Replay.
+   */
+  attached: boolean;
   /** Bytes handed to `term.write()` whose flush callback has not fired yet. */
   pendingBytes: number;
   /** Latched true once pendingBytes crosses HIGH, cleared once it drops back below LOW. */
@@ -87,6 +98,7 @@ export class TerminalManager {
       resizeObserver: undefined,
       resizeTimer: undefined,
       opened: false,
+      attached: false,
       pendingBytes: 0,
       overWatermark: false,
     });
@@ -106,6 +118,36 @@ export class TerminalManager {
     return this.entries.get(sessionId)?.opened ?? false;
   }
 
+  /**
+   * Has this session's daemon firehose been wired via a SUCCESSFUL `attach()`? (A1)
+   * Per-session, manager-owned attach state — the source of truth panes and the reconnect
+   * flow both consult. False for an unknown/disposed session.
+   */
+  isAttached(sessionId: SessionId): boolean {
+    return this.entries.get(sessionId)?.attached ?? false;
+  }
+
+  /**
+   * Clear one session's attach flag so the next `attach()` re-wires the firehose (fresh
+   * Replay). Called on `daemon://reconnected` (per-session) and any place a single session
+   * must be forced to re-attach. No-op for an unknown session.
+   */
+  resetAttachment(sessionId: SessionId): void {
+    const entry = this.entries.get(sessionId);
+    if (entry) entry.attached = false;
+  }
+
+  /**
+   * Clear EVERY session's attach flag. Called on `daemon://reconnected` BEFORE the
+   * re-attach pass: a daemon restart kills the shells and only replays scrollback up to the
+   * last flush, so every session — the visible one (re-attached eagerly by App) and every
+   * hidden one (re-attached lazily when its tab is next shown) — must re-attach with a
+   * fresh Replay + live Output.
+   */
+  resetAllAttachments(): void {
+    for (const entry of this.entries.values()) entry.attached = false;
+  }
+
   /** Bytes handed to `term.write()` that have not been flushed yet (flow-control gauge). */
   pendingBytes(sessionId: SessionId): number {
     return this.entries.get(sessionId)?.pendingBytes ?? 0;
@@ -116,8 +158,17 @@ export class TerminalManager {
    * and `attach_session`. `Replay` (first message) resizes to the snapshot dims and writes
    * its content; `Output` streams straight to xterm. Bytes NEVER touch React/Zustand state
    * — the handler writes directly to the Terminal held in the non-reactive map.
+   *
+   * Idempotent per session (A1): the pane effect calls this UNCONDITIONALLY on every mount
+   * (and a pane instance is reused across tab switches), so the manager — not the pane —
+   * owns dedup. A no-op if this session is already attached; a no-op (records nothing) if
+   * the session is unknown/disposed. The `attached` flag is set only AFTER `attach_session`
+   * resolves, so a rejected attach leaves the flag false and stays retryable.
    */
   async attach(sessionId: SessionId): Promise<void> {
+    const entry = this.entries.get(sessionId);
+    if (!entry || entry.attached) return; // unknown session, or already attached -> dedup
+
     const channel = newTerminalChannel((e: TerminalEvent) => {
       if (e.event === "replay") {
         this.applyReplay(
@@ -130,7 +181,10 @@ export class TerminalManager {
         this.writeOutput(sessionId, new Uint8Array(e.data.bytes));
       }
     });
-    await attachSession(sessionId, channel);
+    await attachSession(sessionId, channel); // throws on failure -> flag stays false
+    // Re-check the entry: a dispose() could have raced during the await.
+    const live = this.entries.get(sessionId);
+    if (live) live.attached = true;
   }
 
   /**

@@ -5,21 +5,26 @@ import { theme } from "../theme";
 
 /**
  * Hosts one session's xterm Terminal. App mounts exactly one `TerminalPane` — the ACTIVE
- * session's — at a time; switching tabs unmounts the old pane and mounts the new one. The
- * underlying `Terminal` instance itself is NOT tied to this component's lifecycle: it lives
- * in the non-reactive `TerminalManager` map, so a hidden/unmounted pane's terminal keeps
- * buffering incoming bytes in the background (spec §12 keep-alive) and is instantly re-shown
- * (scrollback + all) the next time its session's tab becomes active again.
+ * session's — at a time, rendered WITHOUT a React `key`, so switching tabs does NOT
+ * unmount/remount a fresh instance: React REUSES this single component instance and only
+ * this effect re-runs (its `sessionId` dep changes). The underlying `Terminal` is not tied
+ * to this component's lifecycle either — it lives in the non-reactive `TerminalManager`
+ * map, so a hidden pane's terminal keeps buffering incoming bytes (spec §12 keep-alive) and
+ * is instantly re-shown (scrollback + all) when its tab becomes active again.
  *
- * On mount: `ensure()` (idempotent — returns the existing Terminal if already created,
- * which makes React 19 StrictMode's double-invoke of effects safe), `attach()` once
- * (wires the Channel<TerminalEvent> firehose: Replay-before-open + live Output), then
- * `open()` into this pane's container.
+ * On every effect run (initial mount AND each tab switch): `ensure()` (idempotent — returns
+ * the existing Terminal if already created, which also makes React 19 StrictMode's
+ * double-invoke of effects safe), then `attach()` UNCONDITIONALLY. Attach dedup is owned by
+ * the manager per-session (A1) — a component-instance guard would latch on the first
+ * session shown and leave every later tab a dead pane (no Replay, no Output), because the
+ * reused instance's ref never resets across the `sessionId` change. Finally `open()` into
+ * this pane's container. `attach()` wires the Channel<TerminalEvent> firehose
+ * (Replay-before-open + live Output) and is a no-op when the session is already attached.
  *
- * On unmount: `hide()` — KEEP-ALIVE. This does NOT dispose the Terminal; the instance
- * stays in the manager's non-reactive map so scrollback + the PTY binding survive
- * across tab switches. `dispose()` is only ever called from TerminalTabs' close button
- * (a real session close), never here.
+ * On effect cleanup (tab switch away, or real unmount): `hide()` — KEEP-ALIVE. This does
+ * NOT dispose the Terminal; the instance stays in the manager's non-reactive map so
+ * scrollback + the PTY binding survive. `dispose()` is only ever called from TerminalTabs'
+ * close button (a real session close), never here.
  */
 export function TerminalPane(props: {
   sessionId: SessionId;
@@ -27,17 +32,16 @@ export function TerminalPane(props: {
 }): JSX.Element {
   const { sessionId, manager } = props;
   const containerRef = useRef<HTMLDivElement>(null);
-  const attachedRef = useRef(false);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     manager.ensure(sessionId);
-    if (!attachedRef.current) {
-      attachedRef.current = true;
-      void manager.attach(sessionId); // wires Replay-before-open + Output firehose
-    }
+    // Call unconditionally: the manager dedupes per-session (A1). This is what makes the
+    // second-and-later tabs live — the old per-instance latch never reset across the
+    // reused instance's sessionId change, so later tabs were dead panes.
+    void manager.attach(sessionId); // wires Replay-before-open + Output firehose (deduped)
     manager.open(sessionId, container);
 
     return () => {

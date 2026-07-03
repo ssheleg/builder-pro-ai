@@ -50,13 +50,18 @@ vi.mock("./ipc/commands", () => ({
 const disposeMock = vi.fn();
 const openMock = vi.fn();
 const hideMock = vi.fn();
+const resetAllAttachmentsMock = vi.fn();
+const resetAttachmentMock = vi.fn();
 const fakeManager = {
   ensure: vi.fn(),
   has: vi.fn(() => true),
   get: vi.fn(),
   isOpened: vi.fn(() => true),
+  isAttached: vi.fn(() => false),
   pendingBytes: vi.fn(() => 0),
   attach: vi.fn().mockResolvedValue(undefined),
+  resetAttachment: resetAttachmentMock,
+  resetAllAttachments: resetAllAttachmentsMock,
   applyReplay: vi.fn(),
   writeOutput: vi.fn(),
   open: openMock,
@@ -91,6 +96,11 @@ beforeEach(() => {
   disposeMock.mockReset();
   openMock.mockReset();
   hideMock.mockReset();
+  resetAllAttachmentsMock.mockReset();
+  resetAttachmentMock.mockReset();
+  (fakeManager.attach as unknown as ReturnType<typeof vi.fn>)
+    .mockReset()
+    .mockResolvedValue(undefined);
   listSessionsMock.mockReset().mockResolvedValue([]);
   listWorkspacesMock.mockReset().mockResolvedValue([]);
   createSessionMock.mockClear();
@@ -226,7 +236,39 @@ describe("App", () => {
     expect(disposeMock).not.toHaveBeenCalled();
   });
 
-  it("daemon reconnect re-attaches the active session's terminal (spec §13)", async () => {
+  it("A1: switching to a second tab attaches that session's terminal (no dead pane)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    const attachMock = fakeManager.attach as unknown as ReturnType<typeof vi.fn>;
+    await act(async () => {
+      cbs.created(meta()); // s1 active -> pane mounts -> attach('s1')
+    });
+    expect(attachMock.mock.calls.filter((c) => c[0] === "s1").length).toBe(1);
+
+    await act(async () => {
+      cbs.created(meta({ id: "s2", title: "bash" })); // s2 exists but s1 stays active
+    });
+    // Switch the active tab to s2: the reused pane instance must attach s2.
+    await act(async () => {
+      useAppStore.getState().setActiveSession("s2");
+    });
+    // Pre-fix this is 0 (attachedRef latched on the first mount -> dead pane).
+    expect(attachMock.mock.calls.filter((c) => c[0] === "s2").length).toBe(1);
+
+    // Switching back to s1 re-mounts the pane; TerminalPane calls attach('s1')
+    // unconditionally and the manager dedupes. With the fake manager there is no
+    // real dedup, so we only assert the pane issues the call (dedup is proven in
+    // terminal-manager.test.ts against the real manager).
+    await act(async () => {
+      useAppStore.getState().setActiveSession("s1");
+    });
+    expect(attachMock.mock.calls.filter((c) => c[0] === "s1").length).toBeGreaterThanOrEqual(1);
+    // A tab switch must never dispose a keep-alive pane.
+    expect(disposeMock).not.toHaveBeenCalled();
+  });
+
+  it("daemon reconnect resets ALL attach flags then re-attaches the visible session (spec §13)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -244,9 +286,49 @@ describe("App", () => {
       cbs.recon(null);
     });
 
+    // New mechanism: reconnect clears EVERY session's attach flag (so hidden ones
+    // re-attach lazily when next shown) BEFORE eagerly re-attaching the visible one.
+    expect(resetAllAttachmentsMock).toHaveBeenCalledTimes(1);
     const callsAfterReconnect = attachMock.mock.calls.filter((c) => c[0] === "s1").length;
     expect(callsAfterReconnect).toBeGreaterThan(callsBeforeReconnect);
     // The active pane must NOT have been disposed/remounted to achieve this.
+    expect(disposeMock).not.toHaveBeenCalled();
+  });
+
+  it("daemon reconnect: a hidden session lazily re-attaches when its tab is next shown (spec §13)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.created(meta()); // s1 active (visible)
+    });
+    await act(async () => {
+      cbs.created(meta({ id: "s2", title: "bash" })); // s2 hidden
+    });
+    // Show s2 once so its pane has mounted+attached at least once before reconnect.
+    await act(async () => {
+      useAppStore.getState().setActiveSession("s2");
+    });
+    await act(async () => {
+      useAppStore.getState().setActiveSession("s1"); // back to s1 visible; s2 hidden
+    });
+    const attachMock = fakeManager.attach as unknown as ReturnType<typeof vi.fn>;
+
+    await act(async () => {
+      cbs.disc(null);
+    });
+    await act(async () => {
+      cbs.recon(null); // resets all flags; eagerly re-attaches visible s1 only
+    });
+    expect(resetAllAttachmentsMock).toHaveBeenCalledTimes(1);
+    const s2Before = attachMock.mock.calls.filter((c) => c[0] === "s2").length;
+
+    // Now switch to the hidden session -> its pane re-mounts and re-attaches lazily.
+    await act(async () => {
+      useAppStore.getState().setActiveSession("s2");
+    });
+    const s2After = attachMock.mock.calls.filter((c) => c[0] === "s2").length;
+    expect(s2After).toBeGreaterThan(s2Before);
     expect(disposeMock).not.toHaveBeenCalled();
   });
 
