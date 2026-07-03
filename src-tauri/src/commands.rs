@@ -108,6 +108,41 @@ pub(crate) fn build_write_stdin(session_id: SessionId, data: String) -> Request 
     Request::WriteStdin { session_id, bytes: data.into_bytes() }
 }
 
+// ── core-side path pre-flights (spec §13/§16 defense in depth) ─────────────────────────────
+//
+// The daemon is the security-authoritative validator (S6 agents drive the same surface), but the
+// core validates too so a bad path fails fast BEFORE a socket round-trip. These are pulled out as
+// pure functions so they can be unit-tested directly — the guard logic itself, not a reconstruction
+// of its output — and reused byte-identically by the `#[tauri::command]` wrappers.
+
+/// Pre-flight for `create_session`: validate an explicitly-provided cwd BEFORE brokering. `None` or
+/// an empty-string cwd ⇒ `Ok(())` (the daemon defaults an omitted cwd to `$HOME`, so the core must
+/// not validate-and-reject that). A present, non-empty cwd is run through the shared
+/// [`crate::paths::validate_dir`]; any failure is reshaped into a `CommandError::Daemon` carrying
+/// the path error's stable wire code. The daemon re-validates and canonicalizes independently.
+pub(crate) fn preflight_cwd(opts: &Option<CreateOpts>) -> Result<(), CommandError> {
+    if let Some(cwd) = opts.as_ref().and_then(|o| o.cwd.as_deref()).filter(|c| !c.is_empty()) {
+        crate::paths::validate_dir(std::path::Path::new(cwd)).map_err(|e| CommandError::Daemon {
+            code: e.code().to_string(),
+            message: e.to_string(),
+        })?;
+    }
+    Ok(())
+}
+
+/// Pre-flight for `create_workspace`: validate AND canonicalize `root_path` BEFORE brokering.
+/// Returns the canonicalized path as a `String` (exactly what the wrapper forwards to the daemon),
+/// or a `CommandError::Daemon` carrying the path error's stable wire code. The daemon re-validates
+/// independently (defense in depth for S6 agents driving the same surface).
+pub(crate) fn preflight_workspace_root(root_path: &str) -> Result<String, CommandError> {
+    let validated =
+        crate::paths::validate_dir(std::path::Path::new(root_path)).map_err(|e| CommandError::Daemon {
+            code: e.code().to_string(),
+            message: e.to_string(),
+        })?;
+    Ok(validated.to_string_lossy().into_owned())
+}
+
 // ── response unwrappers: map the expected variant, or a typed error ────────────────────────
 
 fn err_from_response(res: Response) -> CommandError {
@@ -161,15 +196,9 @@ pub async fn create_session(
     opts: Option<CreateOpts>,
 ) -> Result<SessionMeta, CommandError> {
     // Defense in depth (spec §13/§16): reject an invalid cwd BEFORE brokering, mirroring
-    // create_workspace's root_path pre-flight. Only when explicitly provided — an empty/omitted cwd
-    // means "daemon defaults to $HOME", so we must not validate-and-reject that here. The daemon
-    // re-validates (and canonicalizes) independently.
-    if let Some(cwd) = opts.as_ref().and_then(|o| o.cwd.as_deref()).filter(|c| !c.is_empty()) {
-        crate::paths::validate_dir(std::path::Path::new(cwd)).map_err(|e| CommandError::Daemon {
-            code: e.code().to_string(),
-            message: e.to_string(),
-        })?;
-    }
+    // create_workspace's root_path pre-flight. `preflight_cwd` skips None/empty (the daemon defaults
+    // those to $HOME); the daemon re-validates (and canonicalizes) independently.
+    preflight_cwd(&opts)?;
     let req = build_create_session(workspace_id, opts);
     expect_session(state.client.request(req).await?)
 }
@@ -243,12 +272,7 @@ pub async fn create_workspace(
 ) -> Result<Workspace, CommandError> {
     // Fail fast on an invalid root BEFORE touching the daemon (spec §13/§16); the daemon
     // re-validates independently (defense in depth for S6 agents driving the same surface).
-    let validated =
-        crate::paths::validate_dir(std::path::Path::new(&root_path)).map_err(|e| CommandError::Daemon {
-            code: e.code().to_string(),
-            message: e.to_string(),
-        })?;
-    let root_path = validated.to_string_lossy().into_owned();
+    let root_path = preflight_workspace_root(&root_path)?;
     expect_workspace(state.client.request(Request::CreateWorkspace { name, root_path }).await?)
 }
 
@@ -599,34 +623,102 @@ mod commands_over_stub_daemon {
         );
     }
 
-    #[tokio::test]
-    async fn create_workspace_rejects_bad_path_before_any_request() {
-        // No stub daemon is even started: if validate_dir ran a request first, this would hang
-        // trying to connect to a socket nobody is listening on and the test would time out. This
-        // exercises exactly the same validate-then-map step `create_workspace` performs before
-        // ever calling `state.client.request(...)`.
-        let bad_path = std::path::Path::new("relative/not/absolute");
-        let path_err = crate::paths::validate_dir(bad_path).unwrap_err();
-        let expected_message = path_err.to_string();
-        let err = CommandError::Daemon { code: path_err.code().to_string(), message: expected_message.clone() };
-        assert_eq!(err, CommandError::Daemon { code: "RelativePath".into(), message: expected_message });
+    // Escaping-symlink layout (mirrors bpa-paths' `symlink_escaping_parent_is_rejected`):
+    //   base/outside/          (real dir, OUTSIDE `named`)
+    //   base/named/link -> ../outside
+    // validate_dir(base/named/link) canonicalizes to base/outside, whose parent (base) != the
+    // canonical parent of the input (base/named) ⇒ SymlinkEscape. Returns (tempdir, link path).
+    fn escaping_symlink_layout() -> (tempfile::TempDir, String) {
+        let base = tempfile::tempdir().unwrap();
+        let outside = base.path().join("outside");
+        let named = base.path().join("named");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(&named).unwrap();
+        let link = named.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let link_str = link.to_string_lossy().into_owned();
+        (base, link_str)
     }
 
-    #[tokio::test]
-    async fn create_session_rejects_bad_cwd_before_any_request() {
-        // Mirrors create_workspace_rejects_bad_path_before_any_request: `create_session`'s core-side
-        // pre-flight (spec §13/§16 defense in depth) validates a non-empty cwd via the same shared
-        // `paths::validate_dir` and reshapes any failure into a `CommandError::Daemon` with the
-        // path error's wire code — BEFORE ever touching the daemon. No stub daemon is started; if
-        // the guard forwarded first this would hang connecting to a socket nobody is listening on.
-        let bad_cwd = std::path::Path::new("relative/not/absolute");
-        let path_err = crate::paths::validate_dir(bad_cwd).unwrap_err();
-        let expected_message = path_err.to_string();
-        let err = CommandError::Daemon {
-            code: path_err.code().to_string(),
-            message: expected_message.clone(),
-        };
-        assert_eq!(err, CommandError::Daemon { code: "RelativePath".into(), message: expected_message });
+    fn opts_with_cwd(cwd: Option<&str>) -> Option<CreateOpts> {
+        Some(CreateOpts {
+            shell: None,
+            cwd: cwd.map(|s| s.to_string()),
+            env_overrides: vec![],
+            cols: None,
+            rows: None,
+        })
+    }
+
+    // ---- REAL coverage of `create_session`'s core-side cwd pre-flight (spec §13/§16). Calls the
+    // actual `preflight_cwd` guard (which `create_session` invokes before any socket round-trip) and
+    // asserts on its real return — not a reconstruction of a constructed error. ----
+    #[test]
+    fn preflight_cwd_accepts_none_empty_and_valid_dir() {
+        // None ⇒ Ok (daemon defaults an omitted cwd to $HOME).
+        assert!(preflight_cwd(&None).is_ok(), "omitted cwd must pass (defaults to $HOME)");
+        assert!(preflight_cwd(&Some(CreateOpts::default())).is_ok(), "opts with cwd=None must pass");
+        // Empty-string cwd ⇒ Ok (also "daemon defaults to $HOME").
+        assert!(preflight_cwd(&opts_with_cwd(Some(""))).is_ok(), "empty cwd must pass");
+        // A real, existing directory ⇒ Ok.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        assert!(preflight_cwd(&opts_with_cwd(Some(&cwd))).is_ok(), "valid dir must pass");
+    }
+
+    #[test]
+    fn preflight_cwd_rejects_missing_relative_and_symlink_escape() {
+        // Nonexistent absolute path ⇒ CwdMissing.
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("does-not-exist").to_string_lossy().into_owned();
+        match preflight_cwd(&opts_with_cwd(Some(&gone))).unwrap_err() {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "CwdMissing"),
+            other => panic!("expected Daemon/CwdMissing, got {other:?}"),
+        }
+        // Relative path ⇒ RelativePath (rejected before any fs access).
+        match preflight_cwd(&opts_with_cwd(Some("relative/not/absolute"))).unwrap_err() {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "RelativePath"),
+            other => panic!("expected Daemon/RelativePath, got {other:?}"),
+        }
+        // Symlink escaping its lexical parent ⇒ SymlinkEscape.
+        let (_layout, link) = escaping_symlink_layout();
+        match preflight_cwd(&opts_with_cwd(Some(&link))).unwrap_err() {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "SymlinkEscape"),
+            other => panic!("expected Daemon/SymlinkEscape, got {other:?}"),
+        }
+    }
+
+    // ---- REAL coverage of `create_workspace`'s root_path pre-flight (spec §13/§16): calls the
+    // actual `preflight_workspace_root` and asserts on its real return (canonicalized path on
+    // success, real wire codes on failure). ----
+    #[test]
+    fn preflight_workspace_root_canonicalizes_valid_and_rejects_bad() {
+        // Valid dir ⇒ Ok(canonicalized string) — this is exactly what the wrapper forwards.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let expected = std::fs::canonicalize(&root).unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            preflight_workspace_root(&root).expect("valid root"),
+            expected,
+            "valid root must be forwarded canonicalized"
+        );
+        // Relative ⇒ RelativePath.
+        match preflight_workspace_root("relative/not/absolute").unwrap_err() {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "RelativePath"),
+            other => panic!("expected Daemon/RelativePath, got {other:?}"),
+        }
+        // Nonexistent absolute ⇒ CwdMissing (the code `PathError::Missing` yields).
+        let gone = dir.path().join("nope").to_string_lossy().into_owned();
+        match preflight_workspace_root(&gone).unwrap_err() {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "CwdMissing"),
+            other => panic!("expected Daemon/CwdMissing, got {other:?}"),
+        }
+        // Symlink escape ⇒ SymlinkEscape.
+        let (_layout, link) = escaping_symlink_layout();
+        match preflight_workspace_root(&link).unwrap_err() {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "SymlinkEscape"),
+            other => panic!("expected Daemon/SymlinkEscape, got {other:?}"),
+        }
     }
 
     #[tokio::test]

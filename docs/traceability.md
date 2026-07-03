@@ -49,7 +49,7 @@ the daemon (spec §16). Commands below use `-p <package name>`.
 | Attach: a killed/exited session drops its attach entry — no orphaned registry growth across create/kill churn (§7, resource hygiene) | `cargo test -p bpa-sessiond --lib socket_server::tests::killed_session_attach_entry_is_reaped` |
 | Attach: unknown-session error path (§7) | `cargo test -p bpa-sessiond --lib attach::tests::attach_unknown_session_errors socket_server::tests::write_resize_kill_unknown_session_errors` |
 | Detach integration: kill the client, child stays alive (pgrep), reconnect, scrollback replays (§14.1) | `npm run e2e:survive` (phase4a: `pgrepDaemon`/`pgrepShell` after client quit; phase4b: reattach + scrollback intact) |
-| Path validation: missing/not-a-dir/relative/symlink-escape/root-deleted-before-create (§16) | Shared validator (used byte-for-byte by BOTH core and daemon) `cargo test -p bpa-paths` (`missing_path_is_missing`, `file_is_not_a_directory`, `relative_path_is_rejected_before_fs`, `symlink_escaping_parent_is_rejected`, `symlink_within_parent_is_allowed`, `ok_real_directory_canonicalizes`, `root_path_is_allowed`) + daemon-side path validation over the wire `cargo test -p bpa-sessiond --lib socket_server::tests::create_session_rejects_missing_cwd socket_server::tests::create_session_rejects_relative_cwd socket_server::tests::create_workspace_rejects_missing_dir socket_server::tests::create_workspace_rejects_symlink_escaping_root socket_server::tests::create_session_rejects_symlink_escaping_cwd` + core-side `create_session` cwd pre-flight `cargo test -p builder-pro-ai --lib commands::commands_over_stub_daemon::create_session_rejects_bad_cwd_before_any_request` |
+| Path validation: missing/not-a-dir/relative/symlink-escape/root-deleted-before-create (§16) | Shared validator (used byte-for-byte by BOTH core and daemon) `cargo test -p bpa-paths` (`missing_path_is_missing`, `file_is_not_a_directory`, `relative_path_is_rejected_before_fs`, `symlink_escaping_parent_is_rejected`, `symlink_within_parent_is_allowed`, `ok_real_directory_canonicalizes`, `root_path_is_allowed`) + daemon-side path validation over the wire `cargo test -p bpa-sessiond --lib socket_server::tests::create_session_rejects_missing_cwd socket_server::tests::create_session_rejects_relative_cwd socket_server::tests::create_workspace_rejects_missing_dir socket_server::tests::create_workspace_rejects_symlink_escaping_root socket_server::tests::create_session_rejects_symlink_escaping_cwd` + core-side pre-flights (extracted pure guards `preflight_cwd` / `preflight_workspace_root`, exercised directly — Ok on None/empty/valid, real wire codes `RelativePath`/`CwdMissing`/`SymlinkEscape` on failure, canonicalized forward on success) `cargo test -p builder-pro-ai --lib commands::commands_over_stub_daemon::preflight_cwd_accepts_none_empty_and_valid_dir commands::commands_over_stub_daemon::preflight_cwd_rejects_missing_relative_and_symlink_escape commands::commands_over_stub_daemon::preflight_workspace_root_canonicalizes_valid_and_rejects_bad` |
 | launchd install/bootstrap idempotency/kickstart/dir-missing/hard-failure (§8.3, §13) | `cargo test -p builder-pro-ai --lib launchd::tests::install_creates_dirs_and_writes_plist launchd::tests::bootstrap_already_bootstrapped_is_success launchd::tests::bootstrap_clean_success_no_bootout launchd::tests::kickstart_cmd_shape launchd::tests::hard_failure_surfaces_install_error launchd::tests::is_loaded_reads_print_exit_code launchd::tests::render_plist_has_locked_keys` + `npm run e2e:survive` (real launchd path documented in `scripts/smoke-clean-vm.sh` via `BPA_E2E_EXTERNAL_DAEMON=1`) |
 | Daemon boot: bind, wire deps, serve until shutdown, drain (spec §8.1–§8.3, §13) | `cargo test -p bpa-sessiond --test boot_integration boot_handshake_create_session_and_clean_shutdown` |
 | Daemon-crash / logout truth table (§13) | Documented (not independently testable without killing the OS session) — see README.md "Survival truth table"; the socket-disconnect half of "daemon crash → live shells die" is implied by process-group kill semantics already proven by `kill_terminates_whole_process_group`; the "daemon restart survives via rehydrate" half is proven end-to-end by `npm run e2e:survive`. |
@@ -67,14 +67,15 @@ None. Every §14.2 row above resolves to at least one real, currently-passing te
 
 ## Test totals as of this task (Task 25 + blocker-fixes)
 
-- Rust workspace (`cargo test --workspace`): **201 tests**, 0 failed (`bpa-paths`: 7 — the shared
-  path validator, moved verbatim from the core crate; protocol: 18, sessiond lib: 114, sessiond
+- Rust workspace (`cargo test --workspace`): **205 tests**, 0 failed (`bpa-paths`: 7 — the shared
+  path validator, moved verbatim from the core crate; protocol: 18, sessiond lib: 117, sessiond
   `boot_integration`: 3, sessiond `skeleton`: 1, sessiond `no_secrets_in_logs`: 1, core lib
-  (`builder_pro_ai_lib`): 51, core `capabilities`: 5, core `invoke_smoke`: 1; doc-tests: 0 across
-  all four crates). Delta vs. Task 25 (194): the 7 `paths` tests moved from the core crate into the
-  new `bpa-paths` crate (core lib 57 → 51, +1 new `create_session_rejects_bad_cwd_before_any_request`
-  core-side pre-flight test); sessiond lib 108 → 114 (+2 daemon symlink-escape tests, +2
-  connection-aware attach tests, +2 socket_server tests — orphan reap + two-client isolation).
+  (`builder_pro_ai_lib`): 52, core `capabilities`: 5, core `invoke_smoke`: 1; doc-tests: 0 across
+  all four crates). Delta vs. the prior blocker-fix pass (201): sessiond lib 114 → 117 (+3 graceful
+  attach-teardown tests — trailing-output-on-natural-exit race, forwarder self-terminates after a
+  graceful `remove_session`, and attach-on-exited-session refused); core lib 51 → 52 (the two
+  tautological path pre-flight tests replaced by 3 real unit tests of the extracted `preflight_cwd`
+  / `preflight_workspace_root` guards).
 - TypeScript (`npx vitest run`): **92 tests**, 12 test files, 0 failed.
 - E2E (`npm run e2e:survive`): green (5 phases, socket-harness variant); launchd-managed variant
   (`BPA_E2E_EXTERNAL_DAEMON=1`) and full-GUI variant documented in `tests/e2e/README.md` and
