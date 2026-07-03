@@ -330,14 +330,14 @@ impl LiveOscStripper {
                             self.discarding_until_terminator = true;
                         }
                     } else if self.carry.len() > CARRY_CAP {
-                        out.extend(self.carry.drain(..));
+                        out.append(&mut self.carry);
                     }
                 }
                 Verdict::Drop => {
                     self.carry.clear();
                 }
                 Verdict::Keep => {
-                    out.extend(self.carry.drain(..));
+                    out.append(&mut self.carry);
                 }
             }
         }
@@ -540,7 +540,7 @@ mod tests {
         // A must not receive any further Output.
         let a_next = recv_timeout(&mut client_a, 300).await;
         assert!(
-            matches!(a_next, None),
+            a_next.is_none(),
             "A must not receive Output after being superseded, got {a_next:?}"
         );
 
@@ -597,7 +597,7 @@ mod tests {
         // No further Output should reach the detached client.
         let next = recv_timeout(&mut client, 500).await;
         assert!(
-            matches!(next, None),
+            next.is_none(),
             "detached sink must not receive further Output, got {next:?}"
         );
 

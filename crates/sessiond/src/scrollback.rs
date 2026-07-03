@@ -146,14 +146,14 @@ impl Sanitizer {
                     } else if self.carry.len() > CARRY_CAP {
                         // Not a recognized strippable sequence: give up, fail open, flush
                         // verbatim so genuine long user output is never silently lost.
-                        out.extend(self.carry.drain(..));
+                        out.append(&mut self.carry);
                     }
                 }
                 Verdict::Drop => {
                     self.carry.clear();
                 }
                 Verdict::Keep => {
-                    out.extend(self.carry.drain(..));
+                    out.append(&mut self.carry);
                 }
             }
         }

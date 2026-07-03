@@ -519,7 +519,7 @@ mod tests {
 
         // A lone ESC at end of chunk buffers cleanly and continues next feed.
         assert_eq!(p.feed(&[ESC]), Vec::<OscEvent>::new());
-        assert_eq!(p.feed(&[b']']), Vec::<OscEvent>::new());
+        assert_eq!(p.feed(b"]"), Vec::<OscEvent>::new());
         assert_eq!(p.feed(b"133;B\x07"), vec![OscEvent::PromptEnd]);
     }
 }

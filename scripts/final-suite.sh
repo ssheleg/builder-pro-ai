@@ -3,28 +3,34 @@
 # (spec §14.3, Task 25). Runs, IN ORDER, and stops at the first failure with a specific message:
 #
 #   1. Full Rust workspace test suite (`cargo test --workspace`).
-#   2. Full TypeScript test suite (`npx vitest run`).
-#   3. ts-rs type parity: regenerate `src/ipc/types.ts` from `crates/protocol` and diff against
+#   2. Clippy across the whole workspace with warnings denied (`-D warnings`).
+#   3. Full TypeScript test suite (`npx vitest run`).
+#   4. ts-rs type parity: regenerate `src/ipc/types.ts` from `crates/protocol` and diff against
 #      what's committed — a diff means the generated bindings are stale (spec §5, §14.2 row 1).
-#   4. Daemon-crate coverage gate (bpa-sessiond line coverage >= 80%, spec §14.3).
-#   5. E2E survive-restart (spec §14.1/§13's core promise).
+#   5. Daemon-crate coverage gate (bpa-sessiond line coverage >= 80%, spec §14.3).
+#   6. E2E survive-restart (spec §14.1/§13's core promise).
 #
 # Exits 0 and prints "ALL GATES PASSED" only if every stage succeeds.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-echo "== 1/5 Rust workspace tests =="
+echo "== 1/6 Rust workspace tests =="
 cargo test --workspace
 echo "OK: cargo test --workspace"
 
 echo
-echo "== 2/5 TypeScript tests =="
+echo "== 2/6 clippy (deny warnings) =="
+cargo clippy --workspace --all-targets -- -D warnings
+echo "OK: clippy -D warnings"
+
+echo
+echo "== 3/6 TypeScript tests =="
 npx vitest run
 echo "OK: npx vitest run"
 
 echo
-echo "== 3/5 ts-rs type parity (generated types in sync) =="
+echo "== 4/6 ts-rs type parity (generated types in sync) =="
 # The `crates/protocol/tests/ts_export.rs` tests regenerate src/ipc/types.ts as a side effect of
 # running (each test calls `export_all_to` before asserting on the content) — running them here
 # both proves the export path still works AND leaves types.ts freshly regenerated for the diff
@@ -38,11 +44,11 @@ git diff --exit-code -- src/ipc/types.ts || {
 echo "OK: src/ipc/types.ts matches crates/protocol"
 
 echo
-echo "== 4/5 daemon coverage gate (>= 80%) =="
+echo "== 5/6 daemon coverage gate (>= 80%) =="
 bash "$REPO/scripts/coverage-gate.sh"
 
 echo
-echo "== 5/5 e2e survive-restart =="
+echo "== 6/6 e2e survive-restart =="
 cargo build -p bpa-sessiond
 npm run e2e:survive
 echo "OK: npm run e2e:survive"

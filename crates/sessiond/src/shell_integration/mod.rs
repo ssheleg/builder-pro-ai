@@ -40,10 +40,10 @@ pub fn classify_shell(shell_path: &str) -> Option<ShellKind> {
 /// Materialize the integration assets into `runtime_dir` for one session and return the spawn
 /// recipe.
 /// - zsh: writes `<runtime_dir>/.zshenv` (the ZDOTDIR redirect stub that re-sources bpa.zsh),
-///        copies `bpa.zsh` into `runtime_dir`, sets env ZDOTDIR=<runtime_dir> (+ BPA_ORIG_ZDOTDIR
-///        carrying the caller's original ZDOTDIR when set) and BPA_INJECTION=1.
+///   copies `bpa.zsh` into `runtime_dir`, sets env ZDOTDIR=<runtime_dir> (+ BPA_ORIG_ZDOTDIR
+///   carrying the caller's original ZDOTDIR when set) and BPA_INJECTION=1.
 /// - bash: writes `<runtime_dir>/bpa-bash.sh`, returns args ["--init-file", "<that path>"] and env
-///         BPA_INJECTION=1.
+///   BPA_INJECTION=1.
 pub fn write_session_assets(runtime_dir: &Path, shell: ShellKind) -> std::io::Result<ShellSpawn> {
     std::fs::create_dir_all(runtime_dir)?;
     match shell {

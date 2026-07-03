@@ -583,7 +583,7 @@ async fn dispatch(
                 rows,
             ) {
                 Ok(spec) => spec,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
             match deps.supervisor.create(spec) {
                 Ok(id) => match deps.supervisor.meta(&id) {
@@ -702,17 +702,17 @@ fn resolve_session_spec(
     env_overrides: Vec<(String, String)>,
     cols: u16,
     rows: u16,
-) -> Result<SessionSpec, Response> {
+) -> Result<SessionSpec, Box<Response>> {
     // ---- Shell selection: explicit → $SHELL → /bin/zsh (all must be absolute). ----
     let shell_path = shell
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("SHELL").ok())
         .unwrap_or_else(|| "/bin/zsh".to_string());
     if !std::path::Path::new(&shell_path).is_absolute() {
-        return Err(Response::Error {
+        return Err(Box::new(Response::Error {
             code: "InvalidShell".into(),
             message: format!("shell path must be absolute: {shell_path}"),
-        });
+        }));
     }
 
     // ---- cwd validation (§16): canonical, absolute, existing directory. Default to $HOME. ----
@@ -723,10 +723,10 @@ fn resolve_session_spec(
     let cwd_canonical = match validate_dir(&cwd_input) {
         Ok(p) => std::path::PathBuf::from(p),
         Err(_) => {
-            return Err(Response::Error {
+            return Err(Box::new(Response::Error {
                 code: "CwdMissing".into(),
                 message: format!("cwd is not an existing directory: {cwd_input}"),
-            })
+            }))
         }
     };
 
