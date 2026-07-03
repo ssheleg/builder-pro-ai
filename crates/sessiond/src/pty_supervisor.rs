@@ -345,11 +345,15 @@ impl Supervisor {
                 *reader_shared.is_active.lock().unwrap() = false;
                 // Reader is the only producer into the subscribed sink. Dropping it here closes the
                 // std channel, so an attached forwarder drains every queued byte and then observes
-                // `Disconnected` — graceful end-of-stream instead of truncation (child EOF ⇒ all
-                // output already read from the kernel buffer ⇒ everything is in the channel or
-                // already forwarded). PTY EOF is guaranteed after child exit (the slave fd is
-                // dropped at spawn, spec §9), so this single reader-exit tail always runs — both the
-                // `Ok(0)` (EOF) and `Err` (EIO) loop-break arms fall through to here.
+                // `Disconnected` — graceful end-of-stream instead of truncation (once EOF is read,
+                // all output already read from the kernel buffer ⇒ everything is in the channel or
+                // already forwarded). PTY master EOF arrives once NO process holds the slave open:
+                // the daemon drops its slave copy at spawn (spec §9), but that does NOT close slave
+                // fds inherited by the child's descendants — a backgrounded descendant that keeps
+                // the slave open can extend EOF past child exit, delaying this reader-exit tail
+                // until that descendant closes it too (escaped-descendant handling is a known
+                // deferred item; behavior here is unchanged). Whenever EOF (or `Err`/EIO) does
+                // arrive, both loop-break arms fall through to this single reader-exit tail.
                 reader_shared.sink.lock().unwrap().take();
             })
             .map_err(|e| SupervisorError::Spawn(format!("reader thread: {e}")))?;
@@ -490,10 +494,25 @@ impl Supervisor {
     /// the client sees the same "session is gone" it would for a killed one.
     pub fn subscribe_output(&self, id: &str, sink: OutputSink) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
+        // Close the subscribe/reader-exit TOCTOU by checking `is_active` WHILE HOLDING the sink
+        // lock, then installing into the already-held slot. The reader exit tail runs in program
+        // order `is_active = false` (§ reader tail, store) *happens-before* `sink.take()` (take),
+        // each in its own critical section. Serializing against `sink.take()` here therefore gives
+        // one of two correct outcomes:
+        //   - the reader's `sink.take()` has NOT run yet: it is now blocked on the sink lock we
+        //     hold. If our `is_active` read observes `false` we refuse; otherwise we install
+        //     `Some(sink)`, release, and the reader's subsequent `take()` removes and DROPS our
+        //     Sender — the forwarder then sees `Disconnected` (no leak).
+        //   - the reader's `sink.take()` has already run: because the store happens-before the
+        //     take, `is_active` is already `false`, so our read observes it and we refuse.
+        // Either way a fresh sink is never left installed with no producer to drop it. Nothing
+        // anywhere holds `is_active` while acquiring `sink`, so nesting this short `is_active`
+        // acquire under the sink lock cannot deadlock.
+        let mut sink_guard = s.shared.sink.lock().unwrap();
         if !*s.shared.is_active.lock().unwrap() {
             return Err(SupervisorError::NoSuchSession(id.to_string()));
         }
-        *s.shared.sink.lock().unwrap() = Some(sink);
+        *sink_guard = Some(sink);
         Ok(())
     }
 
