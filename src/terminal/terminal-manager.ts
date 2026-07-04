@@ -29,6 +29,15 @@ const TERMINAL_OPTIONS: ITerminalOptions = {
   allowProposedApi: true,
 };
 
+/**
+ * Per-session attach lifecycle (spec §12 / A1 + A2 coalescing).
+ * - `detached`  — no firehose wired; `attach()` will start one.
+ * - `attaching` — an `attach_session` IPC is IN FLIGHT; concurrent `attach()` callers
+ *   coalesce onto the SAME in-flight promise (no second IPC / Channel).
+ * - `attached`  — the firehose is live (a resolved `attach_session`).
+ */
+type AttachState = "detached" | "attaching" | "attached";
+
 interface TerminalEntry {
   term: Terminal;
   fit: FitAddon;
@@ -38,16 +47,34 @@ interface TerminalEntry {
   /** True once `open()` has been called at least once (survives `hide()`/re-`open()`). */
   opened: boolean;
   /**
-   * True once `attach()` has SUCCESSFULLY wired the daemon firehose for this session
-   * (spec §12 / A1). Owned per-session by the manager, NOT by the React pane — panes are
-   * reused across tab switches (App renders a single `TerminalPane` with no `key`), so a
-   * pane-instance guard would latch on the first session and leave every later tab a dead
-   * pane. Set only on a resolved `attach_session`; a failed attach leaves it false so the
-   * attach is retryable. Cleared by `resetAttachment`/`resetAllAttachments` (reconnect) and
-   * by `dispose` (real close), so a re-shown or reconnected session re-attaches with a
-   * fresh Replay.
+   * Attach lifecycle for this session (spec §12 / A1 + A2). Owned per-session by the
+   * manager, NOT by the React pane — panes are reused across tab switches (App renders a
+   * single `TerminalPane` with no `key`), so a pane-instance guard would latch on the first
+   * session and leave every later tab a dead pane. `attaching` is set SYNCHRONOUSLY (before
+   * any await) so two `attach()` calls issued before the first resolves — React 19
+   * StrictMode's double-invoke of the pane effect, a tab-away/back within one round-trip, or
+   * reconnect's eager re-attach racing a pane-effect attach — coalesce onto the one in-flight
+   * promise instead of each firing their own `attach_session` (which duplicated the daemon
+   * Replay into the single xterm). A rejected attach returns to `detached` (retryable).
+   * Reset back to `detached` by `resetAttachment`/`resetAllAttachments` (reconnect) and by
+   * `dispose` (real close), so a re-shown or reconnected session re-attaches with a fresh
+   * Replay.
    */
-  attached: boolean;
+  attach: AttachState;
+  /**
+   * The in-flight `attach()` promise while `attach === "attaching"` (undefined otherwise).
+   * Concurrent callers return THIS so all of them observe the one round-trip's success or
+   * failure — no caller starts a second IPC.
+   */
+  attachInFlight: Promise<void> | undefined;
+  /**
+   * Monotonic generation for this session, bumped by every reset/dispose. An in-flight
+   * `attach()` captures the generation at fire time; if a reset (reconnect) or dispose races
+   * the round-trip and bumps it, the stale completion refuses to mark `attached` — the next
+   * `attach()` re-attempts with a fresh Replay. Without this a reconnect's
+   * `resetAllAttachments()` during an in-flight attach would record a stale attachment.
+   */
+  attachGeneration: number;
   /** Bytes handed to `term.write()` whose flush callback has not fired yet. */
   pendingBytes: number;
   /** Latched true once pendingBytes crosses HIGH, cleared once it drops back below LOW. */
@@ -98,7 +125,9 @@ export class TerminalManager {
       resizeObserver: undefined,
       resizeTimer: undefined,
       opened: false,
-      attached: false,
+      attach: "detached",
+      attachInFlight: undefined,
+      attachGeneration: 0,
       pendingBytes: 0,
       overWatermark: false,
     });
@@ -121,31 +150,46 @@ export class TerminalManager {
   /**
    * Has this session's daemon firehose been wired via a SUCCESSFUL `attach()`? (A1)
    * Per-session, manager-owned attach state — the source of truth panes and the reconnect
-   * flow both consult. False for an unknown/disposed session.
+   * flow both consult. Only the settled `attached` state counts: an `attaching` (in-flight)
+   * or `detached` session reports false. False for an unknown/disposed session.
    */
   isAttached(sessionId: SessionId): boolean {
-    return this.entries.get(sessionId)?.attached ?? false;
+    return this.entries.get(sessionId)?.attach === "attached";
   }
 
   /**
-   * Clear one session's attach flag so the next `attach()` re-wires the firehose (fresh
+   * Force one session back to `detached` so the next `attach()` re-wires the firehose (fresh
    * Replay). Called on `daemon://reconnected` (per-session) and any place a single session
-   * must be forced to re-attach. No-op for an unknown session.
+   * must be forced to re-attach. Bumps the session's generation so an attach that is IN
+   * FLIGHT right now cannot later mark itself `attached` (the stale completion is invalidated
+   * — see `attach`). No-op for an unknown session.
    */
   resetAttachment(sessionId: SessionId): void {
     const entry = this.entries.get(sessionId);
-    if (entry) entry.attached = false;
+    if (entry) this.invalidateAttach(entry);
   }
 
   /**
-   * Clear EVERY session's attach flag. Called on `daemon://reconnected` BEFORE the
+   * Force EVERY session back to `detached`. Called on `daemon://reconnected` BEFORE the
    * re-attach pass: a daemon restart kills the shells and only replays scrollback up to the
    * last flush, so every session — the visible one (re-attached eagerly by App) and every
    * hidden one (re-attached lazily when its tab is next shown) — must re-attach with a
-   * fresh Replay + live Output.
+   * fresh Replay + live Output. Any in-flight attach is invalidated (generation bumped) so a
+   * completion that lands after the reset does NOT record a stale attachment.
    */
   resetAllAttachments(): void {
-    for (const entry of this.entries.values()) entry.attached = false;
+    for (const entry of this.entries.values()) this.invalidateAttach(entry);
+  }
+
+  /**
+   * Reset an entry's attach lifecycle to `detached` and bump its generation, invalidating any
+   * in-flight `attach()` so its (stale) completion refuses to mark `attached`. Shared by
+   * `resetAttachment`/`resetAllAttachments`/`dispose`.
+   */
+  private invalidateAttach(entry: TerminalEntry): void {
+    entry.attach = "detached";
+    entry.attachInFlight = undefined;
+    entry.attachGeneration += 1;
   }
 
   /** Bytes handed to `term.write()` that have not been flushed yet (flow-control gauge). */
@@ -159,15 +203,33 @@ export class TerminalManager {
    * its content; `Output` streams straight to xterm. Bytes NEVER touch React/Zustand state
    * — the handler writes directly to the Terminal held in the non-reactive map.
    *
-   * Idempotent per session (A1): the pane effect calls this UNCONDITIONALLY on every mount
-   * (and a pane instance is reused across tab switches), so the manager — not the pane —
-   * owns dedup. A no-op if this session is already attached; a no-op (records nothing) if
-   * the session is unknown/disposed. The `attached` flag is set only AFTER `attach_session`
-   * resolves, so a rejected attach leaves the flag false and stays retryable.
+   * Coalescing contract (spec §12 / A1 + A2): the pane effect calls this UNCONDITIONALLY on
+   * every mount and a pane instance is reused across tab switches, so the manager — not the
+   * pane — owns dedup, and it does so per SESSION not per call:
+   *   - already `attached`  -> resolved no-op (returns immediately).
+   *   - `attaching`         -> returns the SAME in-flight promise; no second IPC / Channel.
+   *   - unknown/disposed    -> resolved no-op, records nothing.
+   *   - otherwise           -> mark `attaching` SYNCHRONOUSLY (before any await), fire ONE
+   *                            `attach_session`, and on resolve mark `attached`.
+   * Marking `attaching` before the first await is what makes two calls issued before the
+   * first resolves (React 19 StrictMode's double-invoke, a tab-away/back within one
+   * round-trip, or reconnect's eager re-attach racing a pane-effect attach) coalesce instead
+   * of each duplicating the daemon Replay into the single xterm. A rejected `attach_session`
+   * returns the session to `detached` (retryable). A reset/dispose that races the round-trip
+   * bumps the session's generation, so a stale completion refuses to mark `attached`.
    */
-  async attach(sessionId: SessionId): Promise<void> {
+  attach(sessionId: SessionId): Promise<void> {
     const entry = this.entries.get(sessionId);
-    if (!entry || entry.attached) return; // unknown session, or already attached -> dedup
+    if (!entry) return Promise.resolve(); // unknown/disposed session -> record nothing
+    if (entry.attach === "attached") return Promise.resolve(); // already live -> no-op
+    if (entry.attach === "attaching" && entry.attachInFlight) {
+      return entry.attachInFlight; // in flight -> coalesce onto the ONE round-trip
+    }
+
+    // Capture the generation SYNCHRONOUSLY so a reset/dispose during the await can invalidate
+    // this specific attempt.
+    const generation = entry.attachGeneration;
+    entry.attach = "attaching";
 
     const channel = newTerminalChannel((e: TerminalEvent) => {
       if (e.event === "replay") {
@@ -181,10 +243,40 @@ export class TerminalManager {
         this.writeOutput(sessionId, new Uint8Array(e.data.bytes));
       }
     });
-    await attachSession(sessionId, channel); // throws on failure -> flag stays false
-    // Re-check the entry: a dispose() could have raced during the await.
-    const live = this.entries.get(sessionId);
-    if (live) live.attached = true;
+
+    const inFlight = attachSession(sessionId, channel).then(
+      () => {
+        // Re-fetch: a dispose() could have replaced/removed the entry during the await.
+        const live = this.entries.get(sessionId);
+        // Only settle to `attached` if THIS attempt is still current — same live entry, same
+        // generation (no reset/dispose raced), and still `attaching` (not already reset).
+        if (
+          live === entry &&
+          live.attachGeneration === generation &&
+          live.attach === "attaching"
+        ) {
+          live.attach = "attached";
+          live.attachInFlight = undefined;
+        }
+      },
+      (err: unknown) => {
+        // Failed attach -> back to `detached` so it stays retryable, but never clobber a state
+        // a concurrent reset/dispose already moved on to.
+        const live = this.entries.get(sessionId);
+        if (
+          live === entry &&
+          live.attachGeneration === generation &&
+          live.attach === "attaching"
+        ) {
+          live.attach = "detached";
+          live.attachInFlight = undefined;
+        }
+        throw err; // propagate to the caller (existing error style: caller logs/handles)
+      },
+    );
+
+    entry.attachInFlight = inFlight;
+    return inFlight;
   }
 
   /**
@@ -313,6 +405,9 @@ export class TerminalManager {
   dispose(sessionId: SessionId): void {
     const entry = this.entries.get(sessionId);
     if (!entry) return;
+    // Invalidate any in-flight attach (bump generation) so a completion that lands after this
+    // dispose cannot resurrect attach state on a re-created same-id entry.
+    this.invalidateAttach(entry);
     this.teardownContainer(entry);
     entry.webgl = undefined; // disposed transitively by term.dispose()
     entry.term.dispose();

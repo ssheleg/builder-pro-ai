@@ -414,4 +414,132 @@ describe("TerminalManager", () => {
     expect(attachSessionMock).not.toHaveBeenCalled();
     expect(m.isAttached("ghost")).toBe(false);
   });
+
+  // ---- A2: coalesce in-flight attach (StrictMode / rapid-tab double-attach) ----
+  //
+  // The A1 flag was set only AFTER `await attachSession(...)` resolved. Two attach() calls
+  // for the SAME session issued before the first resolves BOTH passed the `entry.attached`
+  // guard -> two attach_session IPC calls, two Channels, two Replay frames into ONE xterm
+  // (duplicated replay). Reachability: React 19 StrictMode double-invokes the pane effect
+  // (deterministic in dev); prod tab-away/back within one attach round-trip; prod reconnect
+  // eager attach racing a pane-effect attach. Fix: mark 'attaching' SYNCHRONOUSLY and coalesce
+  // concurrent callers onto the ONE in-flight promise.
+
+  /** A manually-resolved deferred so two attach() calls can race a pending attachSession. */
+  function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (v: T) => void;
+    reject: (e: unknown) => void;
+  } {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("coalesces two synchronous attach() calls for the same session into ONE IPC (StrictMode double-attach)", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+
+    const d = deferred<void>();
+    attachSessionMock.mockReturnValueOnce(d.promise);
+
+    // Two back-to-back attach() calls BEFORE the first resolves (StrictMode double-invoke).
+    const p1 = m.attach("s1");
+    const p2 = m.attach("s1");
+
+    // Only ONE daemon-side attach / one Channel — the second call coalesced onto the first.
+    expect(attachSessionMock).toHaveBeenCalledTimes(1);
+    expect(newTerminalChannelMock).toHaveBeenCalledTimes(1);
+
+    d.resolve(undefined);
+    await Promise.all([p1, p2]);
+
+    // Both callers observe success; state settles to attached.
+    expect(m.isAttached("s1")).toBe(true);
+    expect(attachSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("after an in-flight attach REJECTS, a later attach re-attempts (state back to detached)", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+
+    const d = deferred<void>();
+    attachSessionMock.mockReturnValueOnce(d.promise);
+
+    const p1 = m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(1);
+
+    d.reject(new Error("daemon down"));
+    await expect(p1).rejects.toThrow("daemon down");
+    expect(m.isAttached("s1")).toBe(false);
+
+    // A fresh attach fires a SECOND IPC (the rejected in-flight left the session retryable).
+    await m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+    expect(m.isAttached("s1")).toBe(true);
+  });
+
+  it("resetAllAttachments() during an in-flight attach: the stale completion is NOT recorded, next attach re-fires", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+
+    const d = deferred<void>();
+    attachSessionMock.mockReturnValueOnce(d.promise);
+
+    const p1 = m.attach("s1"); // pending
+    expect(attachSessionMock).toHaveBeenCalledTimes(1);
+
+    // Reconnect races the in-flight attach: reset must invalidate the pending completion.
+    m.resetAllAttachments();
+
+    d.resolve(undefined);
+    await p1;
+
+    // The stale (pre-reset) completion must NOT have recorded an attachment.
+    expect(m.isAttached("s1")).toBe(false);
+
+    // Next attach re-attaches with a fresh Replay -> a SECOND IPC.
+    await m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+    expect(m.isAttached("s1")).toBe(true);
+  });
+
+  it("resetAttachment(id) during an in-flight attach also invalidates the stale completion", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+
+    const d = deferred<void>();
+    attachSessionMock.mockReturnValueOnce(d.promise);
+
+    const p1 = m.attach("s1"); // pending
+    m.resetAttachment("s1");
+    d.resolve(undefined);
+    await p1;
+
+    expect(m.isAttached("s1")).toBe(false);
+    await m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+    expect(m.isAttached("s1")).toBe(true);
+  });
+
+  it("dispose() during an in-flight attach: the stale completion does not resurrect attach state", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+
+    const d = deferred<void>();
+    attachSessionMock.mockReturnValueOnce(d.promise);
+
+    const p1 = m.attach("s1"); // pending
+    m.dispose("s1"); // real close races the in-flight attach
+
+    d.resolve(undefined);
+    await p1; // must not throw and must not record anything for the gone session
+
+    expect(m.isAttached("s1")).toBe(false);
+    expect(m.has("s1")).toBe(false);
+  });
 });

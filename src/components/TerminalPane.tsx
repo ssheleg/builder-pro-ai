@@ -13,13 +13,21 @@ import { theme } from "../theme";
  * is instantly re-shown (scrollback + all) when its tab becomes active again.
  *
  * On every effect run (initial mount AND each tab switch): `ensure()` (idempotent — returns
- * the existing Terminal if already created, which also makes React 19 StrictMode's
- * double-invoke of effects safe), then `attach()` UNCONDITIONALLY. Attach dedup is owned by
- * the manager per-session (A1) — a component-instance guard would latch on the first
- * session shown and leave every later tab a dead pane (no Replay, no Output), because the
- * reused instance's ref never resets across the `sessionId` change. Finally `open()` into
- * this pane's container. `attach()` wires the Channel<TerminalEvent> firehose
- * (Replay-before-open + live Output) and is a no-op when the session is already attached.
+ * the existing Terminal if already created), then `attach()` UNCONDITIONALLY, then `open()`
+ * into this pane's container. Attach dedup is owned by the manager per-SESSION (A1) — a
+ * component-instance guard would latch on the first session shown and leave every later tab a
+ * dead pane (no Replay, no Output), because the reused instance's ref never resets across the
+ * `sessionId` change.
+ *
+ * This effect is NOT StrictMode-safe on its own: React 19 double-invokes it on mount, firing
+ * two synchronous `attach()` calls for the same session before the first round-trip resolves
+ * (same shape as a rapid tab-away/back, or reconnect's eager re-attach racing this effect).
+ * Safety lives ENTIRELY in the manager: `attach()` marks the session `attaching`
+ * synchronously and coalesces concurrent callers onto the ONE in-flight promise — a second
+ * call wires no second Channel and fires no second `attach_session`, so the daemon Replay is
+ * written into the single xterm exactly once (see `TerminalManager.attach` — the coalescing
+ * contract). `attach()` wires the Channel<TerminalEvent> firehose (Replay-before-open + live
+ * Output); it is a resolved no-op once the session is already attached.
  *
  * On effect cleanup (tab switch away, or real unmount): `hide()` — KEEP-ALIVE. This does
  * NOT dispose the Terminal; the instance stays in the manager's non-reactive map so
