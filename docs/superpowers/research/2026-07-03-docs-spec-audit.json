@@ -1,0 +1,787 @@
+{
+  "lensStats": [
+    {
+      "lens": "product-vision",
+      "findings": 15
+    },
+    {
+      "lens": "system-architecture",
+      "findings": 15
+    },
+    {
+      "lens": "ai-agents",
+      "findings": 16
+    },
+    {
+      "lens": "security",
+      "findings": 8
+    },
+    {
+      "lens": "data-persistence",
+      "findings": 12
+    },
+    {
+      "lens": "docs-vs-reality",
+      "findings": 11
+    },
+    {
+      "lens": "delivery-ops",
+      "findings": 12
+    },
+    {
+      "lens": "frontend-ux",
+      "findings": 13
+    }
+  ],
+  "totalRaw": 102,
+  "merged": 32,
+  "refuted": 0,
+  "findings": [
+    {
+      "id": "A1",
+      "severity": "critical",
+      "kind": "defect",
+      "theme": "frontend",
+      "title": "Dead terminal pane on tab switch: attach guard is per-component, not per-session",
+      "problem": "TerminalPane's attach guard is a component-instance ref (attachedRef), but App renders <TerminalPane sessionId={...}> without a key prop, so switching tabs reuses the same instance with a new sessionId. attachedRef latches true after the first mount and is never reset, so manager.attach() runs only for the FIRST session ever shown; every subsequent session's tab is a never-attached dead pane (no Replay, no Output, keystrokes invisible). Verified in the worktree: src/components/TerminalPane.tsx:30,37-40 and src/App.tsx:156 (no key).",
+      "evidence": "src/components/TerminalPane.tsx:30 (const attachedRef = useRef(false)) and :37-40 (guard skips attach when true while effect deps [sessionId, manager] re-run for the new id); src/App.tsx:156 renders TerminalPane with no key prop; src/App.test.tsx:206-227 tab-switch test asserts hide/dispose but never attach('s2'), so the 92 green TS tests miss this path; the only e2e is a socket harness with no GUI.",
+      "futureImpact": "Core S1 multi-terminal UX is broken in the shipped app today: create terminal 1 (works), create terminal 2, click its tab, get a frozen empty pane. Every S6 agent-driven session surfaced in the UI hits the same path, and the docs' 'FULL APP DONE' claim is invalid for multi-terminal.",
+      "recommendation": "Track attachment per SessionId (attached: Set<SessionId> in TerminalManager, or key the pane with key={activeSession.id} so the ref resets). Add a component test: create two sessions, switch tabs, assert attach called once per session. Spec fix: state in §12 that the attach-once invariant is per-session, not per-pane.",
+      "sourceLenses": [
+        "frontend-ux"
+      ],
+      "verifierNote": "Verified in the worktree: TerminalPane.tsx:30,37-40 latches attach behind a component-instance ref while the effect re-runs on sessionId change, and App.tsx:156 renders TerminalPane without a key, so React reuses the same instance across tab switches — attach() runs only for the first session ever shown. TerminalManager (terminal-manager.ts) confirms ensure()/open() never attach, and the only other attach() call site (App.tsx:80) fires only on daemon://reconnected, not tab switch; so session 2 gets no Replay/Output channel — a dead pane where typed input reaches the PTY but nothing renders. The keep-alive test (App.test.tsx:206-227) asserts hide/dispose but never attach(\"s2\"), the only e2e (tests/e2e/survive-restart.mjs) is a no-GUI socket harness per its README, and progress.md:40 claims \"FULL APP DONE (T1-T22)\". The TerminalPane doc comment (\"switching tabs unmounts the old pane and mounts the new one\") shows the root-cause false assumption. Core S1 multi-terminal UX is broken in the primary user flow, so critical severity stands."
+    },
+    {
+      "id": "A2",
+      "severity": "high",
+      "kind": "doc-rot",
+      "theme": "protocol-evolution",
+      "title": "Spec codec contract contradicts built wire: hand-written serde impls + JSON-in-bincode bridge, never-re-derive rule only in gitignored ledger",
+      "problem": "Spec §3/§5/§6.2 present bincode 1.3.3 as 'serde-native' and show SessionLifecycle/TerminalEvent as plain #[derive(Serialize,Deserialize)] tagged enums; §15.5 asserts 'it does, but verify at lock'. Built reality (verified): bincode 1.3.3 cannot deserialize internally/adjacently-tagged enums, so crates/protocol/src/lib.rs ships hand-written impls branching on is_human_readable() that tunnel a JSON string inside the bincode frame. The load-bearing rule 'DO NOT re-derive Serialize/Deserialize on these types — a stray derive silently breaks the wire' exists only in the gitignored .superpowers ledger and code comments; the tracked spec actively instructs the pattern that breaks the built S1 contract.",
+      "evidence": "Spec §3 codec paragraph (design doc lines 109-113), §5 derives (lines 181-209), §15.5 (lines 761-762) vs crates/protocol/src/lib.rs:9-36,64+,130 (Dual-codec note, is_human_readable branch — verified in worktree); progress.md CONTRACT RULES block (gitignored per .gitignore:54); docs/architecture.md:53-59 describes plain bincode framing only ('no protocol drift is possible').",
+      "futureImpact": "Every S2-S7 slice extends the Hop-B protocol. A zero-context implementer following the locked spec (as the project's own process mandates) re-derives or mirrors the enum and silently misframes the wire — exactly the bug class the spec claims it designed away. The JSON-in-bincode tunnel also grows with the protocol (double-encode cost, two serializers to keep in sync) with no recorded trajectory.",
+      "recommendation": "Amend spec §3/§5/§15.5 in this docs pass: document the tagged-enum limitation, the hand-written-impl/JSON-bridge mechanism, and the never-re-derive rule as a locked contract; cross-link from architecture.md. Additionally decide the trajectory before the protocol grows: either forbid tagged enums on Hop B (externally-tagged shapes, tag conversion at the broker) or plan a one-time codec migration (bincode 2 serde-compat / postcard) bundled with the A3 version-negotiation work.",
+      "sourceLenses": [
+        "product-vision",
+        "system-architecture",
+        "data-persistence",
+        "docs-vs-reality",
+        "delivery-ops"
+      ],
+      "verifierNote": "Core doc-rot fully confirmed: spec §3/§5/§6.2 and the tracked 12k-line plan (lines 1139/1172) instruct plain #[derive(Serialize,Deserialize)] tagged enums and call bincode 1.3.3 'serde-native'; built crates/protocol/src/lib.rs ships hand-written is_human_readable impls with a JSON-in-bincode tunnel; grep confirms zero mention of the workaround anywhere in tracked docs/ or README; the never-re-derive rule lives only in gitignored .superpowers/sdd/progress.md:55-56 (.gitignore:54) plus code comments; architecture.md's 'no protocol drift is possible' omits the bridge. But the 'silently breaks the wire' escalation is refuted: re-deriving on the existing types is a conflicting-impl compile error; replacing the impls or mis-deriving a new S2+ enum fails loudly — bincode 1.3.3 errors on deserializing tagged enums, and tracked crates/protocol/tests/roundtrip.rs bincode-round-trips every SessionLifecycle variant and TerminalEvent. The tracked lib.rs also carries a 27-line dual-codec note at the exact point of change. Real spec/code contradiction guaranteeing S2-S7 confusion and rework (high), not a silent wire-corruption trap (critical)."
+    },
+    {
+      "id": "A3",
+      "severity": "high",
+      "kind": "future-trap",
+      "theme": "protocol-evolution",
+      "title": "No protocol-evolution or app/daemon upgrade strategy: first version bump is a kill-all-sessions event",
+      "problem": "PROTO_VERSION=1 with exact-match handshake on both sides (Incompatible{min,max} exists on the wire but min==max and nothing negotiates a range); bincode 1.3 encodes enum variants by index so any non-append change is wire-breaking, and even the append-only discipline is written nowhere. The daemon outlives app updates by design, but there is no upgrade choreography: launchd.rs uses plain kickstart (not -k) so a running old daemon is never replaced; if PROTO_VERSION is unchanged the new GUI silently runs against an old daemon (binary skew), and if bumped, Incompatible is fatal with no remediation UX — and any daemon restart kills every live shell. No Tauri updater/release channel exists or is roadmapped, no PROTO_VERSION bump/compat-window policy is defined, and Request::DaemonShutdown{drain} is a locked wire request that only Acks (real drain = SIGTERM, recorded only in the gitignored ledger) — a lie-by-API exactly where the upgrade flow needs a real drain. The never-emitted SessionLifecycle::Typing variant is similar reserved-but-undefined wire surface.",
+      "evidence": "crates/sessiond/src/socket_server.rs:319-326 (exact-match, Incompatible{min:PROTO_VERSION,max:PROTO_VERSION}); src-tauri/src/socket_client.rs:25,388-392 (Incompatible fatal, no retry); src-tauri/src/launchd.rs:196-204 (plain kickstart); crates/protocol/src/lib.rs:46 (PROTO_VERSION=1); spec §7 line 341 (DaemonShutdown listed, no semantics) and §5 line 191 (Typing 'NEVER emitted in S1'); grep 'updater' across repo/docs = 0; spec §11 rehydrate (is_active=false, 'its PTY is gone'); persistence migrate() fails closed on newer user_version with unspecced daemon behavior under KeepAlive ThrottleInterval=10.",
+      "futureImpact": "Bites at the FIRST v0.2 release, before S2: either silent daemon-version skew or a dead-end Incompatible banner whose only recovery kills every live session — directly contradicting the survive-restart promise S1 exists to deliver, and forcing rework of the built handshake contract mid-S2/S6.",
+      "recommendation": "Spec a protocol-evolution + upgrade policy now, before S2: (a) append-only variant rule + cross-version decode test locked in the spec; (b) client sends a supported range, daemon accepts min..=max (frames already carry min/max); (c) daemon-upgrade UX: GUI compares Welcome.daemon_build to its bundled daemon and offers 'update background service — N sessions will end' via kickstart -k/bootout+bootstrap with a real drain; (d) spec DaemonShutdown{drain:true} semantics (stop creates, flush+checkpoint, exit 0) or mark it reserved/no-op in §7; (e) define PROTO_VERSION bump policy + compat window and the newer-DB-meets-old-daemon behavior; (f) name Typing's owning slice or mark it reserved; (g) pick the app-update channel (Tauri updater vs manual DMG) as a roadmap row.",
+      "sourceLenses": [
+        "system-architecture",
+        "delivery-ops",
+        "data-persistence",
+        "frontend-ux"
+      ],
+      "verifierNote": "Core claims all verified in the worktree: socket_server.rs:319-326 exact-match handshake replying Incompatible{min:PROTO_VERSION,max:PROTO_VERSION} (min==max, no range negotiation); socket_client.rs:25-26 documents Incompatible as fatal/not-retried with no remediation UX; launchd.rs:196-204 uses plain `launchctl kickstart` (no -k) treating already-running as success, so a new app never replaces a running old daemon; daemon_build from Welcome is only logged (socket_client.rs:389), never compared to client_build — silent version skew is the shipped default. Absence greps (required): updater/auto-update/release-channel/upgrade/negotiat/evolution/append-only/bump across the design spec, platform overview, architecture.md, progress.md, README and the full 12k-line plan return zero relevant hits; no tauri-plugin-updater in src-tauri/Cargo.toml. Spec §1 non-goals defers S2-S8 and cross-logout survival but never defers upgrade/protocol-evolution — the gap is unacknowledged, and it is also absent from the known-issues register, so it is a new finding, not noise. Typing 'NEVER emitted in S1' confirmed at spec line 190. One peripheral inaccuracy: DaemonShutdown's Ack-without-drain S1 limitation IS durably recorded in the committed plan (lines 173-174), not only in a gitignored ledger — but this does not touch the core gap. Given the daemon-outlives-app design is S1's centerpiece and bincode 1.3 enum-by-index makes any undisciplined wire change breaking with the discipline written nowhere, high/future-trap severity is appropriate as stated."
+    },
+    {
+      "id": "A4",
+      "severity": "medium",
+      "kind": "future-trap",
+      "theme": "agent-layer",
+      "title": "Single-attach-per-session model cannot support S6 agent + human co-viewing",
+      "problem": "Spec §7 and attach.rs lock exactly one active PushSink per session with supersede-across-connections semantics, while overview §4 promises S6 agents 'attach / stream-output' of worker terminals concurrently with the human watching the same terminals live. Under the built model an agent's attach silently steals the user's live view and vice versa; two GUI windows/instances have the same steal-the-stream problem, and nothing specs single-app-instance enforcement. The daemon internals already support multiple output subscribers (Supervisor::subscribe_output takes a caller-provided mpsc Sender), but AttachRegistry and the wire protocol expose only single-attach.",
+      "evidence": "Spec §7 'Attach model (single-attach, GUI is one client)' lines 385-392 ('a hypothetical second client would take over'); crates/sessiond/src/attach.rs:1-12,72-76,100-105 ('Exactly one active PushSink per session... attach supersedes across connections'); overview §4 lines 93-104 (agents stream-output while Kanban/panel reflect live state); no single-instance plugin in spec §3.",
+      "futureImpact": "S6 either blinds the human's terminal view (breaking the core 'panel shows live terminals' promise) or forces an attach-model redesign plus PROTO_VERSION bump in a hardened daemon after agents are half-built. S7 stats capture needs the same passive tap.",
+      "recommendation": "Decide and record in overview §4 before the S6 spec: (a) multi-subscriber fan-out (N sinks per session, per-sink bounded queues; interactive stdin ownership stays single), or (b) in-process agents tap the broker/supervisor directly via subscribe_output while socket attach stays GUI-exclusive — option (b) is nearly free given the built Supervisor API and is the recommended plan of record. Add one sentence on multi-window posture: one GUI instance enforced (single-instance plugin or existing flock pattern); multi-window same-session viewing arrives with the multi-consumer rework.",
+      "sourceLenses": [
+        "product-vision",
+        "system-architecture",
+        "ai-agents",
+        "frontend-ux"
+      ],
+      "verifierNote": "The facts check out: spec §7 (lines 385-392) and attach.rs enforce exactly one PushSink per session with owner-agnostic supersede, the Hop-A Broker likewise holds a single Channel per session (plan ~8293), overview §4 lists attach/stream-output in the S6 agent API, vision.md promises the panel shows live terminals, and no doc addresses multi-consumer viewing or GUI single-instance (verified by grep across the plan, both specs, architecture.md, README). But the stated consequence — 'attach-model redesign plus PROTO_VERSION bump in a hardened daemon' — is overstated. S6 agents are explicitly app-native (overview §4; spec line 76: 'The command surface IS the agent control API'), so they share the app's single daemon connection; co-viewing needs only an app-side Broker fan-out (one daemon attach -> N internal Channel consumers), touching neither the daemon nor the wire protocol. Moreover the primary S6/S7 monitoring signal is Push::StateChanged (spec lines 549/565: 'so S6 agents can detect worker is stuck'), a global push not gated by attach. The finding's supporting evidence is also partly wrong: Supervisor::subscribe_output (pty_supervisor.rs:491-498) holds a single replaceable sink slot, not multiple subscribers. What remains real: a forward-contract documentation gap (spec §4 claims to be the S6 forward contract yet neither spec nor plan notes the required broker fan-out, and a naive in-app agent attach_session would steal the panel's channel), plus unspecced GUI single-instance — a legitimate medium doc/backlog item, not a high-severity daemon trap; the spec also explicitly documents single-attach as a deliberate scoping decision, not an accident."
+    },
+    {
+      "id": "A5",
+      "severity": "high",
+      "kind": "future-trap",
+      "theme": "agent-layer",
+      "title": "waiting_for_input heuristic is blind to raw-mode TUI workers — the exact S6 stuck-detection signal never fires",
+      "problem": "Overview §4.3 promises specialists 'watch OSC-133-derived lifecycle and detect when the worker is waiting for input (stuck)'. The built §10.4 heuristic requires canonical mode (ICANON & ECHO) and explicitly returns false in raw/alt-screen mode — but the product's named workers (claude-code, hermes, opencode, kilo) are raw-mode TUI apps, so waiting_for_input is permanently false and lifecycle sits at Running for the whole worker run. Tests validated against cat/vim/less only, never a real agent CLI. No doc names this mismatch or a worker-adapter layer to close it (zero mentions of headless/JSON output modes anywhere).",
+      "evidence": "Spec §10.4 (design doc lines 554-566: ICANON & ECHO AND 'NOT raw / alt-screen mode' — 'excludes vim, less, top'); overview §4 step 3 (lines 100-101); traceability row 'Waiting-for-input heuristic' tests use cat/vim/less; vision.md items 9-10; grep across docs: zero mentions of worker adapters / headless modes.",
+      "futureImpact": "S6 lands and the flagship capability — detecting a stuck coding agent asking a question — silently never fires for every named worker. Emergency mid-slice redesign of either shipped, tested S1 code (raw-mode quiescence branch, StateChanged semantics) or an unscheduled adapter subsystem.",
+      "recommendation": "Amend spec §10.4 and overview §4 now: state the heuristic covers canonical-mode reads only and is NOT the worker-stuck mechanism. Add an 'External worker adapters' subsystem to the roadmap as an S6 dependency: prefer each CLI's headless/machine mode (e.g. claude-code -p / stream-json) over PTY scraping, with per-CLI prompt/completion detectors (output quiescence + cursor heuristics) as fallback. Validate against a real claude-code session before locking any S6 contract on waiting_for_input.",
+      "sourceLenses": [
+        "product-vision",
+        "ai-agents"
+      ],
+      "verifierNote": "Design spec §10.4 (lines 557-563) gates waiting_for_input on ICANON&ECHO and NOT raw/alt-screen, matching shipped code (pty_supervisor.rs:610-640); the named workers (claude-code, opencode, etc.) are raw-mode TUIs, so the signal is structurally false while lifecycle sits at Running for their entire run — exactly the S6 stuck-detection the overview promises (lines 100-106) and the spec advertises (\"so S6 agents can detect 'worker is stuck asking a question'\", line 565). Tests cover only cat/vim/less (spec line 693, traceability.md:27). Greps of the 12k-line plan and all docs for headless/adapter/stream-json/--print/json-mode confirm zero mention of a worker-adapter layer or headless driving mode, and the known-issues register does not capture the gap. The \"explicitly best-effort\" hedge covers uncertainty, not systematic falseness for the flagship workload, and the raw-mode exclusion is framed as targeting \"vim, less, top\" only. High/future-trap severity is justified: the overview justifies S1's first-class status detection by this exact S6 capability, and nothing durable documents the mismatch."
+    },
+    {
+      "id": "A6",
+      "severity": "low",
+      "kind": "defect",
+      "theme": "agent-layer",
+      "title": "Locked 'command surface IS the agent API' is unimplementable as stated; agent process location and agent-state survival undefined",
+      "problem": "Spec §2 and overview §2 lock the Tauri #[tauri::command] surface as the S6 agent control API, but tauri commands are webview-invoked and attach_session takes a Channel<TerminalEvent> (a webview IPC construct) — core-resident Rust agents cannot call it, and out-of-process agents would speak Hop B instead. Overview also says agents 'run inside the app brain' without naming the OS process: if that is the GUI core, the entire orchestration layer dies when the panel closes, contradicting the overnight-autonomy promise, while its terminal sessions survive. The canonical survival truth table has no 'agent runs' row and agent state (conversations, assignments, in-flight escalations) has no persistence story.",
+      "evidence": "Spec §2 line 76-77 ('The command surface IS the agent control API'); §6.1 attach_session(sessionId, onEvent: Channel<TerminalEvent>) lines 248-266; overview line 38 ('run *inside* the app brain' — process unnamed) and §2 truth table lines 45-58 (sessions only); spec §2 architecture diagram has no agent process.",
+      "futureImpact": "S6 discovers late that the locked contract conflates two surfaces and must choose between agents-in-daemon (large rework of a hardened component), a third launchd process (new IPC/signing work), or agents-in-GUI (breaks autonomy) — each rippling into the Hop-B protocol and attach model already built.",
+      "recommendation": "Amend the overview locked decision now: 'S6 agents drive the daemon through the same Hop-B Request set, via the core's DaemonClient if in-process or as an authenticated second UDS client if out-of-process — locked in the S6 spec'; keep the Hop-B Request enum (not the Tauri command list) as the canonical programmatic contract. Add one locked paragraph naming which process hosts agent loops, where agent state persists, and an 'agent runs' row in the truth table (even if the S6.0 answer is 'agents do not survive GUI close').",
+      "sourceLenses": [
+        "system-architecture",
+        "ai-agents"
+      ],
+      "verifierNote": "Textual observations are accurate (spec line 76-77 locks 'command surface IS the agent control API'; overview names no agent OS process; truth tables cover sessions only; no agent-persistence story anywhere), but the two load-bearing claims fail. (1) 'Unimplementable as stated' is wrong: #[tauri::command] fns are plain Rust functions callable in-core by app-native agents, and Hop B is already a multi-client programmatic surface carrying the identical operations — spec §7 explicitly says 'a hypothetical second client would take over', the plan's E2E harness (line ~11462) drives Hop B directly via a bincode Node client with no webview, and known-issues #5 treats arbitrary socket clients as expected callers. The claimed S6 trilemma (daemon rework / new IPC+signing / broken autonomy) ignores that agents-as-Hop-B-clients needs zero rework of the hardened daemon. (2) The 'overnight-autonomy promise' is fabricated: no doc or vision.md promises GUI-closed orchestration; the tenet is 'max autonomy, min human-in-the-loop' meaning decision autonomy (grep for overnight/autonom across specs/plan/README/vision confirms). (3) Agent process model and agent-state persistence are S6-spec material, explicitly deferred: overview says 'Detailed contracts live in per-slice specs, not here' and agents are a stated non-goal of the S0+S1 spec (line 28). Residual real issue: the locked one-liner is ambiguous about calling convention and the S6 spec must name the agent process and its survival/persistence semantics — a forward-contract clarification (low), not a high-severity unimplementable defect."
+    },
+    {
+      "id": "A7",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "security",
+      "title": "No agent execution trust layer: consent, policy, audit, caller identity, and SSH-agent exposure unowned for S6",
+      "problem": "S6 agents will drive create_session/write_stdin/kill with uid-level power and the human explicitly out of the loop (overview §5: 'everything else is agent-decided'), yet no doc names an approval gate for destructive/irreversible actions (rm -rf, force-push, spend), a command allow/deny policy, a dry-run mode, or an audit log of agent-issued commands — spec §16 covers path/env/socket trust only. Compounding it: (a) SSH_AUTH_SOCK is forwarded into every child (§9.3, tradeoff reasoned only for interactive human use), handing autonomous workers the user's live ssh-agent (push/deploy to every host); (b) Hop-B trust is uid-only peer-cred with no per-client identity/token, so agent actions cannot be attributed or scoped and any same-uid process (including agent-spawned workers) can drive every session.",
+      "evidence": "Overview §4 lines 91-107, §5 lines 111-116; spec §2 line 76 (command surface = agent API), §6.1 lines 248-266 (write_stdin/envOverrides, no gate), §16 lines 766-781 (no agent-action content policy); spec §9.3 line 473 (SSH_AUTH_SOCK forwarded, human-case rationale only); spec §8.2/§16 (getpeereid euid only; DAEMON_SECRET exists only in test fixtures); no slice row in overview §3 owns any of this.",
+      "futureImpact": "S6 ships autonomous LLM-driven terminal agents with no sanctioned brake: a hallucinated or prompt-injected command has no interception point, inherits the user's ssh-agent, and leaves no attributable trail. Retrofitting policy after agents exist means re-plumbing every agent-to-terminal call site and bolting identity onto a locked wire protocol.",
+      "recommendation": "Add a named 'agent execution trust layer' roadmap entry (S6 dependency) and a bullet in overview §4/§5: command policy/allowlist, approval gate for irreversible action classes (batched with escalations), dry-run/preview, and an append-only audit log of every agent-issued request. Decide now whether the interception point is the core broker or a new S6 policy layer. Note in §16 that SSH_AUTH_SOCK is withheld or gated for agent-spawned sessions by default, and record a conscious decision on uid-only vs per-client identity (Hello already carries client_build and is the natural token slot).",
+      "sourceLenses": [
+        "security",
+        "ai-agents"
+      ],
+      "verifierNote": "Every factual claim checks out against the actual docs. (1) Absence verified by grep across the 12,203-line plan and all specs/docs: zero hits for consent/approval/audit/dry-run; \"policy\" matches only a webgl renderer policy (plan L79); allowlist/denylist matches are exclusively env-var hygiene (§9.3), never a command allow/deny policy; auth/token/identity/actor match nothing. (2) Spec §16 \"Trust & security model (consolidated)\" covers only path validation, env hygiene, socket perms/peer-cred, OSC forgery, log scrubbing, signing — and it explicitly reasons about S6 agents twice (\"This surface is also driven by S6 agents\", \"S6 agents must not treat it as authoritative\"), so the agent era was in scope of the consolidated model yet no action gate, command policy, or audit trail is named. (3) Overview §5 (L111-116) locks exactly three sanctioned human steps and \"Everything else is agent-decided\"; the §4 escalation loop is agent-initiated question batching, not an interception point for destructive commands. (4) SSH_AUTH_SOCK: spec §9.3 item 3 forwards it \"so git-over-ssh works; documented tradeoff\" (interactive-use rationale only), and the plan hardens this to a contract — L3957: caller \"MUST include SSH_AUTH_SOCK when the daemon has it\" — so autonomous S6 workers inherit the live ssh-agent by locked design. (5) Hop-B: §8.2 is euid-only getpeereid; the §7 Frame/Hello carries only client_build (no per-client identity/token), so agent actions are unattributable; DAEMON_SECRET exists only as a planted test fixture (plan L4711-4756, L12064). (6) No overview §3 slice owns this; S7 is stats/observability (task counts, stages), not a command audit trail, and S6's row names only \"terminal control, escalation loop\". Severity high is warranted: these are not merely deferred-to-S6-spec items — the overview's global locked decisions declare \"the terminal control surface built in S1 IS the surface the agent brain drives in S6\" and spec §2 repeats \"The command surface IS the agent control API\", so the contracts being locked right now (wire protocol without caller identity, env contract that MUST forward the ssh-agent, a human-in-the-loop boundary that excludes any brake) actively bake the gap in; PROTO_VERSION versioning makes retrofit possible but still a breaking re-plumb, and vision.md's own audit rubric counts \"architecturally unprepared-for\" as a finding. The known-issues register (item 5, env_overrides denylist) touches an adjacent env issue but nothing on consent/audit/identity, so this is not a re-discovery."
+    },
+    {
+      "id": "A8",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "product-coverage",
+      "title": "LLM provider abstraction has no owning slice; cost/token/trace capture unplanned",
+      "problem": "OpenRouter-first provider abstraction is a global locked decision, but no roadmap slice owns the provider layer — it is implicitly buried in S6 with no contract sketch: provider trait, model routing, cross-provider fallback, streaming, tool-calling, retries/rate limits, honest degradation. Nothing anywhere covers LLM-specific observability either: per-agent/per-task token + dollar cost (which must be CAPTURED by the provider layer from its first call — it cannot be backfilled), spend budgets/alerts, call traces, or agent-quality evals (escalation rate, task success, stuck frequency); the S7 row is classic ops stats + 'recharts' only.",
+      "evidence": "Overview §2 line 39 (lock) and line 72 (only other mention — 2 hits total for provider/OpenRouter across all docs); overview §3 has no provider or secrets slice; S7 row line 73 ('recharts'); vision item 11; grep for cost/token/eval across docs: zero relevant hits; the user's quality bar mandates retries + honest degradation for every external call.",
+      "futureImpact": "The most reused interface in the product gets designed under S6 delivery pressure with cost/rate/retry concerns bolted on after; weeks of un-attributable LLM spend during S6 bring-up; agent-quality regressions invisible; S8's 'data-driven decisions' has no agent-side data.",
+      "recommendation": "Add a roadmap row now (e.g. 'S6a — LLM provider layer', depends on S0, precedes agent loops) enumerating: provider trait, OpenRouter/OpenAI/GLM adapters, routing + fallback, streaming, tool-calling, retries/rate limits, and per-call cost/token/latency records emitted from day one. Extend the S7 row to include LLM traces + spend dashboards + budget alerts, and note agent evals as an S7/S8 concern.",
+      "sourceLenses": [
+        "product-vision",
+        "ai-agents"
+      ],
+      "verifierNote": "Every evidence claim verified against the actual files. Overview §2 line 39 locks \"OpenRouter-first provider abstraction\" globally; line 72 (S6 row, \"OpenRouter-backed\") is the ONLY other provider/OpenRouter hit across all docs — grep confirms exactly 2 hits, and §3's slice table (S0–S8) has no slice owning the provider layer or secrets, and no contract sketch (trait, routing, fallback, streaming, retries). The 12k-line plan has zero provider content (only WebGL/session \"fallback\" false positives). LLM observability absence confirmed: grep for cost/token/budget/spend/eval/trace across all docs yields only S7 row line 73 (\"time worked, task counts, stages, errors, logs\" + recharts — classic ops stats as stated); the plan's sole \"eval\" hit is a bash eval at line 5048. Vision.md item 11 strengthens the finding — the user explicitly demanded the provider abstraction be baked in from the start (\"сразу же закладывай туда\") — and vision line 43 plus the global quality bar mandate observability and retries/honest degradation for every external call. The mitigation that S6 will get its own spec cycle does not rebut: the overview locks slice scopes (\"apply to every slice\"), so S7's scope row omitting LLM cost/token/eval propagates to its future spec, and per-call cost data genuinely cannot be backfilled once S6 starts making calls. High severity stands for a roadmap-level gap in the product's most-reused future interface."
+    },
+    {
+      "id": "A9",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "security",
+      "title": "Provider API-key storage undecided anywhere — plaintext store is the path of least resistance",
+      "problem": "Overview §5 names API keys as a sanctioned human-provided credential, and spec §3 restricts tauri-plugin-store (unencrypted JSON in App Support) to 'UI settings only', but no document states where OpenRouter/OpenAI/GLM keys will live (Keychain vs store.json vs SQLite vs env), how they transit, or how they are redacted from LLM request/response logs. Grep for keychain/keyring/Security.framework across all docs: zero hits (only Apple-signing keychain refs in build-macos.md).",
+      "evidence": "Overview §5 line 115 (keys as human step, no storage); overview §2 line 39 (provider lock); spec §3 line 87 (store = 'UI settings only'); the S0/S1 no-secrets-in-logs test covers PTY child env only, not future LLM keys.",
+      "futureImpact": "Under S6 delivery pressure, high-value keys land in plaintext store.json or SQLite — readable by any same-uid process including agent-spawned workers — violating the project's own no-secret-leakage bar; later Keychain migration becomes a breaking settings migration plus credential rotation.",
+      "recommendation": "Add one locked line to overview §2 in this docs pass: 'Provider API keys are stored in the macOS Keychain (Security.framework / keyring crate), never in tauri-plugin-store, SQLite, or logs'; extend the no-secrets-in-logs contract to LLM request/response redaction; fold implementation into the A8 provider-layer slice as a dependency of the agent runtime.",
+      "sourceLenses": [
+        "security",
+        "ai-agents",
+        "product-vision"
+      ],
+      "verifierNote": "Factually accurate: grep across all worktree docs (including the 12k-line plan) confirms zero coverage of provider (OpenRouter/OpenAI/GLM) key storage, transit, or LLM-payload redaction — only Apple-signing keychain refs in build-macos.md; overview §5 names API keys as a human step with no storage decision, overview §2 'Global locked decisions' locks the provider but not credential storage, and there is no open-questions/risks section flagging it. However, 'high' overstates it: the gap concerns S6, which per the project's own locked process (overview §6) must get its own spec (brainstorming → locked contracts) before any key-handling code exists — a mandated decision checkpoint; spec §3's 'UI settings only' restriction on tauri-plugin-store and the enforced no-secret-leakage global constraint partially fence the claimed plaintext path of least resistance; and the futureImpact (plaintext under S6 pressure, then breaking migration) requires violating the project's own documented process. Real gap deserving an explicit open-decision line (e.g., Keychain, decided in S6 spec), but forward-looking with no current code surface — medium."
+    },
+    {
+      "id": "A10",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "delivery",
+      "title": "Every deferred/accepted issue lives only in the gitignored .superpowers ledger — the backlog evaporates on merge",
+      "problem": "All deferred issues accepted by final review exist ONLY in .superpowers/sdd/progress.md and session scratch, and .gitignore:54 excludes '.superpowers/' entirely (verified). Uncaptured in any tracked doc: env_overrides denylist decision (#5), flush_scrollback head-of-line/batching (#6), sink MutexGuard-across-send hazard (#7), unused iOS/Android icons (#8), the test-infra backlog (#9: singleton env race, attach flake, real-shell tests silently skipping), clippy 1.92 failures + missing rust-toolchain.toml (#12), missing final-suite clippy stage (#13), plus the ledger's CI TODO and the Supervisor as-built API notes. The ledger itself has rotted: line 50 still claims 'clippy clean, zero warnings' — now false. Only #10 (coverage gate, docs/traceability.md) and #11 (notarization human step, docs/build-macos.md + README) are durably captured.",
+      "evidence": ".gitignore:54 ('.superpowers/'; git check-ignore confirms progress.md ignored; git ls-files .superpowers/ empty); grep -rniE 'denylist|DYLD|flush_scrollback|MutexGuard|backlog|clippy' over docs/*.md README.md tests/e2e/README.md returns zero relevant hits (only the Kanban column name); progress.md:50 stale 'clippy clean' claim; docs/traceability.md Coverage section and build-macos.md §7 cover #10/#11 only.",
+      "futureImpact": "The branch is about to merge; when the worktree is deleted, items #5-#9, #12-#13 — including a security-posture decision and a persistence-throughput fix — are permanently lost and rediscovered the hard way in S2/S6. This violates the project's own 'fix now or file to backlog explicitly, never ignore' rule at the process level.",
+      "recommendation": "In this docs pass create a tracked docs/backlog.md (or Linear issues via LINEAR_API_KEY per global rules) transcribing known-issues #5-#9, #12-#13 verbatim with severity + decision-needed flags + owner-slice tags; migrate the ledger's CONTRACT RULES and as-built API sections into tracked docs (see A2, A30); correct or delete the stale 'clippy clean' claim; make 'deferred finding goes to the committed backlog, never only the ledger' an explicit process rule and DoD checklist item.",
+      "sourceLenses": [
+        "product-vision",
+        "system-architecture",
+        "ai-agents",
+        "security",
+        "data-persistence",
+        "docs-vs-reality",
+        "delivery-ops",
+        "frontend-ux"
+      ],
+      "verifierNote": "Every evidence point verified in the worktree: .gitignore:54 is '.superpowers/' and git check-ignore/ls-files confirm the entire sdd ledger is untracked; git grep across the whole tracked tree (including the 12k-line plan) for denylist/DYLD/flush_scrollback/MutexGuard/rust-toolchain/clippy finds no capture of deferred items #5-#9/#12-#13 (only unrelated entitlements boilerplate, a struct-field mention of env_overrides in the spec, and clippy allow-attributes in the plan); no rust-toolchain.toml exists; progress.md's final block does claim 'clippy clean, zero warnings' while the known-issues register documents 13 clippy-1.92 failures and no clippy stage in final-suite.sh; only #10 (docs/traceability.md:83-101) and #11 (docs/build-macos.md + README.md:22/93/116) are durably captured. High severity stands: the whole accepted-deferred backlog — including a security-posture decision and a latent deadlock hazard — is structurally guaranteed to be lost on merge, contradicting the project's own fix-or-file rule."
+    },
+    {
+      "id": "A11",
+      "severity": "high",
+      "kind": "future-trap",
+      "theme": "security",
+      "title": "env_overrides bypasses the §9.3 allowlist with no DYLD_*/LD_* denylist, and the accepted rationale is recorded nowhere durable",
+      "problem": "A socket client can set DYLD_INSERT_LIBRARIES / PATH / SHELL via env_overrides because overrides are applied last, after the §9.3 allowlist, with no denylist (socket_server.rs:770 'Caller overrides win last'). The known-issue register requires a decision (denylist vs intentional same-uid ceiling); that decision exists only in the gitignored ledger. The committed spec §6.1/§7 documents envOverrides with no security caveat at all, so a future reader sees neither the risk nor the rationale.",
+      "evidence": "crates/sessiond/src/socket_server.rs:770-771 (overrides applied after allowlist); spec §6.1 line 265 and §7 line 334 (envOverrides, no denylist or note); grep for denylist/DYLD across all tracked docs = 0 hits; .superpowers ledger (gitignored) is the only record of the accepted rationale.",
+      "futureImpact": "S6 agents will drive create_session with env_overrides programmatically: a prompt-injected or buggy agent can set DYLD_INSERT_LIBRARIES to load an arbitrary dylib into spawned processes — a code-execution/persistence vector — with no code guard and no documented reason it is allowed. The decision gets re-litigated or stepped on blind after the ledger is lost.",
+      "recommendation": "Resolve in the committed spec §16 during this docs pass: either add a DYLD_*/LD_* denylist enforced in the daemon before applying env_overrides, or explicitly document the same-uid-peer rationale as intentional WITH the S6 caveat that agent-supplied env must be denylisted at the agent trust layer (A7). Mirror the entry into the tracked backlog (A10).",
+      "sourceLenses": [
+        "security",
+        "data-persistence",
+        "docs-vs-reality",
+        "delivery-ops"
+      ],
+      "verifierNote": "All claims check out. socket_server.rs ~779 applies env_overrides last (\"Caller overrides win last\") after the §9.3 allowlist with no DYLD_*/LD_* filtering anywhere in crates/. Spec §6.1 line 265 exposes envOverrides for S6 agents with zero security caveat, and spec line 773 presents \"env_clear() + allowlist\" as the env-hygiene posture, which the override path silently bypasses. Grep of the 12k plan: all ~15 env_overrides hits are mechanical struct/test wiring; the only DYLD hits in tracked docs are unrelated codesigning entitlements; denylist = 0 hits. The finding actually understates durability: the accept/defer rationale is absent even from the gitignored .superpowers/sdd ledger (progress.md, blocker-fixes-report.md, task reports) — it lives only in the session scratchpad known-issues register (item 5, \"Decision needed\"), which itself mandates durable capture. High/future-trap is warranted given the spec commits agents to driving this surface programmatically."
+    },
+    {
+      "id": "A12",
+      "severity": "high",
+      "kind": "doc-rot",
+      "theme": "docs-rot",
+      "title": "Survival story overstated in canonical docs: 'daemon restart → survive' wording, missing degradation caveats, and a falsely-claimed daemon-restart e2e",
+      "problem": "Three related honesty defects in the canonical truth table (overview §2, spec §13, README — marked 'must not drift'): (1) 'Daemon restart | survive' vs 'Daemon crash | live shells die' — per spec §11 itself, live shells die on ANY daemon exit (rehydrated sessions are is_active=false, 'its PTY is gone'); README:74-77 makes it worse by implying a clean restart preserves live children. (2) The table carries none of §11's best-effort caveats: under DB degradation (locked/disk-full/read-only) persistence stops entirely, and corruption quarantine-recreates an empty DB — with no specced UI/agent surfacing of 'persistence degraded'. (3) README and traceability claim daemon-restart rehydrate is 'proven end-to-end by npm run e2e:survive', but the harness phases 0-4b only quit/reconnect the CLIENT — no phase ever restarts the daemon.",
+      "evidence": "Overview §2 truth table rows (lines 52-53); spec §13 table and §11 lines 610-618 (rehydrate is_active=false; best-effort + quarantine-recreate); README.md:70-77; docs/traceability.md row 37 ('phase4: real daemon-restart rehydrate, end-to-end') vs tests/e2e/survive-restart.mjs phase list (no daemon kill/restart); spec §6.3 event list has no persistence-health event.",
+      "futureImpact": "S2+ upgrade design and S6 agent schedulers get built against a false invariant ('just restart the daemon — sessions survive'); a rehydrate regression ships undetected while docs claim it proven; a disk-full laptop silently runs persistence-less for hours then contradicts the headline promise — precisely the dishonesty the product tenets forbid.",
+      "recommendation": "One-line reword in all three docs: 'Daemon restart/upgrade — live shells END; session records + scrollback survive and rehydrate inactive' and 'Daemon crash — same, minus the last unflushed window'. Add a caveat footnote referencing §11 degradation and spec a persistence-degraded/quarantine Push event + UI indicator. Fix the two e2e claims to state what phase 4 proves (client-quit survival) and backlog a real daemon-restart phase (SIGTERM daemon → relaunch → assert rehydrated inactive sessions + scrollback).",
+      "sourceLenses": [
+        "system-architecture",
+        "data-persistence",
+        "delivery-ops"
+      ],
+      "verifierNote": "All three defects verified in the cited files. (1) Spec §11 states rehydrated sessions are is_active=false with \"its PTY is gone\" (no PID/fd handoff exists in the schema), so live shells die on ANY daemon exit — yet the canonical table (overview §2:52-53, spec §13, README ~67-72) contrasts \"Daemon restart | survive\" vs \"Daemon crash | live shells die\", and README:74-77 explicitly asserts a clean restart, \"as opposed to\" a crash, does NOT take live children down — a direct contradiction of §11. (2) The table carries no best-effort caveat; spec §11 makes persistence best-effort (DB locked/disk-full/read-only → log-only degradation; corruption → quarantine + empty recreate), spec §6.3's event list has no persistence-health event, and the plan (line 6514) confirms degraded mode surfaces only as a tracing log — never to UI or agents. (3) tests/e2e/survive-restart.mjs phases 0-4b only hard-close and reconnect the CLIENT; the daemon is never restarted (kickstartDaemon in lib/daemon-harness.mjs:468 is never imported by the harness), so SQLite rehydrate is never exercised e2e (replay comes from the intact in-memory ring) — yet traceability.md:37 claims \"phase4: real daemon-restart rehydrate, end-to-end\", row 55 repeats it, and README claims daemon restarts are \"proven end-to-end by npm run e2e:survive\". The e2e README itself concedes this (line 55 scare-quotes \"restart\"; lines 152-160 say the restart half is out of this harness's scope). High severity holds: these are the canonical \"must not drift\" docs, the survival promise is S1's stated core promise, and the docs both misstate the invariant and fabricate test coverage for it — exactly what downstream S2/S6 designs will build against."
+    },
+    {
+      "id": "A13",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "data",
+      "title": "S3-S5 durable-data home undecided: 'daemon owns ALL durable domain state' contradicts the upcoming slices",
+      "problem": "Spec §2 locks 'the daemon is the single source of truth for all durable domain state' and 'the core does not use a SQL plugin'; architecture.md repeats it. But S3 projects/goals, S4 knowledge graph, and S5 kanban are durable domain state with no survive-GUI requirement, and no doc says where they live. Option A (daemon DB) turns the lean PTY daemon into the app backend — every kanban/goal feature becomes a Hop-B Request variant + daemon release on the fragile codec/handshake (compounds A2/A3), coupling kanban schema changes to live-terminal blast radius. Option B (core store) contradicts the locked sentence in three documents. Also stale: overview §3's S0 row claims 'local SQLite' in the app shell, which never existed.",
+      "evidence": "Spec §2 lines 72-76; docs/architecture.md:27-29 ('owns ALL PTYs + ALL durable state'); overview §3 rows S3-S5 name no storage owner; overview S0 row ('settings, local SQLite') vs design doc :74-76 (core persists UI settings only via tauri-plugin-store).",
+      "futureImpact": "S3 — the next data slice — cannot start without this decision; deciding it inside the S3 spec either violates a locked S0/S1 decision or balloons the daemon protocol unplanned, and three documents mislead implementers until then.",
+      "recommendation": "Add a locked 'data layer' section to the overview before S3: scope the daemon's ownership to terminal-domain durable state (workspaces, sessions, scrollback); S3+ domain data (goals/graph/kanban/agent state) lives in a core-owned app SQLite decided in S3's spec; note the workspace table's eventual ownership/migration question explicitly. Reword the overview S0 row ('settings via tauri-plugin-store; durable domain SQLite lives in the S1 daemon') and record the choice as a new locked row in overview §2.",
+      "sourceLenses": [
+        "product-vision",
+        "system-architecture",
+        "ai-agents",
+        "data-persistence"
+      ],
+      "verifierNote": "All citations check out: spec design doc :72-73 says daemon is \"single source of truth for all durable domain state\" and \"core does not use a SQL plugin\"; architecture.md:28 and README.md:52 both say \"owns ALL PTYs + ALL durable state\"; overview §3 S0 row (:66) stale-claims \"local SQLite\" in the app shell; S3-S5 rows (:69-71) name no storage owner; and grepping the 12k-line plan for kanban/knowledge/goals/durable confirms zero S3-S5 storage provisions. However, severity is overstated. The \"locked\" sentence is self-scoped by its parenthetical \"(workspaces, sessions, scrollback)\" — the only durable state existing in S0+S1 — and the same spec (:28) explicitly declares S3-S5 as non-goals/deferred, so an S3 spec choosing a core-side store clarifies an ambiguous S0/S1 sentence rather than violating a locked cross-slice contract. Nor does it block S3: overview §3 defines each slice as \"an independent spec/plan/build unit\", making S3 storage a by-design S3-spec decision; the fix is a one-sentence scoping amendment in three docs plus correcting the stale overview S0 cell, with zero shipped-code impact. What remains real is doc drift that could mislead a zero-context S3 implementer (unqualified \"ALL durable state\" in three diagrams, un-scoped \"no SQL plugin\", stale \"local SQLite\" row) — a genuine medium documentation-consistency/ambiguity gap, not a high-severity architectural contradiction or slice blocker."
+    },
+    {
+      "id": "A14",
+      "severity": "medium",
+      "kind": "future-trap",
+      "theme": "protocol-evolution",
+      "title": "Workspace locked as single root_path while the vision requires multi-repo workspaces",
+      "problem": "Vision item 1 defines a workspace as 'a SET of repos/folders for one project' and the overview S2 row says 'repos' (plural), but the locked, shipped contract has exactly one root: Workspace{id, name, root_path} in the wire protocol (§5), CreateWorkspace{name, root_path} (§7), the SQLite schema (§11 'root_path TEXT NOT NULL'), and the generated TS types. Neither the spec nor the overview flags that S2 must evolve the most-referenced type in the protocol.",
+      "evidence": "vision.md concept 1; overview §3 row S2; spec §5 line 183 (Workspace struct), §7 CreateWorkspace fields, §11 schema lines 592-593.",
+      "futureImpact": "S2's first act becomes an unmanaged breaking change to a just-frozen contract: wire-type change + PROTO_VERSION bump + DB migration + ts-rs regen + create_workspace validation rework — the first wire break happening ad-hoc without the A3 evolution policy.",
+      "recommendation": "Add an evolution note to the overview S2 row now: multi-root arrives additively — keep root_path as the primary root, add a workspace_root child table and appended wire fields / new Request variants (AddWorkspaceRoot) so the change is append-only under the A3 policy; plan the shape before S2 planning starts.",
+      "sourceLenses": [
+        "product-vision",
+        "system-architecture"
+      ],
+      "verifierNote": "Core facts confirmed: Workspace is single root_path in the wire type (spec line 183), CreateWorkspace (line 331), and SQLite schema (line 593), while vision.md concept 1 and overview S2 row say repos (plural); grep of both specs, all docs, and the 12k-line plan finds zero acknowledgment of multi-root evolution (the one 'workspace roots' hit at plan line 7410 means roots of multiple workspaces). However, 'high' overstates the trap: (1) vision.md itself says 'Minimal grouping first, but the concept must scale', explicitly endorsing the single-root start, so this is a missing forward-compat note, not a spec/vision contradiction; (2) the spec already locks the evolution machinery — PROTO_VERSION handshake with refuse-on-mismatch (lines 310-322, tested line 702) and user_version-keyed fail-closed SQLite migrations (lines 591, 617) — and GUI+daemon ship from the same build, so the S2 change is version-gated and internal, not an 'unmanaged' ecosystem wire break; (3) the change can plausibly be additive (keep root_path as primary root, add a workspace_roots table/optional field), avoiding a break entirely. Remaining real issue: docs should flag that S2 evolves the Workspace contract — a medium doc/planning gap."
+    },
+    {
+      "id": "A15",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "data",
+      "title": "No delete/rename/GC/retention anywhere: sessions, workspaces, and scrollback accumulate forever",
+      "problem": "The locked protocol and command surface have create/list/attach/kill but no DeleteSession/DeleteWorkspace/rename variants; kill_session only signals the process group and its row + scrollback BLOB persist indefinitely (zero DELETE statements in the daemon); rehydrate loads every historical session on every start; list_sessions and the tab strip grow unboundedly (exited sessions reappear as tabs whose × can only call killSession, which fails; the store's removeSession action is dead code). There is also no SQLite space-reclamation policy (no auto_vacuum/VACUUM anywhere), so even future pruning would never shrink the file.",
+      "evidence": "Spec §7 Request enum lines 328-342 (no delete/rename variants); src/ipc/commands.ts exports confirm; grep DELETE across crates/sessiond/src = nothing but a test comment; src/store/store.ts:25,52 removeSession with zero call sites; src/components/TerminalTabs.tsx:32-35; spec §11 has only per-session ring prune; grep vacuum/retention across docs = 0.",
+      "futureImpact": "Annoying for humans today; harmful under S6 where agents churn short-lived worker sessions — DB, rehydrate pass, list_sessions payloads, and UI degrade within days, agents have no API to clean up after themselves, and retrofitting deletion later pays the protocol-change cost.",
+      "recommendation": "Spec the small additive change now (cheapest before S2): DeleteSession (kill-if-live + drop row + cascade scrollback), DeleteWorkspace{cascade}, Rename variants; a retention policy for Exited sessions (keep last N per workspace or TTL, agent-configurable); PRAGMA auto_vacuum=INCREMENTAL at schema v2 + periodic incremental_vacuum; UI: closing an exited tab removes it (wire removeSession). Schedule as S1.1 or fold into S2 and record in the durable backlog.",
+      "sourceLenses": [
+        "product-vision",
+        "data-persistence",
+        "frontend-ux"
+      ],
+      "verifierNote": "Every cited fact checks out: spec §7 Request enum (lines ~327-342) and src/ipc/commands.ts have create/list/attach/kill but no Delete/Rename variants; grep DELETE over crates/sessiond/src is empty; grep vacuum/retention over crates+docs+the 12k-line plan is empty (plan hits for delete/cleanup are all attach-entry/test scaffolding); store.ts removeSession (lines 25,52) is called only from store.test.ts; App.tsx only upserts sessions (rehydrated Exited sessions included) and never removes them. The zombie-tab mechanism is real: TerminalTabs.onClose awaits killSession before dispose, and pty_supervisor.kill (line 544) errors NoSuchSession for rehydrated exited sessions (no supervisor entry), so the tab can never be closed. Spec §11 confirms rehydrate rebuilds every historical session and scrollback is retained after exit with only per-session ring prune. known-issues.md does not acknowledge any retention gap. High is justified: unbounded DB/tab/rehydrate growth bites S1 humans today (permanently un-closable exited tabs across restarts), and the omission sits in the locked protocol, so the fix pays the protocol-change cost the spec was designed to avoid — exactly what the S6 agent-churn vision (items 9-10) will amplify."
+    },
+    {
+      "id": "A16",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "agent-layer",
+      "title": "Agent-facing terminal API gaps: no text snapshot, no cursor-based read, no command+argv spawn",
+      "problem": "The agent-terminal API offers only continuous raw-ANSI streaming (attach) and metadata-only GetSessionState. An LLM agent asking 'what do the last 40 lines say?' must implement its own VT/ANSI parser over the firehose, even though the daemon already maintains an alacritty live grid ('never serialized') and a sanitized ring; there is no read_output(session, since_seq) for poll-style loops. Separately, CreateSession takes only shell: Option<String> with no argv (SessionSpec.args is reserved for shell-integration flags), so launching 'claude-code -p \"task\"' requires spawn-shell → wait for heuristic AtPrompt → write_stdin — a race-prone dance for every worker launch.",
+      "evidence": "Spec §7 Request enum lines 328-342 (no snapshot/read request); §6.1 lines 248-261; §11 live grid 'never serialized'; spec lines 333-334 (CreateSession fields); crates/sessiond/src/pty_supervisor.rs:91-98 (args documented as shell-integration-only).",
+      "futureImpact": "S6 agents burn tokens and code on client-side ANSI parsing and inherit prompt-timing flakiness on every worker launch — or these requests get bolted onto the protocol under S6 schedule pressure without design attention (grid-to-text extraction, ring seq numbering, OSC-133 lifecycle semantics for non-shell children).",
+      "recommendation": "Add to overview §4 an explicit capability requirement: S6 needs (a) a plain-text screen snapshot from the live grid, (b) cursor-based read_output(session, since_seq) with ring seq numbering as the cursor, and (c) direct command+argv spawn fields on CreateSession — all additive Hop-B requests under the A3 evolution policy; define lifecycle semantics for non-shell children in the S6/worker-adapter spec.",
+      "sourceLenses": [
+        "ai-agents"
+      ],
+      "verifierNote": "All factual claims verified: spec §7 Request enum (lines 328-342) has no snapshot/read request; §11 (lines 581-584) says the alacritty live grid is \"never serialized\"; CreateSession takes only shell: Option<String> (line 333) and pty_supervisor.rs:91-98 reserves SessionSpec.args for shell-integration flags; grepping the 12k-line plan for snapshot/read_output/argv/GetScreen finds only internal ScrollbackRing/Replay mechanics, no agent-facing read task; and the gap is not registered in known-issues.md/progress.md/traceability.md while spec lines 76-77 affirmatively claim the surface \"IS the agent control API... exactly what S6 agents will call.\" However, high overstates it: (1) agents are an explicit non-goal of this slice (spec line 28) and the documented process (overview §6) mandates a full brainstorm→spec cycle for S6, so \"bolted on without design attention\" is speculative; (2) the protocol carries PROTO_VERSION with Incompatible{min,max} negotiation, making read/argv requests a designed-for additive extension, not a rework; (3) AttachSession already delivers Push::Replay = the sanitized scrollback ring, a coarse poll-style snapshot, so agents are not limited to parsing the raw live firehose — the missing pieces are ergonomics (plain-text/lines, since_seq cursor, argv spawn), not the entire read capability. Real, undocumented forward-contract overstatement in the spec; medium severity."
+    },
+    {
+      "id": "A17",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "product-coverage",
+      "title": "S6 is one roadmap row hiding 6+ subsystems; several locked promises have no delivery vehicle",
+      "problem": "S6 'Agent orchestration' bundles: the agent runtime (loops, tool-use, memory), three agent roles (CEO/PM/specialists), the escalation pipeline AND its user-facing surface (batched inbox, notification delivery that works with the GUI closed — mentioned nowhere), external-worker adapters (per-CLI conventions for claude-code/hermes/opencode/kilo), the custom user-defined-agent authoring model (locked in overview §2 with no owning slice: role prompt, model choice, tool grants, definition persistence), and the multi-terminal grid/dashboard view the vision implies for watching several workers (no slice owns multi-pane rendering; §12 handles only the single-pane case). This contradicts the spine-first, one-spec-per-subsystem discipline that made S0+S1 succeed (25 tasks for far less scope).",
+      "evidence": "Overview §3 row S6 (one line, three deps); §4 describes at least 5 distinct mechanisms; overview line 40 (custom agents locked, no other mention); overview lines 102-116 (escalation flow, no UI owner); vision items 6-11 and item 9 (panel shows live terminals); design doc §12 single-pane assumptions.",
+      "futureImpact": "S6's spec/plan becomes unmanageably large (multi-week, high drift risk across parallel subagents) or silently ships MVP half-states — the exact failure mode the design tenets forbid; 'custom agents' and the escalation inbox slip silently.",
+      "recommendation": "Re-decompose in the overview now: S6a provider+secrets (A8/A9), S6b agent runtime + ONE role end-to-end (PM driving one worker through one terminal), S6c hierarchy + escalation loop + escalation inbox UI + notification delivery (GUI-closed capable), S6d external-worker adapters (claude-code first), S6e custom-agent authoring; add the multi-terminal grid/dashboard as a named UI deliverable. Keep S7 depending on S6b, not the whole chain.",
+      "sourceLenses": [
+        "product-vision",
+        "ai-agents",
+        "frontend-ux"
+      ],
+      "verifierNote": "Kernel is real: overview §3 S6 (line 72) is one row while §4 (lines 91-107) describes ~5 mechanisms; 'custom agents' is locked at overview:40 and appears nowhere else (verified by grep across docs/, README, progress ledger, and the 12,203-line plan); the escalation user-surface is never specified (zero hits for inbox/notification anywhere); S0+S1 UI is single-active-pane tabs (design §12 singular activeSessionId; plan lines 10333-10355 'sidebar | tabs | active pane'). But 'high' rests on overstatements: (1) 'no delivery vehicle' is wrong — the escalation loop is named in the S6 row itself, and custom app-native agents plainly fall under S6, the agent slice (an itemization gap, not a missing owner); (2) two cited 'locked promises' are not promises: GUI-closed notification delivery appears in neither vision.md nor any doc (vision only requires session survival; meta-agents run in the app brain), and the multi-terminal 'grid' is inferred from vision item 9's 'panel shows live terminals', which the tabbed live-terminal UI arguably satisfies; (3) the overview explicitly defers detail ('This is the map... Detailed contracts live in per-slice specs, not here', lines 5-6) and §6 mandates a full brainstorm→spec→plan cycle per slice where S6 sub-slicing would naturally occur — S0+S1 itself shows slices are regrouped at spec time. Real as a roadmap-granularity/traceability risk (S6 disproportionately dense; custom agents and escalation UX unitemized), but the projected 'unmanageable or silent MVP' impact is speculative given the mandated per-slice process — medium, not high."
+    },
+    {
+      "id": "A18",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "security",
+      "title": "Terminal scrollback persists raw output (including secrets) to disk forever with no redaction, retention, or purge",
+      "problem": "Scrollback rings persist raw PTY output bytes to SQLite BLOBs with no redaction, no encryption-at-rest, no file-permission statement, and no wipe path: persistence.rs has no scrub and kill_session never deletes rows. Terminal output routinely contains secrets (env dumps, echoed tokens, cred-embedded URLs). Spec §16 is meticulous about env hygiene and log secrecy but silent on the largest plaintext secret sink, so readers reasonably assume it is covered.",
+      "evidence": "Spec §11 lines 586-618 (scrollback SQL + cadence, no redaction/retention); §16 lines 766-781 (env + logs only); crates/sessiond/src/persistence.rs:343-361 (append/load, no scrub, no delete path); kill_session in socket_server.rs does not purge DB rows.",
+      "futureImpact": "Every secret ever echoed in any terminal is durably retained in plaintext bpa.db, readable by any same-uid process (including agent workers) and anyone copying the file/backup, with no way to wipe a session's captured secrets; worsens at S6 scale with many agent terminals.",
+      "recommendation": "Add a data-at-rest decision to spec §11/§16 in this docs pass: document that bpa.db contains raw terminal output (sensitivity statement), harden file permissions (0600), purge scrollback rows on session delete (ties to A15) with a retention policy, and add a roadmap note on optional at-rest encryption.",
+      "sourceLenses": [
+        "security"
+      ],
+      "verifierNote": "Core gap confirmed: spec §16 (consolidated security section) is silent on the scrollback DB; no redaction/retention/purge exists anywhere (no DELETE FROM in the daemon; KillSession at socket_server.rs:645 never removes rows; plan's secret-scrub coverage at lines 4711-4756/12033+ is logs/env only; no bpa.db file-mode statement). But severity is overstated: (1) \"persists raw output forever / every secret ever echoed\" is factually wrong — flush_scrollback_once (socket_server.rs:274-296) upserts a single seq-0 blob per session, overwritten every ~500 ms with the 256 KiB-capped ring (pty_supervisor.rs:60; spec §11 \"ring-pruned per session\"), so only each session's final ≤256 KiB window survives, not all history; (2) the DB sits under 0700 ~/Library/Application Support — same same-uid plaintext exposure class as ~/.zsh_history or iTerm2/tmux-resurrect restore files, the industry norm for restore-capable terminals, and encryption-at-rest against same-uid readers adds little; (3) retaining exited sessions is a deliberate §11 rehydrate/replay feature. Real residue (no wipe/retention path, §16 omission) is a medium doc/design gap, not high."
+    },
+    {
+      "id": "A19",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "security",
+      "title": "Webview CSP is null and the network boundary is undocumented",
+      "problem": "tauri.conf.json sets security.csp = null (no Content-Security-Policy), so the WKWebView can make arbitrary outbound requests and load remote content, and no doc explains or roadmaps the webview network boundary — including whether S6 LLM calls go from the Rust core or the webview. capabilities/default.json documents its shell:default rationale, but the CSP hole has no rationale anywhere; spec §16 omits the webview boundary entirely.",
+      "evidence": "src-tauri/tauri.conf.json lines 22-24 (\"security\": { \"csp\": null }); no csp/capabilities rationale in spec §16 or README (grep confirmed); capabilities/default.json:4.",
+      "futureImpact": "At S6 the webview renders untrusted agent/worker output; with null CSP, any XSS or malicious rendered content (agent-generated markdown, compromised dependency) can exfiltrate to arbitrary hosts — a live injection-to-exfiltration path. Locking CSP after the S6 UI is built is far harder than setting policy now.",
+      "recommendation": "Document the intended boundary in spec §16 during this docs pass: restrictive CSP (default-src 'self'; connect-src 'none' if all network egress is core-side — recommended, so the webview needs no connect-src), state that LLM egress is core-only, and record the decision even if enforcement tightens per slice.",
+      "sourceLenses": [
+        "security"
+      ],
+      "verifierNote": "All cited facts verified: src-tauri/tauri.conf.json lines 22-24 set \"security\": {\"csp\": null}; repo-wide grep finds \"csp\" only as the unexplained config literal in the plan (line 443) with no rationale in spec, README, or capabilities file (which does document its shell:default rationale, proving the omission is anomalous); spec §16 \"Trust & security model (consolidated)\" covers paths/env/socket/OSC/logging/signing but says nothing about the webview network boundary or CSP; and no doc states whether S6 OpenRouter LLM calls originate in the Rust core or the webview (platform-overview.md lines 39, 72 only name the provider). High severity stands: the webview already renders untrusted PTY output and holds IPC power to write to PTYs, so null CSP turns any future XSS into command execution plus arbitrary exfiltration, and the S6 roadmap (rendering agent-generated content) makes the boundary decision load-bearing now, under a project quality bar that explicitly requires documented security posture."
+    },
+    {
+      "id": "A20",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "delivery",
+      "title": "CI does not exist and is not roadmapped, yet spec, architecture.md, and traceability all assume it",
+      "problem": "There is no CI of any kind (no .github/, no workflow files) and no CI/infra line in the S0-S8 roadmap, but tracked docs speak of it as real: spec §5 'CI checks it is in sync', §14.2 row 1 'CI ts-rs generate + git diff --exit-code', architecture.md 'CI/scripts/final-suite.sh fails the build'. final-suite.sh is only ever run by hand. The ledger's own CI TODO ('T25 must set up CI that actually executes real-shell tests on macOS') was never done, yet T25 is marked COMPLETE. Known-issue #9's test-infra backlog (real-shell tests silently skip without /bin/bash|zsh, flaky env race, peer-cred foreign-uid test) explicitly needs a CI home and has none.",
+      "evidence": "ls .github absent; git ls-files shows no workflow files; spec lines 174, 725; docs/architecture.md:104; docs/traceability.md:17; .superpowers/sdd/progress.md:126-133 vs :46 (T25 COMPLETE, self-contradictory).",
+      "futureImpact": "Already materialized once: 'clippy clean' rotted to 13 lints with nobody noticing because nothing runs the gates automatically. With S2+ parallel subagent branches, ts-rs parity drift, silently-skipping shell tests, and toolchain drift recur; every documented gate is honor-system and the production-grade bar is unenforceable.",
+      "recommendation": "Add CI as a blocking pre-S2 work item in the roadmap (e.g. 'S1.5: CI + release infra'): GitHub Actions macOS runner executing final-suite.sh stages plus clippy -D warnings, fmt --check, tsc --noEmit, coverage gate, and an assertion that shell_integration real-shell tests actually ran (not skipped). Until it lands, soften the 'CI' wording in architecture.md/traceability.md to 'final-suite.sh (manual until CI lands)'.",
+      "sourceLenses": [
+        "docs-vs-reality",
+        "delivery-ops"
+      ],
+      "verifierNote": "All cited evidence verified: no .github/ or workflow files exist (ls + git ls-files); spec lines 174 (\"CI checks it is in sync\") and 725 (\"CI ts-rs generate + git diff --exit-code\") and architecture.md:104 (\"CI/scripts/final-suite.sh fails the build\") all treat CI as an existing enforcer; the S0-S8 roadmap in the platform-overview spec has no CI/infra line (grep for CI/github/workflow returns nothing); progress.md:124-130 contains an explicit \"CI TODO (for T25) ... T25 must set up CI that actually executes them on macOS\" while T25 is marked COMPLETE and \"ALL 25 TASKS COMPLETE\" — a genuine self-contradiction, and the plan's Task 25 deliverables (grepped in the 12k-line plan) include no workflow file, only final-suite.sh/coverage-gate.sh/docs. The impact has already materialized: known-issues #12/#13 confirm 13 clippy lints accumulated while the ledger claimed \"clippy clean\" (no gate ran clippy), and known-issues confirms real-shell tests have \"no CI guarantees they ever run\". Only trivial overreach: traceability.md:17 itself honestly cites final-suite.sh stage 3 (CI appears at traceability.md:81), which does not dent the finding. High severity stands: every documented quality gate is honor-system, drift has already occurred undetected, and the completion ledger is internally false."
+    },
+    {
+      "id": "A21",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "agent-layer",
+      "title": "No resource model: unlimited sessions x threads x fds with no exhaustion behavior",
+      "problem": "Each session spawns 3 dedicated OS threads (reader, wait, 200ms status ticker) plus a per-attach blocking forwarder thread, PTY fd pairs, and a 256 KiB ring — and no document specs a maximum session count, thread/fd budget, or behavior at exhaustion (thread-spawn failure is handled per-call but nothing prevents approach). Vision scale is N projects x M sessions and S6 agents create sessions programmatically in loops.",
+      "evidence": "Spec §9 (threading contract, no limits), §12/§13 (no quota or exhaustion semantics); crates/sessiond/src/pty_supervisor.rs:59-60 (256 KiB ring), :291,:352,:390-393 (three threads per session, TICK const); overview §4 (agents spawn workers).",
+      "futureImpact": "An S6 runaway (PM decomposes into 40 tasks → 40 workers → 120+ daemon threads + 40 tickers + fds) degrades the whole daemon with no honest degradation path; retrofitting limits later changes CreateSession error semantics.",
+      "recommendation": "Spec now while additive: a configurable max concurrent active sessions (e.g. 64) with typed Error{code:\"SessionLimitReached\"}; collapse per-session tickers into one shared ticker thread; document the per-session cost envelope (threads/fds/memory) in architecture.md so S6 planning can budget.",
+      "sourceLenses": [
+        "system-architecture"
+      ],
+      "verifierNote": "Gap verified: grep of the full spec and 12k-line plan for limit/quota/exhaust/max-session/RLIMIT/EMFILE/thread-budget finds no session-count cap, no thread/fd budget, and no launchd fd-limit config; all existing caps (256 KiB ring, CLIENT_OUTQ_CAP, OSC/frame caps) are per-session/per-client, and pty_supervisor.rs confirms 3 threads + 200ms ticker per session. known-issues.md does not capture it. However, \"high\" overstates it: (1) exhaustion is not wholly unspecified — spec S13 already routes PTY/thread spawn failure to Response::Error (rejects the promise, no crash), so only the proactive quota is missing; (2) the retrofit claim is weak — Error{code} is string-coded and CreateSession callers must already handle Response::Error, so adding SessionLimitExceeded is additive, not a semantics break; (3) within delivered S0+S1 scope (human-driven GUI, tens of sessions) the limits are unreachable; the runaway scenario belongs to S6, which gets its own spec. Real forward-looking spec/backlog gap that should be durably captured, at medium severity."
+    },
+    {
+      "id": "A22",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "frontend",
+      "title": "Reconnect re-attach contract undefined for hidden/opened sessions — stale panes look live after daemon restart",
+      "problem": "Spec §13 says on reconnect 're-list_sessions + re-attach visible sessions' but defines nothing for previously-attached-but-hidden sessions. The built app re-attaches ONLY the active session (and only if isOpened); after a daemon restart every hidden session's channel is dead, switching to its tab never re-attaches (compounded by A1), and those panes show permanently stale content with no staleness indicator. Ordering/burst behavior of N simultaneous Replays through one socket after reconnect is also unspecced.",
+      "evidence": "Spec §13 line 649 ('re-attach visible sessions' — undefined for hidden); src/App.tsx:76-82 (re-attach gated on activeSessionId + manager.isOpened only); no 'needs re-attach' state in store.ts or terminal-manager.ts.",
+      "futureImpact": "Any S2+ multi-terminal or agent-dashboard view inherits an undefined reconnect contract; users and agents silently watch frozen output believing it live — an 'honest about state' violation that S6 amplifies.",
+      "recommendation": "Spec the reconnect contract: on daemon://reconnected mark all attached sessions stale; re-attach lazily on show (fresh Replay clears the terminal first) or eagerly for all opened sessions with defined ordering (sequential per session, bounded concurrency); render a per-pane 'reattaching…' state. Fix alongside A1 with a shared per-session attach-state model.",
+      "sourceLenses": [
+        "frontend-ux"
+      ],
+      "verifierNote": "Spec §13:649 says only \"re-attach visible sessions\" verbatim; grep of the full spec and 12k-line plan finds no contract for previously-attached-but-hidden sessions after reconnect (plan T22's handler at ~11323 only re-hydrates metadata), while spec §12:629 promises hidden terminals \"stay attached\" — a premise broken by daemon restart/EPIPE cleanup of the in-memory attach registry. Built app matches the claim: App.tsx onDaemonReconnected re-attaches only activeSessionId gated on isOpened; TerminalPane's attachedRef latch (no key on the pane) means tab-switching never re-attaches; store.ts/terminal-manager.ts have no needs-re-attach or staleness state. N-simultaneous-Replay ordering is also unspecced. Result: silently frozen panes that look live — a real high-severity gap violating the spec's own honest-degradation commitment, inherited by S2+ multi-pane views."
+    },
+    {
+      "id": "A23",
+      "severity": "high",
+      "kind": "gap",
+      "theme": "frontend",
+      "title": "Command errors silently swallowed in the UI; no error-code-to-message contract; disconnected panes not visually degraded",
+      "problem": "No spec section maps CommandError kinds / typed daemon Error codes (InvalidWorkspaceRoot, CwdMissing, SymlinkEscape, Disconnected, …) to user-visible UI, and the built app swallows every command rejection: TerminalTabs' onNewTerminal/onClose and WorkspaceSidebar's onAdd are fire-and-forget with no catch and no toast/inline error — a failed folder validation or terminal creation does nothing visible. A failed killSession also skips manager.dispose (it is after the await), leaking the xterm instance. Related honesty gap: spec §13 promises 'UI banner, terminals greyed' on daemon disconnect — the banner exists but no greying/dimming is implemented, so a disconnected terminal looks live.",
+      "evidence": "src-tauri/src/commands.rs:59-69 (CommandError kinds exist); spec §13 covers only daemon/launchd banners; src/components/TerminalTabs.tsx:26-35 and WorkspaceSidebar.tsx:30-35 (unhandled rejections, void fn()); no error/toast component in src/components/; spec §13 line 649 vs grep for grey/opacity across components = 0 hits.",
+      "futureImpact": "Directly violates the project's own honest-degradation rule ('never swallow errors silently'); S2+ slices copy the pattern into file-explorer/kanban/graph mutations, multiplying silent failures.",
+      "recommendation": "Add a spec subsection (§12/§13): every rejected command surfaces a code-mapped, user-visible message (central error-to-message table generated from the daemon's typed error codes); add a lightweight notification surface with tests asserting failed createSession/createWorkspace shows it; fix the killSession dispose ordering; implement the dim/disabled overlay on panes when daemonConnected=false or amend §13 to banner-only — pick one in the docs pass.",
+      "sourceLenses": [
+        "frontend-ux"
+      ],
+      "verifierNote": "Every cited fact verified in the worktree. (1) TerminalTabs.tsx onNewTerminal/onClose and WorkspaceSidebar.tsx onAdd are void-invoked async fns with no catch; the only catch in the UI layer is App.tsx:113 (hydrate loop). No toast/error component exists in src/components/. (2) commands.rs:57-69 defines typed CommandError kinds \"so the frontend can match\" — the frontend never matches them; spec has zero hits for toast/notification/\"error message\"/\"user-visible\", and the plan itself locks the fire-and-forget pattern verbatim (plan lines 10883-11049), so the gap is spec+plan-level, not an implementation slip. (3) onClose puts manager.dispose after `await killSession`, so a rejected kill leaks the xterm instance. (4) Spec §13 line 648 promises \"UI banner, terminals greyed\"; DaemonBanner exists but grep for grey/gray/opacity/dim/filter across components/App/theme shows no disconnect styling and nothing but DaemonBanner reads daemonConnected — disconnected terminals look live. Not covered by the known-issues register. High is the right severity: it directly violates the spec's own §13 honest-degradation principle and the global never-swallow-errors rule, with a concrete silent-failure UX (invalid folder pick → nothing visible), and the pattern is poised to propagate into S2+ mutations."
+    },
+    {
+      "id": "A24",
+      "severity": "medium",
+      "kind": "doc-rot",
+      "theme": "data",
+      "title": "Scrollback persistence: docs describe a mechanism and durability bound that were not built, and the write path has no dirty-check or architecture plan",
+      "problem": "Three doc claims drift from the built flusher: (1) durability window — overview/spec/README all say '≈500 ms', code is a fixed 1000 ms interval (loss bound understated 2x, in a table marked canonical); (2) spec §11 promises flush 'every ≈500 ms or 32 KB' — no size trigger exists; (3) the schema (seq column, PK(session_id,seq), 'ring-pruned') describes append+prune rows but the implementation stores one seq=0 full-ring upsert per session — seq is vestigial. Beyond the ledger-only known-issue #6 (per-session mutex head-of-line), the un-captured deltas: no change-detection means every idle session still costs a 256 KiB blob rewrite per tick (write amplification, WAL churn, SSD wear scaling with session count), all funneled through one Arc<Mutex<Db>> connection — and no doc decides the future DB write architecture (dedicated DB task/actor, one DB vs per-domain) before S4/S5/S7 writers join the same mutex.",
+      "evidence": "crates/sessiond/src/socket_server.rs:57 (SCROLLBACK_FLUSH_INTERVAL = 1000ms), :240-289 (seq-0 replace, no size trigger, no dirty flag); persistence.rs:351-353 (ON CONFLICT upsert); design doc :604-609, :674; overview:52; README.md:70 ('≈500 ms'); ledger :72-73 (Db is Send,!Sync → Arc<Mutex<Db>>).",
+      "futureImpact": "Anyone sizing acceptable data loss or S6 recovery logic from the docs assumes 500 ms (real ~1 s); the phantom 32 KB trigger and append schema confuse whoever implements retention (A15); at S6 scale (10-20 workers) redundant blob writes plus lock contention land as UI-visible latency, forcing a mid-slice persistence redesign.",
+      "recommendation": "Docs pass: fix the constant to 500 ms or update all three docs to '≤ ~1 s'; rewrite §11 to describe the single-snapshot-row semantics and drop or implement the 32 KB trigger; note seq as reserved or remove at schema v2. Backlog: last-flushed generation/hash per ring to skip unchanged sessions (fold into the #6 batching fix); decide the DB connection/actor architecture in the A13 data-layer section before S3.",
+      "sourceLenses": [
+        "data-persistence"
+      ]
+    },
+    {
+      "id": "A25",
+      "severity": "medium",
+      "kind": "future-trap",
+      "theme": "data",
+      "title": "Historical data S6/S7 will need is being discarded today: pruned transcripts, no command-event journal, unlocked ring cap",
+      "problem": "Both the in-memory ring and the durable scrollback are ring-pruned to ~256 KiB per session — but the S6 PM's gap analysis, escalation context, and S7 observability need full worker transcripts, and once pruned the output is unrecoverable; the 256 KiB number itself exists only in the plan and a code comment mis-citing 'spec §11', which states no number. Likewise OSC-133 gives the daemon command boundaries, exit codes, and timing, but only the LATEST lifecycle per session is stored — no command-history/event journal — so S7 stats ('time worked, task counts, errors') start from zero history and months of agent-run data valuable to the S8 CEO are lost.",
+      "evidence": "Spec §11 lines 574-580, 592-604 (bounded ring, no size constant; session table stores single lifecycle/exit_code; no events table); pty_supervisor.rs:59-60 (SCROLLBACK_CAP comment citing a spec number that isn't there); plan line 3958 (only 256 KiB statement); spec §10.3 CommandEnd(exit) events not stored; overview §4 items 2-4 and S7 row.",
+      "futureImpact": "S6/S7 discover mid-slice that the data they need was pruned or never captured; bolting a transcript log and event journal on later duplicates the reader fan-out under time pressure and pays the daemon schema-bump cost (A3).",
+      "recommendation": "Docs pass: lock the 256 KiB replay cap in spec §11 as an agent-visible limit. Roadmap notes: (a) worker sessions get an optional append-only transcript log (file per session under APP_SUPPORT, size/retention-capped) fed from the existing reader fan-out — replay ring stays bounded; (b) a tiny additive command_events table (session_id, started_ts, ended_ts, exit_code) at the OSC state-machine seam in the next daemon schema bump, before/with S7.",
+      "sourceLenses": [
+        "system-architecture",
+        "ai-agents",
+        "product-vision",
+        "data-persistence"
+      ]
+    },
+    {
+      "id": "A26",
+      "severity": "medium",
+      "kind": "defect",
+      "theme": "product-coverage",
+      "title": "S4 knowledge graph: S6 dependency link missing and the roadmap row names only a viz library",
+      "problem": "Overview §3 lists S6 deps as 'S1, S3, S5' and the diagram leaves S4 as a leaf nothing consumes — yet §4.1 and the vision say the CEO 'picks the next objective from goals + knowledge graph' (the graph IS S4). Either the dependency row is wrong or a goals-only CEO v1 is an unstated product decision. Separately, S4's entire technical note is '@xyflow/react' — for the agents' primary decision input, the roadmap names none of its real decisions: storage (SQLite node/edge tables vs graph store, and WHERE given A13), schema/ontology, cross-project link identity (stable node IDs), or the agent retrieval mechanism (context injection vs tool queries vs embeddings). Viz-library-only is the wrong roadmap altitude.",
+      "evidence": "Overview §3 rows S4/S6 + diagram lines 72-84 vs §4 step 1 line 97; diagram note '(S3 goals/graph feed S6 directly)' blurs S3 with S4; overview line 70-71 (S4 notes = '@xyflow/react'); vision items 3, 6 (graphs feed agent decisions, linked across projects).",
+      "futureImpact": "S6 scheduled per the stated deps specs a CEO whose primary input doesn't exist, or S4 becomes an unplanned mid-S6 blocker; S4 gets specced as a graph-drawing feature instead of an agent-memory substrate, and retrieval is discovered as a requirement during S6.",
+      "recommendation": "Fix the overview: either add S4 to S6's deps or state 'S6 v1 operates on S3 goals only; S4 graph becomes a CEO input when it lands' — and make the diagram match. Expand the S4 row to name the open decisions: storage home (recommend plain SQLite node/edge tables in the A13 app-core DB; one per-user DB naturally supports cross-project links), UUID node IDs from day one, and the agent retrieval API as an S6 consumer.",
+      "sourceLenses": [
+        "product-vision",
+        "system-architecture",
+        "ai-agents",
+        "data-persistence"
+      ]
+    },
+    {
+      "id": "A27",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "data",
+      "title": "Workspace vs Project entity relationship undefined across S1-S5",
+      "problem": "The vision treats 'Workspaces (projects)' as one concept; the roadmap splits them — S1/S2 build 'workspaces' (shipped DB table + wire type) while S3 introduces 'Projects + Goals' and S4/S5 are 'per-project'. Nothing defines whether project == workspace, a project owns N workspaces, or vice versa, yet goals, graph, kanban, and the S6 join (agent works on project X via terminal in workspace Y) all key off whichever is canonical.",
+      "evidence": "vision.md concept 1 vs overview §3 rows S2/S3/S4/S5; spec §5 Workspace type has no project linkage; the word 'project' appears in no S0/S1 contract.",
+      "futureImpact": "S3's data model either duplicates workspaces under a new name or bolts a foreign key onto a table whose ownership is itself contested (A13), complicating everything downstream.",
+      "recommendation": "Resolve with one sentence in the overview during this docs pass, e.g.: 'Project is the S3 root entity; a workspace (S1) belongs to exactly one project; S3 migrates existing workspaces under a default project.' S3's spec then inherits a decided shape.",
+      "sourceLenses": [
+        "product-vision"
+      ]
+    },
+    {
+      "id": "A28",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "product-coverage",
+      "title": "No product-level Definition of Done or success metrics for any S2+ slice",
+      "problem": "Overview §3 rows are one-line noun phrases whose notes column contains only library names; no slice has an outcome statement ('after S5 a user/agent can ...') and no product success metrics exist anywhere (autonomy rate, escalations per completed task, stuck-detection latency) even though S7/S8 are premised on measurement. Per-slice detail is rightly deferred, but the roadmap gives future spec cycles no target and no scope fence.",
+      "evidence": "Overview §3 lines 60-87; no metrics/AC section in overview, README, or architecture.md.",
+      "futureImpact": "Each S2+ brainstorm re-derives scope from the vision brain-dump; slices drift larger (see A17) or smaller than intended, and 'production-grade, no MVP half-states' has no per-slice checkable meaning.",
+      "recommendation": "Add one 'Definition of Done (product)' bullet per slice to overview §3 (user-visible/agent-visible capability) and a short §7 with 3-5 north-star metrics that the S7 stats slice must eventually measure.",
+      "sourceLenses": [
+        "product-vision"
+      ]
+    },
+    {
+      "id": "A29",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "delivery",
+      "title": "Daemon operations lifecycle unowned: no runbook, no uninstall, no log rotation, no backup/export",
+      "problem": "Four operational gaps for an always-running launchd daemon: (1) no runbook/troubleshooting doc — how to inspect (launchctl print), restart (kickstart -k), fully reset (bootout + plist + socket + DB), where logs live, what a quarantined bpa.db.corrupt-<ts> means; no CONTRIBUTING.md either. (2) No uninstall path anywhere — deleting the app leaves a registered LaunchAgent pointing at a trashed binary (ghost background-items entry). (3) The daemon writes three unbounded log files (tracing_appender::rolling::never plus launchd stdout/err) with no rotation/retention, and the log location is documented only inside the spec. (4) Zero coverage of backup/export/import of user data, including safe live-backup semantics for a WAL DB owned by a running daemon (naive copies yield torn snapshots) and no re-import route from the quarantine file. The clean-VM smoke runbook also omits its own prerequisites (repo checkout + Node on the VM).",
+      "evidence": "ls docs = architecture, build-macos, traceability, superpowers only; grep uninstall in src-tauri/src/launchd.rs = 0; crates/sessiond/src/main.rs:64 (rolling::never); spec §8.3 lines 437-438 (locations only); grep backup|export|import across docs/README = 0; docs/build-macos.md:192-208 vs scripts/smoke-clean-vm.sh:75 (needs node + repo, unlisted).",
+      "futureImpact": "First real daemon incident (e.g. stale dev plist pointing at a deleted debug binary — which dev mode installs) has no recovery path; months-running daemon fills the disk (which then degrades SQLite persistence, compounding A12); by S4-S6 the DB holds irreplaceable graphs/goals with no supported migration or recovery route.",
+      "recommendation": "In the docs pass add docs/runbook-daemon.md (inspect/restart/reset/uninstall procedures, log + DB + socket + plist locations, quarantine semantics, dev-mode cleanup) and a short CONTRIBUTING.md; spec log rotation (rolling::daily or size-capped, keep N); document the manual uninstall procedure now and backlog an in-app 'remove background service' affordance; add a roadmap line for export/import via SQLite backup API / VACUUM INTO plus a note on the .corrupt quarantine artifact; fix the clean-VM §5 prerequisites.",
+      "sourceLenses": [
+        "delivery-ops",
+        "docs-vs-reality",
+        "data-persistence"
+      ]
+    },
+    {
+      "id": "A30",
+      "severity": "medium",
+      "kind": "doc-rot",
+      "theme": "docs-rot",
+      "title": "As-built errata needed: committed plan/spec/README describe superseded or never-built reality",
+      "problem": "A cluster of committed-doc drift beyond A2/A12: (1) plan amendment §B locks a Supervisor API (Arc<Db>, broadcast fan-out) that T9 proved impossible and replaced (mpsc subscribe_output, broker-owned persistence) — the supersession lives only in the gitignored ledger, and §C misattributes the live OSC-133/7 strip (actually attach.rs/T11, contradicting spec §10.3's pass-through claim); (2) README quickstart claims 'npm run tauri dev spawns the daemon automatically' — beforeDevCommand only runs vite, nothing builds bpa-sessiond, so a fresh contributor's first run fails; spec §3/§8.3's 'daemonize 0.5 dev fallback' appears nowhere in code or plan (silently dropped); (3) architecture.md omits the bpa-paths shared crate added by the blocker fix and still calls crates/protocol 'the one genuinely shared file'; (4) the spec §15 're-verify at plan time' items have no recorded outcomes — §15.3 (binary/ArrayBuffer Channel payload for the firehose) was never resolved and number[] JSON shipped silently, tauri='2'/@tauri-apps/api '^2' float against §3's instruction to record concrete versions; (5) xterm addon pins drifted (§3 locks 0.15/0.11/0.13, shipped ^0.16/^0.12/^0.14) and search/web-links/serialize are installed but imported nowhere; (6) minor: README says 194 tests vs traceability's 201/four crates, plan says package name 'app' and alacritty =0.24.2 (actual builder-pro-ai, =0.25.0), traceability has no explicit renderer-chain row, and S0's 'settings' goal shipped as storage plumbing with no note.",
+      "evidence": "Plan :133-146 (§B broadcast API) and :168-173 (§C) vs attach.rs and gitignored ledger; README.md:88 vs tauri.conf.json beforeDevCommand='npm run dev' and launchd.rs:217-231 (sibling lookup only); grep daemonize across crates/src-tauri/plan = 0; architecture.md:84-104 vs Cargo.toml members crates/paths; grep ArrayBuffer in plan = 0; src/ipc/channel.ts:10 (number[]); design doc §3:106 vs package.json; README.md:101 vs traceability.md:70-77; plan :100-101, :184-185 vs Cargo.tomls.",
+      "futureImpact": "A future maintainer or S6 implementer designs against a nonexistent broadcast API and wrong persistence ownership; every new dev hits a broken quickstart and chases a phantom feature flag; §15.3 (a real S6 performance question — N agent firehoses through per-byte JSON) gets re-litigated or forgotten; stale pins/counts erode the 'honest about state' brand.",
+      "recommendation": "Produce one as-built errata section in the spec (or docs/as-built.md) in this docs pass covering: T9 supervisor API + broker persistence, live OSC strip in attach.rs (amending §10.3), the dropped daemonize fallback and what dev mode actually does (plus 'cargo build -p bpa-sessiond' in the quickstart or beforeDevCommand); update architecture.md's module map with crates/paths; add a §15 resolution table (item → outcome → where recorded) and decide §15.3 (Tauri 2 Channel supports binary payloads — adopt or defer with rationale, cross-ref A17's grid posture); true up §3 addon pins and drop or annotate unused addons; sweep the small fixes (test count → point at traceability, plan supersession markers, renderer traceability row, S0 settings note).",
+      "sourceLenses": [
+        "docs-vs-reality",
+        "system-architecture",
+        "frontend-ux",
+        "product-vision"
+      ]
+    },
+    {
+      "id": "A31",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "delivery",
+      "title": "Local gates incomplete and builds non-reproducible: final-suite lacks clippy/tsc/fmt, no toolchain or version pinning, no release-posture statement",
+      "problem": "The single command gating the S0+S1 DoD has holes: no clippy stage (known #13 — and 13 clippy-1.92 lints currently fail -D warnings), no TypeScript typecheck (vitest strips types via esbuild; tsc --noEmit runs only inside npm run build, which final-suite never invokes, so a TS type error passes ALL gates), no cargo fmt --check/eslint — and spec §14.3's DoD itself never requires lint/format/typecheck. Reproducibility: no rust-toolchain.toml (only an MSRV floor; toolchain drift already caused the clippy incident), no Node pin (no engines/.nvmrc though Vite 6 needs ≥18.19). Version identity: 0.1.0 is duplicated across package.json, tauri.conf.json, and four Cargo.tomls with no bump process or CHANGELOG, while client_build/daemon_build handshake strings derive from CARGO_PKG_VERSION — a partial bump silently desyncs the wire-reported identity. Also missing: a single 'release security posture' statement (hardened runtime + deep-signed sidecar + notarization mandatory for distribution; dev-signed = local only) so 'complete' is never misread as 'notarized'.",
+      "evidence": "scripts/final-suite.sh:17-51 (stages: cargo test, vitest, ts-parity, coverage, e2e only); package.json:8 (tsc only in 'build'); spec §14.3 lines 739-747 (no lint/typecheck row); ls rust-toolchain* empty; Cargo.toml:7 (rust-version floor); no engines/.nvmrc; version 0.1.0 in six files; env!(CARGO_PKG_VERSION) at src-tauri/src/lib.rs:70-71 and sessiond/main.rs:95; no CHANGELOG; spec §14.3 notarization DoD unmet while ledger says T24 COMPLETE.",
+      "futureImpact": "Type/lint regressions accumulate silently ('ALL GATES PASSED' overstates what was checked — already manifested); machine-to-machine gate divergence makes the future CI (A20) non-reproducible; the first release cycle produces mismatched daemon_build identities and unanswerable 'which daemon is running?' support questions.",
+      "recommendation": "Amend spec §14.3 DoD and final-suite.sh in this pass: add cargo clippy --workspace --all-targets -- -D warnings, cargo fmt --check, and tsc --noEmit as early stages; fix or explicitly allow the 13 existing lints. Commit rust-toolchain.toml (pinned stable + clippy/rustfmt/llvm-tools) and Node engines/.nvmrc; adopt workspace.package version inheritance + a bump checklist + CHANGELOG.md; add a short 'Release security posture' section to README/build-macos.md cross-linking the open notarization human step. Fold all into the A20 CI work item.",
+      "sourceLenses": [
+        "delivery-ops",
+        "system-architecture",
+        "docs-vs-reality",
+        "security"
+      ]
+    },
+    {
+      "id": "A32",
+      "severity": "medium",
+      "kind": "gap",
+      "theme": "frontend",
+      "title": "No frontend platform conventions for S2+: store/event-wiring architecture, design tokens, and GUI test strategy all undefined",
+      "problem": "Three convention gaps that every UI slice (files, goals, graph, kanban, agents, stats) will hit: (1) State/eventing — 'Zustand for state' is locked with no slice-composition convention; built reality is one flat store plus ALL event-to-store wiring hand-rolled in a single App.tsx useEffect; the event namespace (session://, workspace://, daemon://) is implicit; and §6.3 has no initial 'daemon://connected' event, forcing App into a bespoke bounded-backoff hydrate-retry loop every future surface must replicate. (2) Design system — 'minimalist but functional UI' is never defined; theme.ts is one hard-coded dark palette (colors only, no spacing/typography/radius tokens, no light mode despite S0's 'theme' goal) and every component uses ad-hoc inline styles. (3) Testing — §14.1's frontend suite is unit-only with a faked TerminalManager; no component-integration or GUI-e2e strategy (tooling, when required) is defined anywhere, and the A1 dead-pane bug is exactly the class this layer would have caught; S5 dnd and S4 canvas are barely unit-testable.",
+      "evidence": "src/store/store.ts (flat store); src/App.tsx:43-129 (monolithic subscription+hydrate effect, comment :30-33 on the missing initial-connect event); spec §6.3 lines 287-299; src/theme.ts; inline styles throughout src/components/*.tsx; design doc §14.1 lines 713-716; tests/e2e = socket harness only; no Playwright/tauri-driver decision recorded.",
+      "futureImpact": "S2-S7 each invent their own store slices, spacing/typography, and retry dances; App.tsx becomes a god-effect; inline styles make light mode/theming a cross-cutting rewrite; integration regressions like A1 keep shipping green.",
+      "recommendation": "Write a short frontend-conventions doc in this pass: (1) Zustand slice-per-feature convention + an event-subscription registry module, plus add daemon://connected (initial) to §6.3 (one-line core change) and document the <domain>://<event> namespace rule; (2) extend Theme with spacing/typography/radius tokens and decide the styling mechanism (CSS variables recommended for xterm theme sync and future light mode); (3) lock the testing contract per UI slice: unit (vitest/RTL) + component-integration against real store+manager + one tauri-driver/WebdriverIO GUI smoke, tool pinned before S2.",
+      "sourceLenses": [
+        "frontend-ux"
+      ]
+    }
+  ],
+  "report": {
+    "executiveSummary": "S0+S1 delivered a genuinely strong terminal spine: the launchd-owned daemon with socket-only coupling is the correct survive-restart architecture, the shared protocol crate with ts-rs parity structurally kills Rust-TS drift, and honest-degradation behavior (DB quarantine, bounded queues, fail-closed migrations) is specced AND test-enforced rather than aspirational. The audit found exactly one broken-today defect — A1, a per-component attach guard that makes every terminal after the first a dead pane on tab switch — which invalidates the 'FULL APP DONE' claim for multi-terminal use and slipped through because the test suite has no component-integration layer. The biggest systemic risk is not any single bug but a documentation-truth problem in three forms: the locked spec actively contradicts the built wire codec (A2), the canonical survival table and e2e claims overstate what was built and proven (A12), and the entire accepted-deferred backlog lives only in a gitignored ledger that evaporates on merge (A10) — for a project whose whole method is 'zero-context implementers follow the locked spec,' spec-vs-reality drift is a first-class production defect. The second systemic cluster is forward contracts being locked without their evolution story: no protocol/upgrade policy before the first version bump (A3), no delete/retention in a protocol designed to avoid change (A15), and an agent layer (S6) whose flagship signals and control surfaces demonstrably won't work as promised — waiting_for_input is structurally blind to every named raw-mode worker CLI (A5), single-attach steals the human's view (A4), and there is no execution trust layer, provider slice, or key-storage decision for autonomous agents wielding uid-level power and the user's ssh-agent (A7, A8, A9, A11). Third, every quality gate is honor-system: CI does not exist despite three docs assuming it, and drift has already materialized once as 13 unnoticed clippy failures (A20, A31). None of this requires touching the sound topology; the fix plan is mostly a docs-and-roadmap pass (spec errata, protocol-evolution policy, agent-layer forward contracts, durable backlog, security posture) plus a small set of code follow-ups (A1 attach fix, reconnect/error UX, deletion, CI). Do the docs pass before S2 planning starts, because S2 inherits every one of these ambiguities on day one.",
+    "topProblems": [
+      "A1 (critical): Tab switch yields a permanently dead terminal pane — attach guard is per-component-instance, not per-session; core S1 multi-terminal UX is broken in the shipped app",
+      "A2 (high): Locked spec instructs the exact derive pattern the built wire cannot support; the dual-codec JSON-in-bincode reality and never-re-derive rule live only in code comments and a gitignored ledger",
+      "A3 (high): No protocol-evolution or app/daemon upgrade strategy — the first PROTO_VERSION bump is a silent-skew-or-kill-all-sessions event with no remediation UX",
+      "A5 (high): waiting_for_input is structurally false for every named raw-mode worker CLI, so the flagship S6 stuck-detection signal never fires and no doc records the mismatch",
+      "A7 (high): No agent execution trust layer — no approval gate, command policy, audit trail, or caller identity for S6 agents, which also inherit the user's live ssh-agent by locked env contract",
+      "A8 (high): LLM provider abstraction has no owning slice and per-call cost/token capture is unplanned — data that cannot be backfilled once S6 starts",
+      "A10 (high): The entire accepted-deferred backlog (security decision, deadlock hazard, test-infra items) exists only in the gitignored .superpowers ledger and is lost on merge",
+      "A11 (high): env_overrides bypasses the env allowlist with no DYLD_*/LD_* denylist and the accepted rationale is recorded nowhere durable — a code-injection vector S6 agents will drive programmatically",
+      "A12 (high): Survival story overstated in the canonical no-drift docs — 'daemon restart -> survive' is false for live shells, degradation caveats are missing, and a daemon-restart e2e is claimed that never restarts the daemon",
+      "A15 (high): No delete/rename/GC/retention anywhere — sessions, workspaces, and scrollback accumulate forever, exited tabs are un-closable, and the omission sits in the locked protocol",
+      "A19 (high): Webview CSP is null with the network boundary undocumented — a live injection-to-exfiltration path once S6 renders agent-generated content",
+      "A20 (high): CI does not exist and is not roadmapped while spec/architecture/traceability all cite it as an enforcer; gate rot has already happened once undetected",
+      "A22 (high): Reconnect re-attach contract undefined for hidden sessions — after daemon restart, stale panes look live with no indicator",
+      "A23 (high): UI silently swallows every command error (no catch, no toast, no error-code mapping) and disconnected panes are not visually degraded, violating the project's own honesty rule"
+    ],
+    "architectureRecommendations": [
+      "Add a 'Protocol evolution & upgrade' section to the spec/overview locking: append-only variant discipline with cross-version decode tests, client-range/daemon-range version negotiation (frames already carry min/max), daemon-upgrade choreography with real drain semantics for DaemonShutdown, PROTO_VERSION bump policy, and an app-update-channel decision. This kills A3 and A14, de-risks the additive changes A15/A16 need, and gives A2's codec trajectory a home.",
+      "Do a single 'spec tells the truth' errata pass as a first-class deliverable: document the dual-codec/never-re-derive reality in §3/§5/§15.5 (A2), reword the survival truth table and degradation caveats and fix the fabricated e2e claims (A12), true up persistence semantics — flush interval, phantom 32KB trigger, seq-0 snapshot (A24) — and produce an as-built errata for the superseded Supervisor API, dropped daemonize fallback, broken quickstart, and stale pins (A30). The project's method depends on the locked spec being executable by a zero-context implementer; treat spec drift as a P1 defect class.",
+      "Establish a durable-backlog process: create tracked docs/backlog.md (or Linear issues) transcribing every ledger-only deferred item, migrate CONTRACT RULES and as-built notes into tracked docs, and add a DoD rule that accepted-deferred findings must land in the committed backlog, never only the gitignored ledger. Kills A10 structurally and prevents its recurrence for every future slice.",
+      "Write the 'agent platform forward contract' into overview §4 before any S6 work: name the agent process model and Hop-B (not the Tauri command list) as the canonical programmatic API (A6), record app-side broker fan-out as the plan for human+agent co-viewing (A4), correct waiting_for_input's stated scope and add an external-worker-adapter subsystem as an S6 dependency (A5), and enumerate the missing agent-facing capabilities — text snapshot, cursor-based read, argv spawn — as planned additive requests (A16).",
+      "Add a named 'agent execution trust layer' to the security model and roadmap: approval gate for irreversible action classes, command policy, append-only audit log, per-client identity decision, SSH_AUTH_SOCK withheld/gated for agent sessions (A7); resolve the env_overrides DYLD denylist in committed spec §16 (A11); lock provider-key storage to Keychain (A9); document and set the webview CSP/network boundary with LLM egress core-side only (A19); add the scrollback-at-rest sensitivity statement and purge path (A18). One consolidated §16 rewrite kills five security findings.",
+      "Add a 'data layer charter' section to the overview before S3: scope the daemon's ownership to terminal-domain state, decide S3+ domain data lives in a core-owned store, define the Project⇄Workspace relationship in one sentence, fix the stale S0 row, name S4's real decisions (storage, node identity, agent retrieval) and its S6 dependency status, and note the historical-data capture plan (transcript log, command_events table). Kills A13, A26, A27 and frames A25.",
+      "Re-decompose the roadmap's back half: split S6 into S6a provider layer (with per-call cost/token capture from day one), S6b runtime + one role end-to-end, S6c escalation loop + inbox UI, S6d worker adapters, S6e custom-agent authoring; extend S7 with LLM traces/spend/evals; add per-slice product DoD statements and 3-5 north-star metrics. Kills A8, A17, A28 and gives every future spec cycle a scope fence.",
+      "Stand up CI and reproducibility as a blocking pre-S2 work item: GitHub Actions macOS runner executing final-suite stages plus clippy -D warnings, fmt --check, tsc --noEmit, coverage, and an assertion that real-shell tests actually ran; commit rust-toolchain.toml and Node engines; adopt workspace version inheritance + CHANGELOG. Kills A20 and A31 and makes every other documented gate real instead of honor-system.",
+      "Define a frontend platform contract with a per-session attach-state model at its core: attachment tracked per SessionId (fixes A1), an explicit reconnect/stale/re-attach contract (A22), a central error-code-to-message surface so no command rejection is silent (A23), plus store-slice/event-namespace/design-token conventions and a component-integration + GUI-smoke test layer that would have caught A1 (A32). This is one coherent 'UI truthfulness' architecture move, not four patches."
+    ],
+    "fixPlanSkeleton": [
+      {
+        "workItem": "Fix dead-pane attach bug: track attachment per SessionId (or key TerminalPane by session id), reset semantics on dispose, fix killSession dispose ordering; add component test creating two sessions and switching tabs asserting attach per session",
+        "coversFindingIds": [
+          "A1",
+          "A23"
+        ],
+        "kind": "code-followup"
+      },
+      {
+        "workItem": "Spec §12/§13 attach & reconnect contract: state the attach-once invariant is per-session; define stale/re-attach semantics for hidden sessions after reconnect (lazy re-attach on show with fresh Replay, 'reattaching' pane state), and Replay burst ordering",
+        "coversFindingIds": [
+          "A1",
+          "A22"
+        ],
+        "kind": "spec-edit"
+      },
+      {
+        "workItem": "Implement reconnect model: mark all attached sessions stale on daemon://reconnected, re-attach per contract, per-pane stale/reattaching indicator, dim/disable panes when daemonConnected=false",
+        "coversFindingIds": [
+          "A22",
+          "A23"
+        ],
+        "kind": "code-followup"
+      },
+      {
+        "workItem": "Spec §12/§13 error-surfacing contract + implementation: error-code-to-message table generated from daemon typed errors, lightweight toast/notification surface, catch handlers on all fire-and-forget command call sites, tests asserting failed createSession/createWorkspace are visible",
+        "coversFindingIds": [
+          "A23"
+        ],
+        "kind": "spec-edit"
+      },
+      {
+        "workItem": "Codec truth pass: amend spec §3/§5/§6.2/§15.5 to document the bincode tagged-enum limitation, hand-written impls, JSON-in-bincode bridge, and the never-re-derive rule as a locked contract; add a §15 'verify at lock' resolution table (incl. §15.3 binary Channel payload decision); record the codec trajectory decision (keep bridge vs migrate with A3 work)",
+        "coversFindingIds": [
+          "A2",
+          "A30"
+        ],
+        "kind": "spec-edit"
+      },
+      {
+        "workItem": "New 'Protocol evolution & upgrade policy' spec section: append-only variant rule + cross-version decode test, client-range version negotiation, daemon-upgrade choreography (Welcome.daemon_build comparison, kickstart -k with consent, real DaemonShutdown drain semantics or mark reserved), PROTO_VERSION bump policy, newer-DB-meets-old-daemon behavior, Typing variant ownership, app-update channel roadmap row; add the S2 multi-root Workspace evolution note (additive workspace_roots)",
+        "coversFindingIds": [
+          "A3",
+          "A14"
+        ],
+        "kind": "spec-edit"
+      },
+      {
+        "workItem": "Overview §4 agent-platform forward contracts: broker fan-out as plan of record for human+agent co-viewing + single-instance posture; Hop-B as the canonical programmatic API with agent process/calling-convention paragraph and an 'agent runs' survival-table row; correct waiting_for_input scope (canonical-mode only, NOT the worker-stuck mechanism) and add external-worker-adapters as a named S6 dependency; enumerate agent-facing capability requirements (text snapshot, read_output since_seq, command+argv spawn) as additive requests",
+        "coversFindingIds": [
+          "A4",
+          "A5",
+          "A6",
+          "A16"
+        ],
+        "kind": "overview-roadmap-edit"
+      },
+      {
+        "workItem": "Roadmap re-decomposition: split S6 into S6a LLM provider layer (trait, adapters, routing/fallback, streaming, retries, per-call cost/token/latency capture from first call) through S6e custom-agent authoring + escalation inbox UI + multi-terminal grid deliverable; extend S7 with LLM traces/spend/budgets/evals; add per-slice product DoD bullets and 3-5 north-star metrics",
+        "coversFindingIds": [
+          "A8",
+          "A17",
+          "A28"
+        ],
+        "kind": "overview-roadmap-edit"
+      },
+      {
+        "workItem": "Security posture rewrite of spec §16 + overview: named 'agent execution trust layer' roadmap entry (approval gate, command policy, audit log, interception point decision, per-client identity vs uid-only decision); SSH_AUTH_SOCK withheld/gated for agent-spawned sessions; env_overrides DYLD_*/LD_* decision documented; webview boundary — restrictive CSP, LLM egress core-only; provider keys locked to macOS Keychain + LLM-payload log redaction; bpa.db sensitivity statement, 0600 perms, purge-on-delete tie-in",
+        "coversFindingIds": [
+          "A7",
+          "A9",
+          "A11",
+          "A18",
+          "A19"
+        ],
+        "kind": "spec-edit"
+      },
+      {
+        "workItem": "Security code follow-ups: enforce DYLD_*/LD_* denylist before applying env_overrides in the daemon; set restrictive CSP in tauri.conf.json; harden bpa.db file mode — each with tests",
+        "coversFindingIds": [
+          "A11",
+          "A19",
+          "A18"
+        ],
+        "kind": "code-followup"
+      },
+      {
+        "workItem": "Create tracked docs/backlog.md (or Linear issues via LINEAR_API_KEY) transcribing ledger known-issues #5-#9, #12-#13 verbatim with severity/decision flags/owner-slice tags; migrate CONTRACT RULES + as-built Supervisor API notes into tracked docs; correct the stale 'clippy clean' claim",
+        "coversFindingIds": [
+          "A10"
+        ],
+        "kind": "new-doc"
+      },
+      {
+        "workItem": "Process rule: 'accepted-deferred findings go to the committed backlog, never only the .superpowers ledger' — add to DoD checklist and the planning-cycle instructions",
+        "coversFindingIds": [
+          "A10"
+        ],
+        "kind": "process"
+      },
+      {
+        "workItem": "Survival-story honesty pass across overview §2 / spec §13 / README: reword to 'daemon restart/upgrade — live shells END; records + scrollback survive and rehydrate inactive', add §11 degradation caveat footnote, spec a persistence-degraded/quarantine Push event + UI indicator; fix traceability/README e2e claims to what phase 4 proves; true up persistence docs (flush interval vs 500ms claim, drop/implement 32KB trigger, seq-0 snapshot semantics, dirty-check + DB write-architecture note for the data charter)",
+        "coversFindingIds": [
+          "A12",
+          "A24"
+        ],
+        "kind": "spec-edit"
+      },
+      {
+        "workItem": "Persistence code follow-ups: real daemon-restart e2e phase (SIGTERM daemon, relaunch, assert rehydrated inactive sessions + scrollback), persistence-degraded event emission, last-flushed dirty-check to skip unchanged rings",
+        "coversFindingIds": [
+          "A12",
+          "A24"
+        ],
+        "kind": "code-followup"
+      },
+      {
+        "workItem": "Data-layer charter section in the overview: scope daemon ownership to terminal-domain durable state, S3+ domain data in core-owned store (decided in S3 spec), one-sentence Project⇄Workspace relationship with default-project migration, fix stale S0 'local SQLite' row, expand S4 row (storage home, UUID node IDs, agent retrieval API, S6 dependency status or goals-only CEO v1), note historical-data plan (worker transcript log + command_events table at next schema bump, lock the 256KiB replay cap in §11)",
+        "coversFindingIds": [
+          "A13",
+          "A26",
+          "A27",
+          "A25"
+        ],
+        "kind": "overview-roadmap-edit"
+      },
+      {
+        "workItem": "Retention & lifecycle spec addition: DeleteSession/DeleteWorkspace{cascade}/Rename request variants, Exited-session retention policy, PRAGMA auto_vacuum=INCREMENTAL at schema v2, resource model (max concurrent sessions with typed SessionLimitReached error, shared ticker note, per-session cost envelope in architecture.md)",
+        "coversFindingIds": [
+          "A15",
+          "A21"
+        ],
+        "kind": "spec-edit"
+      },
+      {
+        "workItem": "Implement session/workspace deletion + retention: daemon delete paths with cascade + tests, wire store removeSession so closing an exited tab removes it, rehydrate respects retention",
+        "coversFindingIds": [
+          "A15"
+        ],
+        "kind": "code-followup"
+      },
+      {
+        "workItem": "CI + reproducibility (blocking pre-S2): GitHub Actions macOS workflow running final-suite stages + clippy -D warnings + fmt --check + tsc --noEmit + coverage + real-shell-tests-ran assertion; fix/allow the 13 existing clippy lints; commit rust-toolchain.toml + Node engines/.nvmrc; workspace version inheritance + bump checklist + CHANGELOG; soften 'CI' wording in docs until it lands; add release-security-posture statement to build-macos/README",
+        "coversFindingIds": [
+          "A20",
+          "A31"
+        ],
+        "kind": "code-followup"
+      },
+      {
+        "workItem": "docs/runbook-daemon.md + CONTRIBUTING.md: inspect/restart/full-reset/uninstall procedures, log/DB/socket/plist locations, quarantine semantics, dev-mode cleanup; spec log rotation (daily or size-capped); backlog in-app 'remove background service'; roadmap line for backup/export via SQLite backup API; fix clean-VM smoke prerequisites",
+        "coversFindingIds": [
+          "A29"
+        ],
+        "kind": "new-doc"
+      },
+      {
+        "workItem": "As-built errata doc (or spec appendix): T9 supervisor API supersession + broker-owned persistence, live OSC strip location (amend §10.3), dropped daemonize fallback + what dev mode actually does (fix README quickstart with the sessiond build step), architecture.md module map + bpa-paths, addon pin true-up + unused addons, test-count/package-name/version sweeps",
+        "coversFindingIds": [
+          "A30"
+        ],
+        "kind": "new-doc"
+      },
+      {
+        "workItem": "docs/frontend-conventions.md: Zustand slice-per-feature + event-subscription registry, add daemon://connected initial event to §6.3, <domain>://<event> namespace rule, design tokens (spacing/typography/radius, CSS variables) + light-mode posture, per-slice testing contract (unit + component-integration against real store/manager + one GUI smoke, tool pinned before S2)",
+        "coversFindingIds": [
+          "A32"
+        ],
+        "kind": "new-doc"
+      }
+    ],
+    "openQuestionsForUser": [
+      "Codec trajectory (A2/A3): keep the JSON-in-bincode bridge with a hard never-re-derive rule, or schedule a one-time migration to a tagged-enum-safe codec (bincode 2 serde-compat / postcard) bundled with the version-negotiation work? The second costs one planned wire break now to avoid a permanent double-serializer discipline.",
+      "Daemon-upgrade UX (A3): is 'update background service — N live sessions will end' with explicit consent an acceptable product answer for v0.x, and do you want the Tauri auto-updater or manual DMG releases as the app-update channel?",
+      "S6 co-viewing (A4): confirm the plan of record — agents tap output in-process via app-side broker fan-out while socket attach stays GUI-exclusive (near-free), vs designing wire-level multi-subscriber attach (bigger, also serves future multi-window)?",
+      "Agent brake posture (A7): which action classes require human approval (rm -rf, force-push, spend, prod deploy?) and is batching approvals with the existing escalation inbox acceptable, or do you want a synchronous confirm for some classes?",
+      "SSH_AUTH_SOCK for agent-spawned sessions (A7/A11): withhold by default and grant per-task, or keep forwarding with audit-only? This directly trades agent autonomy (git push works) against blast radius.",
+      "env_overrides (A11): enforce a DYLD_*/LD_* denylist in the daemon now, or document same-uid ceiling as intentional and defer enforcement to the S6 agent trust layer?",
+      "Backlog home (A10): tracked docs/backlog.md in-repo, or Linear issues via your API key? (Pick one; the fix plan will wire the process rule to it.)",
+      "S6 v1 CEO input (A26): may the first CEO operate on S3 goals only, with the S4 knowledge graph added as an input later — or is the graph a hard prerequisite (which reorders S4 before S6)?",
+      "Retention defaults (A15): what should auto-expire — e.g. keep last 20 exited sessions per workspace / 30-day TTL, agent-configurable? And is deleting a workspace allowed to cascade-kill its live sessions?",
+      "Scope of this pass: docs+roadmap-only first (everything except W1's A1 fix), or do you want the code follow-ups (A1 dead pane, reconnect UX, error toasts, deletion, CI) executed in the same plan?"
+    ],
+    "strengths": [
+      "launchd-owned daemon (not a Tauri sidecar) with KeepAlive{Crashed}, socket-only coupling, and tested bootout/re-bootstrap — the load-bearing survive-restart topology is correct and proven; no fix item may touch it.",
+      "The S1 command surface genuinely built as the future S6 agent control API: daemon-side path/cwd validation regardless of caller, envOverrides exposed for agents, status push designed for programmatic consumers — preserve this agent-first posture while layering the trust/policy work on top, never narrow it back to GUI-only.",
+      "Honest-degradation discipline is mechanically enforced, not aspirational: DB quarantine-and-recreate, bounded per-client outq with drop-disconnect, fail-closed migrations, connection state set only from real outcomes — all specced AND covered by named tests; extend this pattern to the gaps (persistence-degraded event, UI errors) rather than replacing it.",
+      "The OSC-133/7 trust model is explicitly correct: derived lifecycle/cwd documented as child-forgeable and advisory, 'S6 agents must not treat it as authoritative for security decisions', bounded hardened parser — preserve this wording verbatim and extend waiting_for_input's stated scope in the same honest register.",
+      "Single shared protocol crate with ts-rs-generated, diff-gated TS types structurally eliminates Rust⇄TS drift — keep as the mandatory pattern for every future slice's shared types (the fix is making the 'CI' half real).",
+      "Sanitized byte-ring replay plus bytes-never-in-React-state (firehose straight into xterm instances held outside Zustand) is the single most important data-flow decision for scaling to N agent terminals — do not regress toward grid serialization or state-managed bytes while fixing attach/reconnect.",
+      "The canonical truth-table pattern (one authoritative statement in overview §2, restated with no-drift notes in spec §13 and README) is the right documentation skeleton — the fix is rewording its content honestly and hanging new rows on it, not restructuring it.",
+      "docs/traceability.md and docs/build-macos.md are exemplary honest-evidence artifacts (real test fn names per contract row, explicit what-was-not-run disclosures, loud degradation semantics in release tooling) — they are the durable-capture template the ledger-only backlog items should have followed; hold every new doc from this fix plan to their standard."
+    ]
+  }
+}
