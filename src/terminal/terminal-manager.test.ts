@@ -508,6 +508,36 @@ describe("TerminalManager", () => {
     expect(m.isAttached("s1")).toBe(true);
   });
 
+  it("stale completion resolving while a NEWER attach is in flight is refused (generation guard)", async () => {
+    // The discriminating interleaving for the generation counter: after a reset, a NEW attach is
+    // already pending (state is back to "attaching") when the STALE (pre-reset) completion lands.
+    // A generation-less guard of `attach === "attaching"` alone would wrongly record the stale
+    // completion as `attached` while the newer attempt is still in flight — if that newer attach
+    // then failed, the renderer would sit "attached" with no live channel (dead pane).
+    const m = new TerminalManager();
+    m.ensure("s1");
+
+    const dStale = deferred<void>();
+    const dFresh = deferred<void>();
+    attachSessionMock.mockReturnValueOnce(dStale.promise).mockReturnValueOnce(dFresh.promise);
+
+    const pStale = m.attach("s1"); // gen 0, pending
+    m.resetAllAttachments(); // bump gen -> 1, state detached
+    const pFresh = m.attach("s1"); // gen 1, pending -> state "attaching" again
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+
+    // Stale completion lands WHILE the fresh attempt is still in flight.
+    dStale.resolve(undefined);
+    await pStale;
+    expect(m.isAttached("s1")).toBe(false); // stale gen-0 completion refused
+
+    // The fresh gen-1 attempt is still live and settles normally.
+    dFresh.resolve(undefined);
+    await pFresh;
+    expect(m.isAttached("s1")).toBe(true);
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+  });
+
   it("resetAttachment(id) during an in-flight attach also invalidates the stale completion", async () => {
     const m = new TerminalManager();
     m.ensure("s1");

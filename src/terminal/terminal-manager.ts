@@ -271,7 +271,11 @@ export class TerminalManager {
           live.attach = "detached";
           live.attachInFlight = undefined;
         }
-        throw err; // propagate to the caller (existing error style: caller logs/handles)
+        // Propagate so callers CAN handle. NOTE: both production call sites currently `void`
+        // this promise (TerminalPane effect, App reconnect), so a failed attach surfaces only
+        // as an unhandledrejection warning and a detached-but-retryable pane; the user-visible
+        // error surface is a known gap tracked in the backlog (error-surfacing contract).
+        throw err;
       },
     );
 
