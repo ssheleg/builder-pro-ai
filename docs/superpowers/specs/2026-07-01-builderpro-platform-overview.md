@@ -48,12 +48,36 @@ The terminal engine (S1) keeps sessions alive in a detached daemon. What actuall
 
 | Event | Sessions |
 |---|---|
-| GUI close / crash / restart | **survive** (reattach + replay) |
-| Daemon restart | survive (SQLite rehydrate; scrollback up to last flush ≈500 ms) |
-| **Daemon crash** | live shells die (they are the daemon's children); scrollback replays up to last flush |
+| GUI close / crash / restart | live shells **keep running** (daemon-owned); reattach + replay |
+| Daemon restart / upgrade / crash | live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
 | **macOS logout** | die (per-user LaunchAgent torn down); cross-logout survival is out of scope (needs a root LaunchDaemon) |
+| Agent runs (S6+) | **undefined until S6b** — agent state is NOT covered by the daemon survival model (honest placeholder) |
 
 This is stated honestly in-app; the product never claims sessions "survive anything."
+(Amended 2026-07-04, A12: the earlier "daemon restart → survive" row overstated — live PTYs die
+with the daemon; only records + scrollback survive.)
+
+---
+
+## Protocol evolution & upgrade policy (added 2026-07-04 — A3/A14; owner decisions D3/D4)
+
+The Hop-B wire (core ⇄ daemon) outlives app updates by design, so its evolution is policy, not
+improvisation:
+
+- **Wire discipline:** enum variant order is FROZEN (append-only); new requests/pushes are
+  appended; fields are added additively. Every protocol change ships a cross-version decode test.
+- **Version negotiation (protocol v2, Cycle 2):** the client sends its supported range; the daemon
+  answers in-range or `Incompatible{min,max}`, and the GUI shows a remediation dialog (below) —
+  never a silent misparse. Today PROTO_VERSION=1 is exact-match; negotiation lands with v2.
+- **Daemon upgrade choreography (owner decision D4):** when a new app version carries a new
+  daemon, the GUI shows a consent dialog — *"Update background service — N live sessions will
+  end; records + scrollback survive"* — then drains via SIGTERM and replaces the daemon with
+  `launchctl kickstart -k`. `DaemonShutdown{drain}` is currently a no-op Ack and is **reserved**
+  until protocol v2 defines real drain semantics.
+- **Release channel:** manual notarized DMG for v0.x; Tauri auto-updater is a named roadmap item
+  (BL-19, `docs/backlog.md`).
+- **Workspace evolution (A14):** multi-root workspaces arrive as an additive
+  `workspace_roots: Vec<PathBuf>` alongside the existing `root_path` (compat preserved), slice S2.
 
 ---
 
@@ -61,50 +85,95 @@ This is stated honestly in-app; the product never claims sessions "survive anyth
 
 Build spine-first. Each row is an independent spec/plan/build unit.
 
-| # | Subsystem | Depends on | Notes |
+| # | Subsystem | Depends on | Notes · product DoD · north-star metric |
 |---|---|---|---|
-| **S0** | App shell + foundation (window, theme, settings, local SQLite) | — | Skeleton everything plugs into |
-| **S1** | **Terminal engine** — real PTYs, multi-terminal, lifecycle states, survive-restart, reattach | S0 | Highest technical risk; heart of the product |
-| **S2** | Workspace + file explorer (repos, open/create files & folders, live file-watch) | S0 | React to files agents create |
-| **S3** | Projects + Goals/Context data model | S0 | Foundation for the knowledge layer |
-| **S4** | Knowledge graph (per-project + cross-project links, viz) | S3 | `@xyflow/react` |
-| **S5** | Kanban (backlog / todo / waiting / progress / testing / done) | S3 | `@dnd-kit`; minimalist |
-| **S6** | **Agent orchestration** — CEO + PM + eng specialists, terminal control, escalation loop | S1, S3, S5 | The brain; OpenRouter-backed |
-| **S7** | Stats / observability (time worked, task counts, stages, errors, logs) | S6 | `recharts` |
-| **S8** | *(future)* Analytics integrations (Google Analytics, Mixpanel) → data-driven decisions | S7 | Feeds the CEO agent |
+| **S0** | App shell + foundation (window, theme, settings) | — | Skeleton everything plugs into. *(Amended: durable storage is DAEMON-owned SQLite, built in S1 — see Data-layer charter.)* **DONE.** |
+| **S1** | **Terminal engine** — real PTYs, multi-terminal, lifecycle states, survive-restart, reattach | S0 | Highest technical risk; heart of the product. **DONE** (merged @ 285cb2e). |
+| **Pv2** | **Protocol v2** — codec migration (tagged-enum-safe), version-range negotiation, wire-level **multi-subscriber attach** (D5), real `DaemonShutdown{drain}`, `bpa.db` schema-migration policy + `command_events` | S1 | One planned wire break before the protocol grows. DoD: old GUI vs new daemon shows the remediation dialog (never misparses); two subscribers stream one session; cross-version decode tests green. Metric: zero silent protocol failures. |
+| **S2** | Workspace + file explorer (multi-root repos, open/create files & folders, live file-watch) | S0 | React to files agents create; additive `workspace_roots`. DoD: create/open a multi-repo workspace ≤3 clicks; file tree reflects an external `touch` <1 s; explorer stays responsive at 10k files. Metric: time-to-first-terminal in a fresh workspace. |
+| **S3** | Projects + Goals/Context data model | S0 | Foundation for the knowledge layer; core-owned store (Data-layer charter). DoD: goals CRUD survives app restart; Project⇄Workspace mapping enforced; export/import round-trips. Metric: goals actively referenced by S6 runs (>0 per run). |
+| **S4** | Knowledge graph (per-project + cross-project links, viz) | S3 | `@xyflow/react`; storage + UUID node identity + **agent retrieval API** are S4-spec decisions. **Hard-blocks S6 (owner decision D6).** DoD: cross-project link survives both projects' restarts; retrieval API returns a goal's subgraph <100 ms; graph editable in UI. Metric: graph nodes retrieved per CEO decision. |
+| **S5** | Kanban (backlog / todo / waiting / progress / testing / done) | S3 | `@dnd-kit`; minimalist. DoD: drag persists; agent-driven card moves render live; column WIP counts. Metric: cards moved by agents vs by hand. |
+| **S6a** | **LLM provider layer** — provider trait; OpenRouter/OpenAI/GLM adapters; routing + fallback; streaming; retries; **per-call cost/token/latency capture from the first call** | S4, Pv2 | Keys in Keychain (BL-20); egress core-only. DoD: same prompt runs on 2 providers via config only; provider outage fails over with an honest event; every call logged with cost. Metric: $/task visible per run. |
+| **S6b** | **Agent runtime + ONE role end-to-end** (PM gap-analysis loop against a real repo) | S6a | Agent state survival defined here (survival-table row resolves). DoD: PM produces a spec+task list from goals+graph on a live repo; run resumable after app restart; audit log complete. Metric: tasks completed without human touch. |
+| **S6c** | **Escalation loop + approval inbox UI** | S6b | Trust layer lands here (spec §16: approval classes P1, batched inbox, audit). DoD: gated action blocks until approval; batch-approve works; every agent command in the audit log. Metric: escalations per completed task (target ↓). |
+| **S6d** | **External worker adapters** (claude-code, hermes, opencode, kilo) | S6b | Per-CLI liveness/stuck detection (raw-mode TUIs are invisible to `waiting_for_input` — adapters own this). DoD: adapter detects worker-waiting within 5 s across all 4 CLIs; wedged worker auto-escalates. Metric: mean time-to-unstick. |
+| **S6e** | **Custom-agent authoring** (user-defined app-native agents) | S6c | DoD: user creates a custom role (prompt+model+tools) in UI; it runs under the same trust layer + audit. Metric: custom agents in weekly use. |
+| **S7** | Stats / observability — time worked, task counts, stages, errors, logs, **LLM traces, spend/budgets, evals** | S6b | `recharts`. DoD: per-project spend dashboard; per-agent success/error rates; budget alert fires. Metric: % runs within budget. |
+| **S8** | *(future)* Analytics integrations (Google Analytics, Mixpanel) → data-driven decisions | S7 | Feeds the CEO agent. DoD: at least one external metric visible to the CEO with provenance. Metric: CEO decisions citing product metrics. |
 
 ```
-S0 ─┬─ S1 ───────────────┐
-    ├─ S2                 │
-    └─ S3 ─┬─ S4          │
-           ├─ S5 ─────────┤
-           └──────────────┤   (S3 goals/graph feed S6 directly, per §4)
-                          ▼
-                    S6 ─ S7 ─ S8
+S0 ─┬─ S1 ─ Pv2 ──────────────┐
+    ├─ S2                      │
+    └─ S3 ─┬─ S4 ──────────────┤   (S4 hard-blocks S6 — owner decision D6)
+           ├─ S5 ──────────────┤
+           └───────────────────┤
+                               ▼
+             S6a ─ S6b ─┬─ S6c ─ S6e
+                        └─ S6d
+                        S6b ─ S7 ─ S8
 ```
 
-**Current slice:** S0 + S1, combined (Foundation is inseparable from proving the terminal engine).
+**Current slice:** S0 + S1 — **DONE** (merged @ 285cb2e). Next: docs-truth/CI pass (this cycle),
+then Protocol v2 (Cycle 2), then S2.
 Spec: `2026-07-01-builderpro-s0s1-foundation-terminal-design.md`.
 
 ---
 
 ## 4. How the agent layer will use the terminal engine (forward contract)
 
-S1 must not just *render* terminals interactively — it must expose a **programmatic API**
-(create / attach / write-stdin / stream-output / resize / kill / query-state). In S6 the app-native
-agents call exactly these to:
+*(Rewritten 2026-07-04 — A4/A5/A6/A16; owner decision D5.)*
 
-1. **CEO** picks the next objective from goals + knowledge graph (+ future S8 metrics).
+**The canonical programmatic agent API is the Hop-B socket protocol** (create / attach /
+write-stdin / stream-output / resize / kill / query-state) — not the Tauri command list, which is
+merely the GUI's thin wrapper over it. Agent process model: **app-native agents (CEO/PM/eng) run
+in the core process** (S6b) and reach the daemon over the same socket client; **external worker
+CLIs run inside PTY sessions** as ordinary children.
+
+The orchestration loop (unchanged vision):
+
+1. **CEO** picks the next objective from goals + knowledge graph (+ future S8 metrics). *(S4 is a
+   hard prerequisite — owner decision D6.)*
 2. **PM** (TDD+DDD) does gap analysis (current vs 100%-done), writes specs, decomposes into tasks,
    assigns each to an engineering specialist (ML / data-sci / security / backend / frontend / testing).
-3. Each specialist **spawns / drives a terminal worker** (claude-code, etc.), watches its
-   OSC-133-derived lifecycle, and detects when the worker is **waiting for input** (stuck).
+3. Each specialist **spawns / drives a terminal worker** (claude-code, etc.) and watches it via the
+   worker adapter (below).
 4. Unresolvable questions bubble PM → CEO, which batches them and **validates with the human**,
    then feeds answers back to the workers.
 5. Kanban (S5) reflects the live state; Stats (S7) records it.
 
-This is why S1's **status detection** (waiting-for-input) and **programmatic control** are
-first-class in the S0+S1 spec even though the agents come later.
+**Contract corrections locked now (so S6 doesn't build on false assumptions):**
+
+- **Co-viewing (owner decision D5):** human and agent watching one session simultaneously is
+  served by **wire-level multi-subscriber attach** (N subscribers per session, each getting its
+  own Replay) — designed and implemented in **protocol v2**. Until then S1's single-attach
+  (connection-owned) stands.
+- **`waiting_for_input` honest scope:** it is a **canonical-mode line-input heuristic only**. It
+  is structurally blind to raw-mode TUIs — which includes every named worker CLI (claude-code,
+  opencode, …). Worker liveness / stuck detection is therefore a **named S6d subsystem** (worker
+  adapters, per-CLI strategies), NOT this flag.
+- **Planned additive agent capabilities** (requests to add, append-only): `ReadOutput{since_seq}`
+  cursor read; rendered-text snapshot (grid as text); command+argv spawn (no shell wrapping);
+  typed exit-status wait.
+
+This is why S1's programmatic control is first-class in the S0+S1 spec even though the agents
+come later.
+
+---
+
+## Data-layer charter (added 2026-07-04 — A13/A25/A26/A27; owner decision D6)
+
+- **The daemon owns terminal-domain durable state ONLY** (sessions, scrollback, workspaces-as-
+  terminal-roots in `bpa.db`). It must never become the app's general database.
+- **S3+ domain data** (projects, goals, kanban, knowledge graph) lives in a **core-owned store**;
+  the concrete engine (SQLite in the core process vs embedded alternative) is decided in the S3
+  spec — NOT inherited by default from the daemon.
+- **Project ⇄ Workspace (locked):** *a Project is the planning entity that owns goals / graph /
+  kanban and maps to 1..N Workspaces (repo roots).*
+- **S4 owns:** graph storage decision, UUID node identity, cross-project link model, and the
+  **agent retrieval API**. S4 **hard-blocks S6** (owner decision D6).
+- **Historical telemetry:** worker transcript log + `command_events` table land at the next daemon
+  schema bump (protocol v2 or S3) — today's discarded history (pruned rings) is a known limit.
 
 ---
 
