@@ -1,0 +1,67 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable # rustup honors rust-toolchain.toml (1.92)
+      - uses: Swatinem/rust-cache@v2
+      - name: stage sessiond sidecar (tauri build.rs requires it in a fresh checkout)
+        run: |
+          cargo build -p bpa-sessiond
+          mkdir -p src-tauri/binaries
+          cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$(rustc -vV | sed -n 's/host: //p')"
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: rust tests
+        run: cargo test --workspace
+      - name: real-shell integration tests actually ran
+        run: |
+          # These tests silently no-op when the shell binary is absent — assert the shells
+          # exist on this runner, then run the named tests so a skip can never masquerade
+          # as coverage (docs/backlog.md BL-16).
+          test -x /bin/zsh && test -x /bin/bash
+          out=$(cargo test -p bpa-sessiond shell_integration 2>&1)
+          echo "$out"
+          echo "$out" | grep -E "zsh_emits_osc_sequence_in_order .* ok" >/dev/null
+          echo "$out" | grep -E "bash_emits_osc_sequence_in_order .* ok" >/dev/null
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: tsc
+        run: npx tsc --noEmit
+      - name: vitest
+        run: npx vitest run
+      - name: ts-rs parity
+        run: |
+          cargo test -p bpa-protocol --test ts_export
+          git diff --exit-code -- src/ipc/types.ts
+      - name: e2e survive-restart
+        run: |
+          cargo build -p bpa-sessiond
+          npm run e2e:survive
+
+  coverage:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: coverage gate (sessiond >= 80%)
+        run: bash scripts/coverage-gate.sh
