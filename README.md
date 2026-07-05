@@ -86,8 +86,12 @@ export PATH="$HOME/.cargo/bin:$PATH"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
 # Build the daemon first — dev mode looks for bpa-sessiond BESIDE the app binary
-# (target/debug/) and fails with an actionable error if it's missing:
+# (target/debug/) and fails with an actionable error if it's missing. The Tauri
+# build script ALSO requires the sidecar staged under src-tauri/binaries/ (with
+# the target-triple suffix) in any fresh checkout:
 cargo build -p bpa-sessiond
+mkdir -p src-tauri/binaries
+cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$(rustc -vV | sed -n 's/host: //p')"
 
 # Run the app in dev mode
 npm run tauri dev
