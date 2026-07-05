@@ -4,12 +4,15 @@
 #
 #   1. Full Rust workspace test suite (`cargo test --workspace`).
 #   2. Clippy across the whole workspace with warnings denied (`-D warnings`).
-#   3. Full TypeScript test suite (`npx vitest run`).
-#   4. ts-rs type parity: regenerate `src/ipc/types.ts` from `crates/protocol` and diff against
+#   3. rustfmt check (`cargo fmt --check` — formatting is normative).
+#   4. Full TypeScript test suite (`npx vitest run`).
+#   5. TypeScript typecheck (`npx tsc --noEmit`).
+#   6. ts-rs type parity: regenerate `src/ipc/types.ts` from `crates/protocol` and diff against
 #      what's committed — a diff means the generated bindings are stale (spec §5, §14.2 row 1).
-#   5. Daemon-crate coverage gate (bpa-sessiond line coverage >= 80%, spec §14.3).
-#   6. E2E survive-restart (spec §14.1/§13's core promise).
+#   7. Daemon-crate coverage gate (bpa-sessiond line coverage >= 80%, spec §14.3).
+#   8. E2E survive-restart (spec §14.1/§13's core promise).
 #
+# CI (.github/workflows/ci.yml) runs the same set — keep them in lockstep (CONTRIBUTING.md).
 # Exits 0 and prints "ALL GATES PASSED" only if every stage succeeds.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
