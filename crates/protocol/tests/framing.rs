@@ -15,7 +15,11 @@ fn single_frame_encodes_and_decodes() {
     let bytes = encode_frame(&frame()).expect("encode");
     // u32-LE length prefix + body
     let declared = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-    assert_eq!(declared, bytes.len() - 4, "length prefix must equal body length");
+    assert_eq!(
+        declared,
+        bytes.len() - 4,
+        "length prefix must equal body length"
+    );
 
     let mut dec = FrameDecoder::new();
     dec.push(&bytes);
@@ -30,10 +34,18 @@ fn partial_frame_across_reads_buffers_then_completes() {
     let mut dec = FrameDecoder::new();
 
     dec.push(&bytes[..split]);
-    assert_eq!(dec.decode().expect("decode-1"), vec![], "half a frame yields nothing");
+    assert_eq!(
+        dec.decode().expect("decode-1"),
+        vec![],
+        "half a frame yields nothing"
+    );
 
     dec.push(&bytes[split..]);
-    assert_eq!(dec.decode().expect("decode-2"), vec![frame()], "second half completes it");
+    assert_eq!(
+        dec.decode().expect("decode-2"),
+        vec![frame()],
+        "second half completes it"
+    );
 }
 
 #[test]
@@ -42,7 +54,11 @@ fn length_prefix_split_across_reads() {
     let mut dec = FrameDecoder::new();
     // deliver only 2 of the 4 prefix bytes first
     dec.push(&bytes[..2]);
-    assert_eq!(dec.decode().expect("d1"), vec![], "incomplete prefix yields nothing");
+    assert_eq!(
+        dec.decode().expect("d1"),
+        vec![],
+        "incomplete prefix yields nothing"
+    );
     dec.push(&bytes[2..]);
     assert_eq!(dec.decode().expect("d2"), vec![frame()]);
 }

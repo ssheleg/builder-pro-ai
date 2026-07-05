@@ -106,9 +106,12 @@ fn acquire_lock_at(path: &Path) -> io::Result<LockGuard> {
         .open(path)?;
     match flock(file.as_fd(), FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(LockGuard { _file: file }),
-        Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => Err(
-            Error::new(ErrorKind::WouldBlock, "another daemon holds the single-instance lock"),
-        ),
+        Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {
+            Err(Error::new(
+                ErrorKind::WouldBlock,
+                "another daemon holds the single-instance lock",
+            ))
+        }
         Err(e) => Err(Error::from_raw_os_error(e.raw_os_error())),
     }
 }
@@ -189,7 +192,9 @@ mod tests {
         // can observe or clobber the value while it's temporarily changed. `.unwrap_or_else` (not
         // `.unwrap()`) recovers the guard even if a previous test panicked while holding the lock
         // (poisoning must not cascade-fail every subsequent env test).
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev = std::env::var_os(key);
         match val {
             Some(v) => std::env::set_var(key, v),
@@ -227,7 +232,10 @@ mod tests {
         with_env("XDG_RUNTIME_DIR", Some(""), || {
             let sock = resolve_socket_path();
             let uid = rustix::process::geteuid().as_raw();
-            assert_eq!(sock, std::path::PathBuf::from(format!("/tmp/bpa-{uid}/d.sock")));
+            assert_eq!(
+                sock,
+                std::path::PathBuf::from(format!("/tmp/bpa-{uid}/d.sock"))
+            );
         });
     }
 

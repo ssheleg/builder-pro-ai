@@ -12,7 +12,9 @@ use std::process::ExitCode;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 
-use bpa_sessiond::singleton::{acquire_single_instance_lock, ensure_socket_dir, resolve_socket_path};
+use bpa_sessiond::singleton::{
+    acquire_single_instance_lock, ensure_socket_dir, resolve_socket_path,
+};
 
 /// CLI args (spec §8.3 launchd ProgramArguments: `--socket <path>`).
 struct Args {
@@ -52,7 +54,10 @@ fn init_tracing() {
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     let log_dir = home.join("Library/Application Support/ai.builderpro.desktop/logs");
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("bpa-sessiond: failed to create log dir {}: {e}", log_dir.display());
+        eprintln!(
+            "bpa-sessiond: failed to create log dir {}: {e}",
+            log_dir.display()
+        );
     } else {
         #[cfg(unix)]
         {

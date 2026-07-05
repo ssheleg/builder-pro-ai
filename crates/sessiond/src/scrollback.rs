@@ -237,7 +237,8 @@ fn classify_osc(seq: &[u8]) -> Verdict {
     let body = &seq[2..];
     // Determine if terminated (BEL, or ESC \ as the last two bytes).
     let terminated_bel = body.last() == Some(&BEL);
-    let terminated_st = body.len() >= 2 && body[body.len() - 2] == ESC && body[body.len() - 1] == b'\\';
+    let terminated_st =
+        body.len() >= 2 && body[body.len() - 2] == ESC && body[body.len() - 1] == b'\\';
     if !terminated_bel && !terminated_st {
         return Verdict::Incomplete;
     }
@@ -366,8 +367,14 @@ mod tests {
         // None of the side-effecting sequences survive.
         assert!(!contains(&snap, b"\x1b[?1049h"), "alt-screen enter leaked");
         assert!(!contains(&snap, b"\x1b[?1049l"), "alt-screen leave leaked");
-        assert!(!contains(&snap, b"\x1b[?2004h"), "bracketed-paste enter leaked");
-        assert!(!contains(&snap, b"\x1b[?2004l"), "bracketed-paste leave leaked");
+        assert!(
+            !contains(&snap, b"\x1b[?2004h"),
+            "bracketed-paste enter leaked"
+        );
+        assert!(
+            !contains(&snap, b"\x1b[?2004l"),
+            "bracketed-paste leave leaked"
+        );
         assert!(!contains(&snap, b"\x1b]0;"), "title OSC leaked");
         assert!(!contains(&snap, b"\x1b]133;"), "OSC-133 mark leaked");
         assert!(!contains(&snap, b"\x1b]7;"), "OSC-7 mark leaked");
@@ -430,8 +437,8 @@ mod tests {
         // terminator) straight into `out`, leaking it into the snapshot. That must not happen.
         let mut r = ScrollbackRing::new(1 << 20);
         r.push(b"\x1b]0;"); // recognized title OSC prefix
-        // 85 * 100 = 8500 bytes, comfortably past the 8192-byte RECOGNIZED_OSC_CAP, fed in
-        // many separate push() calls to exercise the carry-across-push path.
+                            // 85 * 100 = 8500 bytes, comfortably past the 8192-byte RECOGNIZED_OSC_CAP, fed in
+                            // many separate push() calls to exercise the carry-across-push path.
         for _ in 0..85 {
             r.push(&[b'A'; 100]);
         }
@@ -476,8 +483,8 @@ mod tests {
         // RECOGNIZED_OSC_CAP (8192 bytes) within a single push().
         r.push(b"pre\x1b]0;");
         r.push(&[b'X'; RECOGNIZED_OSC_CAP + 100]); // carry.clear() + discarding_until_terminator=true
-        // Now split the two-byte ST terminator itself across two separate push() calls: ESC in
-        // this call, with NOTHING after it (so this push() ends mid-terminator).
+                                                   // Now split the two-byte ST terminator itself across two separate push() calls: ESC in
+                                                   // this call, with NOTHING after it (so this push() ends mid-terminator).
         r.push(&[ESC]);
         // The closing '\' arrives in the NEXT push() call, followed by trailing normal text.
         r.push(b"\\post");

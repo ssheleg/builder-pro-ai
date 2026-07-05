@@ -32,11 +32,7 @@ fn export_and_read() -> String {
 /// the same TypeScript object-type key syntax, so quotes around bare identifier keys
 /// are stripped before comparing.
 fn contains_normalized(haystack: &str, needle: &str) -> bool {
-    let strip = |s: &str| {
-        s.split_whitespace()
-            .collect::<String>()
-            .replace('"', "")
-    };
+    let strip = |s: &str| s.split_whitespace().collect::<String>().replace('"', "");
     strip(haystack).contains(&strip(needle))
 }
 
@@ -44,7 +40,10 @@ fn contains_normalized(haystack: &str, needle: &str) -> bool {
 fn generates_types_ts_at_shared_path() {
     let ts = export_and_read();
     assert!(!ts.is_empty(), "types.ts must not be empty");
-    assert!(types_ts_path().exists(), "types.ts must exist at src/ipc/types.ts");
+    assert!(
+        types_ts_path().exists(),
+        "types.ts must exist at src/ipc/types.ts"
+    );
     let _ = &ts;
 }
 
@@ -72,11 +71,13 @@ fn session_lifecycle_is_internally_tagged_camelcase() {
     }
     // Exited carries code:number|null and signal:string|null
     assert!(
-        contains_normalized(&ts, "code: number | null") || contains_normalized(&ts, "code: number|null"),
+        contains_normalized(&ts, "code: number | null")
+            || contains_normalized(&ts, "code: number|null"),
         "Exited must carry nullable numeric code; got:\n{ts}"
     );
     assert!(
-        contains_normalized(&ts, "signal: string | null") || contains_normalized(&ts, "signal: string|null"),
+        contains_normalized(&ts, "signal: string | null")
+            || contains_normalized(&ts, "signal: string|null"),
         "Exited must carry nullable string signal; got:\n{ts}"
     );
 }
@@ -98,11 +99,13 @@ fn terminal_event_is_adjacently_tagged_bytes_are_number_arrays() {
     );
     // Vec<u8> must be a number array (ts-rs emits Array<number>).
     assert!(
-        contains_normalized(&ts, "content: Array<number>") || contains_normalized(&ts, "content: number[]"),
+        contains_normalized(&ts, "content: Array<number>")
+            || contains_normalized(&ts, "content: number[]"),
         "Replay.content (Vec<u8>) must be a number array; got:\n{ts}"
     );
     assert!(
-        contains_normalized(&ts, "bytes: Array<number>") || contains_normalized(&ts, "bytes: number[]"),
+        contains_normalized(&ts, "bytes: Array<number>")
+            || contains_normalized(&ts, "bytes: number[]"),
         "Output.bytes (Vec<u8>) must be a number array; got:\n{ts}"
     );
 }
@@ -110,11 +113,19 @@ fn terminal_event_is_adjacently_tagged_bytes_are_number_arrays() {
 #[test]
 fn session_meta_fields_are_camelcase() {
     let ts = export_and_read();
-    for field in ["workspaceId:", "waitingForInput:", "isActive:", "createdAt:"] {
+    for field in [
+        "workspaceId:",
+        "waitingForInput:",
+        "isActive:",
+        "createdAt:",
+    ] {
         assert!(
             contains_normalized(&ts, field),
             "SessionMeta must expose camelCase field `{field}`; got:\n{ts}"
         );
     }
-    assert!(!ts.contains("workspace_id"), "no snake_case leakage in SessionMeta");
+    assert!(
+        !ts.contains("workspace_id"),
+        "no snake_case leakage in SessionMeta"
+    );
 }

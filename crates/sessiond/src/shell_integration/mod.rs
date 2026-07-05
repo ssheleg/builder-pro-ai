@@ -66,7 +66,10 @@ pub fn write_session_assets(runtime_dir: &Path, shell: ShellKind) -> std::io::Re
             f.write_all(stub.as_bytes())?;
 
             let mut env = vec![
-                ("ZDOTDIR".to_string(), runtime_dir.to_string_lossy().into_owned()),
+                (
+                    "ZDOTDIR".to_string(),
+                    runtime_dir.to_string_lossy().into_owned(),
+                ),
                 ("BPA_INJECTION".to_string(), "1".to_string()),
             ];
             // Carry the caller's original ZDOTDIR through so the stub can restore it.
@@ -106,7 +109,10 @@ mod tests {
         assert_eq!(classify_shell("/bin/zsh"), Some(ShellKind::Zsh));
         assert_eq!(classify_shell("/usr/local/bin/zsh"), Some(ShellKind::Zsh));
         assert_eq!(classify_shell("/bin/bash"), Some(ShellKind::Bash));
-        assert_eq!(classify_shell("/opt/homebrew/bin/bash"), Some(ShellKind::Bash));
+        assert_eq!(
+            classify_shell("/opt/homebrew/bin/bash"),
+            Some(ShellKind::Bash)
+        );
         assert_eq!(classify_shell("/usr/bin/fish"), None);
     }
 
@@ -117,16 +123,24 @@ mod tests {
         // ZDOTDIR points at the runtime dir; BPA_INJECTION=1 present; no --init-file for zsh.
         assert!(spawn.args.is_empty(), "zsh takes no init args");
         let env: std::collections::HashMap<_, _> = spawn.env.iter().cloned().collect();
-        assert_eq!(env.get("ZDOTDIR").map(String::as_str), Some(dir.path().to_str().unwrap()));
+        assert_eq!(
+            env.get("ZDOTDIR").map(String::as_str),
+            Some(dir.path().to_str().unwrap())
+        );
         assert_eq!(env.get("BPA_INJECTION").map(String::as_str), Some("1"));
         // The ZDOTDIR .zshenv stub and the copied bpa.zsh both exist.
         assert!(dir.path().join(".zshenv").is_file(), ".zshenv stub written");
         assert!(dir.path().join("bpa.zsh").is_file(), "bpa.zsh copied");
         // The stub sources the copied bpa.zsh by absolute path.
         let stub = std::fs::read_to_string(dir.path().join(".zshenv")).unwrap();
-        assert!(stub.contains(dir.path().join("bpa.zsh").to_str().unwrap()),
-            "stub must source the copied bpa.zsh absolute path");
-        assert!(stub.contains("BPA_ORIG_ZDOTDIR"), "stub restores original ZDOTDIR");
+        assert!(
+            stub.contains(dir.path().join("bpa.zsh").to_str().unwrap()),
+            "stub must source the copied bpa.zsh absolute path"
+        );
+        assert!(
+            stub.contains("BPA_ORIG_ZDOTDIR"),
+            "stub restores original ZDOTDIR"
+        );
     }
 
     #[test]
@@ -136,7 +150,10 @@ mod tests {
         let script = dir.path().join("bpa-bash.sh");
         assert_eq!(
             spawn.args,
-            vec!["--init-file".to_string(), script.to_str().unwrap().to_string()]
+            vec![
+                "--init-file".to_string(),
+                script.to_str().unwrap().to_string()
+            ]
         );
         let env: std::collections::HashMap<_, _> = spawn.env.iter().cloned().collect();
         assert_eq!(env.get("BPA_INJECTION").map(String::as_str), Some("1"));
@@ -154,7 +171,11 @@ mod tests {
 
     // Same as `drive_shell_capture`, but lets the caller pick the driven command line (e.g. a
     // subshell-fronted command) instead of the default `printf hi`.
-    fn drive_shell_capture_cmd(kind: ShellKind, program: &str, command_line: &[u8]) -> Option<String> {
+    fn drive_shell_capture_cmd(
+        kind: ShellKind,
+        program: &str,
+        command_line: &[u8],
+    ) -> Option<String> {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
         if !std::path::Path::new(program).exists() {
             return None; // shell not installed on this box — skip
@@ -171,12 +192,20 @@ mod tests {
 
         let pty = native_pty_system();
         let pair = pty
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .unwrap();
         let mut cmd = CommandBuilder::new(program);
         cmd.env_clear();
         cmd.env("TERM", "xterm-256color");
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()));
+        cmd.env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        );
         cmd.env("HOME", home_dir.path().to_string_lossy().into_owned());
         cmd.env("HOSTNAME", "localhost");
         cmd.env("HOST", "localhost");
@@ -248,9 +277,15 @@ mod tests {
         // D (done), where A/B/C are the LATEST occurrences at-or-before C's cycle and D is the
         // first occurrence AFTER C.
         let c = out.find("\x1b]133;C").expect("OSC 133;C present");
-        let a = out[..c].rfind("\x1b]133;A").expect("OSC 133;A present before C");
-        let b = out[..c].rfind("\x1b]133;B").expect("OSC 133;B present before C");
-        let d = c + out[c..].find("\x1b]133;D").expect("OSC 133;D present after C");
+        let a = out[..c]
+            .rfind("\x1b]133;A")
+            .expect("OSC 133;A present before C");
+        let b = out[..c]
+            .rfind("\x1b]133;B")
+            .expect("OSC 133;B present before C");
+        let d = c + out[c..]
+            .find("\x1b]133;D")
+            .expect("OSC 133;D present after C");
         assert!(out.contains("\x1b]7;file://"), "OSC 7 cwd present");
         // Order within one prompt+command cycle: A (prompt) < B (prompt end) < C (exec) < D (done).
         assert!(a < c, "A must precede C ({a} < {c})");
@@ -303,16 +338,16 @@ mod tests {
                     c_count, 1,
                     "expected exactly one OSC 133;C for `(exit 37)`, got {c_count} in {out:?}"
                 );
-                let c = out.find("\x1b]133;C").expect("OSC 133;C present for subshell command");
+                let c = out
+                    .find("\x1b]133;C")
+                    .expect("OSC 133;C present for subshell command");
                 // The exit code 37 from the subshell must be captured in the following D mark.
                 let d_rel = out[c..]
                     .find("\x1b]133;D;37\x07")
                     .expect("OSC 133;D;37 present after C for `(exit 37)`");
                 assert!(d_rel > 0, "D must come strictly after C");
             }
-            None => eprintln!(
-                "skipping bash subshell functrace test: /bin/bash not present"
-            ),
+            None => eprintln!("skipping bash subshell functrace test: /bin/bash not present"),
         }
     }
 
@@ -329,9 +364,7 @@ mod tests {
                     "expected exactly one OSC 133;C for a 3-stage pipeline, got {c_count} in {out:?}"
                 );
             }
-            None => eprintln!(
-                "skipping bash pipeline no-double-C test: /bin/bash not present"
-            ),
+            None => eprintln!("skipping bash pipeline no-double-C test: /bin/bash not present"),
         }
     }
 }

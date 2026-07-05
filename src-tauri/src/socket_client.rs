@@ -31,7 +31,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bpa_protocol::{encode_frame, Frame, FrameDecoder, Push, Request, Response, MAGIC, PROTO_VERSION};
+use bpa_protocol::{
+    encode_frame, Frame, FrameDecoder, Push, Request, Response, MAGIC, PROTO_VERSION,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -198,7 +200,10 @@ impl DaemonClient {
     /// Shared implementation behind `connect()`: connects at an explicit socket path (production
     /// always resolves via `resolve_socket_path()`; tests point this at a stub daemon's tempdir
     /// socket instead).
-    async fn connect_at(socket_path: PathBuf, client_build: String) -> Result<DaemonClient, ClientError> {
+    async fn connect_at(
+        socket_path: PathBuf,
+        client_build: String,
+    ) -> Result<DaemonClient, ClientError> {
         let (stream, reader) = connect_and_handshake(&socket_path, &client_build)
             .await
             .map_err(|_| ClientError::Disconnected)?;
@@ -216,11 +221,21 @@ impl DaemonClient {
         // window between `DaemonClient` being constructed and `on_conn` being called.
         let shared = Arc::new(SharedState {
             push_cb: Mutex::new(Vec::new()),
-            conn_cb: Mutex::new(ConnCbState { current: ConnState::Connected, cbs: Vec::new() }),
+            conn_cb: Mutex::new(ConnCbState {
+                current: ConnState::Connected,
+                cbs: Vec::new(),
+            }),
             live: AtomicBool::new(true),
         });
 
-        tokio::spawn(connection_task(socket_path, client_build, stream, reader, cmd_rx, shared.clone()));
+        tokio::spawn(connection_task(
+            socket_path,
+            client_build,
+            stream,
+            reader,
+            cmd_rx,
+            shared.clone(),
+        ));
 
         Ok(DaemonClient { cmd_tx, shared })
     }
@@ -246,7 +261,10 @@ impl DaemonClient {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
-            .send(ClientCmd::Request { req, reply: reply_tx })
+            .send(ClientCmd::Request {
+                req,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| ClientError::Disconnected)?;
 
@@ -318,7 +336,10 @@ impl FrameReader {
     /// `Ok(None)` on a clean EOF at a frame boundary (a mid-frame EOF also yields `None`; the
     /// caller treats both as connection-closed). `Err` on an oversized length prefix, a decode
     /// failure, or an IO error.
-    async fn next(&mut self, stream: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Option<Frame>> {
+    async fn next(
+        &mut self,
+        stream: &mut (impl AsyncReadExt + Unpin),
+    ) -> std::io::Result<Option<Frame>> {
         loop {
             if let Some(f) = self.pending.pop_front() {
                 return Ok(Some(f));
@@ -340,9 +361,12 @@ impl FrameReader {
     }
 }
 
-async fn write_frame(stream: &mut (impl AsyncWriteExt + Unpin), frame: &Frame) -> std::io::Result<()> {
-    let bytes =
-        encode_frame(frame).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+async fn write_frame(
+    stream: &mut (impl AsyncWriteExt + Unpin),
+    frame: &Frame,
+) -> std::io::Result<()> {
+    let bytes = encode_frame(frame)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     stream.write_all(&bytes).await?;
     stream.flush().await
 }
@@ -354,7 +378,10 @@ enum HandshakeError {
     Io(std::io::Error),
     /// Any first reply other than `Welcome`/`Incompatible`, or a connection that closed mid-handshake.
     Protocol(String),
-    Incompatible { min: u16, max: u16 },
+    Incompatible {
+        min: u16,
+        max: u16,
+    },
 }
 
 impl From<std::io::Error> for HandshakeError {
@@ -385,15 +412,27 @@ async fn connect_and_handshake(
 
     let mut reader = FrameReader::new();
     match reader.next(&mut stream).await? {
-        Some(Frame::Response { id: 0, res: Response::Welcome { proto_version, daemon_build } }) => {
+        Some(Frame::Response {
+            id: 0,
+            res:
+                Response::Welcome {
+                    proto_version,
+                    daemon_build,
+                },
+        }) => {
             tracing::info!(daemon_build = %daemon_build, proto_version, "daemon handshake ok");
             Ok((stream, reader))
         }
-        Some(Frame::Response { id: 0, res: Response::Incompatible { min, max } }) => {
-            Err(HandshakeError::Incompatible { min, max })
-        }
-        Some(other) => Err(HandshakeError::Protocol(format!("bad handshake reply: {other:?}"))),
-        None => Err(HandshakeError::Protocol("connection closed during handshake".into())),
+        Some(Frame::Response {
+            id: 0,
+            res: Response::Incompatible { min, max },
+        }) => Err(HandshakeError::Incompatible { min, max }),
+        Some(other) => Err(HandshakeError::Protocol(format!(
+            "bad handshake reply: {other:?}"
+        ))),
+        None => Err(HandshakeError::Protocol(
+            "connection closed during handshake".into(),
+        )),
     }
 }
 
@@ -534,11 +573,19 @@ async fn connection_task(
     // task gets scheduled for the first time. This loop only fires transitions for *subsequent*
     // disconnect/reconnect events.
     let next_id = AtomicU64::new(1); // id 0 is reserved for Hello
-    let pending: Mutex<HashMap<u64, oneshot::Sender<Result<Response, ClientError>>>> = Mutex::new(HashMap::new());
+    let pending: Mutex<HashMap<u64, oneshot::Sender<Result<Response, ClientError>>>> =
+        Mutex::new(HashMap::new());
 
     loop {
-        let end =
-            run_connection(&mut stream, &mut reader, &mut cmd_rx, &next_id, &pending, &shared.push_cb).await;
+        let end = run_connection(
+            &mut stream,
+            &mut reader,
+            &mut cmd_rx,
+            &next_id,
+            &pending,
+            &shared.push_cb,
+        )
+        .await;
         // `run_connection` returned: the connection is no longer serving requests, whether because
         // it dropped (`ConnectionLost`, about to reconnect) or the client is shutting down
         // (`ClientDropped`). Clear liveness *before* draining `pending` / firing `Disconnected` so
@@ -568,7 +615,12 @@ async fn connection_task(
                 fire_conn(&shared.conn_cb, ConnState::Connected);
             }
             Err(HandshakeError::Incompatible { min, max }) => {
-                tracing::error!(min, max, client = PROTO_VERSION, "daemon became incompatible; giving up reconnect");
+                tracing::error!(
+                    min,
+                    max,
+                    client = PROTO_VERSION,
+                    "daemon became incompatible; giving up reconnect"
+                );
                 return;
             }
             // connect_with_backoff only returns Err for Incompatible; Io/Protocol loop internally.
@@ -688,14 +740,25 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let first = read_frame(&mut stream).await.unwrap();
             match first {
-                Frame::Request { id: 0, req: Request::Hello { magic, proto_version, .. } } => {
+                Frame::Request {
+                    id: 0,
+                    req:
+                        Request::Hello {
+                            magic,
+                            proto_version,
+                            ..
+                        },
+                } => {
                     assert_eq!(magic, MAGIC);
                     assert_eq!(proto_version, PROTO_VERSION);
                     write_stub_frame(
                         &mut stream,
                         &Frame::Response {
                             id: 0,
-                            res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "stub".into() },
+                            res: Response::Welcome {
+                                proto_version: PROTO_VERSION,
+                                daemon_build: "stub".into(),
+                            },
                         },
                     )
                     .await;
@@ -705,11 +768,17 @@ mod tests {
 
             let mut first_seen = false;
             loop {
-                let Some(frame) = read_frame(&mut stream).await else { break };
+                let Some(frame) = read_frame(&mut stream).await else {
+                    break;
+                };
                 if let Frame::Request { id, req } = frame {
                     let res = match req {
                         Request::CreateWorkspace { name, root_path } => {
-                            Response::Workspace(bpa_protocol::Workspace { id: name.clone(), name, root_path })
+                            Response::Workspace(bpa_protocol::Workspace {
+                                id: name.clone(),
+                                name,
+                                root_path,
+                            })
                         }
                         _ => Response::Ack,
                     };
@@ -735,12 +804,20 @@ mod tests {
 
         let c1 = client.clone();
         let h1 = tokio::spawn(async move {
-            c1.request(Request::CreateWorkspace { name: "one".into(), root_path: "/".into() }).await
+            c1.request(Request::CreateWorkspace {
+                name: "one".into(),
+                root_path: "/".into(),
+            })
+            .await
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         let c2 = client.clone();
         let h2 = tokio::spawn(async move {
-            c2.request(Request::CreateWorkspace { name: "two".into(), root_path: "/".into() }).await
+            c2.request(Request::CreateWorkspace {
+                name: "two".into(),
+                root_path: "/".into(),
+            })
+            .await
         });
 
         let r1 = h1.await.unwrap().unwrap();
@@ -770,7 +847,10 @@ mod tests {
                 &mut stream,
                 &Frame::Response {
                     id: 0,
-                    res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "stub".into() },
+                    res: Response::Welcome {
+                        proto_version: PROTO_VERSION,
+                        daemon_build: "stub".into(),
+                    },
                 },
             )
             .await;
@@ -779,7 +859,10 @@ mod tests {
                     &mut stream,
                     &Frame::Response {
                         id,
-                        res: Response::Error { code: "NoSuchSession".into(), message: "gone".into() },
+                        res: Response::Error {
+                            code: "NoSuchSession".into(),
+                            message: "gone".into(),
+                        },
                     },
                 )
                 .await;
@@ -789,7 +872,9 @@ mod tests {
 
         let client = connect_at(path, "test".into()).await.unwrap();
         let err = client
-            .request(Request::KillSession { session_id: "missing".into() })
+            .request(Request::KillSession {
+                session_id: "missing".into(),
+            })
             .await
             .unwrap_err();
         match err {
@@ -812,8 +897,14 @@ mod tests {
             r.store(true, Ordering::SeqCst);
             let (mut stream, _) = listener.accept().await.unwrap();
             let _first = read_frame(&mut stream).await.unwrap(); // consume Hello
-            write_stub_frame(&mut stream, &Frame::Response { id: 0, res: Response::Incompatible { min: 2, max: 4 } })
-                .await;
+            write_stub_frame(
+                &mut stream,
+                &Frame::Response {
+                    id: 0,
+                    res: Response::Incompatible { min: 2, max: 4 },
+                },
+            )
+            .await;
         });
         wait_ready(&ready).await;
 
@@ -822,7 +913,10 @@ mod tests {
         // rejection surfaces as Disconnected — but we assert it is a *fast, non-retried* failure
         // by bounding the test's own wall-clock time (an incompatible handshake must return
         // immediately, not after minutes of backoff).
-        assert!(matches!(err, ClientError::Disconnected), "expected Disconnected, got {err:?}");
+        assert!(
+            matches!(err, ClientError::Disconnected),
+            "expected Disconnected, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -843,14 +937,21 @@ mod tests {
                     &mut s,
                     &Frame::Response {
                         id: 0,
-                        res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "d1".into() },
+                        res: Response::Welcome {
+                            proto_version: PROTO_VERSION,
+                            daemon_build: "d1".into(),
+                        },
                     },
                 )
                 .await;
                 write_stub_frame(
                     &mut s,
                     &Frame::Push(Push::WorkspaceCreated {
-                        workspace: bpa_protocol::Workspace { id: "w1".into(), name: "w1".into(), root_path: "/".into() },
+                        workspace: bpa_protocol::Workspace {
+                            id: "w1".into(),
+                            name: "w1".into(),
+                            root_path: "/".into(),
+                        },
                     }),
                 )
                 .await;
@@ -864,12 +965,22 @@ mod tests {
                     &mut s,
                     &Frame::Response {
                         id: 0,
-                        res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "d2".into() },
+                        res: Response::Welcome {
+                            proto_version: PROTO_VERSION,
+                            daemon_build: "d2".into(),
+                        },
                     },
                 )
                 .await;
                 if let Some(Frame::Request { id, .. }) = read_frame(&mut s).await {
-                    write_stub_frame(&mut s, &Frame::Response { id, res: Response::Ack }).await;
+                    write_stub_frame(
+                        &mut s,
+                        &Frame::Response {
+                            id,
+                            res: Response::Ack,
+                        },
+                    )
+                    .await;
                 }
             }
         });
@@ -890,7 +1001,12 @@ mod tests {
         // The Ack request will only succeed after reconnect #2. Retry until connected.
         let mut got_ack = false;
         for _ in 0..100 {
-            match client.request(Request::KillSession { session_id: "x".into() }).await {
+            match client
+                .request(Request::KillSession {
+                    session_id: "x".into(),
+                })
+                .await
+            {
                 Ok(Response::Ack) => {
                     got_ack = true;
                     break;
@@ -900,12 +1016,19 @@ mod tests {
         }
         assert!(got_ack, "expected an Ack after reconnect");
 
-        let got_push = pushes.lock().unwrap().iter().any(|p| matches!(p, Push::WorkspaceCreated { .. }));
+        let got_push = pushes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| matches!(p, Push::WorkspaceCreated { .. }));
         assert!(got_push, "expected the WorkspaceCreated push");
 
         let s = states.lock().unwrap().clone();
         assert_eq!(s.first(), Some(&ConnState::Connected));
-        assert!(s.contains(&ConnState::Disconnected), "expected a Disconnected transition: {s:?}");
+        assert!(
+            s.contains(&ConnState::Disconnected),
+            "expected a Disconnected transition: {s:?}"
+        );
         assert!(
             s.iter().filter(|x| **x == ConnState::Connected).count() >= 2,
             "expected at least two Connected transitions: {s:?}"
@@ -927,7 +1050,10 @@ mod tests {
                 &mut s,
                 &Frame::Response {
                     id: 0,
-                    res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "stub".into() },
+                    res: Response::Welcome {
+                        proto_version: PROTO_VERSION,
+                        daemon_build: "stub".into(),
+                    },
                 },
             )
             .await;
@@ -942,16 +1068,24 @@ mod tests {
 
         let client = connect_at(path, "test".into()).await.unwrap();
         let err = client
-            .request(Request::KillSession { session_id: "x".into() })
+            .request(Request::KillSession {
+                session_id: "x".into(),
+            })
             .await
             .unwrap_err();
-        assert!(matches!(err, ClientError::Disconnected), "expected Disconnected, got {err:?}");
+        assert!(
+            matches!(err, ClientError::Disconnected),
+            "expected Disconnected, got {err:?}"
+        );
     }
 
     /// Test-only alias: exercises `DaemonClient`'s private `connect_at` directly (bypassing
     /// `resolve_socket_path()`) so the stub daemon can bind an arbitrary tempdir path. Same
     /// codepath `connect()` uses in production.
-    async fn connect_at(socket_path: PathBuf, client_build: String) -> Result<DaemonClient, ClientError> {
+    async fn connect_at(
+        socket_path: PathBuf,
+        client_build: String,
+    ) -> Result<DaemonClient, ClientError> {
         DaemonClient::connect_at(socket_path, client_build).await
     }
 
@@ -974,7 +1108,10 @@ mod tests {
                 &mut s,
                 &Frame::Response {
                     id: 0,
-                    res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "stub".into() },
+                    res: Response::Welcome {
+                        proto_version: PROTO_VERSION,
+                        daemon_build: "stub".into(),
+                    },
                 },
             )
             .await;
@@ -1007,7 +1144,9 @@ mod tests {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(1),
-            client.request(Request::KillSession { session_id: "x".into() }),
+            client.request(Request::KillSession {
+                session_id: "x".into(),
+            }),
         )
         .await;
         let elapsed = started.elapsed();
@@ -1015,7 +1154,10 @@ mod tests {
         let err = result
             .unwrap_or_else(|_| panic!("request() did not return within 1s (took > {elapsed:?}); it silently queued during the reconnect gap"))
             .unwrap_err();
-        assert!(matches!(err, ClientError::Disconnected), "expected Disconnected, got {err:?}");
+        assert!(
+            matches!(err, ClientError::Disconnected),
+            "expected Disconnected, got {err:?}"
+        );
         assert!(
             elapsed < Duration::from_secs(1),
             "request() took {elapsed:?} to fail; expected a prompt failure, not a queued/timed-out one"

@@ -135,7 +135,9 @@ impl AttachRegistry {
             rows,
             content,
         };
-        sink.send(replay).await.map_err(|_| AttachError::SinkClosed)?;
+        sink.send(replay)
+            .await
+            .map_err(|_| AttachError::SinkClosed)?;
 
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel_bg = cancel.clone();
@@ -177,7 +179,11 @@ impl AttachRegistry {
 
         self.entries.lock().unwrap().insert(
             session_id.clone(),
-            AttachEntry { conn_id, handle, cancel },
+            AttachEntry {
+                conn_id,
+                handle,
+                cancel,
+            },
         );
         Ok(())
     }
@@ -190,7 +196,9 @@ impl AttachRegistry {
         let mut map = self.entries.lock().unwrap();
         if map.get(session_id).map(|e| e.conn_id) == Some(conn_id) {
             if let Some(entry) = map.remove(session_id) {
-                entry.cancel.store(true, std::sync::atomic::Ordering::Release);
+                entry
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
                 entry.handle.abort();
             }
         }
@@ -201,7 +209,9 @@ impl AttachRegistry {
     pub fn detach_all(&self) {
         let mut map = self.entries.lock().unwrap();
         for (_id, entry) in map.drain() {
-            entry.cancel.store(true, std::sync::atomic::Ordering::Release);
+            entry
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             entry.handle.abort();
         }
     }
@@ -218,7 +228,9 @@ impl AttachRegistry {
             .collect();
         for id in owned {
             if let Some(entry) = map.remove(&id) {
-                entry.cancel.store(true, std::sync::atomic::Ordering::Release);
+                entry
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
                 entry.handle.abort();
             }
         }
@@ -232,7 +244,11 @@ impl AttachRegistry {
     /// Returns the forwarder's `JoinHandle` (production callers drop it — the task is detached and
     /// self-terminating; tests await it to prove termination).
     pub fn remove_session(&self, session_id: &SessionId) -> Option<JoinHandle<()>> {
-        self.entries.lock().unwrap().remove(session_id).map(|e| e.handle)
+        self.entries
+            .lock()
+            .unwrap()
+            .remove(session_id)
+            .map(|e| e.handle)
     }
 
     /// Number of live attachments (observability + test hook).
@@ -242,7 +258,8 @@ impl AttachRegistry {
 
     fn abort_existing(&self, session_id: &SessionId) {
         if let Some(prev) = self.entries.lock().unwrap().remove(session_id) {
-            prev.cancel.store(true, std::sync::atomic::Ordering::Release);
+            prev.cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             prev.handle.abort();
         }
     }
@@ -390,7 +407,8 @@ fn classify(seq: &[u8]) -> Verdict {
 fn classify_osc(seq: &[u8]) -> Verdict {
     let body = &seq[2..];
     let terminated_bel = body.last() == Some(&BEL);
-    let terminated_st = body.len() >= 2 && body[body.len() - 2] == ESC && body[body.len() - 1] == b'\\';
+    let terminated_st =
+        body.len() >= 2 && body[body.len() - 2] == ESC && body[body.len() - 1] == b'\\';
     if !terminated_bel && !terminated_st {
         return Verdict::Incomplete;
     }
@@ -413,7 +431,10 @@ mod tests {
         vec![
             ("TERM".into(), "xterm-256color".into()),
             ("PATH".into(), path),
-            ("HOME".into(), std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())),
+            (
+                "HOME".into(),
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+            ),
         ]
     }
 
@@ -443,7 +464,10 @@ mod tests {
         // Block on a go-signal so nothing is emitted before we can attach — avoids any
         // subscribe/attach race with the reader thread.
         let id = sup
-            .create(spec(vec!["-c".into(), "read _go; printf 'HELLO\\n'".into()]))
+            .create(spec(vec![
+                "-c".into(),
+                "read _go; printf 'HELLO\\n'".into(),
+            ]))
             .expect("create");
 
         let reg = AttachRegistry::new(sup.clone());
@@ -453,7 +477,12 @@ mod tests {
         // First frame: Replay with the session's current dims and (empty, nothing written yet)
         // sanitized scrollback content.
         match recv_timeout(&mut client, 2000).await.expect("replay frame") {
-            Push::Replay { session_id, cols, rows, content } => {
+            Push::Replay {
+                session_id,
+                cols,
+                rows,
+                content,
+            } => {
                 assert_eq!(session_id, id);
                 assert_eq!((cols, rows), (80, 24));
                 assert_eq!(content, Vec::<u8>::new());
@@ -616,7 +645,10 @@ mod tests {
         let sup = Arc::new(Supervisor::new());
         let reg = AttachRegistry::new(sup);
         let (sink, _client) = mpsc::channel::<Push>(4);
-        let err = reg.attach(1, &"ghost-session".to_string(), sink).await.unwrap_err();
+        let err = reg
+            .attach(1, &"ghost-session".to_string(), sink)
+            .await
+            .unwrap_err();
         assert_eq!(err, AttachError::NoSuchSession);
     }
 
@@ -675,10 +707,22 @@ mod tests {
             "OSC-7 marks must be stripped from live Output, got: {collected:?}"
         );
         // Everything else must be kept verbatim for a live-attached terminal.
-        assert!(contains(&collected, b"\x1b[?1049h"), "alt-screen enter must be kept");
-        assert!(contains(&collected, b"\x1b[?1049l"), "alt-screen leave must be kept");
-        assert!(contains(&collected, b"\x1b[31mRED\x1b[0m"), "SGR + text must be kept");
-        assert!(contains(&collected, b"\x1b]0;My Title\x07"), "title OSC must be kept live");
+        assert!(
+            contains(&collected, b"\x1b[?1049h"),
+            "alt-screen enter must be kept"
+        );
+        assert!(
+            contains(&collected, b"\x1b[?1049l"),
+            "alt-screen leave must be kept"
+        );
+        assert!(
+            contains(&collected, b"\x1b[31mRED\x1b[0m"),
+            "SGR + text must be kept"
+        );
+        assert!(
+            contains(&collected, b"\x1b]0;My Title\x07"),
+            "title OSC must be kept live"
+        );
         assert!(contains(&collected, b"TAIL"), "trailing text must be kept");
 
         let _ = sup.kill(&id);
@@ -750,8 +794,14 @@ mod tests {
 
         let mut combined = out1.clone();
         combined.extend_from_slice(&out2);
-        assert!(!contains(&combined, b"\x1b]7;"), "OSC-7 prefix leaked: {combined:?}");
-        assert!(!contains(&combined, b"file://host"), "OSC-7 payload leaked: {combined:?}");
+        assert!(
+            !contains(&combined, b"\x1b]7;"),
+            "OSC-7 prefix leaked: {combined:?}"
+        );
+        assert!(
+            !contains(&combined, b"file://host"),
+            "OSC-7 payload leaked: {combined:?}"
+        );
         assert_eq!(combined, b"ab".to_vec());
     }
 
@@ -783,8 +833,15 @@ mod tests {
 
         // Take the still-live entry out ourselves (mirrors what `abort_existing` does) and prove
         // its JoinHandle completes promptly once cancelled — i.e. the OS thread actually exits.
-        let entry = reg.entries.lock().unwrap().remove(&id).expect("entry present");
-        entry.cancel.store(true, std::sync::atomic::Ordering::Release);
+        let entry = reg
+            .entries
+            .lock()
+            .unwrap()
+            .remove(&id)
+            .expect("entry present");
+        entry
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Release);
         let joined = tokio::time::timeout(Duration::from_secs(2), entry.handle).await;
         assert!(
             joined.is_ok(),
@@ -819,21 +876,32 @@ mod tests {
         // sb: conn 2 owns it, blocked on a go-signal so we can prove it still streams AFTER conn-1
         // teardown by releasing it and observing SB_LIVE.
         let sb = sup
-            .create(spec(vec!["-c".into(), "read _go; printf 'SB_LIVE\\n'; read _hold".into()]))
+            .create(spec(vec![
+                "-c".into(),
+                "read _go; printf 'SB_LIVE\\n'; read _hold".into(),
+            ]))
             .expect("create sb");
 
         let reg = AttachRegistry::new(sup.clone());
 
         let (sink_a, _client_a) = mpsc::channel::<Push>(64);
-        reg.attach(1, &sa, sink_a).await.expect("attach sa on conn 1");
+        reg.attach(1, &sa, sink_a)
+            .await
+            .expect("attach sa on conn 1");
         let (sink_b, mut client_b) = mpsc::channel::<Push>(64);
-        reg.attach(2, &sb, sink_b).await.expect("attach sb on conn 2");
+        reg.attach(2, &sb, sink_b)
+            .await
+            .expect("attach sb on conn 2");
         // Drain sb's Replay first.
         assert!(matches!(
             recv_timeout(&mut client_b, 2000).await.expect("replay sb"),
             Push::Replay { .. }
         ));
-        assert_eq!(reg.attachment_count(), 2, "both attachments live before teardown");
+        assert_eq!(
+            reg.attachment_count(),
+            2,
+            "both attachments live before teardown"
+        );
 
         // Tear down ONLY conn 1: sa's entry is dropped, sb's remains.
         reg.detach_all_for_conn(1);
@@ -875,7 +943,11 @@ mod tests {
         // A fresh attach for sa on conn 1 re-inserts (proves the slot was genuinely freed).
         let (sink_a2, _client_a2) = mpsc::channel::<Push>(64);
         reg.attach(1, &sa, sink_a2).await.expect("re-attach sa");
-        assert_eq!(reg.attachment_count(), 2, "re-attach of sa restores two entries");
+        assert_eq!(
+            reg.attachment_count(),
+            2,
+            "re-attach of sa restores two entries"
+        );
 
         let _ = sup.kill(&sa);
         let _ = sup.kill(&sb);
@@ -1033,7 +1105,9 @@ mod tests {
         // so the forwarder observes `Disconnected` and returns of its own accord.
         sup.kill(&id).expect("kill");
 
-        let handle = reg.remove_session(&id).expect("remove_session returns the forwarder handle");
+        let handle = reg
+            .remove_session(&id)
+            .expect("remove_session returns the forwarder handle");
         let joined = tokio::time::timeout(Duration::from_secs(2), handle).await;
         assert!(
             joined.is_ok(),
@@ -1042,7 +1116,10 @@ mod tests {
         );
 
         // Entry is gone; a second remove is a no-op returning None.
-        assert!(reg.remove_session(&id).is_none(), "entry must be removed exactly once");
+        assert!(
+            reg.remove_session(&id).is_none(),
+            "entry must be removed exactly once"
+        );
     }
 
     // ---- Item 1 step 4 guard: after a natural exit the session lingers in the supervisor map
@@ -1082,7 +1159,11 @@ mod tests {
             AttachError::NoSuchSession,
             "attach on an exited-but-unreaped session must be refused (no forever-polling forwarder)"
         );
-        assert_eq!(reg.attachment_count(), 0, "no entry may be inserted for a refused attach");
+        assert_eq!(
+            reg.attachment_count(),
+            0,
+            "no entry may be inserted for a refused attach"
+        );
 
         let _ = sup.kill(&id);
     }

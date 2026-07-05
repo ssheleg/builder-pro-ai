@@ -183,7 +183,11 @@ pub struct SessionMeta {
 #[ts(export_to = "types.ts")]
 pub enum TerminalEvent {
     /// FIRST msg on attach; write BEFORE term.open()
-    Replay { cols: u16, rows: u16, content: Vec<u8> },
+    Replay {
+        cols: u16,
+        rows: u16,
+        content: Vec<u8>,
+    },
     /// incremental live PTY bytes
     Output { bytes: Vec<u8> },
 }
@@ -193,19 +197,31 @@ pub enum TerminalEvent {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "event", content = "data", rename_all = "camelCase")]
 enum TerminalEventShape {
-    Replay { cols: u16, rows: u16, content: Vec<u8> },
-    Output { bytes: Vec<u8> },
+    Replay {
+        cols: u16,
+        rows: u16,
+        content: Vec<u8>,
+    },
+    Output {
+        bytes: Vec<u8>,
+    },
 }
 
 impl From<&TerminalEvent> for TerminalEventShape {
     fn from(v: &TerminalEvent) -> Self {
         match v {
-            TerminalEvent::Replay { cols, rows, content } => TerminalEventShape::Replay {
+            TerminalEvent::Replay {
+                cols,
+                rows,
+                content,
+            } => TerminalEventShape::Replay {
                 cols: *cols,
                 rows: *rows,
                 content: content.clone(),
             },
-            TerminalEvent::Output { bytes } => TerminalEventShape::Output { bytes: bytes.clone() },
+            TerminalEvent::Output { bytes } => TerminalEventShape::Output {
+                bytes: bytes.clone(),
+            },
         }
     }
 }
@@ -213,9 +229,15 @@ impl From<&TerminalEvent> for TerminalEventShape {
 impl From<TerminalEventShape> for TerminalEvent {
     fn from(v: TerminalEventShape) -> Self {
         match v {
-            TerminalEventShape::Replay { cols, rows, content } => {
-                TerminalEvent::Replay { cols, rows, content }
-            }
+            TerminalEventShape::Replay {
+                cols,
+                rows,
+                content,
+            } => TerminalEvent::Replay {
+                cols,
+                rows,
+                content,
+            },
             TerminalEventShape::Output { bytes } => TerminalEvent::Output { bytes },
         }
     }
@@ -308,14 +330,23 @@ pub enum Request {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Response {
-    Welcome { proto_version: u16, daemon_build: String },
-    Incompatible { min: u16, max: u16 },
+    Welcome {
+        proto_version: u16,
+        daemon_build: String,
+    },
+    Incompatible {
+        min: u16,
+        max: u16,
+    },
     Workspaces(Vec<Workspace>),
     Workspace(Workspace),
     Sessions(Vec<SessionMeta>),
     Session(SessionMeta),
     Ack,
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
