@@ -4,6 +4,26 @@ Verbatim-in-substance capture of the owner's second vision statement. This EXTEN
 replace) [`2026-07-01-product-vision.md`](2026-07-01-product-vision.md). Docs/specs/roadmap are
 audited against BOTH.
 
+## The pain this product exists to kill (owner, 2026-07-06)
+
+> «Проблема сейчас — хаос и потеря целей и контекста: всегда 5-6 проектов в работе, у каждого
+> разная скорость и разные этапы, всё держать в голове невозможно. Постоянно надо подключаться,
+> проверять что делают агенты и нажимать кнопки — хотя всё это можно было бы делать автоматически.»
+
+Translated into product law:
+1. **The attention tax is the enemy.** Every "connect and check what the agents are doing" and
+   every routine button-press is a defect. The system pulls the owner in (batched escalations,
+   morning summaries) — the owner never polls.
+2. **Context restoration in seconds.** Opening the panel must answer, for all 5-6 projects at
+   once: where is each one, what moved since I last looked, what (if anything) needs ME.
+3. **Autonomy is the default, approval is the exception.** Anything that CAN proceed under policy
+   does; only policy-gated actions (spec approvals, destructive ops, spend) wait — and they wait
+   in ONE inbox, not in N terminal tabs.
+
+North-star metrics: (a) time-to-context on app open (target: <30 s for all projects), (b) owner
+interventions per shipped task (target: →1, the approval that matters), (c) hours agents progress
+unattended without stalling on a button.
+
 ## Mission (owner's words, restated)
 
 **The product's main job: take ANY idea to a working project, and manage/organize the
