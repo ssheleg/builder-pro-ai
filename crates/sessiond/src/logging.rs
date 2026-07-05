@@ -57,13 +57,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedFileWriter {
 /// Returns an error if `path` cannot be created/opened, or if a subscriber was already installed
 /// in this process (only one `#[test]` per integration-test binary may call this).
 pub fn init_to_file(path: &Path) -> io::Result<()> {
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
     let shared = Arc::new(Mutex::new(file));
-    SINK.set(shared.clone())
-        .map_err(|_| io::Error::other("logging::init_to_file called more than once in this process"))?;
+    SINK.set(shared.clone()).map_err(|_| {
+        io::Error::other("logging::init_to_file called more than once in this process")
+    })?;
 
     let writer = SharedFileWriter(shared);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -99,7 +97,11 @@ mod tests {
         // test that also calls `init_to_file`/`tracing_subscriber::registry().init()`).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.log");
-        let file = OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
         let mut w = SharedFileWriter(Arc::new(Mutex::new(file)));
         w.write_all(b"hello\n").unwrap();
         w.flush().unwrap();

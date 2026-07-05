@@ -332,10 +332,7 @@ mod tests {
         // Split "ESC ] 1 3 3 ; D ; 4 2 BEL" across three feeds.
         assert_eq!(p.feed(&[ESC, b']', b'1', b'3']), Vec::<OscEvent>::new());
         assert_eq!(p.feed(b"3;D;4"), Vec::<OscEvent>::new());
-        assert_eq!(
-            p.feed(&[b'2', BEL]),
-            vec![OscEvent::CommandEnd(Some(42))]
-        );
+        assert_eq!(p.feed(&[b'2', BEL]), vec![OscEvent::CommandEnd(Some(42))]);
     }
 
     #[test]
@@ -434,7 +431,10 @@ mod tests {
     #[test]
     fn osc7_unknown_scheme_dropped() {
         let mut p = OscParser::new();
-        assert_eq!(p.feed(&osc("7;http://evil/", &[BEL])), Vec::<OscEvent>::new());
+        assert_eq!(
+            p.feed(&osc("7;http://evil/", &[BEL])),
+            Vec::<OscEvent>::new()
+        );
     }
 
     #[test]

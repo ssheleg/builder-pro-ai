@@ -240,7 +240,11 @@ fn install_push_callbacks(
         if let Some(attach) = attach_exited.upgrade() {
             let _ = attach.remove_session(&session_id);
         }
-        b_exited.broadcast(Push::ChildExited { session_id, code, signal });
+        b_exited.broadcast(Push::ChildExited {
+            session_id,
+            code,
+            signal,
+        });
     });
 }
 
@@ -330,7 +334,10 @@ async fn handle_client(
         // Wrong magic, wrong/out-of-range version, or a non-Hello first frame ⇒ refuse + close.
         let bytes = encode_frame(&Frame::Response {
             id: 0,
-            res: Response::Incompatible { min: PROTO_VERSION, max: PROTO_VERSION },
+            res: Response::Incompatible {
+                min: PROTO_VERSION,
+                max: PROTO_VERSION,
+            },
         })
         .map_err(to_io)?;
         stream.write_all(&bytes).await?;
@@ -518,7 +525,9 @@ async fn dispatch(
                 Err(_) => {
                     return Response::Error {
                         code: "InvalidWorkspaceRoot".into(),
-                        message: format!("workspace root is not an existing directory: {root_path}"),
+                        message: format!(
+                            "workspace root is not an existing directory: {root_path}"
+                        ),
                     }
                 }
             };
@@ -532,7 +541,9 @@ async fn dispatch(
                 Ok(()) => {
                     // Broadcast to every client (spec §7). The awaiting caller still gets the
                     // Response below; other clients learn via the Push.
-                    let _ = push_sink.try_send(Push::WorkspaceCreated { workspace: w.clone() });
+                    let _ = push_sink.try_send(Push::WorkspaceCreated {
+                        workspace: w.clone(),
+                    });
                     Response::Workspace(w)
                 }
                 Err(e) => err("DbError", e),
@@ -572,7 +583,14 @@ async fn dispatch(
             Response::Sessions(by_id.into_values().collect())
         }
 
-        Request::CreateSession { workspace_id, shell, cwd, env_overrides, cols, rows } => {
+        Request::CreateSession {
+            workspace_id,
+            shell,
+            cwd,
+            env_overrides,
+            cols,
+            rows,
+        } => {
             let spec = match resolve_session_spec(
                 &deps.runtime_root,
                 workspace_id,
@@ -610,7 +628,11 @@ async fn dispatch(
         }
 
         Request::AttachSession { session_id } => {
-            match deps.attach.attach(conn_id, &session_id, push_sink.clone()).await {
+            match deps
+                .attach
+                .attach(conn_id, &session_id, push_sink.clone())
+                .await
+            {
                 Ok(()) => Response::Ack,
                 Err(AttachError::NoSuchSession) => Response::Error {
                     code: "NoSuchSession".into(),
@@ -635,12 +657,14 @@ async fn dispatch(
             }
         }
 
-        Request::Resize { session_id, cols, rows } => {
-            match deps.supervisor.resize(&session_id, cols, rows) {
-                Ok(()) => Response::Ack,
-                Err(e) => err(code_for(&e), e),
-            }
-        }
+        Request::Resize {
+            session_id,
+            cols,
+            rows,
+        } => match deps.supervisor.resize(&session_id, cols, rows) {
+            Ok(()) => Response::Ack,
+            Err(e) => err(code_for(&e), e),
+        },
 
         Request::KillSession { session_id } => match deps.supervisor.kill(&session_id) {
             Ok(()) => Response::Ack,
@@ -681,7 +705,10 @@ fn code_for(e: &SupervisorError) -> &'static str {
 }
 
 fn err(code: &str, e: impl std::fmt::Display) -> Response {
-    Response::Error { code: code.into(), message: e.to_string() }
+    Response::Error {
+        code: code.into(),
+        message: e.to_string(),
+    }
 }
 
 /// Validate a workspace root / session cwd via the shared `bpa-paths` validator (spec §16):
@@ -809,7 +836,9 @@ mod tests {
     // ---- framing helpers (mirror the server codec on the client side) ----
     async fn send_frame(s: &mut UnixStream, f: &Frame) {
         let body = bincode::serialize(f).unwrap();
-        s.write_all(&(body.len() as u32).to_le_bytes()).await.unwrap();
+        s.write_all(&(body.len() as u32).to_le_bytes())
+            .await
+            .unwrap();
         s.write_all(&body).await.unwrap();
         s.flush().await.unwrap();
     }
@@ -892,7 +921,10 @@ mod tests {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
         match hello(&mut c).await {
-            Response::Welcome { proto_version, daemon_build } => {
+            Response::Welcome {
+                proto_version,
+                daemon_build,
+            } => {
                 assert_eq!(proto_version, PROTO_VERSION);
                 assert_eq!(daemon_build, "test");
             }
@@ -917,7 +949,10 @@ mod tests {
         )
         .await;
         match recv_frame_t(&mut c).await {
-            Frame::Response { id: 0, res: Response::Incompatible { min, max } } => {
+            Frame::Response {
+                id: 0,
+                res: Response::Incompatible { min, max },
+            } => {
                 assert_eq!((min, max), (PROTO_VERSION, PROTO_VERSION));
             }
             other => panic!("expected Incompatible, got {other:?}"),
@@ -948,7 +983,10 @@ mod tests {
         )
         .await;
         match recv_frame_t(&mut c).await {
-            Frame::Response { id: 0, res: Response::Incompatible { .. } } => {}
+            Frame::Response {
+                id: 0,
+                res: Response::Incompatible { .. },
+            } => {}
             other => panic!("expected Incompatible, got {other:?}"),
         }
     }
@@ -957,9 +995,19 @@ mod tests {
     async fn non_hello_first_frame_is_rejected() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        send_frame(&mut c, &Frame::Request { id: 7, req: Request::ListWorkspaces }).await;
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 7,
+                req: Request::ListWorkspaces,
+            },
+        )
+        .await;
         match recv_frame_t(&mut c).await {
-            Frame::Response { res: Response::Incompatible { .. }, .. } => {}
+            Frame::Response {
+                res: Response::Incompatible { .. },
+                ..
+            } => {}
             other => panic!("first frame must be Hello; expected Incompatible, got {other:?}"),
         }
     }
@@ -972,12 +1020,22 @@ mod tests {
 
         // Fire three ListWorkspaces requests with distinct ids back-to-back.
         for id in [11u64, 22, 33] {
-            send_frame(&mut c, &Frame::Request { id, req: Request::ListWorkspaces }).await;
+            send_frame(
+                &mut c,
+                &Frame::Request {
+                    id,
+                    req: Request::ListWorkspaces,
+                },
+            )
+            .await;
         }
         let mut seen = std::collections::HashSet::new();
         for _ in 0..3 {
             match recv_frame(&mut c).await {
-                Frame::Response { id, res: Response::Workspaces(_) } => {
+                Frame::Response {
+                    id,
+                    res: Response::Workspaces(_),
+                } => {
                     seen.insert(id);
                 }
                 other => panic!("expected Workspaces response, got {other:?}"),
@@ -997,7 +1055,10 @@ mod tests {
             &mut c,
             &Frame::Request {
                 id: 5,
-                req: Request::CreateWorkspace { name: "w".into(), root_path: "/tmp".into() },
+                req: Request::CreateWorkspace {
+                    name: "w".into(),
+                    root_path: "/tmp".into(),
+                },
             },
         )
         .await;
@@ -1006,7 +1067,10 @@ mod tests {
         let mut got_push = false;
         for _ in 0..2 {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 5, res: Response::Workspace(w) } => got_resp = Some(w),
+                Frame::Response {
+                    id: 5,
+                    res: Response::Workspace(w),
+                } => got_resp = Some(w),
                 Frame::Push(Push::WorkspaceCreated { .. }) => got_push = true,
                 other => panic!("unexpected frame {other:?}"),
             }
@@ -1014,10 +1078,20 @@ mod tests {
         assert!(got_resp.is_some() && got_push);
 
         // The workspace is persisted: a subsequent ListWorkspaces reflects it.
-        send_frame(&mut c, &Frame::Request { id: 6, req: Request::ListWorkspaces }).await;
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 6,
+                req: Request::ListWorkspaces,
+            },
+        )
+        .await;
         loop {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 6, res: Response::Workspaces(v) } => {
+                Frame::Response {
+                    id: 6,
+                    res: Response::Workspaces(v),
+                } => {
                     assert_eq!(v.len(), 1);
                     assert_eq!(v[0].name, "w");
                     break;
@@ -1045,7 +1119,10 @@ mod tests {
         )
         .await;
         match recv_frame(&mut c).await {
-            Frame::Response { id: 9, res: Response::Error { code, .. } } => {
+            Frame::Response {
+                id: 9,
+                res: Response::Error { code, .. },
+            } => {
                 assert_eq!(code, "InvalidWorkspaceRoot");
             }
             other => panic!("expected InvalidWorkspaceRoot error, got {other:?}"),
@@ -1079,12 +1156,18 @@ mod tests {
         // Drain until the correlated Session response (Pushes may interleave).
         let session_id = loop {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 1, res: Response::Session(meta) } => {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Session(meta),
+                } => {
                     assert_eq!(meta.cols, 80);
                     assert_eq!(meta.rows, 24);
                     break meta.id;
                 }
-                Frame::Response { id: 1, res: Response::Error { code, message } } => {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Error { code, message },
+                } => {
                     panic!("create failed: {code}: {message}");
                 }
                 Frame::Push(_) => continue,
@@ -1095,12 +1178,20 @@ mod tests {
         // GetSessionState returns the live session.
         send_frame(
             &mut c,
-            &Frame::Request { id: 2, req: Request::GetSessionState { session_id: session_id.clone() } },
+            &Frame::Request {
+                id: 2,
+                req: Request::GetSessionState {
+                    session_id: session_id.clone(),
+                },
+            },
         )
         .await;
         loop {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 2, res: Response::Session(meta) } => {
+                Frame::Response {
+                    id: 2,
+                    res: Response::Session(meta),
+                } => {
                     assert_eq!(meta.id, session_id);
                     break;
                 }
@@ -1110,10 +1201,20 @@ mod tests {
         }
 
         // ListSessions reflects the persisted session too.
-        send_frame(&mut c, &Frame::Request { id: 3, req: Request::ListSessions }).await;
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 3,
+                req: Request::ListSessions,
+            },
+        )
+        .await;
         loop {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 3, res: Response::Sessions(v) } => {
+                Frame::Response {
+                    id: 3,
+                    res: Response::Sessions(v),
+                } => {
                     assert!(v.iter().any(|m| m.id == session_id));
                     break;
                 }
@@ -1125,7 +1226,10 @@ mod tests {
         // Clean up the live child.
         send_frame(
             &mut c,
-            &Frame::Request { id: 4, req: Request::KillSession { session_id } },
+            &Frame::Request {
+                id: 4,
+                req: Request::KillSession { session_id },
+            },
         )
         .await;
     }
@@ -1151,7 +1255,10 @@ mod tests {
         )
         .await;
         match recv_frame(&mut c).await {
-            Frame::Response { id: 1, res: Response::Error { code, .. } } => {
+            Frame::Response {
+                id: 1,
+                res: Response::Error { code, .. },
+            } => {
                 assert_eq!(code, "CwdMissing");
             }
             other => panic!("expected CwdMissing error, got {other:?}"),
@@ -1180,7 +1287,10 @@ mod tests {
         )
         .await;
         match recv_frame(&mut c).await {
-            Frame::Response { id: 1, res: Response::Error { code, .. } } => {
+            Frame::Response {
+                id: 1,
+                res: Response::Error { code, .. },
+            } => {
                 assert_eq!(code, "CwdMissing");
             }
             other => panic!("expected CwdMissing error for relative cwd, got {other:?}"),
@@ -1212,8 +1322,14 @@ mod tests {
         .await;
         let session_id = loop {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 1, res: Response::Session(meta) } => break meta.id,
-                Frame::Response { id: 1, res: Response::Error { code, message } } => {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Session(meta),
+                } => break meta.id,
+                Frame::Response {
+                    id: 1,
+                    res: Response::Error { code, message },
+                } => {
                     panic!("create failed: {code}: {message}")
                 }
                 Frame::Push(_) => continue,
@@ -1236,7 +1352,10 @@ mod tests {
         // Ack for WriteStdin (drain until it).
         loop {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 2, res: Response::Ack } => break,
+                Frame::Response {
+                    id: 2,
+                    res: Response::Ack,
+                } => break,
                 Frame::Push(_) => continue,
                 other => panic!("expected Ack for write, got {other:?}"),
             }
@@ -1244,7 +1363,12 @@ mod tests {
 
         send_frame(
             &mut c,
-            &Frame::Request { id: 3, req: Request::AttachSession { session_id: session_id.clone() } },
+            &Frame::Request {
+                id: 3,
+                req: Request::AttachSession {
+                    session_id: session_id.clone(),
+                },
+            },
         )
         .await;
 
@@ -1254,8 +1378,13 @@ mod tests {
         let mut got_replay = false;
         for _ in 0..4 {
             match recv_frame(&mut c).await {
-                Frame::Response { id: 3, res: Response::Ack } => got_ack = true,
-                Frame::Push(Push::Replay { session_id: sid, .. }) => {
+                Frame::Response {
+                    id: 3,
+                    res: Response::Ack,
+                } => got_ack = true,
+                Frame::Push(Push::Replay {
+                    session_id: sid, ..
+                }) => {
                     assert_eq!(sid, session_id);
                     got_replay = true;
                 }
@@ -1266,14 +1395,20 @@ mod tests {
                 break;
             }
         }
-        assert!(got_ack && got_replay, "attach must Ack and deliver Replay first");
+        assert!(
+            got_ack && got_replay,
+            "attach must Ack and deliver Replay first"
+        );
 
         // Release the child; Output with the printed text must follow.
         send_frame(
             &mut c,
             &Frame::Request {
                 id: 4,
-                req: Request::WriteStdin { session_id: session_id.clone(), bytes: b"go\n".to_vec() },
+                req: Request::WriteStdin {
+                    session_id: session_id.clone(),
+                    bytes: b"go\n".to_vec(),
+                },
             },
         )
         .await;
@@ -1281,8 +1416,13 @@ mod tests {
         let mut collected = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut c)).await {
-                Ok(Frame::Push(Push::Output { session_id: sid, bytes })) if sid == session_id => {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut c))
+                .await
+            {
+                Ok(Frame::Push(Push::Output {
+                    session_id: sid,
+                    bytes,
+                })) if sid == session_id => {
                     collected.extend_from_slice(&bytes);
                     if collected.windows(12).any(|w| w == b"HELLO_ATTACH") {
                         break;
@@ -1297,7 +1437,14 @@ mod tests {
             "expected live Output containing HELLO_ATTACH, got: {collected:?}"
         );
 
-        send_frame(&mut c, &Frame::Request { id: 5, req: Request::KillSession { session_id } }).await;
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 5,
+                req: Request::KillSession { session_id },
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1309,9 +1456,15 @@ mod tests {
         assert!(matches!(hello(&mut a).await, Response::Welcome { .. }));
 
         for id in 0..(CLIENT_OUTQ_CAP as u64 + 512) {
-            let f = Frame::Request { id, req: Request::ListWorkspaces };
+            let f = Frame::Request {
+                id,
+                req: Request::ListWorkspaces,
+            };
             let body = bincode::serialize(&f).unwrap();
-            if a.write_all(&(body.len() as u32).to_le_bytes()).await.is_err() {
+            if a.write_all(&(body.len() as u32).to_le_bytes())
+                .await
+                .is_err()
+            {
                 break;
             }
             if a.write_all(&body).await.is_err() {
@@ -1323,9 +1476,19 @@ mod tests {
         // Client B connects fresh and MUST be served normally.
         let mut b = UnixStream::connect(&path).await.unwrap();
         assert!(matches!(hello(&mut b).await, Response::Welcome { .. }));
-        send_frame(&mut b, &Frame::Request { id: 1, req: Request::ListWorkspaces }).await;
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 1,
+                req: Request::ListWorkspaces,
+            },
+        )
+        .await;
         match tokio::time::timeout(std::time::Duration::from_secs(2), recv_frame(&mut b)).await {
-            Ok(Frame::Response { id: 1, res: Response::Workspaces(_) }) => {}
+            Ok(Frame::Response {
+                id: 1,
+                res: Response::Workspaces(_),
+            }) => {}
             Ok(other) => panic!("B expected Workspaces, got {other:?}"),
             Err(_) => panic!("B was stalled by A's backpressure — bounded-outq isolation broken"),
         }
@@ -1355,13 +1518,34 @@ mod tests {
         assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
 
         for (id, req) in [
-            (1u64, Request::WriteStdin { session_id: "ghost".into(), bytes: vec![1] }),
-            (2, Request::Resize { session_id: "ghost".into(), cols: 10, rows: 10 }),
-            (3, Request::KillSession { session_id: "ghost".into() }),
+            (
+                1u64,
+                Request::WriteStdin {
+                    session_id: "ghost".into(),
+                    bytes: vec![1],
+                },
+            ),
+            (
+                2,
+                Request::Resize {
+                    session_id: "ghost".into(),
+                    cols: 10,
+                    rows: 10,
+                },
+            ),
+            (
+                3,
+                Request::KillSession {
+                    session_id: "ghost".into(),
+                },
+            ),
         ] {
             send_frame(&mut c, &Frame::Request { id, req }).await;
             match recv_frame(&mut c).await {
-                Frame::Response { id: rid, res: Response::Error { code, .. } } => {
+                Frame::Response {
+                    id: rid,
+                    res: Response::Error { code, .. },
+                } => {
                     assert_eq!(rid, id);
                     assert_eq!(code, "NoSuchSession");
                 }
@@ -1378,18 +1562,36 @@ mod tests {
 
         send_frame(
             &mut c,
-            &Frame::Request { id: 1, req: Request::DetachSession { session_id: "ghost".into() } },
+            &Frame::Request {
+                id: 1,
+                req: Request::DetachSession {
+                    session_id: "ghost".into(),
+                },
+            },
         )
         .await;
         assert!(matches!(
             recv_frame(&mut c).await,
-            Frame::Response { id: 1, res: Response::Ack }
+            Frame::Response {
+                id: 1,
+                res: Response::Ack
+            }
         ));
 
-        send_frame(&mut c, &Frame::Request { id: 2, req: Request::DaemonShutdown { drain: false } }).await;
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 2,
+                req: Request::DaemonShutdown { drain: false },
+            },
+        )
+        .await;
         assert!(matches!(
             recv_frame(&mut c).await,
-            Frame::Response { id: 2, res: Response::Ack }
+            Frame::Response {
+                id: 2,
+                res: Response::Ack
+            }
         ));
     }
 
@@ -1437,15 +1639,23 @@ mod tests {
             &mut c,
             &Frame::Request {
                 id: 9,
-                req: Request::CreateWorkspace { name: "esc".into(), root_path: link },
+                req: Request::CreateWorkspace {
+                    name: "esc".into(),
+                    root_path: link,
+                },
             },
         )
         .await;
         match recv_frame_t(&mut c).await {
-            Frame::Response { id: 9, res: Response::Error { code, .. } } => {
+            Frame::Response {
+                id: 9,
+                res: Response::Error { code, .. },
+            } => {
                 assert_eq!(code, "InvalidWorkspaceRoot");
             }
-            other => panic!("expected InvalidWorkspaceRoot for symlink-escaping root, got {other:?}"),
+            other => {
+                panic!("expected InvalidWorkspaceRoot for symlink-escaping root, got {other:?}")
+            }
         }
     }
 
@@ -1474,7 +1684,10 @@ mod tests {
         )
         .await;
         match recv_frame_t(&mut c).await {
-            Frame::Response { id: 1, res: Response::Error { code, .. } } => {
+            Frame::Response {
+                id: 1,
+                res: Response::Error { code, .. },
+            } => {
                 assert_eq!(code, "CwdMissing");
             }
             other => panic!("expected CwdMissing for symlink-escaping cwd, got {other:?}"),
@@ -1493,7 +1706,10 @@ mod tests {
             env: vec![
                 ("TERM".into(), "xterm-256color".into()),
                 ("PATH".into(), path),
-                ("HOME".into(), std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())),
+                (
+                    "HOME".into(),
+                    std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+                ),
             ],
             cols: 80,
             rows: 24,
@@ -1515,7 +1731,11 @@ mod tests {
         // Attach it (a bounded mpsc sink stands in for a client's push queue).
         let (sink, _client) = mpsc::channel::<Push>(16);
         deps.attach.attach(1, &id, sink).await.expect("attach");
-        assert_eq!(deps.attach.attachment_count(), 1, "attach registered one entry");
+        assert_eq!(
+            deps.attach.attachment_count(),
+            1,
+            "attach registered one entry"
+        );
 
         // Kill joins the wait thread, so on_exited → remove_session has run by the time kill returns.
         deps.supervisor.kill(&id).expect("kill");
@@ -1554,8 +1774,14 @@ mod tests {
         .await;
         let sa_id = loop {
             match recv_frame_t(&mut a).await {
-                Frame::Response { id: 1, res: Response::Session(m) } => break m.id,
-                Frame::Response { id: 1, res: Response::Error { code, message } } => {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Session(m),
+                } => break m.id,
+                Frame::Response {
+                    id: 1,
+                    res: Response::Error { code, message },
+                } => {
                     panic!("A create failed: {code}: {message}")
                 }
                 Frame::Push(_) => continue,
@@ -1564,14 +1790,22 @@ mod tests {
         };
         send_frame(
             &mut a,
-            &Frame::Request { id: 2, req: Request::AttachSession { session_id: sa_id.clone() } },
+            &Frame::Request {
+                id: 2,
+                req: Request::AttachSession {
+                    session_id: sa_id.clone(),
+                },
+            },
         )
         .await;
         // Drain A's Ack + first Replay.
         let (mut a_ack, mut a_replay) = (false, false);
         for _ in 0..4 {
             match recv_frame_t(&mut a).await {
-                Frame::Response { id: 2, res: Response::Ack } => a_ack = true,
+                Frame::Response {
+                    id: 2,
+                    res: Response::Ack,
+                } => a_ack = true,
                 Frame::Push(Push::Replay { .. }) => a_replay = true,
                 Frame::Push(_) => continue,
                 other => panic!("A unexpected before attach settle {other:?}"),
@@ -1602,8 +1836,14 @@ mod tests {
         .await;
         let sb_id = loop {
             match recv_frame_t(&mut b).await {
-                Frame::Response { id: 1, res: Response::Session(m) } => break m.id,
-                Frame::Response { id: 1, res: Response::Error { code, message } } => {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Session(m),
+                } => break m.id,
+                Frame::Response {
+                    id: 1,
+                    res: Response::Error { code, message },
+                } => {
                     panic!("B create failed: {code}: {message}")
                 }
                 Frame::Push(_) => continue,
@@ -1624,7 +1864,10 @@ mod tests {
         .await;
         loop {
             match recv_frame_t(&mut b).await {
-                Frame::Response { id: 2, res: Response::Ack } => break,
+                Frame::Response {
+                    id: 2,
+                    res: Response::Ack,
+                } => break,
                 Frame::Push(_) => continue,
                 other => panic!("B expected Ack for prime write, got {other:?}"),
             }
@@ -1632,14 +1875,24 @@ mod tests {
         // Attach SB (drain Ack + Replay).
         send_frame(
             &mut b,
-            &Frame::Request { id: 3, req: Request::AttachSession { session_id: sb_id.clone() } },
+            &Frame::Request {
+                id: 3,
+                req: Request::AttachSession {
+                    session_id: sb_id.clone(),
+                },
+            },
         )
         .await;
         let (mut b_ack, mut b_replay) = (false, false);
         for _ in 0..4 {
             match recv_frame_t(&mut b).await {
-                Frame::Response { id: 3, res: Response::Ack } => b_ack = true,
-                Frame::Push(Push::Replay { session_id, .. }) if session_id == sb_id => b_replay = true,
+                Frame::Response {
+                    id: 3,
+                    res: Response::Ack,
+                } => b_ack = true,
+                Frame::Push(Push::Replay { session_id, .. }) if session_id == sb_id => {
+                    b_replay = true
+                }
                 Frame::Push(_) => continue,
                 other => panic!("B unexpected before attach settle {other:?}"),
             }
@@ -1653,14 +1906,19 @@ mod tests {
             &mut b,
             &Frame::Request {
                 id: 4,
-                req: Request::WriteStdin { session_id: sb_id.clone(), bytes: b"go\n".to_vec() },
+                req: Request::WriteStdin {
+                    session_id: sb_id.clone(),
+                    bytes: b"go\n".to_vec(),
+                },
             },
         )
         .await;
         let mut b_out = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b)).await {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b))
+                .await
+            {
                 Ok(Frame::Push(Push::Output { session_id, bytes })) if session_id == sb_id => {
                     b_out.extend_from_slice(&bytes);
                     if b_out.windows(8).any(|w| w == b"B_BEFORE") {
@@ -1695,7 +1953,10 @@ mod tests {
         // Drain the Ack for id 5 (Output may interleave).
         loop {
             match recv_frame_t(&mut b).await {
-                Frame::Response { id: 5, res: Response::Ack } => break,
+                Frame::Response {
+                    id: 5,
+                    res: Response::Ack,
+                } => break,
                 Frame::Push(_) => continue,
                 other => panic!("B expected Ack for post-disconnect write, got {other:?}"),
             }
@@ -1704,14 +1965,19 @@ mod tests {
             &mut b,
             &Frame::Request {
                 id: 6,
-                req: Request::WriteStdin { session_id: sb_id.clone(), bytes: b"go\n".to_vec() },
+                req: Request::WriteStdin {
+                    session_id: sb_id.clone(),
+                    bytes: b"go\n".to_vec(),
+                },
             },
         )
         .await;
         let mut b_out2 = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b)).await {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b))
+                .await
+            {
                 Ok(Frame::Push(Push::Output { session_id, bytes })) if session_id == sb_id => {
                     b_out2.extend_from_slice(&bytes);
                     if b_out2.windows(7).any(|w| w == b"B_AFTER") {
@@ -1728,6 +1994,13 @@ mod tests {
         );
 
         // Clean up: kill SB over B (SA went away with A).
-        send_frame(&mut b, &Frame::Request { id: 7, req: Request::KillSession { session_id: sb_id } }).await;
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 7,
+                req: Request::KillSession { session_id: sb_id },
+            },
+        )
+        .await;
     }
 }

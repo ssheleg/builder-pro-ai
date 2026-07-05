@@ -45,9 +45,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use portable_pty::{
-    native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize, PtySystem,
-};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize, PtySystem};
 use tracing::{debug, warn};
 
 use crate::live_grid::LiveGrid;
@@ -459,7 +457,8 @@ impl Supervisor {
         let mut w = s.writer.lock().unwrap();
         w.write_all(bytes)
             .map_err(|e| SupervisorError::Io(format!("write_all: {e}")))?;
-        w.flush().map_err(|e| SupervisorError::Io(format!("flush: {e}")))?;
+        w.flush()
+            .map_err(|e| SupervisorError::Io(format!("flush: {e}")))?;
         Ok(())
     }
 
@@ -517,10 +516,7 @@ impl Supervisor {
     }
 
     /// `(cols, rows, sanitized_scrollback_bytes)` — the payload for `Push::Replay` (spec §6.2/§11).
-    pub fn snapshot_scrollback(
-        &self,
-        id: &str,
-    ) -> Result<(u16, u16, Vec<u8>), SupervisorError> {
+    pub fn snapshot_scrollback(&self, id: &str) -> Result<(u16, u16, Vec<u8>), SupervisorError> {
         let s = self.get(id)?;
         let cols = *s.shared.cols.lock().unwrap();
         let rows = *s.shared.rows.lock().unwrap();
@@ -671,7 +667,10 @@ mod tests {
         vec![
             ("TERM".into(), "xterm-256color".into()),
             ("PATH".into(), path),
-            ("HOME".into(), std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())),
+            (
+                "HOME".into(),
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+            ),
         ]
     }
 
@@ -727,10 +726,12 @@ mod tests {
         let id = sup.create(spec_for("/bin/sh", vec![])).expect("create");
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         sup.subscribe_output(&id, tx).expect("subscribe");
-        sup.write_stdin(&id, b"printf BPA_MARKER_OK\n").expect("write");
+        sup.write_stdin(&id, b"printf BPA_MARKER_OK\n")
+            .expect("write");
         let out = drain_until(&rx, b"BPA_MARKER_OK", Duration::from_secs(5));
         assert!(
-            out.windows(b"BPA_MARKER_OK".len()).any(|w| w == b"BPA_MARKER_OK"),
+            out.windows(b"BPA_MARKER_OK".len())
+                .any(|w| w == b"BPA_MARKER_OK"),
             "expected echoed marker in output, got: {}",
             String::from_utf8_lossy(&out)
         );
@@ -803,7 +804,10 @@ mod tests {
 
         let out = drain_until(&rx, b"PIDS ", Duration::from_secs(5));
         let text = String::from_utf8_lossy(&out);
-        let line = text.lines().find(|l| l.contains("PIDS ")).expect("PIDS line");
+        let line = text
+            .lines()
+            .find(|l| l.contains("PIDS "))
+            .expect("PIDS line");
         let nums: Vec<i32> = line
             .trim()
             .rsplit(' ')
@@ -823,8 +827,14 @@ mod tests {
         while (pid_alive(a) || pid_alive(b)) && start.elapsed() < Duration::from_secs(4) {
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(!pid_alive(a), "grandchild {a} must be killed by process-group kill");
-        assert!(!pid_alive(b), "grandchild {b} must be killed by process-group kill");
+        assert!(
+            !pid_alive(a),
+            "grandchild {a} must be killed by process-group kill"
+        );
+        assert!(
+            !pid_alive(b),
+            "grandchild {b} must be killed by process-group kill"
+        );
     }
 
     // ---- §14.1: resize delivers SIGWINCH ($COLUMNS / stty size updates). ----
@@ -910,10 +920,18 @@ mod tests {
         let sup_ref = &sup;
         let idc = id.clone();
         let ok = wait_for(
-            || sup_ref.meta(&idc).map(|m| m.waiting_for_input).unwrap_or(false),
+            || {
+                sup_ref
+                    .meta(&idc)
+                    .map(|m| m.waiting_for_input)
+                    .unwrap_or(false)
+            },
             Duration::from_secs(3),
         );
-        assert!(ok, "shell blocked at a partial prompt should be waiting_for_input");
+        assert!(
+            ok,
+            "shell blocked at a partial prompt should be waiting_for_input"
+        );
         sup.kill(&id).expect("kill");
     }
 
@@ -982,7 +1000,8 @@ mod tests {
         // The live sink must deliver the SGR + text verbatim.
         let out = drain_until(&rx, b"tail", Duration::from_secs(5));
         assert!(
-            out.windows(b"\x1b[31mRED\x1b[0m".len()).any(|w| w == b"\x1b[31mRED\x1b[0m"),
+            out.windows(b"\x1b[31mRED\x1b[0m".len())
+                .any(|w| w == b"\x1b[31mRED\x1b[0m"),
             "live sink must pass SGR through verbatim, got: {out:?}"
         );
 
@@ -1001,7 +1020,8 @@ mod tests {
         );
         // ...but keeps the SGR + visible text.
         assert!(
-            ring.windows(b"\x1b[31mRED\x1b[0m".len()).any(|w| w == b"\x1b[31mRED\x1b[0m"),
+            ring.windows(b"\x1b[31mRED\x1b[0m".len())
+                .any(|w| w == b"\x1b[31mRED\x1b[0m"),
             "scrollback ring must keep SGR + text"
         );
         sup.kill(&id).expect("kill");
@@ -1027,7 +1047,10 @@ mod tests {
         let id = sup
             .create(spec_for("/bin/sh", vec!["-c".into(), "exit 0".into()]))
             .expect("create");
-        assert!(created.load(Ordering::SeqCst), "on_created must fire during create");
+        assert!(
+            created.load(Ordering::SeqCst),
+            "on_created must fire during create"
+        );
         assert!(
             wait_for(|| exited.load(Ordering::SeqCst), Duration::from_secs(5)),
             "on_exited must fire when the child exits 0"
@@ -1042,4 +1065,3 @@ mod tests {
         assert_send_sync::<Supervisor>();
     }
 }
-

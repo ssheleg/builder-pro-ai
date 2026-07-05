@@ -72,13 +72,28 @@ pub enum BrokerAction {
 ///   surfaced as a Hop-A event in S1 — spec §7 broker-mapping table: "log + mark session errored").
 pub fn map_push(push: Push) -> BrokerAction {
     match push {
-        Push::Replay { session_id, cols, rows, content } => {
-            BrokerAction::SendChannel(session_id, TerminalEvent::Replay { cols, rows, content })
-        }
+        Push::Replay {
+            session_id,
+            cols,
+            rows,
+            content,
+        } => BrokerAction::SendChannel(
+            session_id,
+            TerminalEvent::Replay {
+                cols,
+                rows,
+                content,
+            },
+        ),
         Push::Output { session_id, bytes } => {
             BrokerAction::SendChannel(session_id, TerminalEvent::Output { bytes })
         }
-        Push::StateChanged { session_id, lifecycle, waiting_for_input, cwd } => {
+        Push::StateChanged {
+            session_id,
+            lifecycle,
+            waiting_for_input,
+            cwd,
+        } => {
             let payload = serde_json::json!({
                 "sessionId": session_id,
                 "lifecycle": lifecycle,
@@ -87,7 +102,11 @@ pub fn map_push(push: Push) -> BrokerAction {
             });
             BrokerAction::Emit(EV_SESSION_STATE_CHANGED, payload)
         }
-        Push::ChildExited { session_id, code, signal } => {
+        Push::ChildExited {
+            session_id,
+            code,
+            signal,
+        } => {
             let payload = serde_json::json!({
                 "sessionId": session_id,
                 "code": code,
@@ -105,7 +124,11 @@ pub fn map_push(push: Push) -> BrokerAction {
                 .expect("Workspace is a plain-data struct; serialization cannot fail");
             BrokerAction::Emit(EV_WORKSPACE_CREATED, payload)
         }
-        Push::Error { session_id, code, message } => {
+        Push::Error {
+            session_id,
+            code,
+            message,
+        } => {
             warn!(target: "broker", ?session_id, code = %code, message = %message, "daemon async error push");
             BrokerAction::Ignore
         }
@@ -156,7 +179,10 @@ pub struct Broker {
 
 impl Broker {
     pub fn new(app: AppHandle) -> Self {
-        Broker { app, attachments: Arc::new(Mutex::new(HashMap::new())) }
+        Broker {
+            app,
+            attachments: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Register (or supersede) the attach channel for a session (spec §7: a second attach
@@ -267,18 +293,30 @@ mod tests {
             action,
             BrokerAction::SendChannel(
                 "sess-1".to_string(),
-                TerminalEvent::Replay { cols: 120, rows: 40, content: vec![1, 2, 3] }
+                TerminalEvent::Replay {
+                    cols: 120,
+                    rows: 40,
+                    content: vec![1, 2, 3]
+                }
             )
         );
     }
 
     #[test]
     fn output_maps_to_send_channel_with_terminal_event_output() {
-        let push = Push::Output { session_id: "sess-1".to_string(), bytes: vec![7, 8, 9] };
+        let push = Push::Output {
+            session_id: "sess-1".to_string(),
+            bytes: vec![7, 8, 9],
+        };
         let action = map_push(push);
         assert_eq!(
             action,
-            BrokerAction::SendChannel("sess-1".to_string(), TerminalEvent::Output { bytes: vec![7, 8, 9] })
+            BrokerAction::SendChannel(
+                "sess-1".to_string(),
+                TerminalEvent::Output {
+                    bytes: vec![7, 8, 9]
+                }
+            )
         );
     }
 
@@ -308,8 +346,11 @@ mod tests {
 
     #[test]
     fn child_exited_maps_to_reshaped_emit_payload() {
-        let push =
-            Push::ChildExited { session_id: "sess-2".to_string(), code: Some(137), signal: Some("SIGKILL".to_string()) };
+        let push = Push::ChildExited {
+            session_id: "sess-2".to_string(),
+            code: Some(137),
+            signal: Some("SIGKILL".to_string()),
+        };
         let action = map_push(push);
         match action {
             BrokerAction::Emit(event, payload) => {
@@ -324,7 +365,11 @@ mod tests {
 
     #[test]
     fn child_exited_none_fields_serialize_as_null_never_coerced_to_zero() {
-        let push = Push::ChildExited { session_id: "sess-3".to_string(), code: None, signal: None };
+        let push = Push::ChildExited {
+            session_id: "sess-3".to_string(),
+            code: None,
+            signal: None,
+        };
         match map_push(push) {
             BrokerAction::Emit(event, payload) => {
                 assert_eq!(event, EV_SESSION_EXITED);
@@ -363,7 +408,11 @@ mod tests {
 
     #[test]
     fn workspace_created_maps_to_workspace_created_event_with_raw_workspace() {
-        let ws = Workspace { id: "w1".into(), name: "N".into(), root_path: "/root".into() };
+        let ws = Workspace {
+            id: "w1".into(),
+            name: "N".into(),
+            root_path: "/root".into(),
+        };
         let action = map_push(Push::WorkspaceCreated { workspace: ws });
         match action {
             BrokerAction::Emit(event, payload) => {
@@ -377,10 +426,18 @@ mod tests {
 
     #[test]
     fn error_push_maps_to_ignore() {
-        let push = Push::Error { session_id: Some("s".into()), code: "boom".into(), message: "bad".into() };
+        let push = Push::Error {
+            session_id: Some("s".into()),
+            code: "boom".into(),
+            message: "bad".into(),
+        };
         assert_eq!(map_push(push), BrokerAction::Ignore);
 
-        let push_no_session = Push::Error { session_id: None, code: "boom".into(), message: "bad".into() };
+        let push_no_session = Push::Error {
+            session_id: None,
+            code: "boom".into(),
+            message: "bad".into(),
+        };
         assert_eq!(map_push(push_no_session), BrokerAction::Ignore);
     }
 

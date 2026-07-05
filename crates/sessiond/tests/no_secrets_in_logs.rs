@@ -27,7 +27,9 @@ use tokio::net::UnixStream;
 
 async fn send_frame(s: &mut UnixStream, f: &Frame) {
     let body = bincode::serialize(f).unwrap();
-    s.write_all(&(body.len() as u32).to_le_bytes()).await.unwrap();
+    s.write_all(&(body.len() as u32).to_le_bytes())
+        .await
+        .unwrap();
     s.write_all(&body).await.unwrap();
     s.flush().await.unwrap();
 }
@@ -92,7 +94,10 @@ async fn planted_secret_never_appears_in_logs() {
     )
     .await;
     match recv_frame(&mut c).await {
-        Frame::Response { id: 0, res: Response::Welcome { .. } } => {}
+        Frame::Response {
+            id: 0,
+            res: Response::Welcome { .. },
+        } => {}
         other => panic!("expected Welcome, got {other:?}"),
     }
 
@@ -111,7 +116,10 @@ async fn planted_secret_never_appears_in_logs() {
     .await;
     let ws_id = loop {
         match recv_frame(&mut c).await {
-            Frame::Response { id: 1, res: Response::Workspace(w) } => break w.id,
+            Frame::Response {
+                id: 1,
+                res: Response::Workspace(w),
+            } => break w.id,
             Frame::Push(_) => continue,
             other => panic!("expected Workspace, got {other:?}"),
         }
@@ -134,9 +142,15 @@ async fn planted_secret_never_appears_in_logs() {
     .await;
     let session_id = loop {
         match recv_frame(&mut c).await {
-            Frame::Response { id: 2, res: Response::Session(meta) } => break meta.id,
+            Frame::Response {
+                id: 2,
+                res: Response::Session(meta),
+            } => break meta.id,
             Frame::Push(_) => continue,
-            Frame::Response { id: 2, res: Response::Error { code, message } } => {
+            Frame::Response {
+                id: 2,
+                res: Response::Error { code, message },
+            } => {
                 panic!("CreateSession failed: {code}: {message}");
             }
             other => panic!("expected Session, got {other:?}"),
@@ -150,7 +164,12 @@ async fn planted_secret_never_appears_in_logs() {
     // `pty_supervisor` contract (env_clear + allowlist) — irrelevant to what THIS test checks.
     send_frame(
         &mut c,
-        &Frame::Request { id: 3, req: Request::AttachSession { session_id: session_id.clone() } },
+        &Frame::Request {
+            id: 3,
+            req: Request::AttachSession {
+                session_id: session_id.clone(),
+            },
+        },
     )
     .await;
     // Drain the Replay push for the attach.
@@ -180,10 +199,22 @@ async fn planted_secret_never_appears_in_logs() {
 
     send_frame(
         &mut c,
-        &Frame::Request { id: 5, req: Request::DetachSession { session_id: session_id.clone() } },
+        &Frame::Request {
+            id: 5,
+            req: Request::DetachSession {
+                session_id: session_id.clone(),
+            },
+        },
     )
     .await;
-    send_frame(&mut c, &Frame::Request { id: 6, req: Request::KillSession { session_id } }).await;
+    send_frame(
+        &mut c,
+        &Frame::Request {
+            id: 6,
+            req: Request::KillSession { session_id },
+        },
+    )
+    .await;
 
     // Give the kill/reap/status-change path a moment to log too, then clean shutdown.
     tokio::time::sleep(Duration::from_millis(300)).await;

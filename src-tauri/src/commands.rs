@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use bpa_protocol::{Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId};
+use bpa_protocol::{
+    Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
+};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::AppHandle;
@@ -105,7 +107,10 @@ pub(crate) fn build_create_session(workspace_id: WorkspaceId, opts: Option<Creat
 }
 
 pub(crate) fn build_write_stdin(session_id: SessionId, data: String) -> Request {
-    Request::WriteStdin { session_id, bytes: data.into_bytes() }
+    Request::WriteStdin {
+        session_id,
+        bytes: data.into_bytes(),
+    }
 }
 
 // ── core-side path pre-flights (spec §13/§16 defense in depth) ─────────────────────────────
@@ -121,10 +126,16 @@ pub(crate) fn build_write_stdin(session_id: SessionId, data: String) -> Request 
 /// [`crate::paths::validate_dir`]; any failure is reshaped into a `CommandError::Daemon` carrying
 /// the path error's stable wire code. The daemon re-validates and canonicalizes independently.
 pub(crate) fn preflight_cwd(opts: &Option<CreateOpts>) -> Result<(), CommandError> {
-    if let Some(cwd) = opts.as_ref().and_then(|o| o.cwd.as_deref()).filter(|c| !c.is_empty()) {
-        crate::paths::validate_dir(std::path::Path::new(cwd)).map_err(|e| CommandError::Daemon {
-            code: e.code().to_string(),
-            message: e.to_string(),
+    if let Some(cwd) = opts
+        .as_ref()
+        .and_then(|o| o.cwd.as_deref())
+        .filter(|c| !c.is_empty())
+    {
+        crate::paths::validate_dir(std::path::Path::new(cwd)).map_err(|e| {
+            CommandError::Daemon {
+                code: e.code().to_string(),
+                message: e.to_string(),
+            }
         })?;
     }
     Ok(())
@@ -135,11 +146,12 @@ pub(crate) fn preflight_cwd(opts: &Option<CreateOpts>) -> Result<(), CommandErro
 /// or a `CommandError::Daemon` carrying the path error's stable wire code. The daemon re-validates
 /// independently (defense in depth for S6 agents driving the same surface).
 pub(crate) fn preflight_workspace_root(root_path: &str) -> Result<String, CommandError> {
-    let validated =
-        crate::paths::validate_dir(std::path::Path::new(root_path)).map_err(|e| CommandError::Daemon {
+    let validated = crate::paths::validate_dir(std::path::Path::new(root_path)).map_err(|e| {
+        CommandError::Daemon {
             code: e.code().to_string(),
             message: e.to_string(),
-        })?;
+        }
+    })?;
     Ok(validated.to_string_lossy().into_owned())
 }
 
@@ -216,8 +228,16 @@ pub async fn attach_session(
 ) -> Result<(), CommandError> {
     // Register the channel BEFORE asking the daemon to attach, so the first Push::Replay it sends
     // is delivered rather than raced (spec §7 reattach flow).
-    state.broker.register_attachment(session_id.clone(), on_event);
-    match state.client.request(Request::AttachSession { session_id: session_id.clone() }).await {
+    state
+        .broker
+        .register_attachment(session_id.clone(), on_event);
+    match state
+        .client
+        .request(Request::AttachSession {
+            session_id: session_id.clone(),
+        })
+        .await
+    {
         Ok(res) => expect_ack(res).inspect_err(|_e| {
             // Attach rejected by the daemon: drop the just-registered channel so it doesn't leak.
             state.broker.remove_attachment(&session_id);
@@ -230,9 +250,18 @@ pub async fn attach_session(
 }
 
 #[tauri::command]
-pub async fn detach_session(state: State<'_, AppState>, session_id: SessionId) -> Result<(), CommandError> {
-    let out =
-        expect_ack(state.client.request(Request::DetachSession { session_id: session_id.clone() }).await?);
+pub async fn detach_session(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+) -> Result<(), CommandError> {
+    let out = expect_ack(
+        state
+            .client
+            .request(Request::DetachSession {
+                session_id: session_id.clone(),
+            })
+            .await?,
+    );
     state.broker.remove_attachment(&session_id);
     out
 }
@@ -243,18 +272,46 @@ pub async fn write_stdin(
     session_id: SessionId,
     data: String,
 ) -> Result<(), CommandError> {
-    expect_ack(state.client.request(build_write_stdin(session_id, data)).await?)
+    expect_ack(
+        state
+            .client
+            .request(build_write_stdin(session_id, data))
+            .await?,
+    )
 }
 
 #[tauri::command]
-pub async fn resize(state: State<'_, AppState>, session_id: SessionId, cols: u16, rows: u16) -> Result<(), CommandError> {
-    expect_ack(state.client.request(Request::Resize { session_id, cols, rows }).await?)
+pub async fn resize(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+    cols: u16,
+    rows: u16,
+) -> Result<(), CommandError> {
+    expect_ack(
+        state
+            .client
+            .request(Request::Resize {
+                session_id,
+                cols,
+                rows,
+            })
+            .await?,
+    )
 }
 
 #[tauri::command]
-pub async fn kill_session(state: State<'_, AppState>, session_id: SessionId) -> Result<(), CommandError> {
-    let out =
-        expect_ack(state.client.request(Request::KillSession { session_id: session_id.clone() }).await?);
+pub async fn kill_session(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+) -> Result<(), CommandError> {
+    let out = expect_ack(
+        state
+            .client
+            .request(Request::KillSession {
+                session_id: session_id.clone(),
+            })
+            .await?,
+    );
     state.broker.remove_attachment(&session_id);
     out
 }
@@ -273,12 +330,25 @@ pub async fn create_workspace(
     // Fail fast on an invalid root BEFORE touching the daemon (spec §13/§16); the daemon
     // re-validates independently (defense in depth for S6 agents driving the same surface).
     let root_path = preflight_workspace_root(&root_path)?;
-    expect_workspace(state.client.request(Request::CreateWorkspace { name, root_path }).await?)
+    expect_workspace(
+        state
+            .client
+            .request(Request::CreateWorkspace { name, root_path })
+            .await?,
+    )
 }
 
 #[tauri::command]
-pub async fn get_session_state(state: State<'_, AppState>, session_id: SessionId) -> Result<SessionMeta, CommandError> {
-    expect_session(state.client.request(Request::GetSessionState { session_id }).await?)
+pub async fn get_session_state(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+) -> Result<SessionMeta, CommandError> {
+    expect_session(
+        state
+            .client
+            .request(Request::GetSessionState { session_id })
+            .await?,
+    )
 }
 
 /// CORE-ONLY (spec §6.1): the native folder picker must run in the GUI process, never brokered to
@@ -291,9 +361,11 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, CommandError>
     app.dialog().file().pick_folder(move |maybe_path| {
         let _ = tx.send(maybe_path);
     });
-    let chosen = rx
-        .await
-        .map_err(|e| CommandError::Internal(format!("dialog channel closed before a result arrived: {e}")))?;
+    let chosen = rx.await.map_err(|e| {
+        CommandError::Internal(format!(
+            "dialog channel closed before a result arrived: {e}"
+        ))
+    })?;
     Ok(chosen.map(|p| p.to_string()))
 }
 
@@ -317,18 +389,32 @@ mod tests {
         let opts2: CreateOpts = serde_json::from_str(json2).unwrap();
         assert_eq!(
             opts2.env_overrides,
-            vec![("FOO".to_string(), "bar".to_string()), ("BAZ".to_string(), "qux".to_string())]
+            vec![
+                ("FOO".to_string(), "bar".to_string()),
+                ("BAZ".to_string(), "qux".to_string())
+            ]
         );
         assert_eq!(opts2.shell, None);
     }
 
     #[test]
     fn create_session_uses_80x24_when_size_omitted() {
-        let opts = CreateOpts { shell: None, cwd: None, env_overrides: vec![], cols: None, rows: None };
+        let opts = CreateOpts {
+            shell: None,
+            cwd: None,
+            env_overrides: vec![],
+            cols: None,
+            rows: None,
+        };
         assert_eq!(resolve_size(&opts), (80, 24));
 
-        let opts2 =
-            CreateOpts { shell: None, cwd: None, env_overrides: vec![], cols: Some(100), rows: Some(30) };
+        let opts2 = CreateOpts {
+            shell: None,
+            cwd: None,
+            env_overrides: vec![],
+            cols: Some(100),
+            rows: Some(30),
+        };
         assert_eq!(resolve_size(&opts2), (100, 30));
     }
 
@@ -336,7 +422,14 @@ mod tests {
     fn create_session_builds_request_with_defaults() {
         let req = build_create_session("ws-1".to_string(), None);
         match req {
-            Request::CreateSession { workspace_id, shell, cwd, env_overrides, cols, rows } => {
+            Request::CreateSession {
+                workspace_id,
+                shell,
+                cwd,
+                env_overrides,
+                cols,
+                rows,
+            } => {
                 assert_eq!(workspace_id, "ws-1");
                 assert_eq!(shell, None);
                 assert_eq!(cwd, None);
@@ -358,7 +451,14 @@ mod tests {
         };
         let req = build_create_session("ws-2".to_string(), Some(opts));
         match req {
-            Request::CreateSession { workspace_id, shell, cwd, env_overrides, cols, rows } => {
+            Request::CreateSession {
+                workspace_id,
+                shell,
+                cwd,
+                env_overrides,
+                cols,
+                rows,
+            } => {
                 assert_eq!(workspace_id, "ws-2");
                 assert_eq!(shell.as_deref(), Some("/bin/bash"));
                 assert_eq!(cwd.as_deref(), Some("/tmp/x"));
@@ -383,7 +483,10 @@ mod tests {
 
     #[test]
     fn response_error_becomes_command_error_daemon() {
-        let res = Response::Error { code: "InvalidWorkspaceRoot".into(), message: "gone".into() };
+        let res = Response::Error {
+            code: "InvalidWorkspaceRoot".into(),
+            message: "gone".into(),
+        };
         let err = expect_session(res).unwrap_err();
         match err {
             CommandError::Daemon { code, message } => {
@@ -412,7 +515,10 @@ mod tests {
         let got = expect_session(Response::Session(meta.clone())).unwrap();
         assert_eq!(got.id, "s");
         // A wrong variant is an Internal protocol error, not a silent default.
-        assert!(matches!(expect_session(Response::Ack), Err(CommandError::Internal(_))));
+        assert!(matches!(
+            expect_session(Response::Ack),
+            Err(CommandError::Internal(_))
+        ));
     }
 
     #[test]
@@ -423,13 +529,27 @@ mod tests {
 
     #[test]
     fn client_error_daemon_maps_to_command_error_daemon() {
-        let err: CommandError = ClientError::Daemon { code: "X".into(), message: "Y".into() }.into();
-        assert_eq!(err, CommandError::Daemon { code: "X".into(), message: "Y".into() });
+        let err: CommandError = ClientError::Daemon {
+            code: "X".into(),
+            message: "Y".into(),
+        }
+        .into();
+        assert_eq!(
+            err,
+            CommandError::Daemon {
+                code: "X".into(),
+                message: "Y".into()
+            }
+        );
     }
 
     #[test]
     fn command_error_serializes_with_camel_case_tag() {
-        let v = serde_json::to_value(CommandError::Daemon { code: "C".into(), message: "M".into() }).unwrap();
+        let v = serde_json::to_value(CommandError::Daemon {
+            code: "C".into(),
+            message: "M".into(),
+        })
+        .unwrap();
         assert_eq!(v["kind"], "daemon");
         assert_eq!(v["code"], "C");
         assert_eq!(v["message"], "M");
@@ -531,7 +651,15 @@ mod commands_over_stub_daemon {
             ready2.store(true, Ordering::SeqCst);
             let (mut stream, _) = listener.accept().await.unwrap();
             match read_frame(&mut stream).await {
-                Some(Frame::Request { id: 0, req: Request::Hello { magic, proto_version, .. } }) => {
+                Some(Frame::Request {
+                    id: 0,
+                    req:
+                        Request::Hello {
+                            magic,
+                            proto_version,
+                            ..
+                        },
+                }) => {
                     assert_eq!(magic, MAGIC);
                     assert_eq!(proto_version, PROTO_VERSION);
                 }
@@ -539,7 +667,13 @@ mod commands_over_stub_daemon {
             }
             write_stub_frame(
                 &mut stream,
-                &Frame::Response { id: 0, res: Response::Welcome { proto_version: PROTO_VERSION, daemon_build: "stub".into() } },
+                &Frame::Response {
+                    id: 0,
+                    res: Response::Welcome {
+                        proto_version: PROTO_VERSION,
+                        daemon_build: "stub".into(),
+                    },
+                },
             )
             .await;
 
@@ -563,7 +697,9 @@ mod commands_over_stub_daemon {
             unsafe {
                 std::env::set_var("XDG_RUNTIME_DIR", dir.path());
             }
-            let client = DaemonClient::connect("test-build".to_string()).await.unwrap();
+            let client = DaemonClient::connect("test-build".to_string())
+                .await
+                .unwrap();
             unsafe {
                 std::env::remove_var("XDG_RUNTIME_DIR");
             }
@@ -577,7 +713,12 @@ mod commands_over_stub_daemon {
     #[tokio::test]
     async fn create_session_round_trips_through_real_daemon_client() {
         let (client, _sock) = connect_to_stub(|req| match req {
-            Request::CreateSession { workspace_id, cols, rows, .. } => {
+            Request::CreateSession {
+                workspace_id,
+                cols,
+                rows,
+                ..
+            } => {
                 assert_eq!(workspace_id, "ws-1");
                 assert_eq!((cols, rows), (80, 24));
                 Response::Session(SessionMeta {
@@ -607,8 +748,9 @@ mod commands_over_stub_daemon {
 
     #[tokio::test]
     async fn daemon_error_response_becomes_command_error_daemon_end_to_end() {
-        let (client, _sock) = connect_to_stub(|_req| {
-            Response::Error { code: "InvalidWorkspaceRoot".into(), message: "no such dir".into() }
+        let (client, _sock) = connect_to_stub(|_req| Response::Error {
+            code: "InvalidWorkspaceRoot".into(),
+            message: "no such dir".into(),
         })
         .await;
 
@@ -619,7 +761,10 @@ mod commands_over_stub_daemon {
         let err: CommandError = res.unwrap_err().into();
         assert_eq!(
             err,
-            CommandError::Daemon { code: "InvalidWorkspaceRoot".into(), message: "no such dir".into() }
+            CommandError::Daemon {
+                code: "InvalidWorkspaceRoot".into(),
+                message: "no such dir".into()
+            }
         );
     }
 
@@ -656,21 +801,37 @@ mod commands_over_stub_daemon {
     #[test]
     fn preflight_cwd_accepts_none_empty_and_valid_dir() {
         // None ⇒ Ok (daemon defaults an omitted cwd to $HOME).
-        assert!(preflight_cwd(&None).is_ok(), "omitted cwd must pass (defaults to $HOME)");
-        assert!(preflight_cwd(&Some(CreateOpts::default())).is_ok(), "opts with cwd=None must pass");
+        assert!(
+            preflight_cwd(&None).is_ok(),
+            "omitted cwd must pass (defaults to $HOME)"
+        );
+        assert!(
+            preflight_cwd(&Some(CreateOpts::default())).is_ok(),
+            "opts with cwd=None must pass"
+        );
         // Empty-string cwd ⇒ Ok (also "daemon defaults to $HOME").
-        assert!(preflight_cwd(&opts_with_cwd(Some(""))).is_ok(), "empty cwd must pass");
+        assert!(
+            preflight_cwd(&opts_with_cwd(Some(""))).is_ok(),
+            "empty cwd must pass"
+        );
         // A real, existing directory ⇒ Ok.
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_string_lossy().into_owned();
-        assert!(preflight_cwd(&opts_with_cwd(Some(&cwd))).is_ok(), "valid dir must pass");
+        assert!(
+            preflight_cwd(&opts_with_cwd(Some(&cwd))).is_ok(),
+            "valid dir must pass"
+        );
     }
 
     #[test]
     fn preflight_cwd_rejects_missing_relative_and_symlink_escape() {
         // Nonexistent absolute path ⇒ CwdMissing.
         let dir = tempfile::tempdir().unwrap();
-        let gone = dir.path().join("does-not-exist").to_string_lossy().into_owned();
+        let gone = dir
+            .path()
+            .join("does-not-exist")
+            .to_string_lossy()
+            .into_owned();
         match preflight_cwd(&opts_with_cwd(Some(&gone))).unwrap_err() {
             CommandError::Daemon { code, .. } => assert_eq!(code, "CwdMissing"),
             other => panic!("expected Daemon/CwdMissing, got {other:?}"),
@@ -696,7 +857,10 @@ mod commands_over_stub_daemon {
         // Valid dir ⇒ Ok(canonicalized string) — this is exactly what the wrapper forwards.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_string_lossy().into_owned();
-        let expected = std::fs::canonicalize(&root).unwrap().to_string_lossy().into_owned();
+        let expected = std::fs::canonicalize(&root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             preflight_workspace_root(&root).expect("valid root"),
             expected,
@@ -734,7 +898,11 @@ mod commands_over_stub_daemon {
                 Request::CreateWorkspace { name, root_path } => {
                     assert_eq!(name, "My Workspace");
                     assert_eq!(root_path, expected_str);
-                    Response::Workspace(Workspace { id: "w-1".into(), name, root_path })
+                    Response::Workspace(Workspace {
+                        id: "w-1".into(),
+                        name,
+                        root_path,
+                    })
                 }
                 other => panic!("expected CreateWorkspace, got {other:?}"),
             })
@@ -744,7 +912,10 @@ mod commands_over_stub_daemon {
         let validated = crate::paths::validate_dir(&root).unwrap();
         let root_path = validated.to_string_lossy().into_owned();
         let res = client
-            .request(Request::CreateWorkspace { name: "My Workspace".to_string(), root_path })
+            .request(Request::CreateWorkspace {
+                name: "My Workspace".to_string(),
+                root_path,
+            })
             .await
             .unwrap();
         let ws = expect_workspace(res).unwrap();

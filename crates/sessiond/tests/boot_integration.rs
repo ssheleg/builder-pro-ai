@@ -9,7 +9,9 @@ use tokio::net::UnixStream;
 
 async fn send_frame(s: &mut UnixStream, f: &Frame) {
     let body = bincode::serialize(f).unwrap();
-    s.write_all(&(body.len() as u32).to_le_bytes()).await.unwrap();
+    s.write_all(&(body.len() as u32).to_le_bytes())
+        .await
+        .unwrap();
     s.write_all(&body).await.unwrap();
     s.flush().await.unwrap();
 }
@@ -135,7 +137,10 @@ async fn boot_handshake_create_session_and_clean_shutdown() {
         .expect("run() did not return after shutdown")
         .expect("join");
     assert!(res.is_ok(), "run() returned error: {res:?}");
-    assert!(!socket.exists(), "socket should be unlinked on clean shutdown");
+    assert!(
+        !socket.exists(),
+        "socket should be unlinked on clean shutdown"
+    );
 }
 
 #[tokio::test]

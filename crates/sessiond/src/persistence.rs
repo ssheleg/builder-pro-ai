@@ -56,7 +56,10 @@ fn now_secs() -> i64 {
 fn is_corruption(e: &rusqlite::Error) -> bool {
     use rusqlite::ffi::ErrorCode;
     if let rusqlite::Error::SqliteFailure(err, _) = e {
-        matches!(err.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
+        matches!(
+            err.code,
+            ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase
+        )
     } else {
         false
     }
@@ -86,7 +89,11 @@ impl Db {
             Ok(db) => Ok(db),
             Err(PersistError::Corrupt(msg)) => {
                 let dst = quarantine(path);
-                warn!(?path, ?dst, "database corrupt, quarantining and recreating: {msg}");
+                warn!(
+                    ?path,
+                    ?dst,
+                    "database corrupt, quarantining and recreating: {msg}"
+                );
                 std::fs::rename(path, &dst)
                     .map_err(|e| PersistError::Open(format!("quarantine rename failed: {e}")))?;
                 // Sidecar WAL/SHM files from the corrupt db would confuse the fresh one.
@@ -193,7 +200,8 @@ impl Db {
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| PersistError::Migration(e.to_string()))?;
-        tx.commit().map_err(|e| PersistError::Migration(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| PersistError::Migration(e.to_string()))?;
         Ok(())
     }
 }
@@ -224,7 +232,9 @@ fn decode_lifecycle(
             code: exit_code.map(|c| (c & 0xff) as u8),
             signal: exit_signal,
         }),
-        other => Err(PersistError::Sql(format!("unknown lifecycle tag {other:?}"))),
+        other => Err(PersistError::Sql(format!(
+            "unknown lifecycle tag {other:?}"
+        ))),
     }
 }
 
@@ -404,9 +414,12 @@ mod tests {
         {
             let db = Db::open(&path).unwrap();
             db.upsert_workspace(&ws("w1")).unwrap();
-            db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running)).unwrap();
-            db.append_scrollback(&"s1".to_string(), 0, b"hello ", 1).unwrap();
-            db.append_scrollback(&"s1".to_string(), 1, b"world", 2).unwrap();
+            db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+                .unwrap();
+            db.append_scrollback(&"s1".to_string(), 0, b"hello ", 1)
+                .unwrap();
+            db.append_scrollback(&"s1".to_string(), 1, b"world", 2)
+                .unwrap();
         }
         let db = Db::open(&path).unwrap();
         let wss = db.list_workspaces().unwrap();
@@ -437,10 +450,34 @@ mod tests {
             ("a", SessionLifecycle::AtPrompt),
             ("t", SessionLifecycle::Typing),
             ("r", SessionLifecycle::Running),
-            ("e0", SessionLifecycle::Exited { code: Some(0), signal: None }),
-            ("e255", SessionLifecycle::Exited { code: Some(255), signal: None }),
-            ("enone", SessionLifecycle::Exited { code: None, signal: None }),
-            ("esig", SessionLifecycle::Exited { code: None, signal: Some("SIGKILL".into()) }),
+            (
+                "e0",
+                SessionLifecycle::Exited {
+                    code: Some(0),
+                    signal: None,
+                },
+            ),
+            (
+                "e255",
+                SessionLifecycle::Exited {
+                    code: Some(255),
+                    signal: None,
+                },
+            ),
+            (
+                "enone",
+                SessionLifecycle::Exited {
+                    code: None,
+                    signal: None,
+                },
+            ),
+            (
+                "esig",
+                SessionLifecycle::Exited {
+                    code: None,
+                    signal: Some("SIGKILL".into()),
+                },
+            ),
         ];
         for (id, lc) in &variants {
             db.upsert_session(&meta(id, "w1", lc.clone())).unwrap();
@@ -498,7 +535,8 @@ mod tests {
                 let db = Db::open(&p).unwrap();
                 for i in 0..50i64 {
                     let sid = format!("s-{t}-{i}");
-                    db.upsert_session(&meta(&sid, "w1", SessionLifecycle::Running)).unwrap();
+                    db.upsert_session(&meta(&sid, "w1", SessionLifecycle::Running))
+                        .unwrap();
                 }
             }));
         }
@@ -536,10 +574,14 @@ mod tests {
         let path = dir.path().join("bpa.db");
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
         }
         let err = Db::open(&path).unwrap_err();
-        assert!(matches!(err, PersistError::Migration(_)), "expected Migration error, got {err:?}");
+        assert!(
+            matches!(err, PersistError::Migration(_)),
+            "expected Migration error, got {err:?}"
+        );
     }
 
     #[test]
@@ -552,8 +594,10 @@ mod tests {
         {
             let db = Db::open(&path).unwrap();
             db.upsert_workspace(&ws("w1")).unwrap();
-            db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running)).unwrap();
-            db.append_scrollback(&"s1".to_string(), 0, b"committed", 1).unwrap();
+            db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+                .unwrap();
+            db.append_scrollback(&"s1".to_string(), 0, b"committed", 1)
+                .unwrap();
             // No checkpoint / no clean close: `db` is dropped here abruptly.
             std::mem::drop(db);
         }
@@ -561,15 +605,20 @@ mod tests {
         let db2 = Db::open(&path).unwrap();
         let sessions = db2.rehydrate().unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(db2.load_scrollback(&"s1".to_string()).unwrap(), b"committed");
+        assert_eq!(
+            db2.load_scrollback(&"s1".to_string()).unwrap(),
+            b"committed"
+        );
     }
 
     #[test]
     fn open_in_memory_supports_full_crud() {
         let db = Db::open_in_memory().unwrap();
         db.upsert_workspace(&ws("w1")).unwrap();
-        db.upsert_session(&meta("s1", "w1", SessionLifecycle::AtPrompt)).unwrap();
-        db.append_scrollback(&"s1".to_string(), 0, b"abc", 1).unwrap();
+        db.upsert_session(&meta("s1", "w1", SessionLifecycle::AtPrompt))
+            .unwrap();
+        db.append_scrollback(&"s1".to_string(), 0, b"abc", 1)
+            .unwrap();
 
         assert_eq!(db.list_workspaces().unwrap().len(), 1);
         assert_eq!(db.list_sessions().unwrap().len(), 1);
@@ -587,8 +636,10 @@ mod tests {
         let path = dir.path().join("bpa.db");
         let db = Db::open(&path).unwrap();
         db.upsert_workspace(&ws("w1")).unwrap();
-        db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running)).unwrap();
-        db.append_scrollback(&"s1".to_string(), 0, b"data", 1).unwrap();
+        db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+            .unwrap();
+        db.append_scrollback(&"s1".to_string(), 0, b"data", 1)
+            .unwrap();
 
         db.checkpoint().unwrap();
 
