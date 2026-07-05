@@ -54,9 +54,17 @@ kinds of push data from the core:
 server) speak the same wire protocol: a `u32`-LE length prefix followed by a `bincode` 1.3.3
 (fixint, deterministic little-endian)-encoded `Frame` (`Request { id, req }` /
 `Response { id, res }` / `Push(..)`), defined once in `crates/protocol` and shared by both binaries
-— no protocol drift is possible because both sides import the exact same enum. Every
-request/response is correlated by a client-chosen `id`; pushes (state changes, output, replay) are
-unsolicited and fan out to whichever client currently has that session attached.
+— the shared crate prevents *type* drift. The codec itself carries one non-obvious mechanism:
+bincode 1.3 cannot deserialize serde-tagged enums, so `SessionLifecycle` and `TerminalEvent` use
+hand-written dual-codec impls (JSON shape for ts-rs/Channel, a JSON string tunneled inside the
+bincode frame on the wire — see the spec §3 amendment).
+
+> **Locked contract:** DO NOT re-derive Serialize/Deserialize on SessionLifecycle or
+> TerminalEvent, and DO NOT add new serde-tagged enums to the Hop-B protocol, until
+> protocol v2 replaces the codec.
+
+Every request/response is correlated by a client-chosen `id`; pushes (state changes, output,
+replay) are unsolicited and fan out to whichever client currently has that session attached.
 
 The daemon accepts a connection, requires a `Hello`/`Welcome` handshake (magic + protocol version;
 mismatches are refused, never misparsed), verifies the peer's effective uid via `getpeereid`
@@ -81,10 +89,12 @@ src-tauri/src/                    # Tauri core (the broker)
 ├─ commands.rs                    # #[tauri::command] surface (Hop A)
 ├─ broker.rs                      # daemon frames → Channel/global events; Promise correlation
 ├─ socket_client.rs               # connect/handshake/reconnect (Hop B client, bounded backoff)
-├─ paths.rs                       # workspace-root/cwd canonicalize + validate (spec §16)
+├─ paths.rs                       # thin re-export of bpa-paths (fail-fast pre-flights, spec §16)
 └─ launchd.rs                     # install/bootstrap/kickstart the per-user LaunchAgent
 
 crates/protocol/src/lib.rs        # SHARED Hop-B wire types (serde + ts-rs) — source of truth
+crates/paths/src/lib.rs           # SHARED bpa-paths: workspace-root/cwd validation incl.
+                                  # symlink-escape — one impl for core AND daemon (spec §16)
 crates/sessiond/src/              # the daemon binary
 ├─ main.rs                        # arg parse, tracing init, flock, socket bind, SIGTERM drain
 ├─ boot.rs                        # testable boot core: bind → wire deps → serve → drain
@@ -111,9 +121,16 @@ parallel (see the plan's dependency graph).
 The daemon is deliberately NOT a Tauri sidecar child process — `launchd` supervises it
 (`~/Library/LaunchAgents/ai.builderpro.desktop.sessiond.plist`, `KeepAlive.Crashed = true`), and
 the Tauri core only ever holds a *socket connection* to it, never a process handle. See the
-"Survival truth table" in `README.md` for the exact guarantees and honest boundaries (GUI
-close/crash/restart survives; daemon restart survives via SQLite rehydrate; daemon crash and
-logout do not — see spec §13).
+"Survival truth table" in `README.md` for the exact guarantees and honest boundaries: GUI
+close/crash/restart keeps live shells running; ANY daemon stop (restart, upgrade, crash) ends
+live shells — records + scrollback rehydrate as inactive sessions (spec §13).
+
+## Resource envelope (per session)
+
+Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live
+attachment** + PTY file descriptors. There is currently **no enforced cap** on concurrent
+sessions; a configurable cap + typed `SessionLimitReached` error is planned (BL-4,
+`docs/backlog.md`).
 
 ## Related docs
 
