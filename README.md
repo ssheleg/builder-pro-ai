@@ -1,5 +1,7 @@
 # Builder Pro AI
 
+![ci](https://github.com/sshlg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)
+
 A lightweight macOS desktop workspace for **orchestrating AI coding agents** (claude-code,
 hermes, opencode, kilo, …) that do their work through terminals — plus app-native meta-agents
 (a CEO strategist, a TDD/DDD project manager, and engineering specialists) that decide *what*
