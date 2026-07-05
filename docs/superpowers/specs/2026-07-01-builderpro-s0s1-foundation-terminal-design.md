@@ -10,6 +10,23 @@
 > were verified against current docs (Context7 + web, 2026-06/07) and hardened by an adversarial
 > completeness review. Re-verify pins at plan time (§15) before writing code.
 
+## Post-implementation amendments (2026-07-04)
+
+The S0+S1 implementation (merged @ 285cb2e) diverged from this spec in specific,
+audited ways. The sections below were amended IN PLACE so this document remains the
+single executable truth for zero-context implementers. Full audit:
+`docs/superpowers/research/2026-07-03-docs-spec-audit.json`.
+
+| Amendment | Sections | Finding |
+|-----------|----------|---------|
+| Codec truth: dual-codec bridge + never-re-derive contract | §3, §5, §7 | A2 |
+| §15 verify-at-lock resolution table | §15 | A2/A30 |
+| Persistence truth: 1000 ms cadence, no size trigger, seq-0 semantics, 256 KiB cap | §11 | A24 |
+| Attach/reconnect + error-surfacing contracts | §12, §13 | A22/A23 |
+| Trust model rewrite: agent trust layer, keys, CSP, data-at-rest, env_overrides | §16 | A7/A9/A11/A18/A19 |
+| Resource model honest posture + planned cap | §9, §13 | A21 |
+| Survival truth wording | §13 | A12 |
+
 ---
 
 ## 1. Goals / non-goals
@@ -92,7 +109,7 @@ sessions (tmux/retach model).
 | PTY | `portable-pty` (wezterm) | **0.9.0** |
 | VT (live grid state) | `alacritty_terminal` | pin exact (0.24/0.25) — used for cursor/alt-screen/size, **not** serialized |
 | DB | `rusqlite` (bundled sqlite) | 0.32 (≥0.31) |
-| Codec | `bincode` | **1.3.3** (serde-native, deterministic fixint LE; see §7) |
+| Codec | `bincode` | **1.3.3** (fixint LE framing; tagged enums via hand-written dual-codec impls — see below) |
 | Async | `tokio` | 1.x (`net, io-util, rt-multi-thread, macros, sync, time`) |
 | Lock/creds | `rustix` (flock, `getsockopt`/peer creds) | current |
 | Detach fallback | `daemonize` (dev/non-launchd only, feature-flagged) | 0.5 |
@@ -106,11 +123,21 @@ sessions (tmux/retach model).
 | Term addons | `@xterm/addon-fit` / `-webgl` / `-search` / `-web-links` / `-serialize` | 0.11 / 0.19 / 0.15 / 0.11 / 0.13 |
 | Type parity | `ts-rs` (Rust→TS type gen for `crates/protocol`) | current |
 
-**Codec decision:** `bincode` **1.3.3**, not 2.x. bincode 2.x's native `Encode/Decode` derives are
-not serde; using it with our `#[derive(Serialize,Deserialize)]` types needs the `bincode::serde::*`
-compat path + a chosen `Configuration`, and a config mismatch silently misframes. 1.3.3 is
-serde-native (`bincode::serialize`/`deserialize`), deterministic (fixint, little-endian), and
-battle-tested for length-prefixed framing. Both crates depend on the exact same version.
+**Codec decision (amended 2026-07-04, A2):** `bincode` **1.3.3**. As built, bincode 1.3
+CANNOT deserialize serde internally/adjacently-tagged enums. `SessionLifecycle` and
+`TerminalEvent` therefore ship hand-written `Serialize`/`Deserialize` impls that branch on
+`is_human_readable()`: JSON (and ts-rs) see the tagged shape; bincode tunnels a JSON string
+inside the binary frame (dual codec). See `crates/protocol/src/lib.rs` (dual-codec note) and
+`crates/protocol/tests/roundtrip.rs` (every variant round-trips both ways).
+
+> **Locked contract:** DO NOT re-derive Serialize/Deserialize on SessionLifecycle or
+> TerminalEvent, and DO NOT add new serde-tagged enums to the Hop-B protocol, until
+> protocol v2 replaces the codec.
+
+Trajectory (owner decision D3): protocol v2 (Cycle 2) migrates to a tagged-enum-safe codec
+(postcard or bincode 2 serde-compat — decided in the Cycle 2 spec) bundled with version
+negotiation; the bridge and this contract box then retire. Both crates depend on the exact
+same bincode version.
 
 Renderer chain is **WebGL → DOM** (guaranteed); do not depend on a canvas addon.
 
@@ -183,6 +210,8 @@ pub type WorkspaceId = String; // UUID v4
 pub struct Workspace { pub id: WorkspaceId, pub name: String, pub root_path: String }
 
 // Internally tagged (tag only, no content) — works for unit + struct variants, matches TS below.
+// AS BUILT (A2): this derive shows the LOGICAL shape ts-rs exports. The real impls are
+// hand-written (dual codec, §3) — do not re-derive.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionLifecycle {
@@ -490,6 +519,15 @@ Shells spawn with `setsid` (portable-pty does this) → children survive the GUI
 
 ---
 
+### Resource model (amended 2026-07-04, A21)
+
+Per-session cost envelope: **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per
+live attachment** + PTY fds. There is currently **NO enforced cap** on concurrent sessions;
+exhaustion behavior is the OS's. Planned additive remedy: configurable cap + typed
+`SessionLimitReached` error (**BL-4**).
+
+---
+
 ## 10. Shell integration & status (`osc_parser.rs`, `shell_integration/`)
 
 Spawn the user's **real** shell; inject a tiny integration **non-invasively** (no rc edits); emit
@@ -604,9 +642,15 @@ CREATE TABLE scrollback (
   PRIMARY KEY (session_id, seq));              -- ring-pruned per session
 ```
 
-- **Cadence:** scrollback persisted **batched** — every ≈500 ms or 32 KB per session (not per chunk);
-  `flush + WAL checkpoint` on graceful shutdown. Durability bound: on `SIGKILL` you lose at most the
-  last unflushed window (≤ ~500 ms / 32 KB); WAL guarantees row-atomicity (no half-written rows).
+- **Cadence (amended 2026-07-04, A24):** scrollback persisted **batched** — every **1000 ms**
+  (`SCROLLBACK_FLUSH_INTERVAL`, `crates/sessiond/src/socket_server.rs`) per session; there is
+  **NO size-based trigger**. `flush + WAL checkpoint` on graceful shutdown. Durability bound: on
+  `SIGKILL` you lose at most the last unflushed window (bounded by the flush interval, ≤ ~1 s of
+  tail output); WAL guarantees row-atomicity (no half-written rows).
+- **Cap & semantics (amended, A24):** replay/persist cap = **256 KiB** per session ring (locked
+  constant `SCROLLBACK_CAP`, `crates/sessiond/src/pty_supervisor.rs`). Snapshot-replace semantics:
+  each sweep REPLACES the stored blob at `seq 0` (no append log). Dirty-check + write-architecture
+  review: BL-8 (`docs/backlog.md`).
 - **Rehydrate on restart:** rebuild rings from `scrollback`; every rehydrated session is
   `is_active = false` and `waiting_for_input = false` (its PTY is gone); `lifecycle` = stored value
   (typically `Exited`). Round-trips each `SessionLifecycle` variant losslessly (test in §14).
@@ -640,6 +684,19 @@ CREATE TABLE scrollback (
 - **Input:** `term.onData(d => write_stdin(id, d))`.
 - **Status dots** read `SessionMeta.lifecycle` + `waitingForInput` (updated by `session://state-changed`).
 
+### Attach state contract (as built @ 4c91dfe; amended 2026-07-04, A22)
+
+- Attach state is a **per-session** state machine `detached | attaching | attached` owned by
+  `TerminalManager` (`src/terminal/terminal-manager.ts`) — never by a pane component (a pane
+  instance is REUSED across tab switches; a per-instance guard makes later tabs dead panes).
+- **Coalescing:** concurrent `attach()` callers for one session share the single in-flight promise
+  (exactly one IPC / one Channel / one Replay); StrictMode's double effect-invoke coalesces.
+- **Generation guard:** `resetAttachment` / `resetAllAttachments` / `dispose` bump a per-session
+  generation; a stale in-flight completion refuses to record state.
+- **Reconnect:** on `daemon://reconnected` → reset ALL attach state → eagerly re-attach the visible
+  session → hidden sessions re-attach lazily on next show, each with a fresh Replay. Stale panes
+  are visually marked until re-attached (**implementation BL-5**).
+
 ---
 
 ## 13. Error handling & honest degradation
@@ -660,7 +717,9 @@ CREATE TABLE scrollback (
   `Push::ChildExited`; session marked `is_active=false`, scrollback retained; UI shows exit status.
 - **Workspace root gone:** on create/rehydrate when the validated root no longer exists → typed
   `Error{code:"InvalidWorkspaceRoot"|"CwdMissing"}`; do **not** silently spawn in an unexpected dir.
-- **SQLite failures:** §11 (best-effort, quarantine-on-corruption, fail-closed migrations).
+- **SQLite failures:** §11 (best-effort, quarantine-on-corruption, fail-closed migrations). A
+  `persistence-degraded` (quarantine / repeated flush-failure) Push event + UI indicator is a
+  specced future event — **BL-7**.
 - **Logging:** `tracing` structured logs (session id, transitions, errors); **no secrets** (env is
   allowlisted; a scrub test asserts no allowlisted-secret value appears in logs). Logs under
   `{APP_SUPPORT}/logs/`.
@@ -670,10 +729,34 @@ for locality and must not drift from it:
 
 | Event | Sessions |
 |---|---|
-| GUI close / crash / restart | survive (reattach + replay) |
-| Daemon restart | survive (SQLite rehydrate; scrollback up to last flush ≈500 ms) |
-| **Daemon crash** | live shells die (children); scrollback replays up to last flush |
+| GUI close / crash / restart | live shells **keep running** (daemon-owned); reattach + replay |
+| Daemon restart / upgrade / crash | live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
 | **macOS logout** | die (per-user LaunchAgent torn down) |
+
+### Error-surfacing contract (normative; implementation BL-6) — amended 2026-07-04, A23
+
+**Invariant: no command rejection is silent.** Every rejected invoke reaches the user as a
+readable message (toast/banner), mapped from the typed error:
+
+| Error (kind / daemon code) | User-facing message |
+|---|---|
+| `Disconnected` | "Daemon disconnected — reconnecting… The action didn't run; retry when the banner clears." |
+| `Internal` | "Something went wrong inside the app (not the daemon). Details were logged." |
+| `NoSuchSession` | "That terminal no longer exists — it may have been closed or the daemon restarted." |
+| `InvalidWorkspaceRoot` | "That folder can't be a workspace root: it must exist and be a real directory." |
+| `CwdMissing` | "Starting folder doesn't exist (or isn't a directory)." |
+| `RelativePath` | "Path must be absolute." |
+| `SymlinkEscape` | "That path is a symlink pointing outside its folder — not allowed." |
+| `NotADirectory` | "That path exists but isn't a directory." |
+| `InvalidShell` | "Shell path must be absolute (e.g. /bin/zsh)." |
+| `CreateSessionFailed` / `SpawnError` | "Couldn't start the terminal: {message}." |
+| `PtyError` / `IoError` | "Terminal I/O error: {message}." |
+| `DbError` | "Saved-state database error: {message}. Live terminals keep working." |
+| `SinkClosed` | "The terminal's output channel closed — reopen the tab to re-attach." |
+| `UnexpectedHello` | (protocol bug — log only, generic Internal message to the user) |
+
+Fire-and-forget call sites (`void manager.attach(...)`, etc.) must route rejections into this
+surface — tracked as BL-6.
 
 ---
 
@@ -761,15 +844,29 @@ assert daemon + shell survive (`pgrep`) → relaunch → reattach + scrollback i
 5. Confirm `bincode` 1.3.3 + serde covers all `Frame`/`Request`/`Response`/`Push` variants (enums,
    `Vec<(String,String)>`, `Option`, `Vec<u8>`); it does, but verify at lock.
 
+### Resolution table (amended 2026-07-04 — what plan-time verification actually found)
+
+| §15 item | Resolution |
+|---|---|
+| 15.1 exact pins | Verified & recorded: bincode 1.3.3, portable-pty 0.9.0, rusqlite 0.32, alacritty_terminal =0.25.0 (exact pin), xterm 6.0.0, Zustand 5, React 19 (`Cargo.toml` / `package.json`). |
+| 15.2 alacritty live-grid API | Verified at 0.25.0 — cursor column, alt-screen/mode flags, resize all used in `crates/sessiond/src/live_grid.rs`. |
+| 15.3 binary Channel payload | **Resolved: NOT binary.** `Channel<TerminalEvent>` serializes via serde (JSON path of the dual codec); `Vec<u8>` crosses Hop-A as `number[]`. Acceptable at S1 throughput; revisit with protocol v2 if profiling demands. |
+| 15.4 ts-rs emission | Verified — `crates/protocol/tests/ts_export.rs` regenerates and asserts `src/ipc/types.ts`; parity is a final-suite + CI gate. |
+| 15.5 bincode covers all variants | **DIVERGED** — bincode 1.3 cannot DEserialize tagged enums; resolved by the hand-written dual-codec impls (§3 amendment, A2). |
+| §3 `daemonize` dev fallback row | **NOT BUILT** — dev mode and the e2e harness spawn `target/debug/bpa-sessiond` directly; no `daemonize` dependency exists. Row kept in §3 for history; treat as dropped (A30). |
+
 ---
 
-## 16. Trust & security model (consolidated)
+## 16. Trust & security model (consolidated) — rewritten 2026-07-04 (A7/A9/A11/A18/A19)
 
-- **Path validation (`paths.rs`, daemon-side too):** `create_workspace.root_path` and
-  `CreateSession.cwd` are canonicalized (realpath), required to be **absolute + existing + a
-  directory**; reject otherwise with typed `Error{code}`. Symlink escape is disallowed (canonicalize
-  and re-check). This surface is also driven by S6 agents, so validation is enforced in the daemon,
-  not just the UI.
+### As built (verified against `main` @ 285cb2e)
+
+- **Path validation (shared `bpa-paths` crate — core AND daemon):** `create_workspace.root_path`
+  and `CreateSession.cwd` are canonicalized (realpath), required to be **absolute + existing + a
+  directory**, symlink-escape rejected (canonicalize and re-check vs the lexical parent) — one
+  implementation (`crates/paths`), byte-for-byte identical on both sides, with core-side
+  pre-flights (`preflight_cwd`/`preflight_workspace_root`) for fail-fast. This surface is also
+  driven by S6 agents, so the daemon is the authoritative validator.
 - **Env hygiene:** `env_clear()` + explicit allowlist (§9.3); daemon-internal/secret env never
   reaches child shells; a test asserts a planted secret is absent.
 - **Socket:** dir 0700 owned by uid, socket 0600, peer-cred (`getpeereid`) euid check, stale-socket
@@ -779,3 +876,42 @@ assert daemon + shell survive (`pgrep`) → relaunch → reattach + scrollback i
 - **Logging:** structured, no secret values; allowlisted-secret scrub test (§13).
 - **Signing:** deep-signed + notarized sidecar so Gatekeeper doesn't kill the daemon (§14.3); TCC /
   launchd-permission failures degrade to an actionable banner (§8.3).
+
+### env_overrides (decision recorded; enforcement BL-1)
+
+`env_overrides` are applied AFTER the allowlist and can currently set any variable, including
+loader vars — the §9.3 allowlist is a **default, not a ceiling**. Decision: the daemon WILL
+enforce a `DYLD_*`/`LD_*` denylist before applying overrides (**BL-1**). Same-uid peer-cred means
+this is not a privilege boundary today; it becomes one when agent-initiated sessions land (S6).
+
+### Agent execution trust layer (roadmap — implemented in S6c)
+
+Autonomous agents executing terminal commands is this product's central risk. Locked posture:
+
+- **Approval-gate classes** (owner decision P1): destructive-fs outside the workspace,
+  `git push --force`, package publish, spend/payment, production deploy. Approvals are batched
+  via the escalation inbox; **synchronous confirm** only for irreversibly destructive actions.
+- **Audit log:** append-only record of every agent-initiated command (who/what/where/when).
+- **Caller identity:** same-uid peer-cred today; per-agent identity tokens are an S6 design item.
+
+### SSH agent (owner decision P2)
+
+`SSH_AUTH_SOCK` is **withheld by default** from agent-spawned sessions, grantable per-task via
+approval. Human GUI sessions keep current behavior (forwarded per the §9.3 allowlist).
+
+### Provider API keys (S6a; BL-20)
+
+macOS **Keychain only** — never SQLite, config files, or logs. LLM egress happens from the core
+process only; the webview never talks to model providers.
+
+### Webview boundary (BL-2)
+
+Target: restrictive CSP in `tauri.conf.json`. Current state, stated honestly: `csp: null` until
+BL-2 lands. The capabilities file already scopes the IPC surface.
+
+### Data at rest (BL-3, BL-4; retention = owner decision P3)
+
+`bpa.db` contains raw terminal scrollback ⇒ **secret-bearing** (env dumps, tokens, command
+output). Required: 0600 file mode (**BL-3**); purge-on-delete tied into retention (**BL-4**).
+Retention defaults: keep the last **20 exited sessions per workspace** / **30-day TTL** (config
+later); deleting a workspace cascades its live sessions **with consent**.
