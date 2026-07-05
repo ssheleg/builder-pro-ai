@@ -36,10 +36,14 @@ configured) actually executes the pipeline.
 - **Disk space:** a full universal release build (two `cargo build --release`
   daemon builds + a universal `tauri build`, which itself does a release build of
   the Tauri core for both arches and `lipo`-merges them) needs on the order of
-  **10-15 GB free** in `target/` across `crates/sessiond` and `src-tauri`, plus
-  bundle output. Do not attempt this on a machine with only a few GB free — it was
-  explicitly NOT run in the environment that authored these scripts for exactly
-  this reason (see "Why this wasn't run here" below).
+  **10-15 GB free** in `target/`, plus bundle output. Do not attempt this on a
+  machine with only a few GB free — it was explicitly NOT run in the environment
+  that authored these scripts for exactly this reason (see "Why this wasn't run
+  here" below).
+- **Workspace crates** (all built as part of the above): `crates/sessiond`
+  (`bpa-sessiond`, the daemon), `crates/protocol` (`bpa-protocol`, shared wire
+  types), `crates/paths` (`bpa-paths`, shared core+daemon path validation), and
+  `src-tauri` (`builder-pro-ai`, the Tauri core).
 - **An Apple Developer Program membership** (paid, $99/yr) for a Developer ID
   Application certificate. Notarization is impossible without one.
 
@@ -235,6 +239,18 @@ For a full visual confirmation of the terminal UI itself (xterm.js rendering, th
 status dot's color transitions), also follow the manual GUI procedure in
 `tests/e2e/README.md` §3 (launch the app, create a workspace + terminal, run a
 command, watch the status dot, quit, relaunch, confirm scrollback repaints).
+
+---
+
+## Release security posture (normative)
+
+- Hardened runtime + entitlements + **notarization are REQUIRED for every distributed build** —
+  never ship an unsigned or ad-hoc-signed artifact to anyone else's machine (the honest-degradation
+  dev build below is for LOCAL use only).
+- The signing identity / Team ID and the App Store Connect API key are the only human-held
+  secrets in the release path; they live in the environment (§3), never in the repo.
+- CI builds are **test-only** (unsigned; they never produce release artifacts). Release builds run
+  `scripts/build-universal.sh` + `scripts/sign-verify.sh` locally with credentials present.
 
 ---
 
