@@ -62,6 +62,22 @@ tools for custom chains and by connecting MCP servers.
   (prowl.chat first; more later).
 - Custom chains are built from these tools.
 
+## The home screen (owner, 2026-07-06 — the ideal open-the-app moment)
+
+> «Круто когда я открываю и вижу агентов на каждом этапе в разных проектах — что они делают, могу
+> посмотреть прогресс по проекту и накинуть идей в бэклог, добавить настройки для CEO и других
+> агентов организации, корректировать вектор разработки и видеть горячие вопросы, которые нужно
+> решать человеку.»
+
+Decomposed — the home screen shows, in one view:
+1. **Live agent feed** — every agent, on every stage, in every project: who is doing what right now.
+2. **Per-project progress** — drill-in from the same view.
+3. **Idea quick-capture** — toss ideas into a project backlog (or spawn a project) without leaving.
+4. **Agent-org settings** — configure the CEO and the other organization agents (roles, models,
+   policies, prompts) — the agent ORG is itself a configurable entity.
+5. **Vector steering** — adjust the development direction (goals/priorities) and agents pick it up.
+6. **Hot questions** — the human-decision queue (escalations) front and center.
+
 ## Cross-project visibility (the control panel promise)
 For every project, always visible: goals · tasks from the plan · bug-fix tasks · prioritization ·
 delivery workflow state · monitoring. The panel is the single place the owner directs all
