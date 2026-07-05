@@ -853,7 +853,7 @@ assert daemon + shell survive (`pgrep`) → relaunch → reattach + scrollback i
 | 15.3 binary Channel payload | **Resolved: NOT binary.** `Channel<TerminalEvent>` serializes via serde (JSON path of the dual codec); `Vec<u8>` crosses Hop-A as `number[]`. Acceptable at S1 throughput; revisit with protocol v2 if profiling demands. |
 | 15.4 ts-rs emission | Verified — `crates/protocol/tests/ts_export.rs` regenerates and asserts `src/ipc/types.ts`; parity is a final-suite + CI gate. |
 | 15.5 bincode covers all variants | **DIVERGED** — bincode 1.3 cannot DEserialize tagged enums; resolved by the hand-written dual-codec impls (§3 amendment, A2). |
-| §3 `daemonize` dev fallback row | **NOT BUILT** — dev mode and the e2e harness spawn `target/debug/bpa-sessiond` directly; no `daemonize` dependency exists. Row kept in §3 for history; treat as dropped (A30). |
+| §3 `daemonize` dev fallback row | **NOT BUILT** — no `daemonize` dependency exists. Dev mode uses the SAME launchd path as production (the plist just points at `target/debug/bpa-sessiond`); only the e2e harness spawns the daemon directly. Row kept in §3 for history; treat as dropped (A30). |
 
 ---
 
@@ -912,6 +912,6 @@ BL-2 lands. The capabilities file already scopes the IPC surface.
 ### Data at rest (BL-3, BL-4; retention = owner decision P3)
 
 `bpa.db` contains raw terminal scrollback ⇒ **secret-bearing** (env dumps, tokens, command
-output). Required: 0600 file mode (**BL-3**); purge-on-delete tied into retention (**BL-4**).
+output). Required: 0600 file mode + purge-on-delete (**BL-3**), tied into retention (**BL-4**).
 Retention defaults: keep the last **20 exited sessions per workspace** / **30-day TTL** (config
 later); deleting a workspace cascades its live sessions **with consent**.

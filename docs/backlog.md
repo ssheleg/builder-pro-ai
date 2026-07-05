@@ -23,7 +23,7 @@ Status: open · in-progress · done (row stays, link the closing commit).
 | BL-13 | P3 | core/tests | Preflight call-site wiring untested (`preflight_cwd`/`preflight_workspace_root` calls in command fns need a State-driven test) | Truncation-fix verification | any | open |
 | BL-14 | P2 | frontend | `applyReplay` without `term.reset()` → duplicated scrollback on any re-attach | A1 verification; chip task_ada4835d | S2 UI pass | open |
 | BL-15 | P3 | core | Cross-layer stale-channel windows: 30 s-hang double-replay; unconditional `remove_attachment` on failed attach | Attach-dedup verification | Protocol v2 | open |
-| BL-16 | P2 | test-infra | `singleton.rs` env-mutation race (needs process-wide env lock); once-seen attach parallel flake | Ledger CI-TODO | CI hardening | open |
+| BL-16 | P2 | test-infra | `singleton.rs` env-mutation race (needs process-wide env lock); once-seen attach parallel flake; real-shell integration tests silently no-op when the shell binary is absent — CI must assert they ran (ci.yml does since this cycle) | Ledger CI-TODO | CI hardening | open |
 | BL-17 | P2 | CI | Coverage gate ≥80 % sessiond enforced in CI (job added this cycle — verify it stays blocking); local run optional | Spec §14.3; audit A20 | this cycle → done when CI green | open |
 | BL-18 | P3 | bundle | Prune ~28 unused iOS/Android icon assets from `src-tauri/icons/` | Final review deferral | any | open |
 | BL-19 | P3 | release | Tauri auto-updater channel (manifests, hosting) — manual DMG until then | Owner decision D4 | post-S2 | open |

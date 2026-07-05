@@ -14,7 +14,7 @@ the daemon (spec §16). Commands below use `-p <package name>`.
 
 | Contract (spec §) | Test (command) |
 |---|---|
-| Shared types / Rust⇄TS parity (§5) | `cargo test -p bpa-protocol --test ts_export` (`generates_types_ts_at_shared_path`, `workspace_uses_camelcase_root_path`, `session_lifecycle_is_internally_tagged_camelcase`, `terminal_event_is_adjacently_tagged_bytes_are_number_arrays`, `session_meta_fields_are_camelcase`) then `git diff --exit-code -- src/ipc/types.ts` (wired into `scripts/final-suite.sh` stage 3) |
+| Shared types / Rust⇄TS parity (§5) | `cargo test -p bpa-protocol --test ts_export` (`generates_types_ts_at_shared_path`, `workspace_uses_camelcase_root_path`, `session_lifecycle_is_internally_tagged_camelcase`, `terminal_event_is_adjacently_tagged_bytes_are_number_arrays`, `session_meta_fields_are_camelcase`) then `git diff --exit-code -- src/ipc/types.ts` (wired into `scripts/final-suite.sh` stage 6 of 8) |
 | Hop-B framing (§7) | `cargo test -p bpa-protocol --test framing` (`encode_matches_manual_prefix`, `single_frame_encodes_and_decodes`, `two_frames_in_one_read_both_decode`, `partial_frame_across_reads_buffers_then_completes`, `length_prefix_split_across_reads`, `oversized_length_prefix_is_rejected`, `garbage_body_of_valid_length_is_a_decode_error`) |
 | Hop-B `bincode` round-trip, every variant (§7) | `cargo test -p bpa-protocol --test roundtrip` (`every_request_variant_roundtrips`, `every_response_variant_roundtrips`, `every_push_variant_roundtrips`, `every_terminal_event_roundtrips`, `constants_are_locked`) |
 | Hop-B correlation + handshake (§7) | `cargo test -p bpa-sessiond --lib socket_server::tests::handshake_happy_path_returns_welcome socket_server::tests::handshake_bad_magic_is_rejected_and_closes socket_server::tests::handshake_bad_version_is_rejected socket_server::tests::non_hello_first_frame_is_rejected socket_server::tests::requests_are_answered_with_matching_ids_concurrently` + client-side `cargo test -p builder-pro-ai --lib socket_client::tests::concurrent_requests_correlate_by_id socket_client::tests::incompatible_handshake_is_rejected` |
@@ -79,13 +79,15 @@ None. Every §14.2 row above resolves to at least one real, currently-passing te
   graceful `remove_session`, and attach-on-exited-session refused); core lib 51 → 52 (the two
   tautological path pre-flight tests replaced by 3 real unit tests of the extracted `preflight_cwd`
   / `preflight_workspace_root` guards).
-- TypeScript (`npx vitest run`): **106 tests**, 12 test files, 0 failed (delta +5 vs. the prior
+- TypeScript (`npx vitest run`): **107 tests**, 12 test files, 0 failed (delta +6 vs. the prior
   101: A2 in-flight-attach coalescing — `TerminalManager.attach` reworked into a per-session
   `detached | attaching | attached` state machine with a generation guard [terminal-manager.test.ts
-  +5: two synchronous attach() calls coalesce onto ONE `attach_session` IPC (StrictMode
-  double-attach — deterministic in dev via `<StrictMode>`), in-flight rejection stays retryable, and
+  +6: two synchronous attach() calls coalesce onto ONE `attach_session` IPC (StrictMode
+  double-attach — deterministic in dev via `<StrictMode>`), in-flight rejection stays retryable,
   `resetAllAttachments`/`resetAttachment`/`dispose` racing an in-flight attach each invalidate the
-  stale completion so the next attach re-fires a fresh Replay]). Delta before that (+9 vs. 92): A1
+  stale completion so the next attach re-fires a fresh Replay, and the discriminating
+  generation-guard test: a stale completion resolving while a NEWER attach is in flight is
+  refused]). Delta before that (+9 vs. 92): A1
   dead-pane fix — per-session attach tracking in `TerminalManager` [terminal-manager.test.ts +7:
   idempotent per-session attach, independent per-session tracking, failed-attach-retryable,
   `resetAttachment`, `resetAllAttachments`, dispose-clears-attach-state, unknown-session no-op] and
@@ -99,26 +101,21 @@ None. Every §14.2 row above resolves to at least one real, currently-passing te
 ## Coverage
 
 `scripts/coverage-gate.sh` runs `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` — a
-real, enforcing gate (non-zero exit below 80%). `cargo-llvm-cov` was **not installed and the
-instrumented build was not run** in the environment this task was completed in: disk headroom was
-~5.4 GB free after building the full Rust + TS suites (down from the task's ~8 GB starting budget),
-and `cargo llvm-cov` instrumentation roughly doubles the daemon crate's build (its dependency tree
-includes `alacritty_terminal`, `portable-pty`, `rusqlite`, `tokio` — all get a second,
-instrumented build variant under `target/llvm-cov-target/`), which risked exhausting the remaining
-disk. This
-is a documented, honest gap, not a silent skip: `scripts/coverage-gate.sh` fails loudly with the
-exact install command if `cargo-llvm-cov` is missing, and this matrix's row-by-row + count-by-count
-test evidence above is the substitute coverage signal for this run. Whoever next has disk headroom
-should run:
+real, enforcing gate (non-zero exit below 80%). **Measured (2026-07-05, docs-truth/CI cycle):
+`bpa-sessiond` line coverage = 88.06 %** (functions 86.70 %, regions 89.20 %) — the gate passes
+with headroom. The gate now runs in two enforced places:
 
-```sh
-rustup component add llvm-tools-preview
-cargo install cargo-llvm-cov
-bash scripts/coverage-gate.sh
-```
+- locally as `scripts/final-suite.sh` stage 7/8 (requires
+  `rustup component add llvm-tools-preview && cargo install cargo-llvm-cov`);
+- in CI as the blocking `coverage` job of `.github/workflows/ci.yml` (see `docs/backlog.md`
+  BL-17 — added and verified green this cycle).
 
-Given the daemon crate's breadth of unit tests (108 `--lib` tests directly inside `bpa-sessiond`,
-covering every module: `attach`, `boot`, `live_grid`, `logging`, `osc_parser`, `persistence`,
+The evidence base behind the number: 117 `--lib` tests directly inside `bpa-sessiond`
+(covering every module: `attach`, `boot`, `live_grid`, `logging`, `osc_parser`, `persistence`,
 `pty_supervisor`, `scrollback`, `shell_integration`, `singleton`, `socket_server`) plus 3
-`boot_integration` + 1 `no_secrets_in_logs` integration tests exercising the full boot→serve→drain
-lifecycle over the real wire protocol, ≥80% line coverage is expected but not measured in this run.
+`boot_integration` + 1 `no_secrets_in_logs` integration tests exercising the full
+boot→serve→drain lifecycle over the real wire protocol.
+
+*(History: at S0+S1 completion this gate was documented but not executed — the authoring
+environment lacked the ~3–5 GB the instrumented build needs. That gap was closed by the
+docs-truth/CI cycle; the paragraph above records the first real measurement.)*

@@ -103,15 +103,14 @@ Build spine-first. Each row is an independent spec/plan/build unit.
 | **S8** | *(future)* Analytics integrations (Google Analytics, Mixpanel) → data-driven decisions | S7 | Feeds the CEO agent. DoD: at least one external metric visible to the CEO with provenance. Metric: CEO decisions citing product metrics. |
 
 ```
-S0 ─┬─ S1 ─ Pv2 ──────────────┐
-    ├─ S2                      │
-    └─ S3 ─┬─ S4 ──────────────┤   (S4 hard-blocks S6 — owner decision D6)
-           ├─ S5 ──────────────┤
-           └───────────────────┤
-                               ▼
-             S6a ─ S6b ─┬─ S6c ─ S6e
-                        └─ S6d
-                        S6b ─ S7 ─ S8
+S0 ─┬─ S1 ─ Pv2 ───────────┐
+    ├─ S2                   │
+    └─ S3 ─┬─ S4 ───────────┤   (S6a depends on S4 + Pv2 exactly;
+           └─ S5            │    S4 hard-blocks S6 — owner decision D6.
+                            ▼    S5 kanban is consumed by agents at RUNTIME,
+              S6a ─ S6b ─┬─ S6c ─ S6e        not a build dependency.)
+                         ├─ S6d
+                         └─ S7 ─ S8
 ```
 
 **Current slice:** S0 + S1 — **DONE** (merged @ 285cb2e). Next: docs-truth/CI pass (this cycle),
