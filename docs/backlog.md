@@ -28,3 +28,4 @@ Status: open · in-progress · done (row stays, link the closing commit).
 | BL-18 | P3 | bundle | Prune ~28 unused iOS/Android icon assets from `src-tauri/icons/` | Final review deferral | any | open |
 | BL-19 | P3 | release | Tauri auto-updater channel (manifests, hosting) — manual DMG until then | Owner decision D4 | post-S2 | open |
 | BL-20 | P1 | agents/security | macOS Keychain storage for provider API keys (never SQLite/config/logs) | Audit A9; spec §16 | S6a | open |
+| BL-21 | P2 | daemon/ops | Log rotation: appender is `rolling::never` (single unbounded `sessiond.tracing.log`) — switch to daily or size-capped | Runbook truth pass (this cycle) | any | open |
