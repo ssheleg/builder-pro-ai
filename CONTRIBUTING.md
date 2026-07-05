@@ -5,8 +5,14 @@
 - **Rust:** the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml) (stable 1.92 +
   rustfmt + clippy) — rustup honors it automatically; no manual install step.
 - **Node:** `>= 24` (enforced via `package.json` `engines`). Then `npm ci`.
-- **Daemon dev build:** `cargo build -p bpa-sessiond` (dev mode and the e2e harness spawn
-  `target/debug/bpa-sessiond`).
+- **Daemon dev build + sidecar staging** (required once per fresh checkout — the Tauri build
+  script checks the sidecar exists):
+  ```sh
+  cargo build -p bpa-sessiond
+  mkdir -p src-tauri/binaries
+  cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$(rustc -vV | sed -n 's/host: //p')"
+  ```
+  (dev mode and the e2e harness spawn `target/debug/bpa-sessiond`).
 
 ## Gates
 
