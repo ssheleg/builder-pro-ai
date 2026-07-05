@@ -15,22 +15,32 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-echo "== 1/6 Rust workspace tests =="
+echo "== 1/8 Rust workspace tests =="
 cargo test --workspace
 echo "OK: cargo test --workspace"
 
 echo
-echo "== 2/6 clippy (deny warnings) =="
+echo "== 2/8 clippy (deny warnings) =="
 cargo clippy --workspace --all-targets -- -D warnings
 echo "OK: clippy -D warnings"
 
 echo
-echo "== 3/6 TypeScript tests =="
+echo "== 3/8 rustfmt (formatting is normative) =="
+cargo fmt --check
+echo "OK: cargo fmt --check"
+
+echo
+echo "== 4/8 TypeScript tests =="
 npx vitest run
 echo "OK: npx vitest run"
 
 echo
-echo "== 4/6 ts-rs type parity (generated types in sync) =="
+echo "== 5/8 TypeScript typecheck =="
+npx tsc --noEmit
+echo "OK: npx tsc --noEmit"
+
+echo
+echo "== 6/8 ts-rs type parity (generated types in sync) =="
 # The `crates/protocol/tests/ts_export.rs` tests regenerate src/ipc/types.ts as a side effect of
 # running (each test calls `export_all_to` before asserting on the content) — running them here
 # both proves the export path still works AND leaves types.ts freshly regenerated for the diff
@@ -44,11 +54,11 @@ git diff --exit-code -- src/ipc/types.ts || {
 echo "OK: src/ipc/types.ts matches crates/protocol"
 
 echo
-echo "== 5/6 daemon coverage gate (>= 80%) =="
+echo "== 7/8 daemon coverage gate (>= 80%) =="
 bash "$REPO/scripts/coverage-gate.sh"
 
 echo
-echo "== 6/6 e2e survive-restart =="
+echo "== 8/8 e2e survive-restart =="
 cargo build -p bpa-sessiond
 npm run e2e:survive
 echo "OK: npm run e2e:survive"
