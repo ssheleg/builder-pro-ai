@@ -66,15 +66,16 @@ actual process. The GUI only ever holds a socket connection to it, never a proce
 
 | Event | Sessions |
 |---|---|
-| GUI close / crash / restart | **Survive** — reattach + scrollback replay |
-| Daemon restart | **Survive** — SQLite rehydrate; scrollback intact up to the last flush (≈500 ms) |
-| **Daemon crash** | Live shells **die** (they're children of the daemon's process group); scrollback replays up to the last flush |
+| GUI close / crash / restart | Live shells **keep running** (daemon-owned) — reattach + scrollback replay |
+| Daemon restart / upgrade / crash | Live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
 | **macOS logout** | Sessions **die** — the per-user LaunchAgent is torn down with the login session |
 
-This is an honest boundary, not a bug: the daemon crashing (as opposed to being cleanly restarted
-by `launchd`) takes its live child processes down with it, and logging out tears down every
-per-user LaunchAgent along with everything it supervises. What *does* survive — GUI restarts and
-daemon restarts — is proven end-to-end by `npm run e2e:survive` (see below).
+This is an honest boundary, not a bug: any daemon stop (restart, upgrade, or crash) takes its live
+child processes down with it, and logging out tears down every per-user LaunchAgent along with
+everything it supervises. What *does* survive — GUI restart with live shells, and daemon restart
+for records + scrollback (rehydrated as inactive) — is stated in the table above.
+`npm run e2e:survive` proves the client-restart half end-to-end; a daemon-restart rehydration e2e
+is tracked as BL-7 in [`docs/backlog.md`](docs/backlog.md).
 
 ## Quickstart
 
@@ -84,7 +85,11 @@ npm install
 export PATH="$HOME/.cargo/bin:$PATH"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-# Run the app in dev mode (spawns the daemon's dev build automatically)
+# Build the daemon first — dev mode looks for bpa-sessiond BESIDE the app binary
+# (target/debug/) and fails with an actionable error if it's missing:
+cargo build -p bpa-sessiond
+
+# Run the app in dev mode
 npm run tauri dev
 
 # Run the full test + traceability + coverage + e2e gate (spec §14.3 Definition of Done)
@@ -98,11 +103,11 @@ bash scripts/build-universal.sh
 
 | Suite | Command | What it covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | daemon (`bpa-sessiond`), shared protocol (`bpa-protocol`), Tauri core (`builder-pro-ai`) — 194 tests as of the last full run |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store, terminal-manager, IPC wrappers, components — 92 tests |
-| End-to-end | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit → daemon+shell survive → relaunch → reattach + scrollback intact (the core S1 promise, spec §14.1) |
+| Rust workspace | `cargo test --workspace` | daemon (`bpa-sessiond`), shared protocol (`bpa-protocol`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — 205 tests as of the last full run |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store, terminal-manager (attach state machine), IPC wrappers, components — 107 tests |
+| End-to-end | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (the core S1 promise, spec §14.1) |
 | Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` — a real, enforcing ≥80% line-coverage gate on the daemon crate (requires `cargo install cargo-llvm-cov`) |
-| Everything, in order | `bash scripts/final-suite.sh` | Rust suite → TS suite → ts-rs type-parity diff → coverage gate → e2e; exits 0 with `ALL GATES PASSED` only if every stage passes |
+| Everything, in order | `bash scripts/final-suite.sh` | 8 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff → coverage gate → e2e; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) |
 
 See [`docs/traceability.md`](docs/traceability.md) for the full contract → test matrix (every
 locked spec §14.2 contract mapped to the concrete test(s) proving it), and
