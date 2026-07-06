@@ -193,10 +193,14 @@ impl<'a> LaunchdAgent<'a> {
         Err(LaunchdError::Install(out.stderr))
     }
 
-    /// `launchctl kickstart gui/<uid>/<label>`.
+    /// `launchctl kickstart -k gui/<uid>/<label>`. `-k` force-kills-then-restarts a running
+    /// service (rather than being a no-op when the service is already up) — required so the
+    /// upgrade flow (spec §6.2) can force a stale, already-running old-version daemon to relaunch
+    /// with the new bundled binary; a plain `kickstart` without `-k` would leave the old process
+    /// running untouched.
     pub fn kickstart(&self) -> Result<(), LaunchdError> {
         let target = self.service_target();
-        let out = self.runner.run(&["kickstart", &target])?;
+        let out = self.runner.run(&["kickstart", "-k", &target])?;
         if out.code == 0 || is_already_running(&out) {
             return Ok(());
         }
@@ -379,7 +383,7 @@ mod tests {
         let calls = mock.calls();
         assert_eq!(
             calls[0],
-            vec!["kickstart", "gui/501/ai.builderpro.desktop.sessiond"]
+            vec!["kickstart", "-k", "gui/501/ai.builderpro.desktop.sessiond"]
         );
     }
 

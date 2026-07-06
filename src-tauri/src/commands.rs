@@ -3,12 +3,14 @@
 //! the daemon.
 //!
 //! Every brokered command follows the same shape: build a `bpa_protocol::Request` from the
-//! command's args, `state.client.request(req).await`, unwrap the expected `Response` variant (or
-//! turn a mismatched/`Error` variant into a typed `CommandError`). The request-building and
-//! response-unwrapping halves are pulled out as plain functions (`build_*` / `expect_*`) so they
-//! are unit-testable without a Tauri runtime or a live socket; the `#[tauri::command]` fns
-//! themselves are exercised against a real `DaemonClient` talking to a stub daemon (see the
-//! `commands_over_stub_daemon` test module), reusing the T14 stub-daemon pattern.
+//! command's args, `state.client()?.request(req).await` (the `?` surfaces `CommandError::
+//! Disconnected` when the slot is empty — daemon not up, or a fatal `IncompatibleDaemon`), unwrap
+//! the expected `Response` variant (or turn a mismatched/`Error` variant into a typed
+//! `CommandError`). The request-building and response-unwrapping halves are pulled out as plain
+//! functions (`build_*` / `expect_*`) so they are unit-testable without a Tauri runtime or a live
+//! socket; the `#[tauri::command]` fns themselves are exercised against a real `DaemonClient`
+//! talking to a stub daemon (see the `commands_over_stub_daemon` test module), reusing the T14
+//! stub-daemon pattern.
 
 use std::sync::Arc;
 
@@ -24,11 +26,47 @@ use tauri_plugin_dialog::DialogExt;
 use crate::broker::Broker;
 use crate::socket_client::{ClientError, DaemonClient};
 
-/// Shared, Tauri-managed application state: the daemon client + the push broker. Constructed once
-/// in T18's `setup()` and registered via `app.manage(...)`.
+/// The daemon client slot: `None` while disconnected/incompatible, `Some` once a connection is
+/// live. Swappable (rather than a fixed `Arc<DaemonClient>`) because a fatal `IncompatibleDaemon`
+/// leaves the old client's `connection_task` dead (its `cmd_tx` is closed) — there is no way to
+/// "reconnect" the same `DaemonClient` in place. The upgrade flow (spec §6.2) instead restarts the
+/// whole process (`upgrade_daemon` -> `app.restart()`); the slot exists so `AppState` can always be
+/// `manage`d (even before any connection succeeds) and commands can gate on `client()` returning
+/// `Disconnected` instead of a `State<AppState>` extraction panicking.
+pub type ClientSlot = std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<DaemonClient>>>>;
+
+/// Shared, Tauri-managed application state: the swappable daemon-client slot, the push broker, and
+/// the launchd agent (used by `upgrade_daemon`). Constructed once in `lib.rs`'s `setup()` and
+/// **always** registered via `app.manage(...)` — unlike the old design, `AppState` is never left
+/// unmanaged, even when the daemon is down or speaks an incompatible protocol version (spec §6.2).
 pub struct AppState {
-    pub client: Arc<DaemonClient>,
+    pub client: ClientSlot,
     pub broker: Arc<Broker>,
+    pub launchd: Arc<crate::launchd::LaunchdAgent<'static>>,
+}
+
+/// The exact logic behind `AppState::client()`, pulled out as a free function over a bare
+/// `ClientSlot` so it is unit-testable without needing a full `AppState` (which requires an
+/// `Arc<Broker>` — buildable only from a real Tauri `AppHandle`, unavailable in a `cargo test`
+/// process without a genuine OS event loop on the main thread). `AppState::client()` below is a
+/// one-line delegate to this, so the two share the identical, real code path.
+pub(crate) fn slot_client(slot: &ClientSlot) -> Result<Arc<DaemonClient>, CommandError> {
+    slot.read()
+        .unwrap()
+        .clone()
+        .ok_or(CommandError::Disconnected)
+}
+
+impl AppState {
+    /// Current live client, or `Disconnected` if the slot is empty (daemon not up / incompatible).
+    /// Clones the `Arc` and drops the read guard BEFORE returning, so callers never hold the lock
+    /// across an `.await`.
+    pub fn client(&self) -> Result<Arc<DaemonClient>, CommandError> {
+        slot_client(&self.client)
+    }
+    pub fn set_client(&self, c: Option<Arc<DaemonClient>>) {
+        *self.client.write().unwrap() = c;
+    }
 }
 
 /// Options for `create_session`. `env_overrides` defaults to `[]`; the frontend normally omits it
@@ -74,6 +112,12 @@ pub enum CommandError {
     /// bounded reconnect can ever resolve on its own.
     #[serde(rename_all = "camelCase")]
     IncompatibleDaemon { daemon_min: u16, daemon_max: u16 },
+    /// The daemon upgrade flow's `launchctl kickstart -k` failed (spec §6.2.4: an honest failure
+    /// banner, never a fake success). `reason` is one word so `rename_all` is a no-op here, but the
+    /// per-variant attr is kept anyway per the Task-8 lesson: the container's `rename_all` does NOT
+    /// cascade into struct-variant fields.
+    #[serde(rename_all = "camelCase")]
+    UpgradeFailed { reason: String },
 }
 
 impl std::fmt::Display for CommandError {
@@ -89,6 +133,7 @@ impl std::fmt::Display for CommandError {
                 f,
                 "incompatible daemon (daemon supports [{daemon_min}, {daemon_max}])"
             ),
+            CommandError::UpgradeFailed { reason } => write!(f, "daemon upgrade failed: {reason}"),
         }
     }
 }
@@ -232,12 +277,12 @@ pub async fn create_session(
     // those to $HOME); the daemon re-validates (and canonicalizes) independently.
     preflight_cwd(&opts)?;
     let req = build_create_session(workspace_id, opts);
-    expect_session(state.client.request(req).await?)
+    expect_session(state.client()?.request(req).await?)
 }
 
 #[tauri::command]
 pub async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionMeta>, CommandError> {
-    expect_sessions(state.client.request(Request::ListSessions).await?)
+    expect_sessions(state.client()?.request(Request::ListSessions).await?)
 }
 
 #[tauri::command]
@@ -252,7 +297,7 @@ pub async fn attach_session(
         .broker
         .register_attachment(session_id.clone(), on_event);
     match state
-        .client
+        .client()?
         .request(Request::AttachSession {
             session_id: session_id.clone(),
         })
@@ -276,7 +321,7 @@ pub async fn detach_session(
 ) -> Result<(), CommandError> {
     let out = expect_ack(
         state
-            .client
+            .client()?
             .request(Request::DetachSession {
                 session_id: session_id.clone(),
             })
@@ -294,7 +339,7 @@ pub async fn write_stdin(
 ) -> Result<(), CommandError> {
     expect_ack(
         state
-            .client
+            .client()?
             .request(build_write_stdin(session_id, data))
             .await?,
     )
@@ -309,7 +354,7 @@ pub async fn resize(
 ) -> Result<(), CommandError> {
     expect_ack(
         state
-            .client
+            .client()?
             .request(Request::Resize {
                 session_id,
                 cols,
@@ -326,7 +371,7 @@ pub async fn kill_session(
 ) -> Result<(), CommandError> {
     let out = expect_ack(
         state
-            .client
+            .client()?
             .request(Request::KillSession {
                 session_id: session_id.clone(),
             })
@@ -338,7 +383,7 @@ pub async fn kill_session(
 
 #[tauri::command]
 pub async fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, CommandError> {
-    expect_workspaces(state.client.request(Request::ListWorkspaces).await?)
+    expect_workspaces(state.client()?.request(Request::ListWorkspaces).await?)
 }
 
 #[tauri::command]
@@ -352,7 +397,7 @@ pub async fn create_workspace(
     let root_path = preflight_workspace_root(&root_path)?;
     expect_workspace(
         state
-            .client
+            .client()?
             .request(Request::CreateWorkspace { name, root_path })
             .await?,
     )
@@ -365,7 +410,7 @@ pub async fn get_session_state(
 ) -> Result<SessionMeta, CommandError> {
     expect_session(
         state
-            .client
+            .client()?
             .request(Request::GetSessionState { session_id })
             .await?,
     )
@@ -387,6 +432,48 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, CommandError>
         ))
     })?;
     Ok(chosen.map(|p| p.to_string()))
+}
+
+/// Core of the daemon-upgrade flow (spec §6.2): best-effort drain the current client (if any),
+/// then force the launchd-managed daemon to relaunch with the new bundled binary. Pulled out as a
+/// plain async fn (not a `#[tauri::command]`) so it is unit-testable with a mock-runner
+/// `LaunchdAgent` and no Tauri runtime — mirrors the rest of this module's "pure helpers are
+/// unit-testable" pattern.
+///
+/// (a) The drain is best-effort and its error is swallowed: an OLD daemon (the dominant trigger
+/// for this flow) cannot parse the v2 `DaemonShutdown` frame at all, so any failure here is
+/// expected and must never block the upgrade. (b) The kickstart is the opposite — its failure is
+/// the one honest, surfaced error (spec §6.2.4): never claim success when `launchctl kickstart -k`
+/// actually failed.
+pub async fn upgrade_daemon_core(
+    client: Option<Arc<DaemonClient>>,
+    agent: &crate::launchd::LaunchdAgent<'_>,
+) -> Result<(), CommandError> {
+    if let Some(c) = client {
+        let _ = c.request(Request::DaemonShutdown { drain: true }).await;
+    }
+    agent.kickstart().map_err(|e| CommandError::UpgradeFailed {
+        reason: e.to_string(),
+    })?;
+    Ok(())
+}
+
+/// `#[tauri::command]` entry point for the upgrade flow (spec §6.2): drains the current session
+/// (best-effort), force-kickstarts the daemon, then relaunches the whole app via
+/// `AppHandle::restart()` — re-running `setup()` from scratch so the fresh process negotiates the
+/// (now-matching) protocol version with the newly-kickstarted daemon and rehydrates its inactive
+/// sessions through the normal startup path. `restart()` never returns (`-> !`, macOS-bundle-aware:
+/// it reads `Info.plist` to find the updated binary rather than assuming the on-disk path is
+/// unchanged) — the frontend (Task 10b) must not await a resolved result from this command's
+/// `invoke()` call.
+#[tauri::command]
+pub async fn upgrade_daemon(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), CommandError> {
+    let client = state.client.read().unwrap().clone();
+    upgrade_daemon_core(client, &state.launchd).await?;
+    app.restart();
 }
 
 #[cfg(test)]
@@ -626,6 +713,192 @@ mod tests {
         }
         assert!(!is_folder_picking_request(&Request::ListWorkspaces));
     }
+
+    // ── upgrade_daemon_core / AppState client-slot tests (spec §6.2) ───────────────────────────
+    //
+    // Mock-runner pattern mirrors `launchd::tests::MockLaunchctl`/`agent()` exactly (that mock is
+    // private to `launchd.rs`'s own test module, so it's replicated here rather than imported) —
+    // records every `launchctl <args...>` invocation and returns scripted `LaunchctlOutput`s in
+    // order, so these tests never touch the real service database.
+
+    struct MockLaunchctl {
+        calls: std::sync::Mutex<std::cell::RefCell<Vec<Vec<String>>>>,
+        scripted: std::sync::Mutex<
+            std::cell::RefCell<std::collections::VecDeque<crate::launchd::LaunchctlOutput>>,
+        >,
+    }
+    impl MockLaunchctl {
+        fn new(outputs: Vec<crate::launchd::LaunchctlOutput>) -> Self {
+            MockLaunchctl {
+                calls: std::sync::Mutex::new(std::cell::RefCell::new(Vec::new())),
+                scripted: std::sync::Mutex::new(std::cell::RefCell::new(
+                    outputs.into_iter().collect(),
+                )),
+            }
+        }
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().borrow().clone()
+        }
+    }
+    impl crate::launchd::LaunchctlRunner for MockLaunchctl {
+        fn run(&self, args: &[&str]) -> std::io::Result<crate::launchd::LaunchctlOutput> {
+            self.calls
+                .lock()
+                .unwrap()
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            let out = self
+                .scripted
+                .lock()
+                .unwrap()
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(crate::launchd::LaunchctlOutput {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            Ok(out)
+        }
+    }
+
+    fn ok_output() -> crate::launchd::LaunchctlOutput {
+        crate::launchd::LaunchctlOutput {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    /// Build a test `LaunchdAgent` on a temp dir with the given mock runner (same shape as
+    /// `launchd::tests::agent()`).
+    fn test_agent<'a>(
+        runner: &'a dyn crate::launchd::LaunchctlRunner,
+        root: &std::path::Path,
+    ) -> crate::launchd::LaunchdAgent<'a> {
+        crate::launchd::LaunchdAgent {
+            runner,
+            uid: 501,
+            launch_agents_dir: root.join("LaunchAgents"),
+            app_support_dir: root.join("AppSupport"),
+            daemon_path: std::path::PathBuf::from(
+                "/Applications/Builder Pro AI.app/Contents/MacOS/bpa-sessiond",
+            ),
+            socket_path: std::path::PathBuf::from("/tmp/bpa-501/d.sock"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_daemon_core_drains_then_kickstarts() {
+        // The stub daemon replies Ack to whatever it receives; the contract is best-effort drain
+        // (an OLD daemon can't parse the v2 DaemonShutdown frame at all), so this test's primary
+        // assertion is the kickstart shape/success — not that the stub specifically observed
+        // DaemonShutdown{drain:true} (asserting that too would require a stub that inspects the
+        // request, which the shared `connect_to_stub` helper doesn't expose here).
+        let (client, _sock) = super::commands_over_stub_daemon::connect_to_stub(|req| match req {
+            Request::DaemonShutdown { drain } => {
+                assert!(
+                    drain,
+                    "upgrade_daemon_core must request a drain, not a hard kill"
+                );
+                Response::Ack
+            }
+            other => panic!("expected DaemonShutdown, got {other:?}"),
+        })
+        .await;
+
+        let mock = MockLaunchctl::new(vec![ok_output()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = test_agent(&mock, tmp.path());
+
+        let result = upgrade_daemon_core(Some(Arc::new(client)), &agent).await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(
+            mock.calls(),
+            vec![vec![
+                "kickstart",
+                "-k",
+                "gui/501/ai.builderpro.desktop.sessiond"
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_daemon_core_without_client_still_kickstarts() {
+        let mock = MockLaunchctl::new(vec![ok_output()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = test_agent(&mock, tmp.path());
+
+        let result = upgrade_daemon_core(None, &agent).await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(
+            mock.calls(),
+            vec![vec![
+                "kickstart",
+                "-k",
+                "gui/501/ai.builderpro.desktop.sessiond"
+            ]],
+            "kickstart must still run even with no client to drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_daemon_core_surfaces_kickstart_failure() {
+        let boom = crate::launchd::LaunchctlOutput {
+            code: 78,
+            stdout: String::new(),
+            stderr: "Operation not permitted (TCC)".into(),
+        };
+        let mock = MockLaunchctl::new(vec![boom]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = test_agent(&mock, tmp.path());
+
+        let err = upgrade_daemon_core(None, &agent).await.unwrap_err();
+
+        match err {
+            CommandError::UpgradeFailed { reason } => {
+                assert!(
+                    reason.contains("Operation not permitted"),
+                    "reason must carry the honest launchctl failure, got: {reason}"
+                );
+            }
+            other => panic!("expected UpgradeFailed, got {other:?}"),
+        }
+    }
+
+    // `AppState::client()`/`set_client()` are one-line delegates to `slot_client`/a direct
+    // `RwLock` write over the bare `ClientSlot` (see their definitions above) — tested here
+    // directly against a `ClientSlot`, rather than through a fully-constructed `AppState`, because
+    // `AppState.broker: Arc<Broker>` can only be built from a real Tauri `AppHandle`, which
+    // requires a genuine OS event loop on the main thread (confirmed empirically: `tauri::
+    // Builder::default().build(...)` panics with "EventLoop must be created on the main thread"
+    // when run from a `cargo test` worker thread, and `tauri::test`'s mock builder only ever
+    // produces a `MockRuntime`-typed handle, which does not satisfy `AppState`'s `Wry`-defaulted
+    // `Broker` field). These tests exercise the exact same slot logic `AppState::client()` calls.
+
+    #[test]
+    fn app_state_client_returns_disconnected_when_slot_empty() {
+        let slot: ClientSlot = Arc::new(std::sync::RwLock::new(None));
+        assert_eq!(slot_client(&slot).unwrap_err(), CommandError::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn app_state_client_returns_client_when_present() {
+        let slot: ClientSlot = Arc::new(std::sync::RwLock::new(None));
+        assert_eq!(slot_client(&slot).unwrap_err(), CommandError::Disconnected);
+
+        let (client, _sock) =
+            super::commands_over_stub_daemon::connect_to_stub(|_req| Response::Ack).await;
+        *slot.write().unwrap() = Some(Arc::new(client));
+
+        let got = slot_client(&slot).expect("slot must now yield the client");
+        assert!(
+            got.request(Request::ListWorkspaces).await.is_ok(),
+            "the returned client must be the real, live one"
+        );
+    }
 }
 
 /// Command-level integration tests: exercise the real `#[tauri::command]` request-building logic
@@ -638,7 +911,7 @@ mod tests {
 /// `DaemonClient::request` round-trip and the `validate_dir`-before-request-ing behavior that the
 /// commands are thin wrappers over.
 #[cfg(test)]
-mod commands_over_stub_daemon {
+pub(crate) mod commands_over_stub_daemon {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -701,7 +974,7 @@ mod commands_over_stub_daemon {
     /// Bind a stub daemon under a fresh tempdir, handshake, then reply to exactly one Request with
     /// `respond`. Returns the connected, handshaken `DaemonClient` (via `XDG_RUNTIME_DIR`, so
     /// `DaemonClient::connect` resolves to this stub's socket).
-    async fn connect_to_stub<F>(respond: F) -> (DaemonClient, PathBuf)
+    pub(crate) async fn connect_to_stub<F>(respond: F) -> (DaemonClient, PathBuf)
     where
         F: FnOnce(Request) -> Response + Send + 'static,
     {

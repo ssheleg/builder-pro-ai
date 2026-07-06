@@ -1,20 +1,43 @@
-//! Builder Pro AI — Tauri core entry point (spec §6, §8.3, §13).
+//! Builder Pro AI — Tauri core entry point (spec §6, §8.3, §13, §6.2).
 //!
 //! `run()` builds the `tauri::Builder`: registers the 4 plugins (`store`/`dialog`/`fs`/`shell`),
 //! the full `#[tauri::command]` surface (spec §6.1), and a `setup()` hook that brings up the
 //! launchd-supervised daemon and connects to it over the Hop-B Unix-domain socket (spec §8.3).
 //!
-//! ## Honest degradation (spec §13)
+//! ## Always-managed `AppState`, swappable client slot (spec §6.2)
 //!
-//! `setup()` never panics and never hangs the window open. If resolving the bundled daemon path,
-//! installing/bootstrapping/kickstarting the LaunchAgent, or connecting to the daemon fails (e.g.
-//! running under `cargo run` in dev, where `bpa-sessiond` is not bundled beside the app binary; or
-//! launchd/TCC denies the operation), the failure is logged with `tracing::error!` and
-//! `daemon://disconnected` is emitted so the frontend can render an actionable banner (the
-//! frontend gates every command call on a connected state — see the T18 cross-task note in the
-//! task brief). In that state `AppState` is left unmanaged; `State<'_, AppState>` extraction in a
-//! command would panic, which is why the frontend must never invoke a command before observing
-//! `daemon://reconnected` (or an initial connected state).
+//! `AppState` is **always** `manage`d — unconditionally, before the daemon connect attempt even
+//! resolves — so `State<'_, AppState>` extraction in a `#[tauri::command]` (including
+//! `commands::upgrade_daemon`) never panics, regardless of whether the daemon is up. What varies is
+//! `AppState.client` (a `commands::ClientSlot`, i.e. `Arc<RwLock<Option<Arc<DaemonClient>>>>`):
+//! it is `None` while disconnected or incompatible, `Some` once a connection is live. Commands gate
+//! on this via `state.client()?`, which surfaces `CommandError::Disconnected` for an empty slot —
+//! never a panic, never a silent hang.
+//!
+//! This design exists because a fatal `ClientError::IncompatibleDaemon` (see below) leaves the
+//! `DaemonClient`'s `connection_task` dead (its `cmd_tx` is closed) — there is no way to
+//! "reconnect" that same client in place, and on the *initial*-connect-incompatible path (a new
+//! client build meeting an old, not-yet-upgraded daemon at launch — the dominant trigger) there was
+//! never a working client to begin with. The upgrade flow instead force-kickstarts the daemon and
+//! restarts the whole app (`commands::upgrade_daemon`), which re-runs `setup()` from scratch.
+//!
+//! ## Three connect outcomes (spec §13, §6.2)
+//!
+//! `bring_up_daemon` resolves `connect_with_retry` to exactly one of three outcomes, each wiring
+//! `AppState.client` and emitting a distinct signal:
+//! - **Connected**: the slot is populated (`Some`), the [`Broker`] is registered against the live
+//!   client, and (on a *re*connect after a prior disconnect) `daemon://reconnected` fires from
+//!   inside `register`'s `on_conn` wiring.
+//! - **`IncompatibleDaemon`**: the slot stays `None`; `daemon://incompatible` fires so the frontend
+//!   can offer the upgrade flow. This is fatal and is never retried (see `connect_with_retry`
+//!   below) — a stale daemon build will never become compatible by waiting.
+//! - **Any other error** (daemon not up yet, launchd failure, etc.): the slot stays `None`;
+//!   `daemon://disconnected` fires (spec §13: actionable degradation, never a silent hang). The
+//!   frontend gates every command call on observing a connected state before invoking.
+//!
+//! `setup()` itself never panics and never hangs the window open — all of the above happens inside
+//! `bring_up_daemon`, spawned on `tauri::async_runtime` so the window opens immediately regardless
+//! of how long the daemon bring-up takes.
 
 pub mod broker;
 pub mod commands;
@@ -62,6 +85,7 @@ pub fn command_names() -> &'static [&'static str] {
         "create_workspace",
         "get_session_state",
         "pick_folder",
+        "upgrade_daemon",
     ]
 }
 
@@ -79,6 +103,12 @@ fn client_build() -> String {
 /// as its own function (rather than inlined in `setup()`) so it is unit-testable without a Tauri
 /// runtime: a `delay` of a few milliseconds and an unreachable socket path let a test exercise
 /// the give-up-and-return-`Err` path quickly and deterministically.
+///
+/// `ClientError::IncompatibleDaemon` is fatal and returned immediately, with **no retry and no
+/// sleep** (spec §6.2): a version mismatch will never resolve itself by waiting, so retrying it up
+/// to `attempts` times would only delay the `daemon://incompatible` signal that drives the upgrade
+/// flow. Every other error (the daemon not being up yet, most commonly `Disconnected`) keeps the
+/// bounded backoff.
 async fn connect_with_retry(
     client_build: String,
     attempts: u32,
@@ -88,6 +118,10 @@ async fn connect_with_retry(
     for attempt in 1..=attempts.max(1) {
         match DaemonClient::connect(client_build.clone()).await {
             Ok(client) => return Ok(client),
+            Err(e @ ClientError::IncompatibleDaemon { .. }) => {
+                warn!(attempt, error = %e, "daemon incompatible; not retrying");
+                return Err(e);
+            }
             Err(e) => {
                 warn!(attempt, attempts, error = %e, "daemon connect attempt failed");
                 last_err = e;
@@ -133,11 +167,12 @@ fn build_launchd_agent(app: &tauri::AppHandle) -> Result<LaunchdAgent<'static>, 
 }
 
 /// Ensure the launchd LaunchAgent is installed, bootstrapped (idempotent), and kicked off (spec
-/// §8.3). Returns `Err` only on a genuinely hard failure (TCC/permissions denial, or the daemon
-/// binary missing from the bundle in dev) — "already bootstrapped"/"already running" are handled
-/// as success inside `launchd.rs` itself.
-fn ensure_daemon_running(app: &tauri::AppHandle) -> Result<(), LaunchdError> {
-    let agent = build_launchd_agent(app)?;
+/// §8.3), using the given, already-built `agent` (the same one that ends up in `AppState.launchd`,
+/// so a later `upgrade_daemon` kickstarts with identical config). Returns `Err` only on a
+/// genuinely hard failure (TCC/permissions denial, or the daemon binary missing from the bundle
+/// in dev) — "already bootstrapped"/"already running" are handled as success inside `launchd.rs`
+/// itself.
+fn ensure_daemon_running(agent: &LaunchdAgent<'_>) -> Result<(), LaunchdError> {
     agent.install_agent()?;
     agent.bootstrap()?;
     agent.kickstart()?;
@@ -153,35 +188,120 @@ fn emit_disconnected(app: &tauri::AppHandle, reason: &str) {
     }
 }
 
+/// Emit the no-payload `daemon://incompatible` banner event (spec §6.2): the handshake found no
+/// overlap between this client build's `[min, max]` and the daemon's, so the frontend should offer
+/// the upgrade flow rather than wait for a reconnect that will never succeed on its own.
+fn emit_incompatible(app: &tauri::AppHandle) {
+    warn!("emitting daemon://incompatible");
+    if let Err(e) = app.emit(broker::EV_DAEMON_INCOMPATIBLE, ()) {
+        error!(error = %e, "failed to emit daemon://incompatible");
+    }
+}
+
 /// Bring up the daemon (launchd install+bootstrap+kickstart) and connect to it, wiring the
-/// [`Broker`] into the resulting [`DaemonClient`]'s push/conn callbacks and `manage`-ing
-/// [`AppState`] on success (spec §8.3, §13). Split out of the `setup()` closure so the
-/// orchestration itself doesn't need to live inside a non-`async` closure body: `setup()` spawns
-/// this on `tauri::async_runtime` and returns `Ok(())` immediately so the window still opens
-/// while this runs in the background.
+/// [`Broker`] into the resulting [`DaemonClient`]'s push/conn callbacks (spec §8.3, §13, §6.2).
+/// `AppState` is `manage`d **unconditionally** before the connect result is known, with an empty
+/// client slot — see the module doc's "Always-managed `AppState`" section — so `upgrade_daemon`
+/// can always extract state, even if the daemon has never come up or the connect fails as
+/// incompatible. Split out of the `setup()` closure so the orchestration itself doesn't need to
+/// live inside a non-`async` closure body: `setup()` spawns this on `tauri::async_runtime` and
+/// returns `Ok(())` immediately so the window still opens while this runs in the background.
 async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
-    if let Err(e) = ensure_daemon_running(&app) {
+    let slot: commands::ClientSlot = Arc::new(std::sync::RwLock::new(None));
+
+    let agent = match build_launchd_agent(&app) {
+        Ok(agent) => Arc::new(agent),
+        Err(e) => {
+            error!(error = %e, "failed to resolve the launchd agent (bundled daemon path/dirs)");
+            app.manage(AppState {
+                client: slot,
+                broker,
+                // A zero-arg, always-`Err` agent so `AppState.launchd` can still be `manage`d:
+                // there is no daemon path to kickstart if `build_launchd_agent` itself failed
+                // (e.g. `bpa-sessiond` missing from the bundle in dev), so `upgrade_daemon` would
+                // surface an honest `UpgradeFailed` if invoked in this state, rather than the app
+                // never managing `AppState` at all.
+                launchd: Arc::new(unreachable_launchd_agent()),
+            });
+            emit_disconnected(&app, "could not resolve the background service binary");
+            return;
+        }
+    };
+
+    if let Err(e) = ensure_daemon_running(&agent) {
         error!(error = %e, "failed to bring up the launchd-managed daemon");
+        app.manage(AppState {
+            client: slot,
+            broker,
+            launchd: agent,
+        });
         emit_disconnected(&app, "could not start background service");
         return;
     }
 
     // Kickstart is asynchronous: give the daemon a moment to fork and bind its socket. 8 attempts
-    // x 500ms = up to ~4s of bounded retry, inside the spec's "~3-5s" window.
-    match connect_with_retry(client_build(), 8, Duration::from_millis(500)).await {
+    // x 500ms = up to ~4s of bounded retry, inside the spec's "~3-5s" window. IncompatibleDaemon
+    // short-circuits this (no retry, see `connect_with_retry`'s docs).
+    let connect_result = connect_with_retry(client_build(), 8, Duration::from_millis(500)).await;
+
+    // manage() UNCONDITIONALLY, before inspecting the outcome (locked contract): every branch
+    // below needs `AppState` to already be registered so a later `upgrade_daemon` invocation can
+    // extract it regardless of which of the three outcomes happened here.
+    app.manage(AppState {
+        client: slot.clone(),
+        broker: broker.clone(),
+        launchd: agent,
+    });
+
+    match connect_result {
         Ok(client) => {
             let client = Arc::new(client);
             // register() wires both on_push -> broker.dispatch_push and on_conn ->
             // broker.dispatch_conn (which itself emits daemon://disconnected/reconnected on
-            // future transitions, spec §13) — call exactly once (locked contract).
-            register(broker.clone(), &client);
-            app.manage(AppState { client, broker });
+            // future transitions, spec §13) — call exactly once (locked contract), BEFORE moving
+            // the client into the slot.
+            register(broker, &client);
+            slot.write().unwrap().replace(client);
             info!("daemon connected; AppState managed");
+        }
+        Err(ClientError::IncompatibleDaemon {
+            daemon_min,
+            daemon_max,
+        }) => {
+            error!(
+                daemon_min,
+                daemon_max, "daemon speaks an incompatible protocol version"
+            );
+            emit_incompatible(&app);
         }
         Err(e) => {
             error!(error = %e, "daemon connect failed after bounded retry");
             emit_disconnected(&app, "daemon unreachable");
         }
+    }
+}
+
+/// A `LaunchdAgent` whose every `launchctl` call fails (never touches the real service DB): used
+/// only as `AppState.launchd`'s value when `build_launchd_agent` itself already failed (no
+/// resolvable daemon path/dirs), so `AppState` can still be `manage`d unconditionally. Any
+/// subsequent `upgrade_daemon` call in this state surfaces an honest `CommandError::UpgradeFailed`
+/// rather than panicking on a missing field.
+fn unreachable_launchd_agent() -> LaunchdAgent<'static> {
+    struct AlwaysFail;
+    impl crate::launchd::LaunchctlRunner for AlwaysFail {
+        fn run(&self, _args: &[&str]) -> std::io::Result<crate::launchd::LaunchctlOutput> {
+            Err(std::io::Error::other(
+                "launchd agent unavailable: daemon path could not be resolved at startup",
+            ))
+        }
+    }
+    LaunchdAgent {
+        runner: Box::leak(Box::new(AlwaysFail)),
+        uid: unsafe { libc::geteuid() },
+        launch_agents_dir: std::env::temp_dir(),
+        app_support_dir: std::env::temp_dir(),
+        daemon_path: std::env::temp_dir(),
+        socket_path: std::env::temp_dir(),
     }
 }
 
@@ -212,6 +332,7 @@ pub fn run() {
             commands::create_workspace,
             commands::get_session_state,
             commands::pick_folder,
+            commands::upgrade_daemon,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -237,7 +358,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_names_are_the_eleven_spec_6_1_commands() {
+    fn command_names_are_the_twelve_spec_6_1_and_6_2_commands() {
         let names = command_names();
         let expected = [
             "create_session",
@@ -251,8 +372,9 @@ mod tests {
             "create_workspace",
             "get_session_state",
             "pick_folder",
+            "upgrade_daemon",
         ];
-        assert_eq!(names.len(), expected.len(), "exactly 11 commands");
+        assert_eq!(names.len(), expected.len(), "exactly 12 commands");
         for e in expected {
             assert!(names.contains(&e), "command surface must include {e}");
         }
@@ -262,6 +384,7 @@ mod tests {
     fn daemon_event_names_are_locked() {
         assert_eq!(DAEMON_DISCONNECTED_EVENT, "daemon://disconnected");
         assert_eq!(DAEMON_RECONNECTED_EVENT, "daemon://reconnected");
+        assert_eq!(broker::EV_DAEMON_INCOMPATIBLE, "daemon://incompatible");
     }
 
     #[test]
@@ -300,5 +423,90 @@ mod tests {
         let result =
             connect_with_retry("test-build".to_string(), 0, Duration::from_millis(5)).await;
         assert!(result.is_err());
+    }
+
+    // Serializes tests that mutate XDG_RUNTIME_DIR (DaemonClient::connect() resolves the socket
+    // path from it), same discipline as `commands::commands_over_stub_daemon::ENV_TEST_LOCK` and
+    // for the identical shared-process-state reason.
+    static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn connect_with_retry_does_not_retry_incompatible() {
+        use bpa_protocol::preamble::{decode_client_preamble, encode_daemon_reply, DaemonReply};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("d.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        // A stub daemon that always replies Incompatible to EVERY connection attempt it accepts —
+        // if connect_with_retry incorrectly retried, this stub would serve every one of those
+        // retries the same fatal reply, and the wall-clock assertion below would catch it.
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut header = [0u8; 10];
+                if stream.read_exact(&mut header).await.is_err() {
+                    continue;
+                }
+                let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
+                let mut buf = header.to_vec();
+                if build_len > 0 {
+                    let mut build = vec![0u8; build_len];
+                    if stream.read_exact(&mut build).await.is_err() {
+                        continue;
+                    }
+                    buf.extend_from_slice(&build);
+                }
+                let _ = decode_client_preamble(&buf);
+                let reply = encode_daemon_reply(&DaemonReply::Incompatible { min: 5, max: 6 });
+                let _ = stream.write_all(&reply).await;
+                let _ = stream.flush().await;
+            }
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // 8 attempts x 500ms (bring_up_daemon's real config) would take ~3.5s if this incorrectly
+        // retried; a prompt return well under that bound proves no retry happened.
+        let started = std::time::Instant::now();
+        let result = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            let result =
+                connect_with_retry("test-build".to_string(), 8, Duration::from_millis(500)).await;
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            result
+        };
+        let elapsed = started.elapsed();
+        std::mem::forget(dir);
+
+        match result {
+            Err(ClientError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            }) => {
+                assert_eq!((daemon_min, daemon_max), (5, 6));
+            }
+            other => panic!("expected IncompatibleDaemon, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "connect_with_retry took {elapsed:?}; IncompatibleDaemon must return promptly with no retry, not run the full ~3.5s of bounded backoff"
+        );
     }
 }

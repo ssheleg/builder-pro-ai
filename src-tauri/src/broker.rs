@@ -36,6 +36,10 @@ pub const EV_SESSION_EXITED: &str = "session://exited";
 pub const EV_WORKSPACE_CREATED: &str = "workspace://created";
 pub const EV_DAEMON_DISCONNECTED: &str = "daemon://disconnected";
 pub const EV_DAEMON_RECONNECTED: &str = "daemon://reconnected";
+/// Emitted (no payload) when the handshake preamble (spec §4.5) finds the daemon's protocol range
+/// incompatible with this client build — the signal that drives the upgrade flow (spec §6.2).
+/// Distinct from `EV_DAEMON_DISCONNECTED`: a bounded reconnect can never resolve this on its own.
+pub const EV_DAEMON_INCOMPATIBLE: &str = "daemon://incompatible";
 
 /// The effect a single `Push` frame should have on Hop-A, decided without touching the Tauri
 /// runtime. Produced by [`map_push`]; consumed by [`Broker::dispatch_push`].
