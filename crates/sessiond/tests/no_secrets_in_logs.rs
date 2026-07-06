@@ -21,8 +21,9 @@ use std::fs;
 use std::io::Read;
 use std::time::Duration;
 
-use bpa_sessiond::protocol::{encode_frame, FrameDecoder};
-use bpa_sessiond::protocol::{Frame, Request, Response, MAGIC, PROTO_VERSION};
+use bpa_sessiond::protocol::{decode_daemon_reply, encode_client_preamble, encode_frame};
+use bpa_sessiond::protocol::{ClientPreamble, DaemonReply, FrameDecoder};
+use bpa_sessiond::protocol::{Frame, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -47,6 +48,36 @@ async fn recv_frame(s: &mut UnixStream) -> Frame {
     decoder.push(&body);
     let mut frames = decoder.decode().unwrap();
     frames.remove(0)
+}
+
+/// Perform the Pv2 §4.2/§4.4 preamble handshake and assert the daemon accepts: write the raw
+/// codec-agnostic client preamble (`min:2, max:2`), then read + `decode_daemon_reply` the fixed
+/// 9-byte reply header (plus the trailing build string when accepted) and require `Accepted`.
+/// Distinct from `send_frame`/`recv_frame`: the preamble is a raw byte layout, not a CBOR `Frame`.
+async fn preamble_handshake(s: &mut UnixStream) {
+    let bytes = encode_client_preamble(&ClientPreamble {
+        min: 2,
+        max: 2,
+        build: "test".into(),
+    });
+    s.write_all(&bytes).await.unwrap();
+    s.flush().await.unwrap();
+
+    // Accepted:    magic(4)+result(1)+chosen(2)+build_len(2) = 9 bytes, then build_len more.
+    // Incompatible: magic(4)+result(1)+min(2)+max(2)         = 9 bytes, no trailing body.
+    let mut header = [0u8; 9];
+    s.read_exact(&mut header).await.unwrap();
+    let mut buf = header.to_vec();
+    if header[4] == 1 {
+        let build_len = u16::from_le_bytes(header[7..9].try_into().unwrap()) as usize;
+        let mut build = vec![0u8; build_len];
+        s.read_exact(&mut build).await.unwrap();
+        buf.extend_from_slice(&build);
+    }
+    match decode_daemon_reply(&buf).expect("valid daemon reply") {
+        DaemonReply::Accepted { .. } => {}
+        other => panic!("expected Accepted, got {other:?}"),
+    }
 }
 
 /// The daemon must never leak its own environment secrets into structured logs (spec §13, §16).
@@ -87,26 +118,8 @@ async fn planted_secret_never_appears_in_logs() {
     }
     let mut c = conn.expect("daemon did not bind socket in time");
 
-    // Handshake.
-    send_frame(
-        &mut c,
-        &Frame::Request {
-            id: 0,
-            req: Request::Hello {
-                magic: MAGIC,
-                proto_version: PROTO_VERSION,
-                client_build: "no-secrets-it".into(),
-            },
-        },
-    )
-    .await;
-    match recv_frame(&mut c).await {
-        Frame::Response {
-            id: 0,
-            res: Response::Welcome { .. },
-        } => {}
-        other => panic!("expected Welcome, got {other:?}"),
-    }
+    // Handshake (Pv2 §4.2/§4.4 preamble, replacing the v1 Hello→Welcome frame exchange).
+    preamble_handshake(&mut c).await;
 
     // Create a workspace, then a session — this exercises persistence + broker logging call
     // sites (socket_server.rs: connection accept, dispatch, persist, scrollback flush).
