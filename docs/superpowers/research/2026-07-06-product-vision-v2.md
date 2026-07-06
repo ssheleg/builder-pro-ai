@@ -111,6 +111,33 @@ New concepts:
    evaluation, prioritization, and sprint planning). Which metrics are «main» is an owner
    decision the system keeps asking about as the project evolves.
 
+## Vision v4 addendum (owner, 2026-07-06): rules, knowledge base, skills/plugins, observability, additive schema, meta-process
+
+1. **Rules — global and per-project.** Like Claude Code's CLAUDE.md hierarchy: global rules
+   (bind everything) + project rules (bind one project). Agents, workflows, and gates read them.
+2. **Knowledge base = the graph, workspace-wide.** The knowledge base is project-scoped BUT
+   cross-linked: an agent can search the ENTIRE workspace, find information about ANOTHER project
+   and look into it. Cross-project retrieval is a first-class agent capability, not a viz.
+3. **Skills / plugins / MCP — the Claude Code format.** The app is an environment the owner plugs
+   things into: MCP servers, connectors, social-network accounts, skills, plugins — with global
+   and local (per-project) settings. «Сделаем вот такой формат, как в Claude Code».
+4. **Design: super-minimalist, light, modern, pleasant type, compact.** And: the visual-design /
+   UX / component rules must be written down NOW so every future feature is designed inside one
+   systematized design language (see `docs/design-system.md`).
+5. **Custom flows get data steps.** While composing a flow: attach MCPs to FETCH data, add
+   data-LOADING steps, data-PROCESSING steps, INSIGHT-EXTRACTION steps. The flow editor is VISUAL.
+6. **Total run observability.** For every flow run, at every step, the owner can see: what data
+   came in, what request was sent, what data came back, every processing action, every step.
+   Everything is logged and recorded — run history is analyzable. Requires a designed logging
+   system + a global storage system.
+7. **Additive-only data architecture.** Entities/schema start small and GROW by extension —
+   adding tables/fields, never rebuilding. «Конструктор: кубик за кубиком» — a new cube slots in
+   without reassembling the existing ones.
+8. **The meta-process (for the platform AND for projects inside it).** Always see the END GOAL
+   (editable; when edited — re-plan); always keep a LIVE step-plan to that goal; architecture and
+   data structures are designed FIRST; then a minimum is defined and extended constructor-style.
+   The platform itself must operate its managed projects by this method.
+
 ## Implied capabilities (derived, to be validated in the audit)
 - Idea entity + lifecycle (captured → researched → specced → in-dev → shipped).
 - Research artifacts as durable, linkable objects (feed the knowledge graph).

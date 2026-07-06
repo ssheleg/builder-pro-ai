@@ -965,3 +965,30 @@ New open questions for the owner (append to the register):
     «experiment» until S8 matures?
 12. Main-metric declaration UX: where does the owner declare/change MAIN metrics — project
     settings, or goal-attached (each goal names the metrics it moves)?
+
+---
+
+# Vision v4 addendum to the correction plan (2026-07-06, later same day)
+
+Owner's fourth statement (see «Vision v4 addendum» in the vision doc): rules hierarchy, workspace-
+wide knowledge base, skills/plugins/MCP à la Claude Code, design-system-now, data steps in flows,
+total run observability, additive-only schema, and the end-goal meta-process. Mapping:
+
+| Correction item | v4 amendment |
+|---|---|
+| Charter + S3 | **+RuleSet entity**: global rules + per-project rules (Claude-Code-style hierarchy); read by agents (system-prompt injection), workflow gates, and policy checks. Owner-editable from settings. |
+| S4 amendment (covers V21) | Strengthened: the graph IS the knowledge base — **workspace-wide agent search** across ALL projects (cross-project retrieval API is the S4 DoD, not viz); an agent working project A can query and read project B's knowledge. |
+| S-MCP slice | Widens to **S-EXT «Extensions: MCP + connectors + skills/plugins»** — the Claude Code format: MCP server registry (global + per-project enablement), connector accounts (e.g. social networks), skills (reusable instruction packs for agents), plugins; global vs local settings resolution. |
+| SW1/SW3 (engine + editor) | **+Step kinds**: data-fetch (MCP), data-load, data-process, insight-extract. The editor is explicitly VISUAL (canvas/graph editing, not a form list). |
+| SW1 run history + S7 (covers V25) | **Run observability contract**: every StepRun persists {input data ref, outgoing request(s), received data ref, processing actions, timings, cost}; UI shows per-step I/O drill-down; full run history analyzable. Requires the **logging/storage architecture** item below. |
+| Charter (covers V14/V15) | **Two elevated design laws**: (a) additive-only schema evolution — extend by adding tables/columns, never rebuild (migrations are append-only by policy, not just mechanism); (b) a named **global storage architecture** section: app-domain store + run/step logs + ingested telemetry + artifact blobs — one map, growth-ready. |
+| CONTRIBUTING + overview §6 (process) | **Meta-process law** (platform AND managed projects): end goal visible and editable → live step-plan re-actualized on goal change → architecture/data first → minimum → constructor-style extension. This is also how the CEO/PM agents must operate managed projects (S6b behavior spec). |
+| NEW doc (this cycle) | **docs/design-system.md** — visual/UX rules written NOW (super-minimalist, light, modern, compact; typography; tokens; component language; UX laws). Binds every future feature. Drafted 2026-07-06, extends frontend-conventions.md. |
+
+New open questions (register continues):
+13. Rules format: free-text markdown (like CLAUDE.md, LLM-read) or structured policies (machine-
+    enforced gates) — or both layers (markdown for agents + typed policy table for gates)?
+14. Skills format: adopt/borrow the Claude Code skill format (SKILL.md) for portability, or a
+    native format?
+15. Run-log retention: step-level I/O can be heavy (full payloads); store full payloads for N days
+    then thin to metadata, or size-capped per run?
