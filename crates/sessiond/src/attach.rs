@@ -1,11 +1,17 @@
-//! Per-session single-attach registry + reattach replay orchestration (spec §7 attach model,
-//! §6.2 reattach flow, §13 backpressure/honest-degradation).
+//! Multi-subscriber attach registry + reattach replay orchestration (spec §7 attach model, §6.2
+//! reattach flow, §13 backpressure/honest-degradation, §5.2-5.4 multi-subscriber).
 //!
-//! Exactly one active [`PushSink`] per session. `attach` supersedes any prior consumer for that
-//! session, emits a fresh sanitized `Push::Replay` (built from
-//! [`crate::pty_supervisor::Supervisor::snapshot_scrollback`]), then forwards live PTY bytes as
-//! `Push::Output` until detach, supersede, or the sink closes. `detach` stops `Output` only — the
-//! PTY keeps running and its scrollback ring keeps filling (spec §7 keep-alive).
+//! N independent [`PushSink`]s may co-attach the SAME session (Pv2 §5.2: a session has 0..N
+//! attachments, one per attached connection — GUI + future agents watching the same session at
+//! once). Entries are keyed by `(SessionId, conn_id)`, so a fresh `attach()` from a NEW connection
+//! never supersedes/stops another connection's existing attachment to the same session; each
+//! attachment gets its own unique `sub_id` (allocated from a per-registry monotonic counter) and
+//! its own independent forwarder. Each `attach` emits a fresh sanitized `Push::Replay` (built from
+//! [`crate::pty_supervisor::Supervisor::snapshot_scrollback`]) to ONLY that attachment's sink, then
+//! forwards live PTY bytes as `Push::Output` until that attachment's own detach or the sink
+//! closes. `detach` stops `Output` only for that one `(session, conn)` pair — the PTY keeps
+//! running and its scrollback ring keeps filling (spec §7 keep-alive), and every OTHER attachment
+//! (this connection's or another's) for the same session is unaffected.
 //!
 //! ## The std-mpsc → async bridge
 //!
@@ -69,24 +75,28 @@ impl std::error::Error for AttachError {}
 
 /// One live attachment's cancellable forwarder handle.
 struct AttachEntry {
-    /// The connection that currently owns this session's single attachment. Teardown on a
-    /// client disconnect / DetachSession is scoped to entries this connection owns, so one
-    /// client's lifecycle never tears down another client's live stream. `attach` still
-    /// supersedes across connections (single-attach per session, spec §7).
-    conn_id: u64,
+    /// This attachment's unique subscriber id in the supervisor's sink list (Pv2 §5.1/§5.2).
+    /// Passed to `unsubscribe_output` on detach so this attachment's sink is pruned from the
+    /// supervisor without disturbing any other subscriber's sink for the same session.
+    sub_id: u64,
     /// Aborts the `spawn_blocking` forwarder task. Aborting a `spawn_blocking` task does not
     /// preempt it mid-`recv()`, so we also flip `cancel` — the forwarder polls it after every
-    /// `recv()` wakeup, including the wakeup caused by the std sender being dropped when a fresh
-    /// `subscribe_output` supersedes it in the supervisor.
+    /// `recv()` wakeup, including the wakeup caused by the std sender being dropped when
+    /// `unsubscribe_output` removes this attachment's sink in the supervisor.
     handle: JoinHandle<()>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Per-session single-attach registry (spec §7). Holds at most one live [`AttachEntry`] per
-/// `SessionId`; a new `attach()` for the same session supersedes (and stops) the prior one.
+/// Multi-subscriber attach registry (Pv2 §5.2-5.4). Holds 0..N live [`AttachEntry`] values per
+/// `SessionId` — one per `(SessionId, conn_id)` pair — so N different connections may co-attach
+/// the same session simultaneously; none supersedes another.
 pub struct AttachRegistry {
     supervisor: Arc<Supervisor>,
-    entries: StdMutex<std::collections::HashMap<SessionId, AttachEntry>>,
+    entries: StdMutex<std::collections::HashMap<(SessionId, u64), AttachEntry>>,
+    /// Monotonic counter allocating a fresh, registry-wide-unique `sub_id` for every attachment
+    /// (Pv2 §5.1: the supervisor's sink list is keyed by caller-assigned `sub_id`; this registry
+    /// is the one caller responsible for assigning them, so it owns uniqueness).
+    next_sub_id: std::sync::atomic::AtomicU64,
 }
 
 impl AttachRegistry {
@@ -94,40 +104,35 @@ impl AttachRegistry {
         AttachRegistry {
             supervisor,
             entries: StdMutex::new(std::collections::HashMap::new()),
+            next_sub_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
-    /// (Re)register `sink` as the single consumer for `session_id`, superseding any prior attach
-    /// (from any connection — single-attach is per-session, spec §7). `conn_id` records which
-    /// connection now owns the attachment so teardown can be scoped per-connection. Sends a fresh
-    /// `Push::Replay` (sanitized snapshot at current cols/rows) into `sink` first, then spawns a
-    /// forwarder that streams live `Push::Output` (with injected OSC-133/OSC-7 marks stripped)
-    /// until detach, supersede, or `sink` closes.
+    /// Register `sink` as an ADDITIONAL independent consumer for `session_id` — Pv2 §5.2: N
+    /// connections may co-attach the same session; this NEVER supersedes/stops another
+    /// connection's (or this connection's own prior) attachment for the same session. `conn_id`
+    /// records which connection owns this attachment so teardown can be scoped per-connection.
+    /// Allocates a fresh unique `sub_id`, pushes it onto the supervisor's sink list (push, not
+    /// replace), sends a fresh `Push::Replay` (sanitized snapshot at current cols/rows) into
+    /// `sink` first, then spawns a forwarder that streams live `Push::Output` (with injected
+    /// OSC-133/OSC-7 marks stripped) until THIS attachment's own detach or `sink` closes.
     pub async fn attach(
         &self,
         conn_id: u64,
         session_id: &SessionId,
         sink: PushSink,
     ) -> Result<(), AttachError> {
-        // Stop any prior attachment for this session BEFORE subscribing a new std sink, so the
-        // supervisor holds exactly one live sink at a time and the old forwarder is not racing
-        // the new one for the same underlying subscription slot. Supersede is owner-agnostic.
-        self.abort_existing(session_id);
+        // Allocate this attachment's own unique sub_id (Pv2 §5.1/§5.2). No supersede: multiple
+        // connections — and multiple sub_ids — may be live for the same session_id at once.
+        let sub_id = self
+            .next_sub_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Bridge: std channel fed by the supervisor's blocking reader thread.
-        //
-        // TASK 7 HANDOFF: the supervisor now supports N independent subscribers keyed by
-        // `sub_id` (Pv2 §5.1), but this registry is still single-attach per session (one
-        // `AttachEntry` per `SessionId`, `abort_existing` above supersedes any prior owner). We
-        // pass a fixed placeholder `sub_id` (0) purely to keep this crate compiling against the
-        // new 3-arg `subscribe_output` signature — it is NOT a real per-connection/per-attach id.
-        // Task 7 re-keys this registry to the multi-subscriber model: allocate a real unique
-        // `sub_id` per attachment (e.g. `conn_id`, once multiple connections may co-attach the
-        // same session) and call `unsubscribe_output(session_id, sub_id)` on detach/supersede
-        // instead of relying solely on the supervisor's reader-exit `sinks.clear()`.
+        // Bridge: std channel fed by the supervisor's blocking reader thread. `subscribe_output`
+        // PUSHES this sink onto the session's sink list alongside any other live subscriber.
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         self.supervisor
-            .subscribe_output(session_id, 0, std_tx)
+            .subscribe_output(session_id, sub_id, std_tx)
             .map_err(|_| AttachError::NoSuchSession)?;
 
         // Snapshot AFTER subscribing: any byte the reader thread produces from this point on is
@@ -182,35 +187,60 @@ impl AttachRegistry {
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return, // superseded/session gone
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return, // detached/session gone
                 }
             }
         });
 
-        self.entries.lock().unwrap().insert(
-            session_id.clone(),
-            AttachEntry {
-                conn_id,
-                handle,
-                cancel,
-            },
-        );
+        // Insert at this connection's own key. If THIS SAME connection already held an
+        // attachment for this session (a re-attach without an intervening detach — e.g. a client
+        // that sends AttachSession twice), retire that stale entry exactly like `detach` would:
+        // unsubscribe its sub_id and cancel+abort its forwarder. This is NOT a cross-connection
+        // supersede (another connection's attachment for the same session is never touched, and
+        // is not reachable through this key) — it only prevents a same-connection re-attach from
+        // silently leaking the previous forwarder's OS thread and stale supervisor sink.
+        let stale = self
+            .entries
+            .lock()
+            .unwrap()
+            .insert(
+                (session_id.clone(), conn_id),
+                AttachEntry {
+                    sub_id,
+                    handle,
+                    cancel,
+                },
+            );
+        if let Some(stale) = stale {
+            self.supervisor
+                .unsubscribe_output(session_id, stale.sub_id);
+            stale
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+            stale.handle.abort();
+        }
         Ok(())
     }
 
-    /// Stop `Output` forwarding for `session_id`, but ONLY if `conn_id` currently owns the
-    /// attachment. A detach from a connection that no longer owns the session (another client
-    /// superseded it) is a no-op, so one client's `DetachSession` can never tear down another
-    /// client's live stream. The PTY keeps running and its ring keeps filling (spec §7 keep-alive).
+    /// Stop `Output` forwarding for THIS connection's attachment to `session_id` only. Other
+    /// connections' (or this connection's own, if it had more than one — it never does since a
+    /// connection attaches a session at most once) attachments to the same session are completely
+    /// unaffected — a detach from a connection that never attached this session is a no-op, so
+    /// one client's `DetachSession` can never tear down another client's live stream. Unsubscribes
+    /// this attachment's `sub_id` from the supervisor's sink list (Pv2 §5.2) so live bytes stop
+    /// being pushed to it. The PTY keeps running and its ring keeps filling (spec §7 keep-alive).
     pub fn detach(&self, conn_id: u64, session_id: &SessionId) {
-        let mut map = self.entries.lock().unwrap();
-        if map.get(session_id).map(|e| e.conn_id) == Some(conn_id) {
-            if let Some(entry) = map.remove(session_id) {
-                entry
-                    .cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
-                entry.handle.abort();
-            }
+        let entry = self
+            .entries
+            .lock()
+            .unwrap()
+            .remove(&(session_id.clone(), conn_id));
+        if let Some(entry) = entry {
+            self.supervisor.unsubscribe_output(session_id, entry.sub_id);
+            entry
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+            entry.handle.abort();
         }
     }
 
@@ -218,7 +248,9 @@ impl AttachRegistry {
     /// belt-and-braces drain — a whole-daemon teardown, not a per-client one.
     pub fn detach_all(&self) {
         let mut map = self.entries.lock().unwrap();
-        for (_id, entry) in map.drain() {
+        for ((session_id, _conn_id), entry) in map.drain() {
+            self.supervisor
+                .unsubscribe_output(&session_id, entry.sub_id);
             entry
                 .cancel
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -227,17 +259,19 @@ impl AttachRegistry {
     }
 
     /// Drop every attach entry OWNED BY `conn_id` — called when that client disconnects. Entries
-    /// owned by other live connections keep streaming (teardown is per-connection; single-attach is
-    /// per-session).
+    /// owned by other live connections (including other attachments to the SAME session) keep
+    /// streaming (teardown is per-connection; a session may have many independent subscribers,
+    /// Pv2 §5.2).
     pub fn detach_all_for_conn(&self, conn_id: u64) {
         let mut map = self.entries.lock().unwrap();
-        let owned: Vec<SessionId> = map
-            .iter()
-            .filter(|(_, e)| e.conn_id == conn_id)
-            .map(|(id, _)| id.clone())
+        let owned: Vec<(SessionId, u64)> = map
+            .keys()
+            .filter(|(_, c)| *c == conn_id)
+            .cloned()
             .collect();
-        for id in owned {
-            if let Some(entry) = map.remove(&id) {
+        for key in owned {
+            if let Some(entry) = map.remove(&key) {
+                self.supervisor.unsubscribe_output(&key.0, entry.sub_id);
                 entry
                     .cancel
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -246,32 +280,39 @@ impl AttachRegistry {
         }
     }
 
-    /// Remove `session_id`'s attach entry when the session itself has ENDED (KillSession or natural
-    /// child exit). Graceful: does NOT cancel/abort the forwarder — the reader thread drops the
-    /// session's sink on its own exit, so the forwarder drains every remaining byte and terminates
-    /// on `Disconnected`. Cancelling here instead would race the reader thread and truncate the
-    /// session's final output to the attached client (a real, user-visible loss).
-    /// Returns the forwarder's `JoinHandle` (production callers drop it — the task is detached and
-    /// self-terminating; tests await it to prove termination).
-    pub fn remove_session(&self, session_id: &SessionId) -> Option<JoinHandle<()>> {
-        self.entries
-            .lock()
-            .unwrap()
-            .remove(session_id)
-            .map(|e| e.handle)
+    /// Remove EVERY attach entry for `session_id` when the session itself has ENDED (KillSession or
+    /// natural child exit) — every connection currently attached to it, not just one. Graceful:
+    /// does NOT cancel/abort any forwarder — the reader thread drops the session's sink(s) on its
+    /// own exit, so each forwarder drains every remaining byte and terminates on `Disconnected`.
+    /// Cancelling here instead would race the reader thread and truncate the session's final
+    /// output to whichever attached clients are still watching (a real, user-visible loss).
+    /// `unsubscribe_output` is called per removed entry for symmetry/defense-in-depth even though
+    /// it is moot here — the supervisor's reader-exit path has already cleared its own sinks list
+    /// by the time a session ends, so this is a harmless no-op there, not a required step.
+    /// Returns the forwarders' `JoinHandle`s (production callers drop them — each task is detached
+    /// and self-terminating; tests await them to prove termination). Empty if no entry existed for
+    /// this session.
+    pub fn remove_session(&self, session_id: &SessionId) -> Vec<JoinHandle<()>> {
+        let mut map = self.entries.lock().unwrap();
+        let owned: Vec<(SessionId, u64)> = map
+            .keys()
+            .filter(|(sid, _)| sid == session_id)
+            .cloned()
+            .collect();
+        let mut handles = Vec::with_capacity(owned.len());
+        for key in owned {
+            if let Some(entry) = map.remove(&key) {
+                self.supervisor.unsubscribe_output(session_id, entry.sub_id);
+                handles.push(entry.handle);
+            }
+        }
+        handles
     }
 
-    /// Number of live attachments (observability + test hook).
+    /// Number of live attachments (observability + test hook). May exceed the number of live
+    /// sessions once multiple connections co-attach the same session (Pv2 §5.2).
     pub fn attachment_count(&self) -> usize {
         self.entries.lock().unwrap().len()
-    }
-
-    fn abort_existing(&self, session_id: &SessionId) {
-        if let Some(prev) = self.entries.lock().unwrap().remove(session_id) {
-            prev.cancel
-                .store(true, std::sync::atomic::Ordering::Release);
-            prev.handle.abort();
-        }
     }
 }
 
@@ -525,9 +566,10 @@ mod tests {
         let _ = sup.kill(&id);
     }
 
-    // ---- second attach supersedes: old forwarder stops, fresh Replay sent to the new sink. ----
+    // ---- second attach from a DIFFERENT connection does NOT supersede: both A and B keep
+    // streaming their own independent live Output (Pv2 §5.2 multi-subscriber, no supersede). ----
     #[tokio::test]
-    async fn second_attach_supersedes_first() {
+    async fn second_attach_from_different_conn_does_not_supersede() {
         let sup = Arc::new(Supervisor::new());
         let id = sup
             .create(spec(vec![
@@ -538,8 +580,7 @@ mod tests {
 
         let reg = AttachRegistry::new(sup.clone());
 
-        // A on conn 1, B on conn 2: proves cross-connection supersede still works — B supersedes A
-        // even though A (a different connection) owns the entry.
+        // A on conn 1, B on conn 2: both remain attached — no cross-connection supersede.
         let (sink_a, mut client_a) = mpsc::channel::<Push>(64);
         reg.attach(1, &id, sink_a).await.expect("attach a");
         assert!(matches!(
@@ -554,8 +595,33 @@ mod tests {
             Push::Replay { .. }
         ));
 
-        // Release the child; live output must reach ONLY B (A's forwarder was superseded/aborted).
+        assert_eq!(
+            reg.attachment_count(),
+            2,
+            "both A and B must remain attached — no supersede"
+        );
+
+        // Release the child; live output must reach BOTH A and B independently.
         sup.write_stdin(&id, b"go\n").expect("write go");
+
+        let mut collected_a = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match recv_timeout(&mut client_a, 500).await {
+                Some(Push::Output { bytes, .. }) => {
+                    collected_a.extend_from_slice(&bytes);
+                    if collected_a.windows(1).any(|w| w == b"A") {
+                        break;
+                    }
+                }
+                Some(other) => panic!("expected Output on A, got {other:?}"),
+                None => continue,
+            }
+        }
+        assert!(
+            collected_a.windows(1).any(|w| w == b"A"),
+            "A must receive its own live Output, got: {collected_a:?}"
+        );
 
         let mut collected_b = Vec::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -573,14 +639,7 @@ mod tests {
         }
         assert!(
             collected_b.windows(1).any(|w| w == b"A"),
-            "B must receive live Output after supersede, got: {collected_b:?}"
-        );
-
-        // A must not receive any further Output.
-        let a_next = recv_timeout(&mut client_a, 300).await;
-        assert!(
-            a_next.is_none(),
-            "A must not receive Output after being superseded, got {a_next:?}"
+            "B must ALSO receive its own independent live Output, got: {collected_b:?}"
         );
 
         let _ = sup.kill(&id);
@@ -815,13 +874,14 @@ mod tests {
         assert_eq!(combined, b"ab".to_vec());
     }
 
-    // ---- a superseded/detached forwarder does not leak a spawn_blocking OS thread. ----
+    // ---- a same-connection re-attach (no cross-connection supersede anymore) does not leak a
+    // spawn_blocking OS thread. ----
     //
     // Directly proves thread exit (not just registry bookkeeping): each retired entry's
     // `JoinHandle` is `.await`ed to completion, which only resolves once the underlying
     // `spawn_blocking` OS thread has actually returned from its closure.
     #[tokio::test]
-    async fn superseded_forwarder_does_not_leak_thread() {
+    async fn same_conn_reattach_does_not_leak_thread() {
         let sup = Arc::new(Supervisor::new());
         let id = sup
             .create(spec(vec!["-c".into(), "sleep 5".into()]))
@@ -829,25 +889,27 @@ mod tests {
 
         let reg = AttachRegistry::new(sup.clone());
 
-        // Attach + supersede several times; the registry must hold exactly one entry throughout
-        // (each prior forwarder aborted, not accumulated).
+        // Re-attach the SAME connection to the SAME session several times; the registry must hold
+        // exactly one entry at this (session, conn) key throughout (each prior forwarder for THIS
+        // connection retired, not accumulated) — this is a same-connection re-attach, not a
+        // cross-connection supersede.
         for _ in 0..5 {
             let (sink, _client) = mpsc::channel::<Push>(16);
             reg.attach(1, &id, sink).await.expect("attach");
             assert_eq!(
                 reg.entries.lock().unwrap().len(),
                 1,
-                "registry must hold exactly one entry per session at all times"
+                "registry must hold exactly one entry for this (session, conn) key at all times"
             );
         }
 
-        // Take the still-live entry out ourselves (mirrors what `abort_existing` does) and prove
-        // its JoinHandle completes promptly once cancelled — i.e. the OS thread actually exits.
+        // Take the still-live entry out ourselves and prove its JoinHandle completes promptly
+        // once cancelled — i.e. the OS thread actually exits.
         let entry = reg
             .entries
             .lock()
             .unwrap()
-            .remove(&id)
+            .remove(&(id.clone(), 1))
             .expect("entry present");
         entry
             .cancel
@@ -921,11 +983,11 @@ mod tests {
             "only conn 1's entry removed; conn 2's must remain"
         );
         assert!(
-            reg.entries.lock().unwrap().contains_key(&sb),
+            reg.entries.lock().unwrap().contains_key(&(sb.clone(), 2)),
             "sb (conn 2) must still be attached"
         );
         assert!(
-            !reg.entries.lock().unwrap().contains_key(&sa),
+            !reg.entries.lock().unwrap().contains_key(&(sa.clone(), 1)),
             "sa (conn 1) must be gone"
         );
 
@@ -1083,10 +1145,10 @@ mod tests {
                 "iter {iter}: attach entry must be reaped after natural exit"
             );
 
-            // (c) A fresh remove_session returns None — the entry is genuinely gone.
+            // (c) A fresh remove_session returns empty — the entry is genuinely gone.
             assert!(
-                reg.remove_session(&id).is_none(),
-                "iter {iter}: entry must already be gone (remove_session returns None)"
+                reg.remove_session(&id).is_empty(),
+                "iter {iter}: entry must already be gone (remove_session returns empty)"
             );
 
             let _ = sup.kill(&id);
@@ -1115,9 +1177,13 @@ mod tests {
         // so the forwarder observes `Disconnected` and returns of its own accord.
         sup.kill(&id).expect("kill");
 
-        let handle = reg
-            .remove_session(&id)
-            .expect("remove_session returns the forwarder handle");
+        let mut handles = reg.remove_session(&id);
+        assert_eq!(
+            handles.len(),
+            1,
+            "remove_session must return exactly one forwarder handle for a single attachment"
+        );
+        let handle = handles.remove(0);
         let joined = tokio::time::timeout(Duration::from_secs(2), handle).await;
         assert!(
             joined.is_ok(),
@@ -1125,11 +1191,53 @@ mod tests {
              reader never dropped the sink (leak)"
         );
 
-        // Entry is gone; a second remove is a no-op returning None.
+        // Entry is gone; a second remove is a no-op returning empty.
         assert!(
-            reg.remove_session(&id).is_none(),
+            reg.remove_session(&id).is_empty(),
             "entry must be removed exactly once"
         );
+    }
+
+    // ---- Task 7 D5 unit proof (Pv2 §5.2-5.4): two DIFFERENT connections attaching the SAME
+    // session must BOTH remain attached — no supersede. `attachment_count()` must read 2, and a
+    // second attach must not have torn down the first (this is the multi-subscriber model
+    // replacing the old single-attach-per-session registry). ----
+    #[tokio::test]
+    async fn attach_two_conns_same_session_no_supersede() {
+        let sup = Arc::new(Supervisor::new());
+        let id = sup
+            .create(spec(vec!["-c".into(), "sleep 5".into()]))
+            .expect("create");
+
+        let reg = AttachRegistry::new(sup.clone());
+
+        let (sink_a, mut client_a) = mpsc::channel::<Push>(64);
+        reg.attach(1, &id, sink_a).await.expect("attach a");
+        assert!(matches!(
+            recv_timeout(&mut client_a, 2000).await.expect("replay a"),
+            Push::Replay { .. }
+        ));
+        assert_eq!(
+            reg.attachment_count(),
+            1,
+            "one attachment after the first conn attaches"
+        );
+
+        let (sink_b, mut client_b) = mpsc::channel::<Push>(64);
+        reg.attach(2, &id, sink_b).await.expect("attach b");
+        assert!(matches!(
+            recv_timeout(&mut client_b, 2000).await.expect("replay b"),
+            Push::Replay { .. }
+        ));
+
+        // NO SUPERSEDE: both entries must be live — count is 2, not 1.
+        assert_eq!(
+            reg.attachment_count(),
+            2,
+            "two connections attaching the same session must BOTH remain attached (no supersede)"
+        );
+
+        let _ = sup.kill(&id);
     }
 
     // ---- Item 1 step 4 guard: after a natural exit the session lingers in the supervisor map
