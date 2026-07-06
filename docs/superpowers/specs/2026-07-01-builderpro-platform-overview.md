@@ -192,15 +192,25 @@ Spec: `2026-07-01-builderpro-s0s1-foundation-terminal-design.md`.
 
 ## 4. How the agent layer will use the terminal engine (forward contract)
 
-*(Rewritten 2026-07-04 — A4/A5/A6/A16; owner decision D5.)*
+*(Rewritten 2026-07-04 — A4/A5/A6/A16; owner decision D5. Amended 2026-07-06, vision v2–v4.)*
 
 **The canonical programmatic agent API is the Hop-B socket protocol** (create / attach /
 write-stdin / stream-output / resize / kill / query-state) — not the Tauri command list, which is
 merely the GUI's thin wrapper over it. Agent process model: **app-native agents (CEO/PM/eng) run
-in the core process** (S6b) and reach the daemon over the same socket client; **external worker
-CLIs run inside PTY sessions** as ordinary children.
+in `bpa-orchd`** (ADR-HOST, §2) and reach the terminal daemon over the same socket client;
+**external worker CLIs run inside PTY sessions** as ordinary children.
 
-The orchestration loop (unchanged vision):
+**The loop is a definition, not code (vision v2–v4).** The CEO→PM→eng orchestration below ships
+as the **DEFAULT built-in WorkflowDefinition executed by the SW1 engine** — editable data, never
+compiled control flow. Built-in definition #2 is **goal-driven research/refresh**: per goal, a
+recurring research run produces Insights (canonical example: goal «прокачать трафик и каналы
+привлечения» → research → N candidate channels → N separately testable items). Step kinds
+available to any definition: `agent-turn | terminal-command | mcp-tool | data-fetch | data-load |
+data-process | insight-extract | human-approval`. **Run-observability contract:** every StepRun
+records {input data ref, outgoing request, received data ref, processing actions, timings, cost}
+— the owner can open any run and see, per step, what came in, what was asked, what came back.
+
+The default orchestration definition (unchanged vision):
 
 1. **CEO** picks the next objective from goals + knowledge graph (+ future S8 metrics). *(S4 is a
    hard prerequisite — owner decision D6.)*
@@ -291,9 +301,14 @@ One map, four stores — growth-ready, additive-only (§2 lock):
 
 ## 5. Human-in-the-loop boundary
 
-Autonomy is the default. The only sanctioned human steps: setting/adjusting **goals + quality
-bars**, answering **batched escalations** the agents genuinely can't resolve, and providing
-**credentials/access** (API keys, repo access). Everything else is agent-decided.
+*(Amended 2026-07-06, vision v2–v4.)*
+
+Autonomy is the default. The sanctioned human steps: setting/adjusting **goals + quality bars**
+(vector steering); **authoring and editing workflow definitions, schedules, step tool-bindings,
+and rules** (global + per-project); answering the **single inbox** (batched escalations +
+workflow gates the agents genuinely can't resolve); **connecting MCP servers / connectors /
+accounts**; and providing **credentials/access** (API keys, repo access). Everything else is
+agent-decided.
 
 ---
 
@@ -303,3 +318,14 @@ Every slice follows the Superpowers cycle: `brainstorming → spec → writing-p
 subagent-driven-development`, with contracts locked in the spec, non-overlapping file ownership
 for parallel tasks, TDD throughout, and a per-task Definition of Done. External-library contracts
 are verified against current docs (Context7 + web) before locking — never from memory.
+
+### The meta-process law (added 2026-07-06, vision v4 §8)
+
+For the platform AND for every project managed inside it:
+
+1. The **end goal is always visible and editable**; editing it triggers re-planning.
+2. A **live step-plan to that goal** is always kept, and re-actualized whenever the goal changes.
+3. **Architecture and data structures are designed first**; then a minimum is defined and
+   extended constructor-style — cube by cube, additive, never a rebuild (§2 lock).
+
+The CEO/PM agents must operate managed projects by this same method — this binds the S6b spec.
