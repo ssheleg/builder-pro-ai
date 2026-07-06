@@ -100,8 +100,17 @@ fn garbage_body_of_valid_length_is_a_decode_error() {
 #[test]
 fn encode_matches_manual_prefix() {
     let f = frame();
-    let body = bincode::serialize(&f).expect("body");
-    let mut expected = (body.len() as u32).to_le_bytes().to_vec();
-    expected.extend_from_slice(&body);
-    assert_eq!(encode_frame(&f).expect("encode"), expected);
+    let full = encode_frame(&f).expect("encode");
+    let declared = u32::from_le_bytes([full[0], full[1], full[2], full[3]]) as usize;
+    let body = &full[4..];
+    assert_eq!(
+        declared,
+        body.len(),
+        "length prefix must equal body length"
+    );
+
+    // encode_frame must be deterministic: re-encoding the same Frame produces
+    // byte-for-byte identical output (prefix + body), independent of the codec
+    // used internally.
+    assert_eq!(encode_frame(&f).expect("encode again"), full);
 }

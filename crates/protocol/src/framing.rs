@@ -1,5 +1,5 @@
-//! Hop-B framing: `u32` little-endian length prefix + `bincode(Frame)` body.
-//! bincode 1.3.3 defaults (fixint, little-endian) — identical both sides.
+//! Hop-B framing: `u32` little-endian length prefix + CBOR(Frame) body.
+//! CBOR body via ciborium (self-describing, RFC 8949); `u32`-LE length prefix unchanged.
 
 use std::fmt;
 
@@ -13,9 +13,9 @@ pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 pub enum FrameError {
     /// declared length prefix exceeds `MAX_FRAME_LEN`
     Oversized(u32),
-    /// bincode failed to decode a complete, correctly-sized body
+    /// CBOR failed to decode a complete, correctly-sized body
     Decode(String),
-    /// bincode failed to encode
+    /// CBOR failed to encode
     Encode(String),
 }
 
@@ -31,9 +31,10 @@ impl fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
-/// Serialize `frame` with bincode and prepend a `u32`-LE length prefix.
+/// Serialize `frame` as CBOR and prepend a `u32`-LE length prefix.
 pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>, FrameError> {
-    let body = bincode::serialize(frame).map_err(|e| FrameError::Encode(e.to_string()))?;
+    let mut body = Vec::new();
+    ciborium::into_writer(frame, &mut body).map_err(|e| FrameError::Encode(e.to_string()))?;
     if body.len() as u64 > MAX_FRAME_LEN as u64 {
         return Err(FrameError::Oversized(body.len() as u32));
     }
@@ -83,7 +84,7 @@ impl FrameDecoder {
             }
             let body = &self.buf[offset + 4..offset + 4 + len];
             let frame: Frame =
-                bincode::deserialize(body).map_err(|e| FrameError::Decode(e.to_string()))?;
+                ciborium::from_reader(body).map_err(|e| FrameError::Decode(e.to_string()))?;
             frames.push(frame);
             offset += 4 + len;
         }
