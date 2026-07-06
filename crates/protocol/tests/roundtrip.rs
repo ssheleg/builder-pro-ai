@@ -77,11 +77,6 @@ fn all_lifecycles() -> Vec<SessionLifecycle> {
 
 fn all_requests() -> Vec<Request> {
     vec![
-        Request::Hello {
-            magic: MAGIC,
-            proto_version: PROTO_VERSION,
-            client_build: "test".into(),
-        },
         Request::ListWorkspaces,
         Request::CreateWorkspace {
             name: "W".into(),
@@ -132,11 +127,6 @@ fn all_requests() -> Vec<Request> {
 
 fn all_responses() -> Vec<Response> {
     let mut v = vec![
-        Response::Welcome {
-            proto_version: PROTO_VERSION,
-            daemon_build: "d".into(),
-        },
-        Response::Incompatible { min: 1, max: 1 },
         Response::Workspaces(vec![sample_workspace()]),
         Response::Workspace(sample_workspace()),
         Response::Ack,
@@ -254,6 +244,9 @@ fn every_terminal_event_variant_roundtrips_via_cbor() {
 
 #[test]
 fn constants_are_locked() {
-    assert_eq!(MAGIC, 0x4250_4131);
-    assert_eq!(PROTO_VERSION, 1);
+    assert_eq!(PREAMBLE_MAGIC, 0x4250_4141);
+    assert_eq!(CLIENT_MIN_VERSION, 2);
+    assert_eq!(CLIENT_MAX_VERSION, 2);
+    assert_eq!(DAEMON_MIN_VERSION, 2);
+    assert_eq!(DAEMON_MAX_VERSION, 2);
 }

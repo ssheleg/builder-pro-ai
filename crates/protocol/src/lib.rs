@@ -24,10 +24,11 @@ use ts_rs::TS;
 mod framing;
 pub use framing::{encode_frame, FrameDecoder, FrameError, MAX_FRAME_LEN};
 
-/// Hop-B handshake magic — ASCII "BPA1". Locked (spec §7 / Global Constraints).
-pub const MAGIC: u32 = 0x4250_4131;
-/// Hop-B protocol version. Locked (spec §7 / Global Constraints).
-pub const PROTO_VERSION: u16 = 1;
+pub mod preamble;
+pub use preamble::{
+    CLIENT_MAX_VERSION, CLIENT_MIN_VERSION, DAEMON_MAX_VERSION, DAEMON_MIN_VERSION,
+    MAX_PREAMBLE_BUILD_LEN, PREAMBLE_MAGIC,
+};
 
 pub type SessionId = String; // UUID v4
 pub type WorkspaceId = String; // UUID v4
@@ -122,11 +123,6 @@ pub enum Frame {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Request {
-    Hello {
-        magic: u32,
-        proto_version: u16,
-        client_build: String,
-    },
     ListWorkspaces,
     CreateWorkspace {
         name: String,
@@ -169,14 +165,6 @@ pub enum Request {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Response {
-    Welcome {
-        proto_version: u16,
-        daemon_build: String,
-    },
-    Incompatible {
-        min: u16,
-        max: u16,
-    },
     Workspaces(Vec<Workspace>),
     Workspace(Workspace),
     Sessions(Vec<SessionMeta>),
@@ -229,10 +217,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_constants_match_spec() {
-        // "BPA1" big-endian ASCII: 0x42='B',0x50='P',0x41='A',0x31='1'.
-        assert_eq!(MAGIC, 0x4250_4131);
-        assert_eq!(&MAGIC.to_be_bytes(), b"BPA1");
-        assert_eq!(PROTO_VERSION, 1);
+    fn preamble_constants_match_spec() {
+        // "BPAA" ASCII, big-endian reading order (Pv2 §4.2); on the wire the u32 is
+        // encoded little-endian, so the raw bytes are b"AAPB".
+        assert_eq!(PREAMBLE_MAGIC, 0x4250_4141);
+        assert_eq!(&PREAMBLE_MAGIC.to_be_bytes(), b"BPAA");
+        assert_eq!(&PREAMBLE_MAGIC.to_le_bytes(), b"AAPB");
+        assert_eq!(CLIENT_MIN_VERSION, 2);
+        assert_eq!(CLIENT_MAX_VERSION, 2);
+        assert_eq!(DAEMON_MIN_VERSION, 2);
+        assert_eq!(DAEMON_MAX_VERSION, 2);
+        assert_eq!(MAX_PREAMBLE_BUILD_LEN, 256);
     }
 }
