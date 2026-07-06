@@ -68,6 +68,12 @@ pub enum CommandError {
     /// An unexpected local failure: a daemon reply of the wrong `Response` variant, a closed
     /// dialog channel, etc. Never used to paper over a real daemon error.
     Internal(String),
+    /// The handshake preamble (spec §4.5) found the daemon's protocol range incompatible with this
+    /// client build (or the handshake reply couldn't be trusted at all). Distinct from
+    /// `Disconnected`: this is the signal that drives the upgrade flow (spec §6.2), not something a
+    /// bounded reconnect can ever resolve on its own.
+    #[serde(rename_all = "camelCase")]
+    IncompatibleDaemon { daemon_min: u16, daemon_max: u16 },
 }
 
 impl std::fmt::Display for CommandError {
@@ -76,6 +82,13 @@ impl std::fmt::Display for CommandError {
             CommandError::Daemon { code, message } => write!(f, "daemon error [{code}]: {message}"),
             CommandError::Disconnected => write!(f, "daemon disconnected"),
             CommandError::Internal(m) => write!(f, "internal error: {m}"),
+            CommandError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            } => write!(
+                f,
+                "incompatible daemon (daemon supports [{daemon_min}, {daemon_max}])"
+            ),
         }
     }
 }
@@ -87,6 +100,13 @@ impl From<ClientError> for CommandError {
         match e {
             ClientError::Disconnected => CommandError::Disconnected,
             ClientError::Daemon { code, message } => CommandError::Daemon { code, message },
+            ClientError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            } => CommandError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            },
         }
     }
 }
@@ -544,6 +564,22 @@ mod tests {
     }
 
     #[test]
+    fn client_error_incompatible_daemon_maps_to_command_error_incompatible_daemon() {
+        let err: CommandError = ClientError::IncompatibleDaemon {
+            daemon_min: 2,
+            daemon_max: 3,
+        }
+        .into();
+        assert_eq!(
+            err,
+            CommandError::IncompatibleDaemon {
+                daemon_min: 2,
+                daemon_max: 3
+            }
+        );
+    }
+
+    #[test]
     fn command_error_serializes_with_camel_case_tag() {
         let v = serde_json::to_value(CommandError::Daemon {
             code: "C".into(),
@@ -556,6 +592,15 @@ mod tests {
 
         let v2 = serde_json::to_value(CommandError::Disconnected).unwrap();
         assert_eq!(v2["kind"], "disconnected");
+
+        let v3 = serde_json::to_value(CommandError::IncompatibleDaemon {
+            daemon_min: 2,
+            daemon_max: 2,
+        })
+        .unwrap();
+        assert_eq!(v3["kind"], "incompatibleDaemon");
+        assert_eq!(v3["daemonMin"], 2);
+        assert_eq!(v3["daemonMax"], 2);
     }
 
     #[test]
@@ -598,9 +643,8 @@ mod commands_over_stub_daemon {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    use bpa_protocol::{
-        encode_frame, Frame, FrameDecoder, Request, Response, MAGIC, PROTO_VERSION,
-    };
+    use bpa_protocol::preamble::{decode_client_preamble, encode_daemon_reply, DaemonReply};
+    use bpa_protocol::{encode_frame, Frame, FrameDecoder, Request, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
 
@@ -638,6 +682,22 @@ mod commands_over_stub_daemon {
         stream.flush().await.unwrap();
     }
 
+    /// Read and decode one client preamble off the wire (mirrors
+    /// `bpa_sessiond::socket_server::read_client_preamble`'s test-stub shape): the fixed 10-byte
+    /// header (`magic | min | max | build_len`), then exactly `build_len` more bytes.
+    async fn read_client_preamble_stub(stream: &mut UnixStream) -> bpa_protocol::ClientPreamble {
+        let mut header = [0u8; 10];
+        stream.read_exact(&mut header).await.unwrap();
+        let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
+        let mut buf = header.to_vec();
+        if build_len > 0 {
+            let mut build = vec![0u8; build_len];
+            stream.read_exact(&mut build).await.unwrap();
+            buf.extend_from_slice(&build);
+        }
+        decode_client_preamble(&buf).expect("valid client preamble")
+    }
+
     /// Bind a stub daemon under a fresh tempdir, handshake, then reply to exactly one Request with
     /// `respond`. Returns the connected, handshaken `DaemonClient` (via `XDG_RUNTIME_DIR`, so
     /// `DaemonClient::connect` resolves to this stub's socket).
@@ -657,32 +717,13 @@ mod commands_over_stub_daemon {
         tokio::spawn(async move {
             ready2.store(true, Ordering::SeqCst);
             let (mut stream, _) = listener.accept().await.unwrap();
-            match read_frame(&mut stream).await {
-                Some(Frame::Request {
-                    id: 0,
-                    req:
-                        Request::Hello {
-                            magic,
-                            proto_version,
-                            ..
-                        },
-                }) => {
-                    assert_eq!(magic, MAGIC);
-                    assert_eq!(proto_version, PROTO_VERSION);
-                }
-                other => panic!("expected Hello, got {other:?}"),
-            }
-            write_stub_frame(
-                &mut stream,
-                &Frame::Response {
-                    id: 0,
-                    res: Response::Welcome {
-                        proto_version: PROTO_VERSION,
-                        daemon_build: "stub".into(),
-                    },
-                },
-            )
-            .await;
+            let _client_preamble = read_client_preamble_stub(&mut stream).await;
+            let reply = encode_daemon_reply(&DaemonReply::Accepted {
+                chosen: 2,
+                build: "stub".into(),
+            });
+            stream.write_all(&reply).await.unwrap();
+            stream.flush().await.unwrap();
 
             if let Some(Frame::Request { id, req }) = read_frame(&mut stream).await {
                 let res = respond(req);

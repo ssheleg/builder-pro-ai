@@ -31,7 +31,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bpa_protocol::{encode_frame, Frame, FrameDecoder, Push, Request, Response};
+use bpa_protocol::preamble::{
+    decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply, PREAMBLE_TIMEOUT,
+};
+use bpa_protocol::{
+    encode_frame, Frame, FrameDecoder, Push, Request, Response, CLIENT_MAX_VERSION,
+    CLIENT_MIN_VERSION,
+};
+#[cfg(test)]
+use bpa_protocol::preamble::encode_daemon_reply;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -103,6 +111,15 @@ pub enum ClientError {
     /// The daemon rejected the request (`Response::Error`).
     #[error("daemon reported: {code}: {message}")]
     Daemon { code: String, message: String },
+    /// The handshake preamble (spec §4.5) found no overlap between this client's `[min, max]` and
+    /// the daemon's — or the daemon's reply couldn't be trusted at all (garbage bytes, a bad magic,
+    /// the connection closing mid-handshake, or the handshake exceeding `PREAMBLE_TIMEOUT`). In the
+    /// unknown-range cases `daemon_min`/`daemon_max` are the `0, 0` sentinel — there was no reply to
+    /// read a real range out of. Fatal: unlike `Disconnected`, this is never retried by the
+    /// reconnect loop (a stale client build will never become compatible by waiting) — it is the
+    /// signal that drives the upgrade flow instead.
+    #[error("incompatible daemon (daemon supports [{daemon_min}, {daemon_max}])")]
+    IncompatibleDaemon { daemon_min: u16, daemon_max: u16 },
 }
 
 /// Emitted by the reconnect loop so the broker can raise `daemon://disconnected` /
@@ -182,14 +199,15 @@ impl std::fmt::Debug for DaemonClient {
 }
 
 impl DaemonClient {
-    /// Resolve the socket path, connect with bounded exponential backoff (cap `BACKOFF_CAP`), send
-    /// `Hello`, await `Welcome`/`Incompatible`, then spawn the read/reconnect loop.
+    /// Resolve the socket path, connect with bounded exponential backoff (cap `BACKOFF_CAP`), write
+    /// the codec-agnostic client preamble, await the daemon's `Accepted`/`Incompatible` reply, then
+    /// spawn the read/reconnect loop.
     ///
     /// The **first** connect attempt is a single try (no retry loop) so a genuinely absent daemon
     /// (nothing listening yet, e.g. before launchd has started it) or a version mismatch surfaces
     /// immediately to the caller instead of hanging `connect()` — the reconnect loop with backoff
     /// only kicks in for a connection that was live and then dropped. `client_build` is echoed to
-    /// the daemon in `Hello` for diagnostics; it never carries secrets.
+    /// the daemon in the preamble for diagnostics; it never carries secrets.
     pub async fn connect(client_build: String) -> Result<DaemonClient, ClientError> {
         let socket_path = resolve_socket_path();
         Self::connect_at(socket_path, client_build).await
@@ -204,7 +222,13 @@ impl DaemonClient {
     ) -> Result<DaemonClient, ClientError> {
         let (stream, reader) = connect_and_handshake(&socket_path, &client_build)
             .await
-            .map_err(|_| ClientError::Disconnected)?;
+            .map_err(|e| match e {
+                HandshakeError::Io(_) => ClientError::Disconnected,
+                HandshakeError::Incompatible { min, max } => ClientError::IncompatibleDaemon {
+                    daemon_min: min,
+                    daemon_max: max,
+                },
+            })?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<ClientCmd>(CMD_CHANNEL_CAP);
         // Seeded at `Connected`/`live=true` here — synchronously, before `tokio::spawn` even
@@ -371,15 +395,21 @@ async fn write_frame(
 
 /// Errors from a single connect+handshake attempt. Distinct from `ClientError` (the public,
 /// terminal-to-callers error) because `Incompatible` needs to short-circuit the backoff loop while
-/// `Io`/`Protocol` should keep retrying.
+/// `Io` (the `UnixStream::connect` itself failing — e.g. the daemon isn't listening yet) should keep
+/// retrying.
 enum HandshakeError {
+    /// `UnixStream::connect` itself failed (daemon not up yet / ENOENT / connection refused). Not a
+    /// version problem — the bounded-backoff reconnect loop should keep trying.
     Io(std::io::Error),
-    /// Any first reply other than `Welcome`/`Incompatible`, or a connection that closed mid-handshake.
-    Protocol(String),
-    Incompatible {
-        min: u16,
-        max: u16,
-    },
+    /// The connection succeeded but the handshake did not: the daemon explicitly replied
+    /// `Incompatible{min,max}`, OR anything else went wrong reading/decoding its reply (a read
+    /// error, EOF/closed-mid-handshake, a bad magic, a malformed reply, or the read exceeding
+    /// `PREAMBLE_TIMEOUT`). Per spec §4.5 every one of these is treated the same way: fatal, not
+    /// retried — a stale client build will never become compatible by waiting, and a daemon that
+    /// can't even complete the handshake is not going to start working on the next attempt either.
+    /// `min`/`max` carry the daemon's real advertised range for `Incompatible`; every other failure
+    /// mode has no real range to report and uses the `0, 0` sentinel.
+    Incompatible { min: u16, max: u16 },
 }
 
 impl From<std::io::Error> for HandshakeError {
@@ -388,25 +418,94 @@ impl From<std::io::Error> for HandshakeError {
     }
 }
 
-/// Connect once. Returns the live stream and a fresh `FrameReader` primed for the connection's
-/// lifetime.
-///
-/// TODO(Task8): preamble handshake. The real handshake (spec §7 / Pv2 §4.2/§4.5: write the
-/// codec-agnostic client preamble via `bpa_protocol::preamble::encode_client_preamble`, read the
-/// daemon's reply, and raise `ClientError::IncompatibleDaemon` on `Incompatible`/garbage/timeout)
-/// is stubbed out here on purpose so the core compiles against the CBOR-only protocol surface
-/// (`Request::Hello` / `Response::Welcome` / `Response::Incompatible` / `MAGIC` / `PROTO_VERSION`
-/// were removed in Pv2 §3.1-§3.3). This client currently sends nothing before the connection is
-/// considered established and proceeds straight into normal CBOR frame I/O — Task 8 replaces this
-/// function with the real preamble write + reply read + negotiate. DO NOT ship this stub.
+/// Sentinel for "the daemon's real supported range is unknown" — used whenever the handshake fails
+/// before (or without) a well-formed `Incompatible{min,max}` reply ever arriving (spec §4.5: garbage
+/// reply / connection closed during handshake / timeout).
+const UNKNOWN_RANGE: HandshakeError = HandshakeError::Incompatible { min: 0, max: 0 };
+
+/// Read the daemon's preamble reply off `stream` (mirrors
+/// `bpa_sessiond::socket_server::read_client_preamble`'s shape on the other side of the handshake):
+/// read the fixed 9-byte header (`magic:u32 | result:u8 | a:u16 | b:u16`) first, then branch — for
+/// `Accepted` (`result == 1`) `a` is `chosen` and `b` is `build_len`, followed by exactly `build_len`
+/// more bytes (rejecting an oversized declared length before reading/allocating that many bytes);
+/// for `Incompatible` (`result == 0`) `a`/`b` are `daemon_min`/`daemon_max` and there is no trailing
+/// body. Returns `Ok(DaemonReply)` only for a well-formed reply; any read error, short read, bad
+/// magic, or malformed body is the caller's problem to map to `HandshakeError::Incompatible`
+/// (unknown range) — this function itself carries no opinion on retryability.
+async fn read_daemon_reply(stream: &mut UnixStream) -> std::io::Result<DaemonReply> {
+    const HEADER_LEN: usize = 4 + 1 + 2 + 2;
+    let mut header = [0u8; HEADER_LEN];
+    stream.read_exact(&mut header).await?;
+    let result = header[4];
+    let mut buf = header.to_vec();
+    if result == 1 {
+        let build_len = u16::from_le_bytes(header[7..9].try_into().unwrap()) as usize;
+        if build_len > bpa_protocol::preamble::MAX_PREAMBLE_BUILD_LEN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "daemon reply build string exceeds MAX_PREAMBLE_BUILD_LEN",
+            ));
+        }
+        if build_len > 0 {
+            let mut build = vec![0u8; build_len];
+            stream.read_exact(&mut build).await?;
+            buf.extend_from_slice(&build);
+        }
+    }
+    decode_daemon_reply(&buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Connect once and run the preamble handshake (spec §4.2/§4.5): write the client's
+/// `[CLIENT_MIN_VERSION, CLIENT_MAX_VERSION]` + `client_build`, then read the daemon's reply under
+/// `PREAMBLE_TIMEOUT`. Returns the live stream and a fresh `FrameReader` primed for the connection's
+/// lifetime on `Accepted`. On `Incompatible` — or ANY failure reading/decoding the reply (IO error,
+/// EOF/closed-mid-handshake, bad magic, malformed body, or the read exceeding `PREAMBLE_TIMEOUT`) —
+/// returns `HandshakeError::Incompatible` (real range for an explicit `Incompatible` reply, the
+/// `0, 0` sentinel otherwise): none of those are retryable, per spec §4.5.
 async fn connect_and_handshake(
     socket_path: &Path,
-    _client_build: &str,
+    client_build: &str,
 ) -> Result<(UnixStream, FrameReader), HandshakeError> {
-    let stream = UnixStream::connect(socket_path).await?;
-    let reader = FrameReader::new();
-    tracing::info!("daemon connection established (handshake stubbed, Task 8)");
-    Ok((stream, reader))
+    let mut stream = UnixStream::connect(socket_path).await?;
+
+    let preamble_bytes = encode_client_preamble(&ClientPreamble {
+        min: CLIENT_MIN_VERSION,
+        max: CLIENT_MAX_VERSION,
+        build: client_build.to_string(),
+    });
+
+    let handshake = async {
+        stream.write_all(&preamble_bytes).await?;
+        stream.flush().await?;
+        read_daemon_reply(&mut stream).await
+    };
+
+    let reply = match tokio::time::timeout(PREAMBLE_TIMEOUT, handshake).await {
+        Ok(Ok(reply)) => reply,
+        // Write failed, or the read hit an IO error / EOF / bad magic / malformed body: the
+        // handshake did not complete honestly, and we have no real range to report.
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "handshake failed reading daemon reply");
+            return Err(UNKNOWN_RANGE);
+        }
+        // Silent/stuck peer: give up rather than hang the connection attempt forever.
+        Err(_) => {
+            tracing::warn!("handshake timed out waiting for daemon reply");
+            return Err(UNKNOWN_RANGE);
+        }
+    };
+
+    match reply {
+        DaemonReply::Accepted { chosen, build } => {
+            let reader = FrameReader::new();
+            tracing::info!(chosen, daemon_build = %build, "daemon handshake accepted");
+            Ok((stream, reader))
+        }
+        DaemonReply::Incompatible { min, max } => {
+            Err(HandshakeError::Incompatible { min, max })
+        }
+    }
 }
 
 /// Connect with bounded exponential backoff (`BACKOFF_START` doubling up to `BACKOFF_CAP`, spec
@@ -421,13 +520,8 @@ async fn connect_with_backoff(
         match connect_and_handshake(socket_path, client_build).await {
             Ok(ok) => return Ok(ok),
             Err(e @ HandshakeError::Incompatible { .. }) => return Err(e),
-            Err(e) => {
-                let msg = match &e {
-                    HandshakeError::Io(err) => err.to_string(),
-                    HandshakeError::Protocol(msg) => msg.clone(),
-                    HandshakeError::Incompatible { .. } => unreachable!(),
-                };
-                tracing::warn!(error = %msg, delay_ms = delay.as_millis(), "daemon connect failed; backing off");
+            Err(HandshakeError::Io(err)) => {
+                tracing::warn!(error = %err, delay_ms = delay.as_millis(), "daemon connect failed; backing off");
                 tokio::time::sleep(delay).await;
                 delay = std::cmp::min(delay * 2, BACKOFF_CAP);
             }
@@ -529,8 +623,8 @@ async fn run_connection(
 /// Owning task for the whole client lifetime: drives the already-handshaken first connection
 /// (with the `FrameReader` primed during that handshake — reused as-is rather than discarded, so
 /// no bytes buffered-but-not-yet-decoded from the handshake read are ever lost), and on drop
-/// reconnects with backoff (re-`Hello`-ing each time) until the client is dropped or the daemon
-/// becomes permanently incompatible.
+/// reconnects with backoff (re-running the preamble handshake each time) until the client is
+/// dropped or the daemon becomes permanently incompatible.
 async fn connection_task(
     socket_path: PathBuf,
     client_build: String,
@@ -545,7 +639,11 @@ async fn connection_task(
     // closes the race where a caller's `request()` or `on_conn()` could otherwise run before this
     // task gets scheduled for the first time. This loop only fires transitions for *subsequent*
     // disconnect/reconnect events.
-    let next_id = AtomicU64::new(1); // id 0 is reserved for Hello
+    // Starts at 1, not 0: the preamble handshake is no longer a `Frame::Request` at all (it's a
+    // raw, codec-agnostic byte exchange completed before this task ever runs), so no id is truly
+    // "reserved" anymore — this just keeps id 0 permanently unused as a harmless, easy-to-recognize
+    // sentinel in logs/traces rather than repurposing it for real request correlation.
+    let next_id = AtomicU64::new(1);
     let pending: Mutex<HashMap<u64, oneshot::Sender<Result<Response, ClientError>>>> =
         Mutex::new(HashMap::new());
 
@@ -596,8 +694,8 @@ async fn connection_task(
                 );
                 return;
             }
-            // connect_with_backoff only returns Err for Incompatible; Io/Protocol loop internally.
-            Err(_) => unreachable!("connect_with_backoff retries Io/Protocol errors internally"),
+            // connect_with_backoff only returns Err for Incompatible; Io loops internally.
+            Err(_) => unreachable!("connect_with_backoff retries Io errors internally"),
         }
     }
 }
@@ -631,6 +729,35 @@ mod tests {
     async fn write_stub_frame(stream: &mut UnixStream, frame: &Frame) {
         let bytes = encode_frame(frame).unwrap();
         stream.write_all(&bytes).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    /// Read and decode one client preamble off the wire (mirrors
+    /// `bpa_sessiond::socket_server::read_client_preamble`'s test-stub shape): the fixed 10-byte
+    /// header (`magic | min | max | build_len`), then exactly `build_len` more bytes.
+    async fn read_client_preamble_stub(stream: &mut UnixStream) -> ClientPreamble {
+        let mut header = [0u8; 10];
+        stream.read_exact(&mut header).await.unwrap();
+        let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
+        let mut buf = header.to_vec();
+        if build_len > 0 {
+            let mut build = vec![0u8; build_len];
+            stream.read_exact(&mut build).await.unwrap();
+            buf.extend_from_slice(&build);
+        }
+        bpa_protocol::preamble::decode_client_preamble(&buf).expect("valid client preamble")
+    }
+
+    /// Read the client preamble then reply `Accepted{chosen:2, build:"stub"}` — the standard
+    /// stub-daemon handshake every test in this module drives before exercising request/response
+    /// behavior.
+    async fn accept_handshake(stream: &mut UnixStream) {
+        let _client_preamble = read_client_preamble_stub(stream).await;
+        let reply = encode_daemon_reply(&DaemonReply::Accepted {
+            chosen: 2,
+            build: "stub".into(),
+        });
+        stream.write_all(&reply).await.unwrap();
         stream.flush().await.unwrap();
     }
 
@@ -717,33 +844,7 @@ mod tests {
             let listener = UnixListener::bind(&path).unwrap();
             ready.store(true, Ordering::SeqCst);
             let (mut stream, _) = listener.accept().await.unwrap();
-            let first = read_frame(&mut stream).await.unwrap();
-            match first {
-                Frame::Request {
-                    id: 0,
-                    req:
-                        Request::Hello {
-                            magic,
-                            proto_version,
-                            ..
-                        },
-                } => {
-                    assert_eq!(magic, MAGIC);
-                    assert_eq!(proto_version, PROTO_VERSION);
-                    write_stub_frame(
-                        &mut stream,
-                        &Frame::Response {
-                            id: 0,
-                            res: Response::Welcome {
-                                proto_version: PROTO_VERSION,
-                                daemon_build: "stub".into(),
-                            },
-                        },
-                    )
-                    .await;
-                }
-                other => panic!("expected Hello, got {other:?}"),
-            }
+            accept_handshake(&mut stream).await;
 
             let mut first_seen = false;
             loop {
@@ -821,18 +922,7 @@ mod tests {
             let listener = UnixListener::bind(&p).unwrap();
             r.store(true, Ordering::SeqCst);
             let (mut stream, _) = listener.accept().await.unwrap();
-            let _ = read_frame(&mut stream).await.unwrap();
-            write_stub_frame(
-                &mut stream,
-                &Frame::Response {
-                    id: 0,
-                    res: Response::Welcome {
-                        proto_version: PROTO_VERSION,
-                        daemon_build: "stub".into(),
-                    },
-                },
-            )
-            .await;
+            accept_handshake(&mut stream).await;
             if let Some(Frame::Request { id, .. }) = read_frame(&mut stream).await {
                 write_stub_frame(
                     &mut stream,
@@ -866,7 +956,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_handshake_is_rejected() {
+    async fn incompatible_daemon_reply_surfaces_typed_error() {
         let path = tmp_sock();
         let ready = Arc::new(AtomicBool::new(false));
         let p = path.clone();
@@ -875,26 +965,68 @@ mod tests {
             let listener = UnixListener::bind(&p).unwrap();
             r.store(true, Ordering::SeqCst);
             let (mut stream, _) = listener.accept().await.unwrap();
-            let _first = read_frame(&mut stream).await.unwrap(); // consume Hello
-            write_stub_frame(
-                &mut stream,
-                &Frame::Response {
-                    id: 0,
-                    res: Response::Incompatible { min: 2, max: 4 },
-                },
-            )
-            .await;
+            let _client_preamble = read_client_preamble_stub(&mut stream).await;
+            let reply = encode_daemon_reply(&DaemonReply::Incompatible { min: 2, max: 2 });
+            stream.write_all(&reply).await.unwrap();
+            stream.flush().await.unwrap();
         });
         wait_ready(&ready).await;
 
+        let started = std::time::Instant::now();
         let err = connect_at(path, "test".into()).await.unwrap_err();
-        // The public ClientError has no Incompatible variant (LOCKED API); the connect-time
-        // rejection surfaces as Disconnected — but we assert it is a *fast, non-retried* failure
-        // by bounding the test's own wall-clock time (an incompatible handshake must return
-        // immediately, not after minutes of backoff).
+        let elapsed = started.elapsed();
+
+        match err {
+            ClientError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            } => {
+                assert_eq!((daemon_min, daemon_max), (2, 2));
+            }
+            o => panic!("expected ClientError::IncompatibleDaemon, got {o:?}"),
+        }
+        // A version-incompatible daemon must be reported immediately, not after backoff retries.
         assert!(
-            matches!(err, ClientError::Disconnected),
-            "expected Disconnected, got {err:?}"
+            elapsed < Duration::from_secs(1),
+            "expected a fast, non-retried failure, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_closing_during_handshake_is_incompatible_not_hang() {
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            // Accept the connection, read the client's preamble, then close without replying —
+            // the client must not hang waiting for a reply that will never come; it must give up
+            // by PREAMBLE_TIMEOUT (or sooner, on the EOF) and surface IncompatibleDaemon.
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _client_preamble = read_client_preamble_stub(&mut stream).await;
+            drop(stream);
+        });
+        wait_ready(&ready).await;
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            PREAMBLE_TIMEOUT + Duration::from_secs(2),
+            connect_at(path, "test".into()),
+        )
+        .await
+        .expect("connect_at must not hang past PREAMBLE_TIMEOUT on a closed-mid-handshake peer");
+        let elapsed = started.elapsed();
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ClientError::IncompatibleDaemon { .. }),
+            "expected IncompatibleDaemon, got {err:?}"
+        );
+        assert!(
+            elapsed < PREAMBLE_TIMEOUT + Duration::from_secs(1),
+            "connect_at took {elapsed:?}, expected to give up at or before PREAMBLE_TIMEOUT"
         );
     }
 
@@ -911,18 +1043,7 @@ mod tests {
             // connection #1
             {
                 let (mut s, _) = listener.accept().await.unwrap();
-                let _ = read_frame(&mut s).await.unwrap(); // Hello
-                write_stub_frame(
-                    &mut s,
-                    &Frame::Response {
-                        id: 0,
-                        res: Response::Welcome {
-                            proto_version: PROTO_VERSION,
-                            daemon_build: "d1".into(),
-                        },
-                    },
-                )
-                .await;
+                accept_handshake(&mut s).await;
                 write_stub_frame(
                     &mut s,
                     &Frame::Push(Push::WorkspaceCreated {
@@ -939,18 +1060,7 @@ mod tests {
             // connection #2
             {
                 let (mut s, _) = listener.accept().await.unwrap();
-                let _ = read_frame(&mut s).await.unwrap(); // Hello again
-                write_stub_frame(
-                    &mut s,
-                    &Frame::Response {
-                        id: 0,
-                        res: Response::Welcome {
-                            proto_version: PROTO_VERSION,
-                            daemon_build: "d2".into(),
-                        },
-                    },
-                )
-                .await;
+                accept_handshake(&mut s).await; // handshake again
                 if let Some(Frame::Request { id, .. }) = read_frame(&mut s).await {
                     write_stub_frame(
                         &mut s,
@@ -1024,18 +1134,7 @@ mod tests {
             let listener = UnixListener::bind(&p).unwrap();
             r.store(true, Ordering::SeqCst);
             let (mut s, _) = listener.accept().await.unwrap();
-            let _ = read_frame(&mut s).await.unwrap(); // Hello
-            write_stub_frame(
-                &mut s,
-                &Frame::Response {
-                    id: 0,
-                    res: Response::Welcome {
-                        proto_version: PROTO_VERSION,
-                        daemon_build: "stub".into(),
-                    },
-                },
-            )
-            .await;
+            accept_handshake(&mut s).await;
             // Read the next request but never reply; just drop the connection.
             let _ = read_frame(&mut s).await;
             drop(s);
@@ -1082,18 +1181,7 @@ mod tests {
             // connection #1: handshake, then immediately drop — never accept again, so the
             // client sits in the reconnect backoff loop for the rest of the test.
             let (mut s, _) = listener.accept().await.unwrap();
-            let _ = read_frame(&mut s).await.unwrap(); // Hello
-            write_stub_frame(
-                &mut s,
-                &Frame::Response {
-                    id: 0,
-                    res: Response::Welcome {
-                        proto_version: PROTO_VERSION,
-                        daemon_build: "stub".into(),
-                    },
-                },
-            )
-            .await;
+            accept_handshake(&mut s).await;
             drop(s);
             // Never accept connection #2: the client stays stuck in connect_with_backoff.
             std::future::pending::<()>().await;
