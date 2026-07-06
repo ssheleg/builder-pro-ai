@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use tracing::{info, warn};
 
 /// Current schema/migration version stored in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -198,6 +198,19 @@ impl Db {
             )
             .map_err(|e| PersistError::Migration(e.to_string()))?;
         }
+        if from_version < 2 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS command_events (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq        INTEGER NOT NULL,
+                   ts         INTEGER NOT NULL,
+                   kind       TEXT NOT NULL,
+                   exit_code  INTEGER,
+                   origin     TEXT NOT NULL DEFAULT 'gui',
+                   PRIMARY KEY (session_id, seq));",
+            )
+            .map_err(|e| PersistError::Migration(e.to_string()))?;
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| PersistError::Migration(e.to_string()))?;
         tx.commit()
@@ -376,6 +389,75 @@ impl Db {
         }
         Ok(out)
     }
+
+    /// Append one command-history row (schema v2, spec §7 + Pv2 `origin` amendment). Best-effort
+    /// from the caller's perspective (persistence-layer errors never panic — spec §11) — the
+    /// caller (the periodic flush sweep in `socket_server.rs`) logs and swallows any `Err` rather
+    /// than stalling the PTY.
+    pub fn append_command_event(
+        &self,
+        session_id: &str,
+        seq: i64,
+        ts: i64,
+        kind: &str,
+        exit_code: Option<u8>,
+        origin: &str,
+    ) -> Result<(), PersistError> {
+        self.conn.execute(
+            "INSERT INTO command_events (session_id, seq, ts, kind, exit_code, origin)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(session_id, seq) DO UPDATE SET
+               ts = excluded.ts, kind = excluded.kind, exit_code = excluded.exit_code,
+               origin = excluded.origin",
+            rusqlite::params![
+                session_id,
+                seq,
+                ts,
+                kind,
+                exit_code.map(|c| c as i64),
+                origin,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read back every command-history row for a session, ordered by `seq` (test-support / future
+    /// history queries).
+    pub fn list_command_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CommandEventRow>, PersistError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, ts, kind, exit_code, origin FROM command_events
+             WHERE session_id = ?1 ORDER BY seq",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            let exit_code: Option<i64> = r.get(3)?;
+            Ok(CommandEventRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                exit_code: exit_code.map(|c| (c & 0xff) as u8),
+                origin: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+}
+
+/// One row of the `command_events` table (schema v2, spec §7 + Pv2 `origin` amendment), as read
+/// back by [`Db::list_command_events`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEventRow {
+    pub seq: i64,
+    pub ts: i64,
+    pub kind: String,
+    pub exit_code: Option<u8>,
+    pub origin: String,
 }
 
 #[cfg(test)]
@@ -659,5 +741,131 @@ mod tests {
         // it is a no-op success, never a panic.
         let db = Db::open_in_memory().unwrap();
         db.checkpoint().unwrap();
+    }
+
+    // ---- Task 11 / spec §7: schema v2 command_events (RED first). ----
+
+    #[test]
+    fn v1_db_migrates_to_v2_gains_command_events_keeps_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        // Build a v1 db by hand: the exact v1 table set + user_version=1, with a session row.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workspace (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
+                 CREATE TABLE session (
+                   id TEXT PRIMARY KEY,
+                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
+                   title TEXT NOT NULL, shell TEXT NOT NULL, cwd TEXT NOT NULL,
+                   cols INTEGER NOT NULL, rows INTEGER NOT NULL,
+                   lifecycle TEXT NOT NULL,
+                   exit_code INTEGER, exit_signal TEXT,
+                   created_at INTEGER NOT NULL);
+                 CREATE TABLE scrollback (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq INTEGER NOT NULL, bytes BLOB NOT NULL, ts INTEGER NOT NULL,
+                   PRIMARY KEY (session_id, seq));
+                 INSERT INTO workspace (id, name, root_path) VALUES ('w1', 'ws-w1', '/tmp');
+                 INSERT INTO session
+                   (id, workspace_id, title, shell, cwd, cols, rows, lifecycle,
+                    exit_code, exit_signal, created_at)
+                 VALUES ('s1', 'w1', 't-s1', '/bin/zsh', '/tmp', 80, 24, 'running',
+                         NULL, NULL, 1700000000);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1_i64).unwrap();
+        }
+
+        // Open with the v2 daemon: migration must run 1 -> 2 in place.
+        let db = Db::open(&path).unwrap();
+        let uv: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, SCHEMA_VERSION);
+
+        // command_events exists and is usable.
+        db.append_command_event("s1", 0, 1_700_000_001, "started", None, "gui")
+            .unwrap();
+        let events = db.list_command_events("s1").unwrap();
+        assert_eq!(events.len(), 1);
+
+        // The pre-existing v1 session row survived the migration untouched.
+        let sessions = db.rehydrate().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s1");
+        assert_eq!(sessions[0].workspace_id, "w1");
+        assert_eq!(sessions[0].lifecycle, SessionLifecycle::Running);
+    }
+
+    #[test]
+    fn v2_reopen_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.upsert_workspace(&ws("w1")).unwrap();
+            db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+                .unwrap();
+            db.append_command_event("s1", 0, 1, "started", None, "gui")
+                .unwrap();
+        }
+        // Reopening an already-v2 db must be a no-op migration (from_version == SCHEMA_VERSION)
+        // and must not disturb existing rows.
+        let db2 = Db::open(&path).unwrap();
+        let uv: i64 = db2
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, SCHEMA_VERSION);
+        assert_eq!(db2.list_workspaces().unwrap().len(), 1);
+        assert_eq!(db2.rehydrate().unwrap().len(), 1);
+        assert_eq!(db2.list_command_events("s1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn user_version_3_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+        let err = Db::open(&path).unwrap_err();
+        assert!(
+            matches!(err, PersistError::Migration(_)),
+            "expected Migration error for a future user_version, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn append_and_read_command_event_round_trips() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws("w1")).unwrap();
+        db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+            .unwrap();
+
+        db.append_command_event("s1", 0, 1_700_000_000, "started", None, "gui")
+            .unwrap();
+        db.append_command_event("s1", 1, 1_700_000_005, "finished", Some(7), "gui")
+            .unwrap();
+
+        let events = db.list_command_events("s1").unwrap();
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].seq, 0);
+        assert_eq!(events[0].ts, 1_700_000_000);
+        assert_eq!(events[0].kind, "started");
+        assert_eq!(events[0].exit_code, None);
+        assert_eq!(events[0].origin, "gui");
+
+        assert_eq!(events[1].seq, 1);
+        assert_eq!(events[1].ts, 1_700_000_005);
+        assert_eq!(events[1].kind, "finished");
+        assert_eq!(events[1].exit_code, Some(7));
+        assert_eq!(events[1].origin, "gui");
     }
 }

@@ -43,6 +43,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::fd::RawFd;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -118,6 +119,20 @@ pub struct StatusUpdate {
     pub cwd: String,
 }
 
+/// One best-effort command-history record accumulated in memory from an OSC-133 C/D mark (spec
+/// §7, Pv2 `origin` amendment). The reader thread pushes these onto `Shared::pending_command_events`
+/// as it parses; it never touches the DB directly (the reader thread has no DB handle — see the
+/// module-level threading contract). `origin` is added by the caller at persist time (currently
+/// always `"gui"`; the periodic flush sweep in `socket_server.rs` is the one place that writes
+/// these through `Db::append_command_event`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEvent {
+    pub seq: u64,
+    pub ts: i64,
+    pub kind: &'static str,
+    pub exit_code: Option<u8>,
+}
+
 /// Mutable per-session state shared between the reader / wait / ticker threads and the
 /// supervisor's own methods. Every field is individually locked so no single lock is held
 /// across a blocking read/write.
@@ -144,6 +159,13 @@ struct Shared {
     master_fd: Option<RawFd>,
     waiting: Mutex<bool>,
     created_at: i64,
+    /// Best-effort command-history events accumulated from OSC-133 C/D marks (spec §7), drained
+    /// by the periodic flush sweep in `socket_server.rs` and written through
+    /// `Db::append_command_event`. In-memory only — the reader thread that pushes onto this never
+    /// opens a DB handle (see the module-level threading contract).
+    pending_command_events: Mutex<Vec<CommandEvent>>,
+    /// Monotonic per-session sequence number for `command_events` rows (starts at 0).
+    command_seq: AtomicU64,
 }
 
 /// Owned per-session runtime state (the PTY master, writer, killer, and worker threads).
@@ -288,6 +310,8 @@ impl Supervisor {
             master_fd,
             waiting: Mutex::new(false),
             created_at: now_secs(),
+            pending_command_events: Mutex::new(Vec::new()),
+            command_seq: AtomicU64::new(0),
         });
 
         // ---- Reader thread (§9.4): the ONLY writer of parser/grid/scrollback from bytes. ----
@@ -320,8 +344,25 @@ impl Supervisor {
                                     let mut lc = reader_shared.lifecycle.lock().unwrap();
                                     advance_lifecycle(&mut lc, ev);
                                 }
-                                if let OscEvent::Cwd(path) = ev {
-                                    *reader_shared.cwd.lock().unwrap() = path.clone();
+                                match ev {
+                                    OscEvent::Cwd(path) => {
+                                        *reader_shared.cwd.lock().unwrap() = path.clone();
+                                    }
+                                    OscEvent::CommandStart => {
+                                        push_command_event(
+                                            &reader_shared,
+                                            "started",
+                                            None,
+                                        );
+                                    }
+                                    OscEvent::CommandEnd(code) => {
+                                        push_command_event(
+                                            &reader_shared,
+                                            "finished",
+                                            *code,
+                                        );
+                                    }
+                                    _ => {}
                                 }
                                 status_dirty = true;
                             }
@@ -558,6 +599,18 @@ impl Supervisor {
         Ok((cols, rows, bytes))
     }
 
+    /// Take (drain) every pending best-effort [`CommandEvent`] accumulated for `id` since the last
+    /// drain (spec §7). Returns an empty `Vec` for an unknown/gone session — best-effort, never an
+    /// error — mirroring [`snapshot_scrollback`](Self::snapshot_scrollback)'s "session may already
+    /// be gone" tolerance. The periodic flush sweep in `socket_server.rs` is the sole caller and is
+    /// the only place these events reach the DB.
+    pub fn drain_command_events(&self, id: &str) -> Vec<CommandEvent> {
+        match self.get(id) {
+            Ok(s) => std::mem::take(&mut *s.shared.pending_command_events.lock().unwrap()),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Build a [`SessionMeta`] snapshot from tracked state (spec §5). The internal lifecycle is
     /// already a `protocol::SessionLifecycle` (the OSC parser reuses the wire type); `Typing` is
     /// never produced.
@@ -642,6 +695,20 @@ impl Default for Supervisor {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Push one best-effort [`CommandEvent`] onto `shared`'s pending queue, assigning the next
+/// monotonic per-session `seq` (spec §7). Called only from the reader thread as it parses OSC-133
+/// C/D marks; never touches the DB (see the module-level threading contract) — the periodic flush
+/// sweep in `socket_server.rs` drains and persists these separately.
+fn push_command_event(shared: &Arc<Shared>, kind: &'static str, exit_code: Option<u8>) {
+    let seq = shared.command_seq.fetch_add(1, Ordering::SeqCst);
+    shared.pending_command_events.lock().unwrap().push(CommandEvent {
+        seq,
+        ts: now_secs(),
+        kind,
+        exit_code,
+    });
 }
 
 /// Build + fire a [`StatusUpdate`] from the current shared state.
@@ -1163,6 +1230,62 @@ mod tests {
             );
         }
         sup.kill(&id).expect("kill");
+    }
+
+    // ---- Task 11 / spec §7: OSC-133 C/D marks accumulate into drainable CommandEvents. ----
+    //
+    // The child emits a real OSC-133 C mark, then a D;7 mark (exit code 7), matching the
+    // shell-integration protocol end to end. After the marks are parsed, draining the session
+    // must return `started` then `finished{exit_code: Some(7)}` in order, and draining again must
+    // be empty (drain takes, does not peek).
+    #[test]
+    fn command_start_and_end_marks_accumulate_and_drain() {
+        let sup = Supervisor::new();
+        let script = "printf '\\033]133;C\\007'; printf '\\033]133;D;7\\007'; read x";
+        let id = sup
+            .create(spec_for("/bin/sh", vec!["-c".into(), script.into()]))
+            .expect("create");
+
+        // Poll lifecycle (not drain, to avoid consuming events before we're ready to assert on
+        // them) until the D mark has landed and flipped it to Exited(Some(7)).
+        let idc = id.clone();
+        let ok = wait_for(
+            || {
+                matches!(
+                    sup.meta(&idc).map(|m| m.lifecycle),
+                    Ok(bpa_protocol::SessionLifecycle::Exited { code: Some(7), .. })
+                )
+            },
+            Duration::from_secs(5),
+        );
+        assert!(ok, "expected lifecycle to reach Exited(Some(7)) via the D mark");
+
+        let events = sup.drain_command_events(&id);
+        assert_eq!(
+            events.len(),
+            2,
+            "expected exactly a started+finished pair, got: {events:?}"
+        );
+        assert_eq!(events[0].kind, "started");
+        assert_eq!(events[0].exit_code, None);
+        assert_eq!(events[1].kind, "finished");
+        assert_eq!(events[1].exit_code, Some(7));
+        assert!(
+            events[1].seq > events[0].seq,
+            "seq must be monotonic: {events:?}"
+        );
+
+        // Draining again returns nothing — drain takes, it does not peek.
+        assert!(sup.drain_command_events(&id).is_empty());
+
+        sup.kill(&id).expect("kill");
+    }
+
+    // ---- Task 11: an unknown/gone session drains empty rather than erroring. ----
+    #[test]
+    fn drain_command_events_on_unknown_session_is_empty() {
+        let sup = Supervisor::new();
+        assert!(sup.drain_command_events("no-such-session").is_empty());
     }
 
     // ---- Pv2 §5.1: subscribe on an exited session still refuses (TOCTOU guard preserved). ----

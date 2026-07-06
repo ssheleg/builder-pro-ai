@@ -295,7 +295,11 @@ fn spawn_scrollback_flusher(
 }
 
 /// One persistence sweep: for every session known to the DB, if it is still live in the supervisor,
-/// snapshot its scrollback and replace the stored blob. Best-effort; logs and continues on error.
+/// snapshot its scrollback and replace the stored blob, and drain + persist any accumulated
+/// best-effort `command_events` (schema v2, spec §7, Pv2 `origin` amendment). Best-effort; logs and
+/// continues on error — a DB failure here must never stall a live PTY. This is the ONLY place
+/// `command_events` reach the DB: the reader thread that accumulates them has no DB handle (see the
+/// `pty_supervisor` module-level threading contract), so draining happens here, outside that thread.
 async fn flush_scrollback_once(deps: &Arc<ServerDeps>) {
     // Snapshot live session ids + their scrollback OUTSIDE the DB lock (supervisor calls are sync).
     let ids: Vec<String> = {
@@ -314,6 +318,27 @@ async fn flush_scrollback_once(deps: &Arc<ServerDeps>) {
             let db = deps.db.lock().await;
             if let Err(e) = db.append_scrollback(&id, 0, &bytes, ts) {
                 tracing::debug!(session = %id, error = %e, "scrollback flush: append failed");
+            }
+        }
+
+        // Drain + persist any command_events accumulated since the last sweep (best-effort,
+        // origin="gui" — the only actor this daemon currently drives commands as).
+        let events = deps.supervisor.drain_command_events(&id);
+        if !events.is_empty() {
+            let db = deps.db.lock().await;
+            for ev in events {
+                if let Err(e) = db.append_command_event(
+                    &id,
+                    ev.seq as i64,
+                    ev.ts,
+                    ev.kind,
+                    ev.exit_code,
+                    "gui",
+                ) {
+                    tracing::debug!(
+                        session = %id, error = %e, "command_events flush: append failed"
+                    );
+                }
             }
         }
     }
