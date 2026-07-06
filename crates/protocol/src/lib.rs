@@ -26,8 +26,10 @@ pub use framing::{encode_frame, FrameDecoder, FrameError, MAX_FRAME_LEN};
 
 pub mod preamble;
 pub use preamble::{
-    CLIENT_MAX_VERSION, CLIENT_MIN_VERSION, DAEMON_MAX_VERSION, DAEMON_MIN_VERSION,
-    MAX_PREAMBLE_BUILD_LEN, PREAMBLE_MAGIC,
+    decode_client_preamble, decode_daemon_reply, encode_client_preamble, encode_daemon_reply,
+    negotiate, ClientPreamble, DaemonReply, PreambleError, CLIENT_MAX_VERSION, CLIENT_MIN_VERSION,
+    DAEMON_MAX_VERSION, DAEMON_MIN_VERSION, MAX_PREAMBLE_BUILD_LEN, PREAMBLE_MAGIC,
+    PREAMBLE_TIMEOUT,
 };
 
 pub type SessionId = String; // UUID v4

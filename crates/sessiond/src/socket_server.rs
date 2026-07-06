@@ -1,8 +1,18 @@
 //! Hop-B socket server (spec §7, §8.2, §11, §13, §16): a tokio `UnixListener` accept loop with
-//! one task per connected client, the `Hello` handshake gate, request/response correlation, a
-//! bounded per-client outbound queue (overflow ⇒ drop+disconnect), peer-cred refusal of foreign
-//! euids, supervisor→`Push` fan-out to every connected client, DB persistence, and daemon-side
-//! path validation.
+//! one task per connected client, the codec-agnostic preamble handshake + version negotiation gate
+//! (Pv2 §4.2/§4.4), request/response correlation, a bounded per-client outbound queue (overflow ⇒
+//! drop+disconnect), peer-cred refusal of foreign euids, supervisor→`Push` fan-out to every
+//! connected client, DB persistence, and daemon-side path validation.
+//!
+//! ## Handshake (Pv2 §4.2/§4.4)
+//!
+//! The very first bytes on every connection are a fixed, codec-independent preamble — not a CBOR
+//! frame — so a version-incompatible peer can always be told so, even one that cannot decode this
+//! daemon's CBOR at all (the failure mode `Request::Hello`-as-a-CBOR-frame had in v1). `handle_client`
+//! reads the client's `[min, max]` + build string within [`PREAMBLE_TIMEOUT`], negotiates a version
+//! via [`bpa_protocol::negotiate`], and replies `Accepted`/`Incompatible` before ever touching the
+//! CBOR frame dispatch loop below. A stuck, silent, or garbage-writing peer is closed once the
+//! timeout elapses rather than left to hang the connection task indefinitely.
 //!
 //! ## What this module owns vs. what Task 13 owns
 //!
@@ -45,12 +55,23 @@ use crate::shell_integration::{classify_shell, write_session_assets};
 use crate::singleton::check_peer_cred;
 
 use bpa_protocol::{
-    encode_frame, Frame, FrameDecoder, Push, Request, Response, SessionMeta, Workspace,
+    decode_client_preamble, encode_daemon_reply, encode_frame, negotiate, DaemonReply, Frame,
+    FrameDecoder, Push, Request, Response, SessionMeta, Workspace, DAEMON_MAX_VERSION,
+    DAEMON_MIN_VERSION, MAX_PREAMBLE_BUILD_LEN, PREAMBLE_TIMEOUT,
 };
 
 /// Per-client bounded outbound queue depth (frames). Overflow (a client that stopped reading) ⇒
 /// drop + disconnect that client rather than buffer unboundedly (spec §13, no memory-DoS).
 pub const CLIENT_OUTQ_CAP: usize = 1024;
+
+/// Bound on how long connection cleanup waits for the writer task to notice its queue is closed
+/// and exit on its own, before forcibly aborting it (spec §13). A client that stopped reading (the
+/// overflow case this queue exists to handle) can leave the writer's own `write_all` blocked
+/// indefinitely on a full kernel socket send buffer that will never drain — waiting on that task
+/// unboundedly here would re-introduce the exact hang spec §13's bounded queue was meant to avoid,
+/// just one step later in the teardown path. 200 ms is generous for the ordinary case (queue
+/// closed, in-flight write already completed) while keeping a stuck client's forced disconnect fast.
+const WRITER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Cadence of the best-effort scrollback persistence sweep (spec §11: batched, ~500 ms).
 const SCROLLBACK_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
@@ -65,7 +86,7 @@ pub struct ServerDeps {
     pub supervisor: Arc<Supervisor>,
     pub db: Arc<Mutex<Db>>,
     pub attach: Arc<AttachRegistry>,
-    /// Human-readable daemon build string echoed in `Response::Welcome` (spec §7).
+    /// Human-readable daemon build string echoed in the accepted preamble reply (Pv2 §4.2/§4.4).
     pub daemon_build: String,
     /// Per-session runtime dir root for shell-integration assets (ZDOTDIR / bpa-bash.sh). Task 13
     /// passes the resolved socket dir; tests pass a tempdir.
@@ -319,14 +340,46 @@ async fn handle_client(
     // handshake preamble across the reader/writer split so no pipelined request is ever lost.
     let mut reader = FrameReader::new();
 
-    // TODO(Task5): preamble handshake — accept and proceed. The real handshake gate (spec §7 /
-    // Pv2 §4.2/§4.4: read the codec-agnostic client preamble, negotiate a version via
-    // `bpa_protocol::preamble::negotiate`, reply Accepted/Incompatible) is stubbed out here on
-    // purpose so the workspace compiles against the CBOR-only protocol surface (Request::Hello /
-    // Response::Welcome / Response::Incompatible / MAGIC / PROTO_VERSION were removed in Pv2 §3.1-
-    // §3.3). This daemon currently accepts every connection unconditionally and proceeds straight
-    // into the CBOR frame dispatch loop below — Task 5 replaces this block with the real preamble
-    // read + negotiate + reply. DO NOT ship this stub.
+    // ---- Preamble handshake (Pv2 §4.2/§4.4): a fixed, codec-independent header precedes the CBOR
+    // frame stream so a version-incompatible peer can always be told so, even if it can't decode
+    // CBOR. Every read here is `PREAMBLE_TIMEOUT`-bounded: a stuck or garbage-writing peer must not
+    // be able to hang this connection task or hold the socket open indefinitely (fail closed).
+    let mut stream = stream;
+    match tokio::time::timeout(PREAMBLE_TIMEOUT, read_client_preamble(&mut stream)).await {
+        Ok(Ok(client)) => {
+            let mut reply = negotiate(
+                client.min,
+                client.max,
+                DAEMON_MIN_VERSION,
+                DAEMON_MAX_VERSION,
+            );
+            if let DaemonReply::Accepted { build, .. } = &mut reply {
+                // `negotiate()` never knows the daemon's real build string (it's a pure
+                // version-arithmetic function in the protocol crate) — it always returns an empty
+                // one. Fill in the real build here before it goes on the wire.
+                *build = deps.daemon_build.clone();
+            }
+            let incompatible = matches!(reply, DaemonReply::Incompatible { .. });
+            let out = encode_daemon_reply(&reply);
+            if tokio::time::timeout(PREAMBLE_TIMEOUT, async {
+                use tokio::io::AsyncWriteExt as _;
+                stream.write_all(&out).await?;
+                stream.flush().await
+            })
+            .await
+            .is_err()
+            {
+                return Ok(()); // peer gone / write stalled past the timeout ⇒ give up quietly
+            }
+            if incompatible {
+                // Version mismatch: the reply already told the peer why. Close without entering
+                // the CBOR dispatch loop.
+                return Ok(());
+            }
+        }
+        Ok(Err(_)) => return Ok(()), // malformed/garbage preamble ⇒ close without a reply
+        Err(_) => return Ok(()),    // preamble never arrived within PREAMBLE_TIMEOUT ⇒ close
+    }
 
     // ---- Split into an independent reader + writer, joined by a bounded outbound queue. ----
     let (mut rd, mut wr) = stream.into_split();
@@ -337,7 +390,7 @@ async fn handle_client(
 
     // Writer task: drains the bounded queue and writes to the socket. Exits on EPIPE/write error
     // (⇒ the client is gone) or when the queue is closed (all senders dropped).
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
             let bytes = match encode_frame(&frame) {
                 Ok(b) => b,
@@ -392,13 +445,58 @@ async fn handle_client(
     // ---- Cleanup: deregister from fan-out, tear down ONLY THIS connection's attach forwarders
     // (per-connection teardown — spec §7: another client's attachment for an unrelated session must
     // keep streaming; a global detach_all here would corrupt it). Sessions keep running (§7
-    // keep-alive). Then let the writer drain/exit. ----
+    // keep-alive). Then let the writer drain/exit — bounded, not unconditional: dropping `out_tx`
+    // only makes `out_rx.recv()` return `None` on its NEXT poll, but the writer may already be
+    // parked inside `wr.write_all(...).await` on a client that stopped reading (the very overflow
+    // this queue exists to catch, spec §13) — that write cannot complete until the client reads or
+    // the kernel gives up, neither of which is guaranteed to happen promptly. Waiting on it
+    // unconditionally here would hang THIS cleanup path forever for exactly the client this branch
+    // exists to disconnect. `WRITER_JOIN_TIMEOUT` caps the wait; a still-running writer past that is
+    // aborted outright (its socket half is dropped either way on return, closing the connection). ----
     broadcaster.deregister(conn_id);
     deps.attach.detach_all_for_conn(conn_id);
     drop(push_sink);
     drop(out_tx);
-    let _ = writer.await;
+    if tokio::time::timeout(WRITER_JOIN_TIMEOUT, &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
     outcome
+}
+
+/// Fixed length of the client preamble's header, before the trailing `build` string (Pv2 §4.2):
+/// `magic:u32 | min:u16 | max:u16 | build_len:u16`.
+const CLIENT_PREAMBLE_HEADER_LEN: usize = 4 + 2 + 2 + 2;
+
+/// Read and decode one [`bpa_protocol::ClientPreamble`] off `stream` (Pv2 §4.2/§4.4): the fixed
+/// 10-byte header first, then exactly `build_len` more bytes for the trailing `build` string — never
+/// more, so a peer that declares an oversized `build_len` is rejected by [`decode_client_preamble`]
+/// (via the header's own bound check) before any attempt to read/allocate that many bytes. Callers
+/// are expected to wrap this in a `PREAMBLE_TIMEOUT`; this function itself has no timeout so it can
+/// be unit-tested directly against an in-memory pipe if ever needed.
+async fn read_client_preamble(
+    stream: &mut UnixStream,
+) -> std::io::Result<bpa_protocol::ClientPreamble> {
+    use tokio::io::AsyncReadExt;
+    let mut header = [0u8; CLIENT_PREAMBLE_HEADER_LEN];
+    stream.read_exact(&mut header).await?;
+    let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
+    if build_len > MAX_PREAMBLE_BUILD_LEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "preamble build string exceeds MAX_PREAMBLE_BUILD_LEN",
+        ));
+    }
+    let mut buf = Vec::with_capacity(CLIENT_PREAMBLE_HEADER_LEN + build_len);
+    buf.extend_from_slice(&header);
+    if build_len > 0 {
+        let mut build = vec![0u8; build_len];
+        stream.read_exact(&mut build).await?;
+        buf.extend_from_slice(&build);
+    }
+    decode_client_preamble(&buf).map_err(to_io)
 }
 
 /// A stateful frame reader for one connection. Owns the protocol [`FrameDecoder`] plus a queue of
@@ -796,7 +894,10 @@ fn resolve_session_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bpa_protocol::{Frame, Push, Request, Response, MAGIC, PROTO_VERSION};
+    use bpa_protocol::{
+        decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply, Frame, Push,
+        Request, Response, CLIENT_MAX_VERSION, CLIENT_MIN_VERSION,
+    };
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
@@ -868,66 +969,71 @@ mod tests {
         (path, tx, jh, dir, runtime)
     }
 
-    async fn hello(s: &mut UnixStream) -> Response {
-        send_frame(
-            s,
-            &Frame::Request {
-                id: 0,
-                req: Request::Hello {
-                    magic: MAGIC,
-                    proto_version: PROTO_VERSION,
-                    client_build: "t".into(),
-                },
-            },
-        )
-        .await;
-        match recv_frame(s).await {
-            Frame::Response { id, res } => {
-                assert_eq!(id, 0);
-                res
+    /// Send a [`ClientPreamble`] (min/max = 2, the current client range) and read back the daemon's
+    /// decoded [`DaemonReply`]. Distinct from [`send_frame`]/[`recv_frame`]: the preamble is a raw
+    /// codec-agnostic byte layout (Pv2 §4.2), not a CBOR `Frame`, so it needs its own wire helper.
+    async fn preamble(s: &mut UnixStream) -> DaemonReply {
+        send_preamble(s, CLIENT_MIN_VERSION, CLIENT_MAX_VERSION, "test").await;
+        recv_daemon_reply(s).await
+    }
+
+    /// Write a client preamble advertising the given `[min, max]` + build string.
+    async fn send_preamble(s: &mut UnixStream, min: u16, max: u16, build: &str) {
+        let bytes = encode_client_preamble(&ClientPreamble {
+            min,
+            max,
+            build: build.into(),
+        });
+        s.write_all(&bytes).await.unwrap();
+        s.flush().await.unwrap();
+    }
+
+    /// Read and decode one [`DaemonReply`] off the wire. Bounded to 3 s so a regressed handshake
+    /// gate (that wrongly never replies) fails the test fast instead of hanging the suite.
+    async fn recv_daemon_reply(s: &mut UnixStream) -> DaemonReply {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            // Accepted: magic(4)+result(1)+chosen(2)+build_len(2) = 9 bytes, then build_len more.
+            // Incompatible: magic(4)+result(1)+min(2)+max(2) = 9 bytes, no trailing body. Both
+            // fixed headers are 9 bytes, so read that first and branch on the trailing build only
+            // for Accepted.
+            let mut header = [0u8; 9];
+            s.read_exact(&mut header).await.unwrap();
+            let result = header[4];
+            let mut buf = header.to_vec();
+            if result == 1 {
+                let build_len = u16::from_le_bytes(header[7..9].try_into().unwrap()) as usize;
+                let mut build = vec![0u8; build_len];
+                s.read_exact(&mut build).await.unwrap();
+                buf.extend_from_slice(&build);
             }
-            other => panic!("expected handshake Response, got {other:?}"),
+            decode_daemon_reply(&buf).expect("valid daemon reply")
+        })
+        .await
+        .expect("timed out waiting for daemon reply (handshake regression?)")
+    }
+
+    #[tokio::test]
+    async fn handshake_happy_path_returns_accepted() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        match preamble(&mut c).await {
+            DaemonReply::Accepted { chosen, build } => {
+                assert_eq!(chosen, CLIENT_MAX_VERSION.min(DAEMON_MAX_VERSION));
+                assert_eq!(build, "test");
+            }
+            other => panic!("expected Accepted, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn handshake_happy_path_returns_welcome() {
+    async fn incompatible_client_range_is_rejected_and_closed() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        match hello(&mut c).await {
-            Response::Welcome {
-                proto_version,
-                daemon_build,
-            } => {
-                assert_eq!(proto_version, PROTO_VERSION);
-                assert_eq!(daemon_build, "test");
-            }
-            other => panic!("expected Welcome, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handshake_bad_magic_is_rejected_and_closes() {
-        let (path, _tx, _jh, _d, _r) = spawn_server().await;
-        let mut c = UnixStream::connect(&path).await.unwrap();
-        send_frame(
-            &mut c,
-            &Frame::Request {
-                id: 0,
-                req: Request::Hello {
-                    magic: 0xDEAD_BEEF,
-                    proto_version: PROTO_VERSION,
-                    client_build: "t".into(),
-                },
-            },
-        )
-        .await;
-        match recv_frame_t(&mut c).await {
-            Frame::Response {
-                id: 0,
-                res: Response::Incompatible { min, max },
-            } => {
-                assert_eq!((min, max), (PROTO_VERSION, PROTO_VERSION));
+        // Client advertises [3, 3]; daemon only speaks [2, 2] ⇒ no overlap.
+        send_preamble(&mut c, 3, 3, "test").await;
+        match recv_daemon_reply(&mut c).await {
+            DaemonReply::Incompatible { min, max } => {
+                assert_eq!((min, max), (DAEMON_MIN_VERSION, DAEMON_MAX_VERSION));
             }
             other => panic!("expected Incompatible, got {other:?}"),
         }
@@ -941,56 +1047,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handshake_bad_version_is_rejected() {
+    async fn garbage_preamble_closes_without_hang() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        send_frame(
-            &mut c,
-            &Frame::Request {
-                id: 0,
-                req: Request::Hello {
-                    magic: MAGIC,
-                    proto_version: PROTO_VERSION + 1,
-                    client_build: "t".into(),
-                },
-            },
+        // Write 4 random/garbage bytes (not a valid magic, not even a full header) then nothing
+        // more: the daemon must give up and close within PREAMBLE_TIMEOUT rather than hang forever
+        // waiting for the rest of a header that will never arrive.
+        c.write_all(&[0xDE, 0xAD, 0xBE, 0xEF]).await.unwrap();
+        c.flush().await.unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(
+            bpa_protocol::PREAMBLE_TIMEOUT + std::time::Duration::from_secs(2),
+            c.read(&mut buf),
         )
-        .await;
-        match recv_frame_t(&mut c).await {
-            Frame::Response {
-                id: 0,
-                res: Response::Incompatible { .. },
-            } => {}
-            other => panic!("expected Incompatible, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn non_hello_first_frame_is_rejected() {
-        let (path, _tx, _jh, _d, _r) = spawn_server().await;
-        let mut c = UnixStream::connect(&path).await.unwrap();
-        send_frame(
-            &mut c,
-            &Frame::Request {
-                id: 7,
-                req: Request::ListWorkspaces,
-            },
-        )
-        .await;
-        match recv_frame_t(&mut c).await {
-            Frame::Response {
-                res: Response::Incompatible { .. },
-                ..
-            } => {}
-            other => panic!("first frame must be Hello; expected Incompatible, got {other:?}"),
-        }
+        .await
+        .expect("server must close a garbage preamble within PREAMBLE_TIMEOUT (timed out waiting)")
+        .unwrap();
+        assert_eq!(n, 0, "server must close the connection on a garbage/short preamble");
     }
 
     #[tokio::test]
     async fn requests_are_answered_with_matching_ids_concurrently() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
 
         // Fire three ListWorkspaces requests with distinct ids back-to-back.
         for id in [11u64, 22, 33] {
@@ -1022,7 +1102,7 @@ mod tests {
     async fn create_workspace_persists_and_pushes() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
 
         // /tmp is a real, existing directory — passes §16 validation.
         send_frame(
@@ -1080,7 +1160,7 @@ mod tests {
     async fn create_workspace_rejects_missing_dir() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -1107,7 +1187,7 @@ mod tests {
     async fn create_session_persists_and_get_reflects_it() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
 
         // Use /bin/sh (unrecognized by classify_shell) so no integration assets are needed and the
         // resolution is deterministic; cwd=/tmp exists.
@@ -1212,7 +1292,7 @@ mod tests {
     async fn create_session_rejects_missing_cwd() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -1243,7 +1323,7 @@ mod tests {
     async fn create_session_rejects_relative_cwd() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
         // A relative path that does not exist relative to the daemon's cwd ⇒ rejected.
         send_frame(
             &mut c,
@@ -1275,7 +1355,7 @@ mod tests {
     async fn attach_first_push_is_replay_then_output() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
 
         // Create a shell that waits for a go-signal, so we can attach before any output.
         // We drive the child via WriteStdin over the same connection.
@@ -1427,7 +1507,7 @@ mod tests {
 
         // Client A connects, handshakes, then STOPS reading — we flood its outq with replies.
         let mut a = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut a).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut a).await, DaemonReply::Accepted { .. }));
 
         for id in 0..(CLIENT_OUTQ_CAP as u64 + 512) {
             let f = Frame::Request {
@@ -1446,7 +1526,7 @@ mod tests {
 
         // Client B connects fresh and MUST be served normally.
         let mut b = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut b).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut b).await, DaemonReply::Accepted { .. }));
         send_frame(
             &mut b,
             &Frame::Request {
@@ -1469,7 +1549,7 @@ mod tests {
     async fn oversized_frame_is_rejected() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
         // Announce a length beyond MAX_FRAME_LEN; the server must disconnect without allocating.
         let bogus_len = bpa_protocol::MAX_FRAME_LEN + 1;
         c.write_all(&bogus_len.to_le_bytes()).await.unwrap();
@@ -1486,7 +1566,7 @@ mod tests {
     async fn write_resize_kill_unknown_session_errors() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
 
         for (id, req) in [
             (
@@ -1529,7 +1609,7 @@ mod tests {
     async fn detach_and_daemon_shutdown_ack() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
 
         send_frame(
             &mut c,
@@ -1574,7 +1654,7 @@ mod tests {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
         // If peer-cred wrongly rejected our own euid, the handshake would never complete.
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
     }
 
     /// Build a real escaping-symlink layout under a fresh tempdir and return `(tempdir, link_path)`.
@@ -1605,7 +1685,7 @@ mod tests {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let (_layout, link) = escaping_symlink_layout();
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -1638,7 +1718,7 @@ mod tests {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let (_layout, link) = escaping_symlink_layout();
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut c).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -1727,7 +1807,7 @@ mod tests {
 
         // ---- Client A: connect, create SA, attach (drain its Ack + Replay). ----
         let mut a = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut a).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut a).await, DaemonReply::Accepted { .. }));
         send_frame(
             &mut a,
             &Frame::Request {
@@ -1789,7 +1869,7 @@ mod tests {
 
         // ---- Client B: connect, create SB, prime it, attach, prove it is streaming (B_BEFORE). ----
         let mut b = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(hello(&mut b).await, Response::Welcome { .. }));
+        assert!(matches!(preamble(&mut b).await, DaemonReply::Accepted { .. }));
         send_frame(
             &mut b,
             &Frame::Request {

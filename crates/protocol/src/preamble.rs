@@ -38,6 +38,14 @@ pub const DAEMON_MAX_VERSION: u16 = 2;
 /// `build_len` is treated as garbage/DoS and rejected rather than allocated/read.
 pub const MAX_PREAMBLE_BUILD_LEN: usize = 256;
 
+/// Hard bound on how long either side of a connection will wait for the peer's
+/// preamble bytes before giving up and closing the connection. A stuck or
+/// malicious peer that writes a partial/garbage preamble and then goes silent
+/// must not be able to hang a server task or client connect call forever
+/// (Pv2 §4.4: fail closed, not open). Applies to both the client read of the
+/// daemon's reply and the daemon read of the client's preamble.
+pub const PREAMBLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Client → daemon preamble (first bytes on every connection).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientPreamble {
