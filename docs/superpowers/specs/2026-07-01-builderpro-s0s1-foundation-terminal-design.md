@@ -904,6 +904,11 @@ approval. Human GUI sessions keep current behavior (forwarded per the §9.3 allo
 macOS **Keychain only** — never SQLite, config files, or logs. LLM egress happens from the core
 process only; the webview never talks to model providers.
 
+This posture generalizes to **ALL provider / connector / MCP secrets** (BL-20): Keychain only;
+egress core/`bpa-orchd`-only. Research-source connections (agents querying production databases,
+docs stores, log systems — audit V24) live in a registry of **read-only, audited** connections
+with their own Keychain credentials — never ad-hoc connection strings in agent context.
+
 ### Webview boundary (BL-2)
 
 Target: restrictive CSP in `tauri.conf.json`. Current state, stated honestly: `csp: null` until
@@ -915,3 +920,24 @@ BL-2 lands. The capabilities file already scopes the IPC surface.
 output). Required: 0600 file mode + purge-on-delete (**BL-3**), tied into retention (**BL-4**).
 Retention defaults: keep the last **20 exited sessions per workspace** / **30-day TTL** (config
 later); deleting a workspace cascades its live sessions **with consent**.
+
+### MCP & extension boundary (roadmap — implemented in S-EXT; amended 2026-07-06)
+
+The product connects external MCP servers, connectors, and skills (vision v2–v4). An MCP server
+is a remote code/data boundary; the posture (details in the S-EXT spec):
+
+- **Egress:** all MCP/connector traffic originates from the core/`bpa-orchd` process only — never
+  the webview.
+- **Consent:** connecting a server is a consent-gated action; enabled tools are an explicit
+  per-server allowlist. A **stdio** MCP server executes local code — connecting one is equivalent
+  to installing a plugin and is gated accordingly.
+- **Tool results are untrusted input.** Treated as potential prompt-injection: agents must not
+  act on instructions embedded in tool results without policy/gate mediation (the same trust
+  layer that gates agent-initiated commands).
+- **Spend:** MCP tool invocations pass through the agent trust layer — spend caps and approval
+  classes apply exactly as for agent commands; per-call cost/latency is recorded (S6a's capture
+  rule generalized).
+- **v1 surface (owner default, Q6):** tools + auth only; **sampling disabled by default** (a
+  remote server must not spend the owner's LLM budget); resources/prompts deferred to backlog.
+- **Unattended access:** Keychain access for `bpa-orchd` runs under a locked screen is an open
+  sub-question (backlog row) — resolved in the S-EXT spec before the first unattended MCP call.
