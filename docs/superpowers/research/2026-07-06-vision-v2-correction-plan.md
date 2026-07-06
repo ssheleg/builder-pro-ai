@@ -937,3 +937,31 @@ Honestly: the overview today serves the original "director of AI development tea
 - S4's UUID node identity, cross-project links, and agent retrieval API (+ D6's hard-block of S6): the ready home for research artifacts and the provenance graph — add write/ingest and entity-reference nodes; do not invent a second knowledge store.
 - Pv2 §7.1's fail-closed, forward-only migration machinery (persistence.rs) and the S3 export/import DoD: proven persistence patterns to transplant into the app-domain store rather than redesign.
 - The survival-truth-table honest-placeholder pattern and S6b's PM decomposition loop: extend the table with workflow/schedule rows instead of overclaiming, and seed the engine's default pipeline from the PM loop + the proven Superpowers brainstorm→spec→plan process — v2's canonical first WorkflowDefinition already exists as practice.
+
+---
+
+# Vision v3 addendum to the correction plan (2026-07-06, same day)
+
+The owner extended the vision AFTER the audit synthesis (see «Vision v3 addendum» in
+[2026-07-06-product-vision-v2.md](2026-07-06-product-vision-v2.md)): goal hierarchy, goal-driven
+research workflows, the **Insight** entity with a goals/metrics fit-test, backlog as the
+opportunity funnel, mutable per-project main metrics. The audit's structures already carry most
+of this — these are AMENDMENTS to existing correction items, not new subsystems:
+
+| Correction item | v3 amendment |
+|---|---|
+| §3 S3 row expansion (covers V4) | S3 entity map gains: **Goal hierarchy** (one strategic goal + N additional goals, owner-editable) and **Insight** (source: research run; lifecycle surfaced → evaluated → accepted-to-backlog \| archived-with-reasoning; evaluation links to the goal(s)/metric(s) it was tested against). Backlog = the funnel view over Idea + Insight + FixTask, prioritized against goals/metrics. |
+| §4 rewrite + SW1 (covers V1/V6) | Named built-in WorkflowDefinition #2: **goal-driven research/refresh** (per-goal recurring research producing Insights). The channels example (goal «traffic/channels» → research → N channels → N testable items) becomes the canonical sample definition in the SW1 spec. |
+| S8 re-scope (covers V19) | Metrics gain **owner-declared MAIN metrics per project, mutable definitions** (a MetricDefinition entity, not just MetricPoint ingestion); insight evaluation and prioritization read them; sprint planning weighs them. |
+| S-IDEA slice | Widens to **S-IDEA/INSIGHT**: the same capture→research→evaluate→task pipeline serves both owner-born ideas and market-born insights; the evaluation step («does it fit the strategic direction / strengthen a main metric?») is the formalized distraction-vs-opportunity filter and is a policy-gated agent step with owner override. |
+| SH mission-control | Home screen gains an **Insights lane** (v2 home item list +1): fresh insights with their fit-verdicts, one-click accept-to-backlog / archive. |
+| Data-layer charter entity map (covers V14) | +2 entity families: GoalNode (hierarchy) and Insight; MetricDefinition joins MetricPoint. |
+
+New open questions for the owner (append to the register):
+10. Insight evaluation authority: does the fit-test verdict (fits goal / strengthens metric) come
+    from an agent with owner override, owner-only, or agent-auto with a confidence threshold?
+11. Experiments: the channels example implies testable experiments per insight (hypothesis,
+    budget, metric, verdict). First-class Experiment entity in S8, or just tasks tagged
+    «experiment» until S8 matures?
+12. Main-metric declaration UX: where does the owner declare/change MAIN metrics — project
+    settings, or goal-attached (each goal names the metrics it moves)?

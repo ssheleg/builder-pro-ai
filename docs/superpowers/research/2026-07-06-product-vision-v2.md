@@ -83,6 +83,34 @@ For every project, always visible: goals · tasks from the plan · bug-fix tasks
 delivery workflow state · monitoring. The panel is the single place the owner directs all
 projects from.
 
+## Vision v3 addendum (owner, 2026-07-06): goals → market insights → backlog funnel
+
+Philosophical frame (owner's): *«если у тебя нет чёткой цели, то любое отвлечение кажется
+возможностью»* — the cure is an **ambitious strategic goal** plus a method: observed
+opportunities (especially from other products/markets) are **methodically attached to the goal**;
+10–30 % will fit. A big goal admits many paths; a small one only one. The product must OPERATE
+this filter, not just preach it.
+
+New concepts:
+
+1. **Goal hierarchy per project.** A project has a BIG strategic goal + additional goals. Goals
+   are living entities the owner edits (vector steering).
+2. **Goal-driven research workflows.** Per goal, recurring research / data-refresh workflows run
+   (workflow-engine instances) to find concrete steps toward the goal.
+   Canonical example: goal «прокачать трафик и каналы привлечения» → research → a list of
+   candidate channels → **each channel becomes a separately testable item** (experiment).
+3. **Insight entity.** Market-sourced opportunities surface as **insights** (shown as such in the
+   UI). An insight is *evaluated against the project's goals and metrics* — the formalized
+   distraction-vs-opportunity test: does it advance the strategic direction / strengthen a main
+   metric? Fit → backlog; no fit → archived with the reasoning kept.
+4. **Backlog as the opportunity funnel.** The project backlog is where everything converges:
+   owner ideas, market insights (via research), bug-fix tasks — prioritized against goals and
+   metrics. Working the backlog IS working the strategy.
+5. **Main metrics, first-class and mutable.** Each project declares its MAIN metrics; they can
+   change over time. The system must define how metrics are collected and analyzed (feeds insight
+   evaluation, prioritization, and sprint planning). Which metrics are «main» is an owner
+   decision the system keeps asking about as the project evolves.
+
 ## Implied capabilities (derived, to be validated in the audit)
 - Idea entity + lifecycle (captured → researched → specced → in-dev → shipped).
 - Research artifacts as durable, linkable objects (feed the knowledge graph).
