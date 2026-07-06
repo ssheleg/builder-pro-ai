@@ -215,19 +215,61 @@ come later.
 
 ---
 
-## Data-layer charter (added 2026-07-04 — A13/A25/A26/A27; owner decision D6)
+## Data-layer charter (added 2026-07-04; amended 2026-07-06, vision v2–v4)
 
-- **The daemon owns terminal-domain durable state ONLY** (sessions, scrollback, workspaces-as-
-  terminal-roots in `bpa.db`). It must never become the app's general database.
-- **S3+ domain data** (projects, goals, kanban, knowledge graph) lives in a **core-owned store**;
-  the concrete engine (SQLite in the core process vs embedded alternative) is decided in the S3
-  spec — NOT inherited by default from the daemon.
+- **`bpa-sessiond` owns terminal-domain durable state ONLY** (sessions, scrollback,
+  workspaces-as-terminal-roots, `command_events` in `bpa.db`). It must never become the app's
+  general database.
+- **All app-domain entities live in the `bpa-orchd` store** (ADR-HOST, §2). The concrete engine
+  is decided in the S3 spec; the OWNERSHIP boundary is locked here.
 - **Project ⇄ Workspace (locked):** *a Project is the planning entity that owns goals / graph /
   kanban and maps to 1..N Workspaces (repo roots).*
 - **S4 owns:** graph storage decision, UUID node identity, cross-project link model, and the
-  **agent retrieval API**. S4 **hard-blocks S6** (owner decision D6).
-- **Historical telemetry:** worker transcript log + `command_events` table land at the next daemon
-  schema bump (protocol v2 or S3) — today's discarded history (pruned rings) is a known limit.
+  **agent retrieval API** — read AND write, **workspace-wide** (an agent working project A can
+  query and read project B's knowledge). S4 **hard-blocks S6** (owner decision D6).
+
+### Entity map (owning slice + store)
+
+| Entity family | Store | Owning slice |
+|---|---|---|
+| Project | orchd | S3 |
+| Workspace (repo roots; bridged to sessiond terminal-roots) | orchd (+ sessiond bridge) | S2/S3 |
+| Goal — hierarchy: 1 strategic + N additional, owner-editable (vector steering) | orchd | S3 |
+| Idea — lifecycle captured→researching→specced→in-dev→shipped; nullable project_id (spawn-project flow) | orchd | S3 |
+| Insight — market-sourced; fit-verdict vs goals/metrics; accepted→backlog \| archived-with-reasoning | orchd | S3 (+S-IDEA) |
+| Task / Subtask — one unified model; kanban is a VIEW; sources: idea \| insight \| bug \| plan | orchd | S3 |
+| RuleSet — global + per-project rules; markdown layer (agent-read) + typed policy layer (gate-enforced) | orchd | S3 |
+| ResearchArtifact — durable research output; provenance links (idea, run, session); graph-ingested | orchd (+ artifact blobs) | S-IDEA/S4 |
+| WorkflowDefinition — versioned, format_version, append-only evolution | orchd | SW1 |
+| WorkflowRun / StepRun — run history; StepRun records {input ref, request, response ref, processing, timings, cost} | orchd (+ run/step logs) | SW1 |
+| Schedule / Trigger — cron \| event \| manual; next_fire_at; catch-up + overlap policy | orchd | SW2 |
+| MCP / Connector / Skill registry — servers, transports, enabled tools, accounts; global + per-project | orchd (secrets → Keychain) | S-EXT |
+| MetricDefinition (owner-declared MAIN metrics, mutable) + MetricPoint (timeseries) | orchd | S8 |
+| ErrorGroup / StudyItem (prod telemetry triage) + Deploy record | orchd | S9a/S9b |
+
+- **Historical telemetry:** worker transcript log + `command_events` land at the daemon schema-v2
+  bump (Pv2) — with a workflow-run attribution hook (Pv2 amendment).
+
+### Global storage architecture
+
+One map, four stores — growth-ready, additive-only (§2 lock):
+
+1. **`bpa-sessiond` `bpa.db`** — terminal domain (sessions, scrollback, command_events). Unchanged.
+2. **`bpa-orchd` app-domain store** — the 14 entity families above; ships schema v1 with its own
+   `user_version`, **fail-closed, forward-only, single-transaction migrations** (mirrors sessiond
+   persistence); additive-only by policy.
+3. **Run/step logs** — StepRun I/O payloads. Default retention (Q15): full payloads 14 days →
+   thinned to metadata (summaries + sizes + hashes); 50 MB per-run cap with honest truncation
+   markers.
+4. **Artifact blobs** — research artifacts and large payloads, referenced by id from orchd rows.
+
+- **Cross-store references are SOFT:** UUID strings, no FK-integrity assumption across stores;
+  a store must keep its own copy of anything it cannot afford to lose to another store's
+  retention (e.g. BL-4 scrollback pruning must not destroy workflow-run evidence — orchd keeps
+  what it needs).
+- **Ingested telemetry is a distinct data class:** prod logs/errors and metrics may carry
+  PII/secrets; store home + redaction + retention are decided in the S9a spec; purge-on-delete
+  ties into project deletion.
 
 ---
 
