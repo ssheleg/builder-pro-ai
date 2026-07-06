@@ -115,9 +115,19 @@ impl AttachRegistry {
         self.abort_existing(session_id);
 
         // Bridge: std channel fed by the supervisor's blocking reader thread.
+        //
+        // TASK 7 HANDOFF: the supervisor now supports N independent subscribers keyed by
+        // `sub_id` (Pv2 §5.1), but this registry is still single-attach per session (one
+        // `AttachEntry` per `SessionId`, `abort_existing` above supersedes any prior owner). We
+        // pass a fixed placeholder `sub_id` (0) purely to keep this crate compiling against the
+        // new 3-arg `subscribe_output` signature — it is NOT a real per-connection/per-attach id.
+        // Task 7 re-keys this registry to the multi-subscriber model: allocate a real unique
+        // `sub_id` per attachment (e.g. `conn_id`, once multiple connections may co-attach the
+        // same session) and call `unsubscribe_output(session_id, sub_id)` on detach/supersede
+        // instead of relying solely on the supervisor's reader-exit `sinks.clear()`.
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         self.supervisor
-            .subscribe_output(session_id, std_tx)
+            .subscribe_output(session_id, 0, std_tx)
             .map_err(|_| AttachError::NoSuchSession)?;
 
         // Snapshot AFTER subscribing: any byte the reader thread produces from this point on is

@@ -12,8 +12,11 @@
 //!   the caller, validated `cwd`). Returns the new [`SessionId`].
 //! - [`Supervisor::write_stdin`] / [`Supervisor::resize`] / [`Supervisor::kill`] — drive one
 //!   session. `kill` is a **process-group** kill (SIGTERM → 2 s grace → SIGKILL) then reap.
-//! - [`Supervisor::subscribe_output`] — register an [`OutputSink`] (an `mpsc::Sender<Vec<u8>>`)
-//!   that receives live PTY bytes verbatim; the attach layer forwards these as `Push::Output`.
+//! - [`Supervisor::subscribe_output`] / [`Supervisor::unsubscribe_output`] — register/remove one
+//!   of N independent [`OutputSink`]s (each an `mpsc::Sender<Vec<u8>>`) per session, keyed by a
+//!   caller-assigned `sub_id` (Pv2 §5.1: multi-subscriber fan-out for GUI + future co-viewing
+//!   agents); each receives live PTY bytes verbatim and the attach layer forwards them as
+//!   `Push::Output`.
 //! - [`Supervisor::snapshot_scrollback`] — `(cols, rows, sanitized_bytes)` for `Push::Replay`.
 //! - [`Supervisor::meta`] — build a [`bpa_protocol::SessionMeta`] from tracked state.
 //! - Callbacks the broker registers so it can translate into protocol Pushes (spec §7):
@@ -29,7 +32,7 @@
 //!    daemon-internal / secret env reaches the child (§9.3 / §16).
 //! 4. One blocking OS reader thread per PTY; `read() == Ok(0)` ⇒ EOF ⇒ teardown. Each chunk is
 //!    fed to the OSC parser (advance lifecycle + cwd), the live grid, the sanitized scrollback
-//!    ring, and any registered live [`OutputSink`].
+//!    ring, and every registered live [`OutputSink`] (fan-out to N subscribers, Pv2 §5.1).
 //! 5. `writer = master.take_writer()` (take-once) owned behind a `Mutex`; `flush()` after writes.
 //! 6. `killer = child.clone_killer()` captured **before** the wait thread; `wait()` runs only on
 //!    the single owning wait thread (`Child` is `Send` not `Sync` — never shared).
@@ -132,7 +135,11 @@ struct Shared {
     exit_signal: Mutex<Option<String>>,
     grid: Mutex<LiveGrid>,
     scrollback: Mutex<ScrollbackRing>,
-    sink: Mutex<Option<OutputSink>>,
+    /// Live subscribers for this session's PTY output (Pv2 §5.1: N independent co-viewers — GUI
+    /// + future agents). Keyed by caller-assigned `sub_id` so a specific subscriber can be
+    /// removed without disturbing the others. The reader thread fans every chunk out to all
+    /// entries and prunes any whose receiver has been dropped (`send` returns `Err`).
+    sinks: Mutex<Vec<(u64, OutputSink)>>,
     last_output: Mutex<Instant>,
     master_fd: Option<RawFd>,
     waiting: Mutex<bool>,
@@ -276,7 +283,7 @@ impl Supervisor {
             exit_signal: Mutex::new(None),
             grid: Mutex::new(LiveGrid::new(spec.cols, spec.rows)),
             scrollback: Mutex::new(ScrollbackRing::new(SCROLLBACK_CAP)),
-            sink: Mutex::new(None),
+            sinks: Mutex::new(Vec::new()),
             last_output: Mutex::new(Instant::now()),
             master_fd,
             waiting: Mutex::new(false),
@@ -323,13 +330,18 @@ impl Supervisor {
                             reader_shared.grid.lock().unwrap().feed(chunk);
                             reader_shared.scrollback.lock().unwrap().push(chunk);
 
-                            // (d) live broadcast — verbatim bytes to the attached client. The
-                            // parser is a side-channel extractor and does NOT filter the stream,
-                            // so the client gets everything (alt-screen, SGR, title, text) exactly
-                            // as the child emitted it.
-                            if let Some(sink) = reader_shared.sink.lock().unwrap().clone() {
-                                let _ = sink.send(chunk.to_vec());
-                            }
+                            // (d) live broadcast — verbatim bytes to every attached subscriber.
+                            // The parser is a side-channel extractor and does NOT filter the
+                            // stream, so each client gets everything (alt-screen, SGR, title,
+                            // text) exactly as the child emitted it. Send-and-prune: a `send`
+                            // failure means that subscriber's receiver (and its forwarder) is
+                            // gone, so we drop its entry here rather than waiting for an explicit
+                            // `unsubscribe_output` — no leaked dead senders accumulate.
+                            reader_shared
+                                .sinks
+                                .lock()
+                                .unwrap()
+                                .retain(|(_, tx)| tx.send(chunk.to_vec()).is_ok());
 
                             if status_dirty {
                                 recompute_waiting(&reader_shared);
@@ -341,18 +353,20 @@ impl Supervisor {
                     }
                 }
                 *reader_shared.is_active.lock().unwrap() = false;
-                // Reader is the only producer into the subscribed sink. Dropping it here closes the
-                // std channel, so an attached forwarder drains every queued byte and then observes
-                // `Disconnected` — graceful end-of-stream instead of truncation (once EOF is read,
-                // all output already read from the kernel buffer ⇒ everything is in the channel or
-                // already forwarded). PTY master EOF arrives once NO process holds the slave open:
-                // the daemon drops its slave copy at spawn (spec §9), but that does NOT close slave
-                // fds inherited by the child's descendants — a backgrounded descendant that keeps
-                // the slave open can extend EOF past child exit, delaying this reader-exit tail
-                // until that descendant closes it too (escaped-descendant handling is a known
-                // deferred item; behavior here is unchanged). Whenever EOF (or `Err`/EIO) does
-                // arrive, both loop-break arms fall through to this single reader-exit tail.
-                reader_shared.sink.lock().unwrap().take();
+                // Reader is the only producer into every subscribed sink. Clearing them all here
+                // drops every std-channel Sender, so each attached forwarder drains its queued
+                // bytes and then observes `Disconnected` — graceful end-of-stream instead of
+                // truncation for every subscriber (once EOF is read, all output already read from
+                // the kernel buffer ⇒ everything is in a channel or already forwarded). PTY master
+                // EOF arrives once NO process holds the slave open: the daemon drops its slave copy
+                // at spawn (spec §9), but that does NOT close slave fds inherited by the child's
+                // descendants — a backgrounded descendant that keeps the slave open can extend EOF
+                // past child exit, delaying this reader-exit tail until that descendant closes it
+                // too (escaped-descendant handling is a known deferred item; behavior here is
+                // unchanged). Whenever EOF (or `Err`/EIO) does arrive, both loop-break arms fall
+                // through to this single reader-exit tail (Pv2 §5.1: extends the single-sink
+                // truncation-fix design to N subscribers — every one gets the same graceful close).
+                reader_shared.sinks.lock().unwrap().clear();
             })
             .map_err(|e| SupervisorError::Spawn(format!("reader thread: {e}")))?;
 
@@ -482,37 +496,57 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Register (or replace) the live output sink for this session. Single-attach: a new sink
-    /// supersedes any previous one (spec §7 attach model).
+    /// Register an additional live output subscriber for this session, keyed by caller-assigned
+    /// `sub_id` (Pv2 §5.1: N independent co-viewers — GUI + future agents attached to the same
+    /// session simultaneously). PUSHES onto the subscriber list; does NOT replace any existing
+    /// entry. Callers own `sub_id` uniqueness (e.g. a connection/attach id) — subscribing twice
+    /// with the same id simply pushes a second entry for that id (harmless: `unsubscribe_output`
+    /// removes every entry matching that id, and a stale duplicate is pruned on its own first
+    /// failed `send` like any other dead sink).
     ///
     /// Refuses an exited-but-unreaped session (`!is_active`): after natural child exit the session
     /// lingers in the map until a `kill`/rehydrate prunes it, but its reader thread has already
-    /// exited and DROPPED the sink slot's only producer. Subscribing a fresh sink here would wire a
-    /// std channel that never sees a producer drop, so the attach forwarder would poll forever
-    /// (leak). Returning `NoSuchSession` maps to `AttachError::NoSuchSession` at the attach layer —
-    /// the client sees the same "session is gone" it would for a killed one.
-    pub fn subscribe_output(&self, id: &str, sink: OutputSink) -> Result<(), SupervisorError> {
+    /// exited and cleared the sinks list (dropping every producer). Subscribing a fresh sink here
+    /// would wire a std channel that never sees a producer drop, so the attach forwarder would poll
+    /// forever (leak). Returning `NoSuchSession` maps to `AttachError::NoSuchSession` at the attach
+    /// layer — the client sees the same "session is gone" it would for a killed one.
+    pub fn subscribe_output(
+        &self,
+        id: &str,
+        sub_id: u64,
+        sink: OutputSink,
+    ) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
-        // Close the subscribe/reader-exit TOCTOU by checking `is_active` WHILE HOLDING the sink
-        // lock, then installing into the already-held slot. The reader exit tail runs in program
-        // order `is_active = false` (§ reader tail, store) *happens-before* `sink.take()` (take),
-        // each in its own critical section. Serializing against `sink.take()` here therefore gives
-        // one of two correct outcomes:
-        //   - the reader's `sink.take()` has NOT run yet: it is now blocked on the sink lock we
-        //     hold. If our `is_active` read observes `false` we refuse; otherwise we install
-        //     `Some(sink)`, release, and the reader's subsequent `take()` removes and DROPS our
-        //     Sender — the forwarder then sees `Disconnected` (no leak).
-        //   - the reader's `sink.take()` has already run: because the store happens-before the
-        //     take, `is_active` is already `false`, so our read observes it and we refuse.
+        // Close the subscribe/reader-exit TOCTOU by checking `is_active` WHILE HOLDING the sinks
+        // lock, then pushing into the already-held Vec. The reader exit tail runs in program order
+        // `is_active = false` (§ reader tail, store) *happens-before* `sinks.clear()` (clear), each
+        // in its own critical section. Serializing against `sinks.clear()` here therefore gives one
+        // of two correct outcomes:
+        //   - the reader's `sinks.clear()` has NOT run yet: it is now blocked on the sinks lock we
+        //     hold. If our `is_active` read observes `false` we refuse; otherwise we push our
+        //     `(sub_id, sink)`, release, and the reader's subsequent `clear()` removes and DROPS
+        //     our Sender along with every other — the forwarder then sees `Disconnected` (no leak).
+        //   - the reader's `sinks.clear()` has already run: because the store happens-before the
+        //     clear, `is_active` is already `false`, so our read observes it and we refuse.
         // Either way a fresh sink is never left installed with no producer to drop it. Nothing
-        // anywhere holds `is_active` while acquiring `sink`, so nesting this short `is_active`
-        // acquire under the sink lock cannot deadlock.
-        let mut sink_guard = s.shared.sink.lock().unwrap();
+        // anywhere holds `is_active` while acquiring `sinks`, so nesting this short `is_active`
+        // acquire under the sinks lock cannot deadlock.
+        let mut sinks_guard = s.shared.sinks.lock().unwrap();
         if !*s.shared.is_active.lock().unwrap() {
             return Err(SupervisorError::NoSuchSession(id.to_string()));
         }
-        *sink_guard = Some(sink);
+        sinks_guard.push((sub_id, sink));
         Ok(())
+    }
+
+    /// Remove the subscriber(s) registered under `sub_id` for this session (Pv2 §5.1), without
+    /// disturbing any other subscriber. A no-op (not an error) if `id` is unknown or `sub_id` was
+    /// never subscribed — unsubscribing is idempotent housekeeping, not a state assertion, so
+    /// callers (e.g. a detaching connection) never need to special-case "already gone".
+    pub fn unsubscribe_output(&self, id: &str, sub_id: u64) {
+        if let Ok(s) = self.get(id) {
+            s.shared.sinks.lock().unwrap().retain(|(sid, _)| *sid != sub_id);
+        }
     }
 
     /// `(cols, rows, sanitized_scrollback_bytes)` — the payload for `Push::Replay` (spec §6.2/§11).
@@ -725,7 +759,7 @@ mod tests {
         let sup = Supervisor::new();
         let id = sup.create(spec_for("/bin/sh", vec![])).expect("create");
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        sup.subscribe_output(&id, tx).expect("subscribe");
+        sup.subscribe_output(&id, 1, tx).expect("subscribe");
         sup.write_stdin(&id, b"printf BPA_MARKER_OK\n")
             .expect("write");
         let out = drain_until(&rx, b"BPA_MARKER_OK", Duration::from_secs(5));
@@ -800,7 +834,7 @@ mod tests {
         let id = sup
             .create(spec_for("/bin/sh", vec!["-c".into(), script.into()]))
             .expect("create");
-        sup.subscribe_output(&id, tx).expect("subscribe");
+        sup.subscribe_output(&id, 1, tx).expect("subscribe");
 
         let out = drain_until(&rx, b"PIDS ", Duration::from_secs(5));
         let text = String::from_utf8_lossy(&out);
@@ -847,7 +881,7 @@ mod tests {
         let id = sup
             .create(spec_for("/bin/sh", vec!["-c".into(), script.into()]))
             .expect("create");
-        sup.subscribe_output(&id, tx).expect("subscribe");
+        sup.subscribe_output(&id, 1, tx).expect("subscribe");
 
         let _ = drain_until(&rx, b"READY", Duration::from_secs(5));
         sup.resize(&id, 132, 40).expect("resize");
@@ -879,7 +913,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let id = sup.create(spec).expect("create");
-        sup.subscribe_output(&id, tx).expect("subscribe");
+        sup.subscribe_output(&id, 1, tx).expect("subscribe");
 
         let out = drain_until(&rx, b"TERM=[xterm-256color]", Duration::from_secs(5));
         let text = String::from_utf8_lossy(&out);
@@ -993,7 +1027,7 @@ mod tests {
             .create(spec_for("/bin/sh", vec!["-c".into(), script.into()]))
             .expect("create");
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        sup.subscribe_output(&id, tx).expect("subscribe");
+        sup.subscribe_output(&id, 1, tx).expect("subscribe");
         // Release the child now that the sink is attached.
         sup.write_stdin(&id, b"go\n").expect("write go");
 
@@ -1063,5 +1097,94 @@ mod tests {
     fn supervisor_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Supervisor>();
+    }
+
+    // ---- Pv2 §5.1: N independent subscribers per session — both receive every chunk. ----
+    #[test]
+    fn two_subscribers_both_receive_output() {
+        let sup = Supervisor::new();
+        let id = sup
+            .create(spec_for("/bin/sh", vec!["-c".into(), "echo hi; sleep 1".into()]))
+            .expect("create");
+        let (tx1, rx1) = mpsc::channel::<Vec<u8>>();
+        let (tx2, rx2) = mpsc::channel::<Vec<u8>>();
+        sup.subscribe_output(&id, 1, tx1).expect("subscribe 1");
+        sup.subscribe_output(&id, 2, tx2).expect("subscribe 2");
+
+        let out1 = drain_until(&rx1, b"hi", Duration::from_secs(5));
+        let out2 = drain_until(&rx2, b"hi", Duration::from_secs(5));
+        assert!(
+            out1.windows(2).any(|w| w == b"hi"),
+            "subscriber 1 must receive output, got: {out1:?}"
+        );
+        assert!(
+            out2.windows(2).any(|w| w == b"hi"),
+            "subscriber 2 must receive output, got: {out2:?}"
+        );
+        sup.kill(&id).expect("kill");
+    }
+
+    // ---- Pv2 §5.1: unsubscribe removes only that sink; the other keeps receiving. ----
+    #[test]
+    fn unsubscribe_stops_only_that_sink() {
+        let sup = Supervisor::new();
+        let script = "read _go; echo one; read _go2; echo two";
+        let id = sup
+            .create(spec_for("/bin/sh", vec!["-c".into(), script.into()]))
+            .expect("create");
+        let (tx1, rx1) = mpsc::channel::<Vec<u8>>();
+        let (tx2, rx2) = mpsc::channel::<Vec<u8>>();
+        sup.subscribe_output(&id, 1, tx1).expect("subscribe 1");
+        sup.subscribe_output(&id, 2, tx2).expect("subscribe 2");
+
+        sup.write_stdin(&id, b"go\n").expect("write go");
+        let out1_first = drain_until(&rx1, b"one", Duration::from_secs(5));
+        let out2_first = drain_until(&rx2, b"one", Duration::from_secs(5));
+        assert!(out1_first.windows(3).any(|w| w == b"one"));
+        assert!(out2_first.windows(3).any(|w| w == b"one"));
+
+        sup.unsubscribe_output(&id, 1);
+        sup.write_stdin(&id, b"go\n").expect("write go2");
+
+        let out2_second = drain_until(&rx2, b"two", Duration::from_secs(5));
+        assert!(
+            out2_second.windows(3).any(|w| w == b"two"),
+            "subscriber 2 must still receive output after 1 unsubscribes, got: {out2_second:?}"
+        );
+
+        // Subscriber 1 was unsubscribed BEFORE "two" was ever written, so it must never see it —
+        // and since the sink is dropped, the sender-side `send` calls stop being attempted for id
+        // 1, so this recv should time out (channel: no more producers, no more data).
+        let late = rx1.recv_timeout(Duration::from_millis(500));
+        if let Ok(chunk) = late {
+            assert!(
+                !chunk.windows(3).any(|w| w == b"two"),
+                "unsubscribed sink 1 must not receive output sent after unsubscribe"
+            );
+        }
+        sup.kill(&id).expect("kill");
+    }
+
+    // ---- Pv2 §5.1: subscribe on an exited session still refuses (TOCTOU guard preserved). ----
+    #[test]
+    fn subscribe_on_exited_session_errors() {
+        let sup = Supervisor::new();
+        let id = sup
+            .create(spec_for("/bin/sh", vec!["-c".into(), "exit 0".into()]))
+            .expect("create");
+        assert!(
+            wait_for(
+                || !sup.meta(&id).map(|m| m.is_active).unwrap_or(true),
+                Duration::from_secs(5)
+            ),
+            "session must become inactive after exit"
+        );
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>();
+        let err = sup.subscribe_output(&id, 99, tx);
+        assert!(
+            matches!(err, Err(SupervisorError::NoSuchSession(_))),
+            "subscribe on an exited session must return NoSuchSession, got: {err:?}"
+        );
+        let _ = sup.kill(&id);
     }
 }
