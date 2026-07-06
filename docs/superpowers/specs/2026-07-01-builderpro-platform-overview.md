@@ -9,12 +9,31 @@ cycle. Detailed contracts live in per-slice specs, not here.
 
 ## 1. Product
 
-A lightweight macOS desktop control panel that turns the user into a **director of AI development
-teams**. The user sets goals and quality bars; the app's meta-agents decide *what* to build and
-drive off-the-shelf coding agents (claude-code, hermes, opencode, kilo, …) that run in real
-terminals. Around the terminals sits everything needed to run a real dev shop: workspaces of
-repos, a live file explorer, a knowledge graph (linked across projects), a Kanban, goals, and
+> (amended 2026-07-06, vision v2–v4 — see `docs/superpowers/research/2026-07-06-product-vision-v2.md`)
+
+A lightweight macOS control panel whose job is to **take any idea to a working project and
+manage/organize the vibecoding process**. The pain it exists to kill: with 5–6 projects in flight
+at different speeds and stages, goals and context get lost and the owner degrades into a poller
+and button-presser — **the attention tax is the enemy**. Everything that can proceed under policy
+proceeds without the owner; the system pulls the owner in (one batched inbox, morning summaries) —
+the owner never polls.
+
+Opening the app answers, for ALL projects at once and in under 30 seconds: where is each one,
+what moved since I last looked, and what — if anything — needs ME. The home screen shows: a live
+agent feed (who is doing what, on which stage, in which project), per-project progress,
+idea quick-capture into a backlog, an Insights lane (market-sourced opportunities with
+fit-verdicts against goals/metrics), agent-org settings (the CEO and the other organization
+agents are configurable), vector steering (edit goals/priorities — agents pick it up), and the
+hot-questions inbox. Underneath sit real terminals running off-the-shelf coding agents
+(claude-code, hermes, opencode, kilo, …) driven by app-native meta-agents, plus workspaces of
+repos, a live file explorer, a workspace-wide knowledge graph, a kanban, editable workflows, and
 observability.
+
+**North-star metrics**
+
+1. **Time-to-context** on app open: < 30 s for all projects.
+2. **Owner interventions per shipped task**: → 1 (the one approval that matters).
+3. **Unattended progress**: hours agents advance without stalling on a button.
 
 **Design tenets**
 
@@ -22,8 +41,11 @@ observability.
   + honest degradation, structured logging, docs. No "TODO later", no stubs.
 - **Max autonomy, min human-in-the-loop.** Humans set goals + quality; agents self-decide
   everywhere they safely can. Escalation is the exception, batched and validated with the user.
-- **Minimalist but functional UI.** The panel is light; the power is in the terminals + agents.
+- **Minimalist but functional UI.** The panel is light; the power is in the terminals + agents
+  (visual/UX rules: `docs/design-system.md`).
 - **Honest about state.** The app never fakes session/agent status.
+- **Additive, constructor-style growth.** The system extends cube-by-cube; schema and
+  architecture grow by addition, never rebuild.
 
 ---
 
