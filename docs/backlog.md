@@ -29,3 +29,9 @@ Status: open · in-progress · done (row stays, link the closing commit).
 | BL-19 | P3 | release | Tauri auto-updater channel (manifests, hosting) — manual DMG until then | Owner decision D4 | post-S2 | open |
 | BL-20 | P1 | agents/security | macOS Keychain storage for provider API keys (never SQLite/config/logs) | Audit A9; spec §16 | S6a | open |
 | BL-21 | P2 | daemon/ops | Log rotation: appender is `rolling::never` (single unbounded `sessiond.tracing.log`) — switch to daily or size-capped | Runbook truth pass (this cycle) | any | open |
+| BL-22 | P1 | mcp/security | MCP hardening: tool-result prompt-injection mediation, per-server connect consent, stdio-server execution consent, spend caps via the trust layer | Vision-v2 audit V13 | S-EXT | open |
+| BL-23 | P3 | ux/ops | Remote escalation channel — answer a hot question away from the Mac (macOS notification only in v0.x; Telegram/mobile web later) | Owner decision Q3 | post-S6c | open |
+| BL-24 | P2 | data/security | Ingested-telemetry retention + redaction: prod logs/errors + metrics carry PII/secrets — store home, redaction, retention, purge-on-project-delete | Charter telemetry class; Q15 | S9a | open |
+| BL-25 | P3 | product | First-class Experiment entity (hypothesis / budget / metric / verdict); v1 uses Tasks tagged `experiment` | Owner decision Q11 | S8 | open |
+| BL-26 | P2 | orchd | StepRun payload-thinning job: full I/O payloads 14 days → thinned to metadata (summaries + sizes + hashes); 50 MB/run cap with honest truncation markers | Owner decision Q15 | SW1 | open |
+| BL-27 | P2 | orchd/security | Keychain access for `bpa-orchd` unattended runs while the screen is LOCKED — resolve before the first unattended MCP/provider call | ADR-HOST sub-question | S-EXT | open |
