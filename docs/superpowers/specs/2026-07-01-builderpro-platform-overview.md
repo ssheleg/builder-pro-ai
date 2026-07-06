@@ -63,6 +63,39 @@ observability.
 | External coding agents | Run as **terminal workers** (claude-code, hermes, opencode, kilo, …) driven by the app brain |
 | Terminal control surface | The programmatic terminal API built in S1 **is** the surface the agent brain drives in S6 |
 | Methodology | **TDD + DDD**; Superpowers planning cycle (brainstorm → spec → plan → subagent-driven dev) |
+| Unattended execution + app-domain store host | **A second launchd-managed daemon `bpa-orchd`** (mirror of the `bpa-sessiond` pattern) owns the app-domain store, the scheduler, the workflow-engine runtime, and the agent runtime; the GUI is its client. `bpa-sessiond`'s charter is unchanged (terminal domain only). See ADR-HOST below. |
+
+**Locks added 2026-07-06 (vision v2–v4):**
+
+- **Multi-project from day one:** every S2+ data model, store, and event stream is multi-project;
+  UI panels are per-project VIEWS over multi-project data.
+- **Additive-only schema evolution:** entities grow by adding tables/columns; migrations are
+  append-only by policy — never a rebuild (vision-v4 §7, «конструктор: кубик за кубиком»).
+
+### ADR-HOST — the two-daemon topology (locked 2026-07-06)
+
+**Problem.** Vision v2's recurring capabilities (the 24h prod-error self-heal loop, metrics
+watching, scheduled research) must fire with the GUI closed, survive restarts, and never silently
+stop. But app-native agents were slated to run in the core (GUI) process, which dies on window
+close; and the Data-layer charter deliberately bars `bpa-sessiond` — the only always-on process —
+from becoming the app's general engine or database. As architected, unattended execution was
+impossible (audit V2).
+
+**Decision.** A second headless, launchd-supervised daemon — **`bpa-orchd`** — owns: the
+app-domain store (all charter entities), the scheduler + event triggers (SW2), the workflow-engine
+runtime (SW1), and the agent runtime (S6b+). The GUI attaches to it as a client, exactly as it
+attaches to `bpa-sessiond`. `bpa-orchd` drives terminals through the same Hop-B socket protocol as
+any client (Pv2 multi-subscriber attach lets orchd and the GUI co-watch one session).
+
+**Rejected alternatives.** (b) Widening `bpa-sessiond`'s charter with an orchestration domain —
+riskiest option: couples the hardened, stable terminal daemon to the fastest-moving domain logic.
+(c) Honest v0 degradation («schedules fire only while the app runs», catch-up on launch) — fails
+the attention-tax mission; kept only as the documented interim behavior until `bpa-orchd` ships.
+
+**Consequences.** orchd reuses the proven patterns verbatim: launchd LaunchAgent lifecycle +
+runbook, fail-closed forward-only migrations, the D4/Pv2 drain-and-consent upgrade choreography.
+Open sub-question routed to the S-EXT/security spec: Keychain access for unattended runs while
+the screen is locked (BL row added this cycle).
 
 ### Session survival truth table (canonical — slices reference this, must not drift)
 
@@ -73,7 +106,7 @@ The terminal engine (S1) keeps sessions alive in a detached daemon. What actuall
 | GUI close / crash / restart | live shells **keep running** (daemon-owned); reattach + replay |
 | Daemon restart / upgrade / crash | live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
 | **macOS logout** | die (per-user LaunchAgent torn down); cross-logout survival is out of scope (needs a root LaunchDaemon) |
-| Agent runs (S6+) | **undefined until S6b** — agent state is NOT covered by the daemon survival model (honest placeholder) |
+| Workflow / agent runs | hosted by `bpa-orchd` (launchd-supervised, survives GUI close); a run's step state persists in the app-domain store and resumes/catches-up on orchd restart (catch-up policy per SW2) |
 
 This is stated honestly in-app; the product never claims sessions "survive anything."
 (Amended 2026-07-04, A12: the earlier "daemon restart → survive" row overstated — live PTYs die
