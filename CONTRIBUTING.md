@@ -37,6 +37,10 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same set on
 - Every external interaction (network / DB / IPC / files) ships with error handling and **honest
   degradation** — never fake success, never swallow an error silently.
 - Docs are updated **in the same change** that alters behavior they describe.
+- **Design-section rule (normative):** every feature spec includes a `Design` section referencing
+  [`docs/design-system.md`](docs/design-system.md) that lists which canonical atoms it reuses,
+  which new atoms it introduces (a new atom = `design-system.md` gets a row in the same change),
+  and the feature's keyboard path. A feature that invents a parallel visual language fails review.
 - **Backlog rule (normative):**
 
   > Any accepted-deferred finding MUST land in [`docs/backlog.md`](docs/backlog.md) in the same
@@ -53,6 +57,18 @@ Non-trivial work follows the full cycle: brainstorm → design spec committed to
 execution with two-stage review per task (spec compliance, then code quality) → whole-branch
 final review → merge. Specs lock shared contracts (types, wire shapes, file ownership) so a
 zero-context implementer can execute any single task.
+
+## Meta-process
+
+For the platform AND for every project this platform manages (vision v4 §8):
+
+1. The **end goal is always visible and editable**; editing it triggers re-planning.
+2. A **live step-plan to that goal** is always kept, re-actualized whenever the goal changes.
+3. **Architecture and data structures are designed first**; then a minimum is defined and
+   extended constructor-style — cube by cube, additive, never a rebuild (the additive-only schema
+   lock in the overview §2). New cubes slot in; existing cubes are not reassembled.
+
+The CEO/PM agents operate managed projects by this same method.
 
 ## Commit conventions
 

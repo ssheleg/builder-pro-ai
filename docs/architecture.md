@@ -125,6 +125,32 @@ the Tauri core only ever holds a *socket connection* to it, never a process hand
 close/crash/restart keeps live shells running; ANY daemon stop (restart, upgrade, crash) ends
 live shells — records + scrollback rehydrate as inactive sessions (spec §13).
 
+## Two-daemon topology (roadmap — ADR-HOST, 2026-07-06)
+
+Vision v2–v4 adds a SECOND launchd-managed daemon, `bpa-orchd`, so unattended work (scheduled
+workflows, the 24h prod self-heal loop, agent runs) survives GUI close — the GUI process cannot
+host it, and `bpa-sessiond`'s charter bars it from domain logic.
+
+```
+┌──────────────┐   Hop-A (Tauri IPC)   ┌───────────────────────────┐
+│  Webview UI  │ ◄───────────────────► │  Tauri core (GUI process) │
+└──────────────┘                       └────────────┬──────────────┘
+                                    Hop-B socket  ┌──┴──────────────┐
+                                    (client)      ▼                 ▼
+                              ┌───────────────────────┐   ┌─────────────────────────┐
+                              │  bpa-sessiond          │   │  bpa-orchd (NEW)         │
+                              │  terminal domain:      │   │  app-domain store,       │
+                              │  PTYs, scrollback,     │◄──┤  scheduler, workflow     │
+                              │  command_events (bpa.db)│  │  engine, agent runtime   │
+                              └───────────────────────┘   └─────────────────────────┘
+                                 (both launchd LaunchAgents; the GUI AND bpa-orchd are
+                                  clients of bpa-sessiond — Pv2 multi-subscriber attach)
+```
+
+`bpa-orchd` reuses the `bpa-sessiond` patterns verbatim (launchd lifecycle + runbook, fail-closed
+migrations, Pv2 drain/consent upgrade). Ownership boundary + entity map: overview Data-layer
+charter. This block is a roadmap target — `bpa-orchd` is not built yet.
+
 ## Resource envelope (per session)
 
 Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live
@@ -136,6 +162,7 @@ sessions; a configurable cap + typed `SessionLimitReached` error is planned (BL-
 
 - `docs/traceability.md` — every spec §14.2 contract row mapped to the concrete test(s) that cover
   it (no uncovered rows as of Task 25).
+- `docs/design-system.md` — visual + UX design rules (binds every feature's UI).
 - `docs/build-macos.md` — the release build/sign/notarize/verify pipeline
   (`scripts/build-universal.sh`, `scripts/sign-verify.sh`, `scripts/smoke-clean-vm.sh`).
 - `docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md` — the locked
