@@ -13,6 +13,12 @@ export interface Theme {
     statusExited: string; // exited
     statusWaiting: string; // running + waitingForInput
   };
+  /**
+   * The ONE soft-shadow token (design-system.md §4 "Elevation = border, not shadow... Shadows
+   * only for true overlays (dialogs, popovers) — one soft shadow token"). Introduced by the
+   * upgrade-consent dialog (Pv2 §6.2), the first true modal overlay in the app.
+   */
+  shadow: string;
 }
 
 export const theme: Theme = {
@@ -28,4 +34,5 @@ export const theme: Theme = {
     statusExited: "#f85149", // red — process exited
     statusWaiting: "#d29922", // amber — waiting for input
   },
+  shadow: "0 8px 24px rgba(1, 4, 9, 0.45)",
 };

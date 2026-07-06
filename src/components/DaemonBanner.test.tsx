@@ -1,13 +1,20 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { render, screen, cleanup, act } from "@testing-library/react";
+import { render, screen, cleanup, act, fireEvent } from "@testing-library/react";
 import { DaemonBanner } from "./DaemonBanner";
 import { useAppStore } from "../store/store";
 
 afterEach(cleanup);
 beforeEach(() => {
   useAppStore.setState(
-    { sessions: {}, workspaces: {}, activeSessionId: null, daemonConnected: true },
+    {
+      sessions: {},
+      workspaces: {},
+      activeSessionId: null,
+      daemonConnected: true,
+      daemonIncompatible: false,
+      upgradeDialogOpen: false,
+    },
     false,
   );
 });
@@ -31,6 +38,37 @@ describe("DaemonBanner", () => {
     render(<DaemonBanner />);
     expect(screen.getByRole("alert")).toBeTruthy();
     act(() => useAppStore.getState().setDaemonConnected(true));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it('shows an honest "outdated / update required" message (NOT "reconnecting…") when daemonIncompatible is true', () => {
+    act(() => useAppStore.setState({ daemonIncompatible: true, daemonConnected: false }, false));
+    render(<DaemonBanner />);
+    const banner = screen.getByRole("alert");
+    expect(banner.textContent).toMatch(/устарел/);
+    expect(banner.textContent).not.toMatch(/reconnect/i);
+  });
+
+  it('exposes an "Обновить" action that calls setUpgradeDialogOpen(true) when daemonIncompatible', () => {
+    act(() => useAppStore.setState({ daemonIncompatible: true, daemonConnected: false }, false));
+    render(<DaemonBanner />);
+    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    expect(useAppStore.getState().upgradeDialogOpen).toBe(true);
+  });
+
+  it('falls back to the existing "reconnecting…" copy when daemonIncompatible is false and daemonConnected is false', () => {
+    act(() =>
+      useAppStore.setState({ daemonIncompatible: false, daemonConnected: false }, false),
+    );
+    render(<DaemonBanner />);
+    expect(screen.getByRole("alert").textContent).toMatch(/reconnect/i);
+  });
+
+  it("renders nothing when connected and not incompatible", () => {
+    act(() =>
+      useAppStore.setState({ daemonIncompatible: false, daemonConnected: true }, false),
+    );
+    render(<DaemonBanner />);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

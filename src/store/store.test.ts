@@ -28,6 +28,8 @@ describe("useAppStore", () => {
         workspaces: {},
         activeSessionId: null,
         daemonConnected: false,
+        daemonIncompatible: false,
+        upgradeDialogOpen: false,
       },
       false,
     );
@@ -39,7 +41,26 @@ describe("useAppStore", () => {
     expect(s.workspaces).toEqual({});
     expect(s.activeSessionId).toBeNull();
     expect(s.daemonConnected).toBe(false);
+    expect(s.daemonIncompatible).toBe(false);
+    expect(s.upgradeDialogOpen).toBe(false);
     expect(typeof initial.upsertSession).toBe("function");
+  });
+
+  it("setDaemonIncompatible and setUpgradeDialogOpen flip their flags from the false default", () => {
+    expect(useAppStore.getState().daemonIncompatible).toBe(false);
+    expect(useAppStore.getState().upgradeDialogOpen).toBe(false);
+    useAppStore.getState().setDaemonIncompatible(true);
+    expect(useAppStore.getState().daemonIncompatible).toBe(true);
+    useAppStore.getState().setUpgradeDialogOpen(true);
+    expect(useAppStore.getState().upgradeDialogOpen).toBe(true);
+  });
+
+  it("honesty invariant: setUpgradeDialogOpen(false) (Cancel) leaves daemonIncompatible untouched", () => {
+    useAppStore.getState().setDaemonIncompatible(true);
+    useAppStore.getState().setUpgradeDialogOpen(true);
+    useAppStore.getState().setUpgradeDialogOpen(false);
+    expect(useAppStore.getState().upgradeDialogOpen).toBe(false);
+    expect(useAppStore.getState().daemonIncompatible).toBe(true);
   });
 
   it("upsertSession adds then replaces by id", () => {

@@ -18,6 +18,17 @@ export interface AppState {
   workspaces: Record<WorkspaceId, Workspace>;
   activeSessionId: SessionId | null;
   daemonConnected: boolean;
+  /**
+   * Honest daemon state (Pv2 §6.2-6.3): set `true` by `daemon://incompatible`, which is FATAL
+   * (the client's connection task has exited and will NOT reconnect, unlike a plain disconnect).
+   * Stays `true` until the app restarts (a successful upgrade resets everything via
+   * `app.restart()`) — Cancel on the upgrade dialog must NOT clear it, or `DaemonBanner` would
+   * revert to its "reconnecting…" copy, which would be a lie.
+   */
+  daemonIncompatible: boolean;
+  /** Pure UI visibility for `UpgradeDialog`. `true` when the event fires; `false` on Cancel;
+   * re-openable from `DaemonBanner`'s action. Independent of `daemonIncompatible` (see above). */
+  upgradeDialogOpen: boolean;
 
   /** Insert or replace a session by `meta.id`. Idempotent. */
   upsertSession: (meta: SessionMeta) => void;
@@ -35,6 +46,8 @@ export interface AppState {
    */
   markExited: (p: ExitedPayload) => void;
   setDaemonConnected: (connected: boolean) => void;
+  setDaemonIncompatible: (v: boolean) => void;
+  setUpgradeDialogOpen: (v: boolean) => void;
   /** Insert or replace a workspace by `ws.id`. Idempotent. */
   upsertWorkspace: (ws: Workspace) => void;
   setActiveSession: (id: SessionId | null) => void;
@@ -45,6 +58,8 @@ export const useAppStore = create<AppState>((set) => ({
   workspaces: {},
   activeSessionId: null,
   daemonConnected: false,
+  daemonIncompatible: false,
+  upgradeDialogOpen: false,
 
   upsertSession: (meta) =>
     set((s) => ({ sessions: { ...s.sessions, [meta.id]: meta } })),
@@ -93,6 +108,8 @@ export const useAppStore = create<AppState>((set) => ({
     }),
 
   setDaemonConnected: (connected) => set({ daemonConnected: connected }),
+  setDaemonIncompatible: (v) => set({ daemonIncompatible: v }),
+  setUpgradeDialogOpen: (v) => set({ upgradeDialogOpen: v }),
 
   upsertWorkspace: (ws) =>
     set((s) => ({ workspaces: { ...s.workspaces, [ws.id]: ws } })),

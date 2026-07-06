@@ -7,6 +7,7 @@ import {
   onWorkspaceCreated,
   onDaemonDisconnected,
   onDaemonReconnected,
+  onDaemonIncompatible,
 } from "./ipc/events";
 import { listSessions, listWorkspaces } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
@@ -15,6 +16,7 @@ import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { TerminalTabs } from "./components/TerminalTabs";
 import { TerminalPane } from "./components/TerminalPane";
 import { DaemonBanner } from "./components/DaemonBanner";
+import { UpgradeDialog } from "./components/UpgradeDialog";
 import { theme } from "./theme";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -85,6 +87,16 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         });
       }),
     );
+    track(
+      onDaemonIncompatible(() => {
+        // FATAL (Pv2 §6.2): the client's connection task has exited and will NOT reconnect —
+        // set BOTH flags (see store.ts's doc comment for why they're separate); the dialog
+        // opens immediately, and daemonIncompatible outlives it even if the user cancels.
+        const s = useAppStore.getState();
+        s.setDaemonIncompatible(true);
+        s.setUpgradeDialogOpen(true);
+      }),
+    );
 
     /**
      * `list_workspaces`/`list_sessions` reject while the core hasn't finished connecting to
@@ -145,6 +157,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       }}
     >
       <DaemonBanner />
+      <UpgradeDialog />
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <WorkspaceSidebar
           activeWorkspaceId={activeWorkspaceId}

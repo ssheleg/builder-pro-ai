@@ -58,3 +58,13 @@ export function onDaemonDisconnected(cb: () => void): Promise<UnlistenFn> {
 export function onDaemonReconnected(cb: () => void): Promise<UnlistenFn> {
   return listen<null>("daemon://reconnected", () => cb());
 }
+
+/**
+ * `daemon://incompatible` carries no payload (the core emits `()`, which decodes as `null`).
+ * Unlike `daemon://disconnected`, this is FATAL (Pv2 §6.2): the client's connection task has
+ * exited and will NOT reconnect on its own — the frontend must offer the user an upgrade
+ * (`upgradeDaemon`) rather than waiting.
+ */
+export function onDaemonIncompatible(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("daemon://incompatible", () => cb());
+}

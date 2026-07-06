@@ -30,6 +30,10 @@ vi.mock("./ipc/events", () => ({
     cbs.recon = cb;
     return Promise.resolve(unlisten);
   },
+  onDaemonIncompatible: (cb: (p: unknown) => void) => {
+    cbs.incompatible = cb;
+    return Promise.resolve(unlisten);
+  },
 }));
 
 const listSessionsMock = vi.fn().mockResolvedValue([]);
@@ -108,17 +112,32 @@ beforeEach(() => {
   createWorkspaceMock.mockClear();
   pickFolderMock.mockClear();
   useAppStore.setState(
-    { sessions: {}, workspaces: {}, activeSessionId: null, daemonConnected: false },
+    {
+      sessions: {},
+      workspaces: {},
+      activeSessionId: null,
+      daemonConnected: false,
+      daemonIncompatible: false,
+      upgradeDialogOpen: false,
+    },
     false,
   );
 });
 
 describe("App", () => {
-  it("registers all six IPC subscriptions on mount", async () => {
+  it("registers all seven IPC subscriptions on mount", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
-    for (const key of ["created", "state", "exited", "wsCreated", "disc", "recon"]) {
+    for (const key of [
+      "created",
+      "state",
+      "exited",
+      "wsCreated",
+      "disc",
+      "recon",
+      "incompatible",
+    ]) {
       expect(typeof cbs[key]).toBe("function");
     }
   });
@@ -193,6 +212,17 @@ describe("App", () => {
     expect(s.isActive).toBe(false);
     expect(s.lifecycle).toEqual({ kind: "exited", code: 0, signal: null });
     expect(disposeMock).not.toHaveBeenCalled();
+  });
+
+  it("daemon://incompatible sets BOTH daemonIncompatible and upgradeDialogOpen", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.incompatible(null);
+    });
+    expect(useAppStore.getState().daemonIncompatible).toBe(true);
+    expect(useAppStore.getState().upgradeDialogOpen).toBe(true);
   });
 
   it("daemon disconnect shows the banner; reconnect hides it and re-hydrates", async () => {

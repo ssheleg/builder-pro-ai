@@ -87,3 +87,13 @@ export function getSessionState(sessionId: SessionId): Promise<SessionMeta> {
 export function pickFolder(): Promise<string | null> {
   return invoke<string | null>("pick_folder");
 }
+
+/**
+ * Triggers the daemon upgrade (Pv2 §6.2, `src-tauri/src/commands.rs::upgrade_daemon`). The core
+ * kickstarts a new daemon and then calls `app.restart()`, which kills this webview process —
+ * so this promise NEVER resolves on the happy path. Callers MUST treat this as fire-and-forget
+ * (`void upgradeDaemon()`), never `await` it, and never treat non-resolution as failure.
+ */
+export function upgradeDaemon(): Promise<void> {
+  return invoke<void>("upgrade_daemon");
+}

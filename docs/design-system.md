@@ -85,6 +85,7 @@ defect. New tokens are added to `theme.ts` first, doc second, usage third.
 | **Step card** (flows) | kind label (mono uppercase) + name + tool-binding chip (agent=accent, terminal=green, MCP=purple `#bc8cff`) |
 | **Terminal pane** | `#010409` ground, xterm defaults, mono 11-12px chrome |
 | **Empty state** | one dim sentence + one primary action; no illustrations |
+| **Dialog / modal overlay** | fixed full-viewport dim backdrop + centered `bgElevated` card, 1px `border`, radius 10, the ONE soft-shadow token (`theme.shadow`, introduced by this atom — the first true overlay in the app); amber top-edge accent marks "a human is needed" (never amber fill decoration elsewhere); one primary (accent-fill) + one secondary (1px-border ghost) button; `role="dialog"` + `aria-modal` + labelled title, focus the primary button on open, `Escape` = the secondary (cancel) action, visible 2px accent focus ring |
 
 Buttons: primary = accent fill (one per view maximum), secondary = 1px border ghost; destructive
 = red border ghost with confirm. Toggles, not checkboxes, for enable/disable.
