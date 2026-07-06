@@ -1,7 +1,7 @@
 # Builder Pro AI — Protocol v2 Design (Cycle 2)
 
 **Date:** 2026-07-06
-**Status:** approved design (brainstormed with owner; technical calls delegated to best-practice judgment, recorded below)
+**Status:** unfrozen — awaiting owner review → implementation cycle (amended 2026-07-06 for vision v2–v4; see "Vision v2–v4 amendments" below)
 **Parent slice:** S0+S1 (merged @ `285cb2e`), docs-truth/CI pass (merged @ `45891b1`)
 **Seed:** [`2026-07-04-docs-truth-ci-fix-pass-design.md` §8](2026-07-04-docs-truth-ci-fix-pass-design.md); overview [`Protocol evolution & upgrade policy`](2026-07-01-builderpro-platform-overview.md)
 **Context7 verification (2026-07-06):** ciborium/CBOR is self-describing (tagged enums via plain
@@ -393,3 +393,32 @@ section marks v2 as shipped; README/architecture/traceability trued up; backlog 
 - **v1→v2 in the wild:** only affects an installed v0.1 with live sessions updated to v0.2; the
   consent dialog makes the session loss explicit and records survive. Documented in the survival
   truth table already.
+
+---
+
+## Vision v2–v4 amendments (2026-07-06)
+
+The vision-alignment pass introduced `bpa-orchd` (ADR-HOST) and the workflow/agent/MCP layers.
+Three additive adjustments keep Pv2 from foreclosing them — none changes the codec/negotiation/
+attach/drain design above; all are append-only.
+
+1. **Pv2.1 additive-request batch (reserved, NOT built now).** The workflow engine and agents
+   will need terminal capabilities beyond S1's set. Reserve them in the append-only `Request`
+   variant order so they slot in later without another wire break: `command+argv spawn` (no shell
+   wrapping), `typed exit-status wait`, `ReadOutput { since_seq }` (cursor read of scrollback),
+   and a rendered-text snapshot (grid as text). This spec only NAMES and orders them; they are
+   implemented in the slice that needs them (SW1/S6b). Recorded so the variant indices are not
+   reused.
+
+2. **`command_events` attribution hook.** The schema-v2 `command_events` table (§7) gains an
+   attribution column now — which actor / workflow-run / step a command belongs to
+   (nullable `origin` text, e.g. `gui`, `run:<uuid>#<step>`). Additive; lets S7/S8 roll up
+   per-run cost and history later without a second migration. The daemon writes `gui` by default;
+   `bpa-orchd`-driven sessions pass their run/step id at `CreateSession` (additive optional field
+   on the create request — reserved with the Pv2.1 batch).
+
+3. **Second core-side client = `bpa-orchd`.** The codec-agnostic handshake preamble + version
+   negotiation (§4) must not assume a single client identity: both the GUI and `bpa-orchd`
+   connect concurrently (multi-subscriber attach, §5, already supports co-attach). No wire change
+   — a note that the preamble carries no "there is exactly one client" assumption, and peer-cred
+   (§8) admits any same-uid client.
