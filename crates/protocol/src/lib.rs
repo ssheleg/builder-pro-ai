@@ -1,40 +1,24 @@
 //! Shared Hop-B wire protocol + Rust⇄TS domain types for Builder Pro AI.
 //!
 //! Source of truth for `src/ipc/types.ts` (generated via ts-rs; never hand-edited).
-//! Codec is bincode 1.3.3 (fixint, little-endian, deterministic). Framing lives in
-//! `framing.rs`. Every type here implements serde `Serialize`/`Deserialize` (derived,
-//! except `SessionLifecycle`/`TerminalEvent` — see the note below); the types that
-//! cross into TypeScript also derive `ts_rs::TS`.
+//! Codec is CBOR (RFC 8949, via ciborium) for Hop-B; framing lives in `framing.rs`.
+//! Every type here derives serde `Serialize`/`Deserialize`; the types that cross
+//! into TypeScript also derive `ts_rs::TS`.
 //!
-//! ## Dual-codec note (`SessionLifecycle` / `TerminalEvent`)
-//!
-//! Spec §5/§6.2 mandate that these two enums serialize as internally-/adjacently-
-//! tagged JSON over Hop-A (`{"kind":"atPrompt"}`, `{"event":"replay","data":{...}}`),
-//! which is also the shape `ts-rs` must generate for `src/ipc/types.ts`. But bincode
-//! 1.3.3's `Deserializer` does not implement `deserialize_any`/`deserialize_identifier`,
-//! so it cannot deserialize serde's internally- or adjacently-tagged representations
-//! (`#[serde(tag = "..")]` / `#[serde(tag = "..", content = "..")]`) even though it CAN
-//! serialize them — the round trip is asymmetric and fails on the way back. Since
-//! `SessionLifecycle` also crosses Hop-B (embedded in `SessionMeta` and
-//! `Push::StateChanged`, both bincode-framed per spec §7), it needs a wire
-//! representation that works under both codecs from a single `Serialize`/
-//! `Deserialize` impl.
-//!
-//! The fix: both enums get a **hand-written** `Serialize`/`Deserialize` that branches
-//! on `Serializer::is_human_readable()` / `Deserializer::is_human_readable()`:
-//! - human-readable (`serde_json`, i.e. Hop-A / Tauri IPC): delegates to a private
-//!   shadow enum carrying the real `#[serde(tag = .., rename_all = ..)]` derive, so
-//!   the JSON shape is byte-for-byte what spec §5/§6.2 specify.
-//! - non-human-readable (`bincode`, i.e. Hop-B): serializes the shadow enum to a JSON
-//!   *string* and writes that string (a plain bincode-native type), then reverses this
-//!   on deserialize. This keeps the wire format symmetric under bincode without
-//!   changing the JSON shape at all.
-//!
-//! `#[ts(tag = .., rename_all = ..)]` (ts-rs's own attribute namespace, independent of
-//! serde-compat) is applied directly to the public enums, so the generated TypeScript
-//! union is unaffected by this workaround and matches spec §5/§6.2 exactly.
+//! `SessionLifecycle` (internally tagged, `tag = "kind"`) and `TerminalEvent`
+//! (adjacently tagged, `tag = "event", content = "data"`) match the discriminated
+//! unions spec §5/§6.2 require in `src/ipc/types.ts`, and derive plainly: CBOR
+//! (unlike the bincode codec used before Pv2 §3.1) supports serde's internally- and
+//! adjacently-tagged representations natively on both serialize and deserialize, so
+//! no hand-written dual-codec shim is needed (Pv2 §3.2 retired the shim + its
+//! `*Shape` shadow structs). Their own `///` doc comments below still describe the
+//! retired bincode/dual-codec rationale verbatim — that text is copied byte-for-byte
+//! into `src/ipc/types.ts` by ts-rs, and the parity test asserts that file is
+//! unchanged across this refactor, so it's kept as-is rather than "corrected" out of
+//! sync with the generated output. Treat this module doc as the current, accurate
+//! account; the per-item docs on those two enums are frozen for output parity.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 mod framing;
@@ -65,8 +49,8 @@ pub struct Workspace {
 /// hand-written instead of derived: bincode cannot deserialize an internally-tagged
 /// enum directly, but this type also crosses the bincode-framed Hop-B wire (nested in
 /// `SessionMeta` / `Push::StateChanged`).
-#[derive(Clone, Debug, PartialEq, TS)]
-#[ts(tag = "kind", rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 #[ts(export_to = "types.ts")]
 pub enum SessionLifecycle {
     /// idle at shell prompt (after OSC 133 B, before C)
@@ -80,74 +64,6 @@ pub enum SessionLifecycle {
         code: Option<u8>,
         signal: Option<String>,
     },
-}
-
-/// Private shadow of [`SessionLifecycle`] carrying the real serde tag derive; used
-/// only by the hand-written `Serialize`/`Deserialize` impls below (see the
-/// module-level "Dual-codec note").
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-enum SessionLifecycleShape {
-    AtPrompt,
-    Typing,
-    Running,
-    Exited {
-        code: Option<u8>,
-        signal: Option<String>,
-    },
-}
-
-impl From<&SessionLifecycle> for SessionLifecycleShape {
-    fn from(v: &SessionLifecycle) -> Self {
-        match v {
-            SessionLifecycle::AtPrompt => SessionLifecycleShape::AtPrompt,
-            SessionLifecycle::Typing => SessionLifecycleShape::Typing,
-            SessionLifecycle::Running => SessionLifecycleShape::Running,
-            SessionLifecycle::Exited { code, signal } => SessionLifecycleShape::Exited {
-                code: *code,
-                signal: signal.clone(),
-            },
-        }
-    }
-}
-
-impl From<SessionLifecycleShape> for SessionLifecycle {
-    fn from(v: SessionLifecycleShape) -> Self {
-        match v {
-            SessionLifecycleShape::AtPrompt => SessionLifecycle::AtPrompt,
-            SessionLifecycleShape::Typing => SessionLifecycle::Typing,
-            SessionLifecycleShape::Running => SessionLifecycle::Running,
-            SessionLifecycleShape::Exited { code, signal } => {
-                SessionLifecycle::Exited { code, signal }
-            }
-        }
-    }
-}
-
-impl Serialize for SessionLifecycle {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let shape: SessionLifecycleShape = self.into();
-        if serializer.is_human_readable() {
-            shape.serialize(serializer)
-        } else {
-            let json = serde_json::to_string(&shape).map_err(serde::ser::Error::custom)?;
-            serializer.serialize_str(&json)
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for SessionLifecycle {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            let shape = SessionLifecycleShape::deserialize(deserializer)?;
-            Ok(shape.into())
-        } else {
-            let s = String::deserialize(deserializer)?;
-            let shape: SessionLifecycleShape =
-                serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
-            Ok(shape.into())
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, TS)]
@@ -178,8 +94,8 @@ pub struct SessionMeta {
 /// see spec §7). It still gets the same dual-codec `Serialize`/`Deserialize` treatment
 /// as `SessionLifecycle` (see the module-level "Dual-codec note") purely so it also
 /// round-trips through bincode directly, for test parity / defense in depth.
-#[derive(Clone, Debug, PartialEq, TS)]
-#[ts(tag = "event", content = "data", rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, TS)]
+#[serde(tag = "event", content = "data", rename_all = "camelCase")]
 #[ts(export_to = "types.ts")]
 pub enum TerminalEvent {
     /// FIRST msg on attach; write BEFORE term.open()
@@ -190,83 +106,6 @@ pub enum TerminalEvent {
     },
     /// incremental live PTY bytes
     Output { bytes: Vec<u8> },
-}
-
-/// Private shadow of [`TerminalEvent`] carrying the real serde tag/content derive;
-/// used only by the hand-written `Serialize`/`Deserialize` impls below.
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "event", content = "data", rename_all = "camelCase")]
-enum TerminalEventShape {
-    Replay {
-        cols: u16,
-        rows: u16,
-        content: Vec<u8>,
-    },
-    Output {
-        bytes: Vec<u8>,
-    },
-}
-
-impl From<&TerminalEvent> for TerminalEventShape {
-    fn from(v: &TerminalEvent) -> Self {
-        match v {
-            TerminalEvent::Replay {
-                cols,
-                rows,
-                content,
-            } => TerminalEventShape::Replay {
-                cols: *cols,
-                rows: *rows,
-                content: content.clone(),
-            },
-            TerminalEvent::Output { bytes } => TerminalEventShape::Output {
-                bytes: bytes.clone(),
-            },
-        }
-    }
-}
-
-impl From<TerminalEventShape> for TerminalEvent {
-    fn from(v: TerminalEventShape) -> Self {
-        match v {
-            TerminalEventShape::Replay {
-                cols,
-                rows,
-                content,
-            } => TerminalEvent::Replay {
-                cols,
-                rows,
-                content,
-            },
-            TerminalEventShape::Output { bytes } => TerminalEvent::Output { bytes },
-        }
-    }
-}
-
-impl Serialize for TerminalEvent {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let shape: TerminalEventShape = self.into();
-        if serializer.is_human_readable() {
-            shape.serialize(serializer)
-        } else {
-            let json = serde_json::to_string(&shape).map_err(serde::ser::Error::custom)?;
-            serializer.serialize_str(&json)
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for TerminalEvent {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            let shape = TerminalEventShape::deserialize(deserializer)?;
-            Ok(shape.into())
-        } else {
-            let s = String::deserialize(deserializer)?;
-            let shape: TerminalEventShape =
-                serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
-            Ok(shape.into())
-        }
-    }
 }
 
 // ---- Hop-B wire frame (core ⇄ daemon). NOT exported to TS. ----

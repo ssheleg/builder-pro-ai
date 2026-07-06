@@ -1,14 +1,30 @@
 use bpa_protocol::*;
 
-/// bincode 1.3.3 default serialize/deserialize must round-trip every wire type.
+/// Hop-B framing (`u32`-LE length prefix + CBOR body, via ciborium) must round-trip
+/// every wire type byte-identically.
 fn assert_frame_roundtrip(frame: Frame) {
-    let bytes = bincode::serialize(&frame).expect("serialize");
-    let back: Frame = bincode::deserialize(&bytes).expect("deserialize");
+    let bytes = encode_frame(&frame).expect("encode");
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&bytes);
+    let mut decoded = decoder.decode().expect("decode");
+    assert_eq!(decoded.len(), 1, "expected exactly one decoded frame");
+    let back = decoded.remove(0);
     assert_eq!(
-        bincode::serialize(&back).expect("re-serialize"),
+        encode_frame(&back).expect("re-encode"),
         bytes,
         "frame did not round-trip byte-identically"
     );
+}
+
+/// Direct CBOR round-trip (no framing) for types that never cross Hop-B on their own.
+fn assert_cbor_roundtrip<T>(value: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).expect("serialize");
+    let back: T = ciborium::from_reader(bytes.as_slice()).expect("deserialize");
+    assert_eq!(&back, value, "value did not round-trip through CBOR");
 }
 
 fn sample_workspace() -> Workspace {
@@ -208,9 +224,20 @@ fn every_push_variant_roundtrips() {
 }
 
 #[test]
-fn every_terminal_event_roundtrips() {
-    // TerminalEvent is Serialize-only over Hop A, but must still bincode-round-trip
-    // via serde for parity coverage; it derives Deserialize too for symmetry.
+fn every_session_lifecycle_variant_roundtrips_via_cbor() {
+    // SessionLifecycle also crosses Hop-B nested in SessionMeta/Push::StateChanged
+    // (covered above via full Frame round-trips); this asserts the bare enum too,
+    // directly through CBOR (ciborium), independent of framing.
+    for lc in all_lifecycles() {
+        assert_cbor_roundtrip(&lc);
+    }
+}
+
+#[test]
+fn every_terminal_event_variant_roundtrips_via_cbor() {
+    // TerminalEvent is a Hop-A-only type (Tauri Channel<TerminalEvent>, JSON in
+    // production) but must still round-trip through CBOR for parity coverage now
+    // that it's a plain tagged derive (no more dual-codec).
     for ev in [
         TerminalEvent::Replay {
             cols: 80,
@@ -221,9 +248,7 @@ fn every_terminal_event_roundtrips() {
             bytes: vec![1, 2, 3],
         },
     ] {
-        let bytes = bincode::serialize(&ev).expect("serialize");
-        let back: TerminalEvent = bincode::deserialize(&bytes).expect("deserialize");
-        assert_eq!(bincode::serialize(&back).expect("re"), bytes);
+        assert_cbor_roundtrip(&ev);
     }
 }
 
