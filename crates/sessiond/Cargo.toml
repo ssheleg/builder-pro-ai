@@ -19,7 +19,6 @@ alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true }
-bincode = { workspace = true }
 rustix = { workspace = true }
 libc = { workspace = true }
 uuid = { workspace = true }
@@ -31,4 +30,3 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 bpa-protocol = { workspace = true }
-bincode = { workspace = true }

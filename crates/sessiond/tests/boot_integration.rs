@@ -3,25 +3,32 @@
 
 use std::time::Duration;
 
+use bpa_sessiond::protocol::{encode_frame, FrameDecoder};
 use bpa_sessiond::protocol::{Frame, Request, Response, MAGIC, PROTO_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 async fn send_frame(s: &mut UnixStream, f: &Frame) {
-    let body = bincode::serialize(f).unwrap();
-    s.write_all(&(body.len() as u32).to_le_bytes())
-        .await
-        .unwrap();
-    s.write_all(&body).await.unwrap();
+    // `encode_frame` already prepends the u32-LE length prefix — write its output verbatim,
+    // do NOT add a second prefix on top.
+    let bytes = encode_frame(f).unwrap();
+    s.write_all(&bytes).await.unwrap();
     s.flush().await.unwrap();
 }
 async fn recv_frame(s: &mut UnixStream) -> Frame {
+    // Read exactly one length-prefixed CBOR frame off the wire via the shared FrameDecoder: read
+    // the 4-byte LE length, then that many body bytes, feed both into the decoder, and take the
+    // single frame it yields (mirrors the length-prefix framing `encode_frame` produces).
     let mut lenb = [0u8; 4];
     s.read_exact(&mut lenb).await.unwrap();
     let len = u32::from_le_bytes(lenb) as usize;
     let mut body = vec![0u8; len];
     s.read_exact(&mut body).await.unwrap();
-    bincode::deserialize(&body).unwrap()
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&lenb);
+    decoder.push(&body);
+    let mut frames = decoder.decode().unwrap();
+    frames.remove(0)
 }
 
 #[tokio::test]

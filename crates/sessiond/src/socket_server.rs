@@ -15,7 +15,7 @@
 //!
 //! ## Framing (spec §7)
 //!
-//! Every wire message is `u32`-LE length + `bincode(Frame)`. We reuse the protocol crate's own
+//! Every wire message is `u32`-LE length + `CBOR(Frame)`. We reuse the protocol crate's own
 //! codec ([`crate::protocol::encode_frame`] / [`crate::protocol::FrameDecoder`] /
 //! [`crate::protocol::MAX_FRAME_LEN`]) verbatim so both sides share one implementation and the
 //! oversized-length / partial-frame rules can never drift. `FrameDecoder` buffers partial frames
@@ -45,8 +45,7 @@ use crate::shell_integration::{classify_shell, write_session_assets};
 use crate::singleton::check_peer_cred;
 
 use bpa_protocol::{
-    encode_frame, Frame, FrameDecoder, Push, Request, Response, SessionMeta, Workspace, MAGIC,
-    PROTO_VERSION,
+    encode_frame, Frame, FrameDecoder, Push, Request, Response, SessionMeta, Workspace,
 };
 
 /// Per-client bounded outbound queue depth (frames). Overflow (a client that stopped reading) ⇒
@@ -311,49 +310,23 @@ fn now_secs() -> i64 {
 /// framing/protocol error or outbound overflow (the caller only logs it).
 async fn handle_client(
     conn_id: u64,
-    mut stream: UnixStream,
+    stream: UnixStream,
     deps: Arc<ServerDeps>,
     broadcaster: Broadcaster,
     mut shutdown: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    // One decoder for the whole connection lifetime — carries any bytes batched after the Hello
-    // frame across the reader/writer split so no pipelined request is ever lost.
+    // One decoder for the whole connection lifetime — carries any bytes batched after the
+    // handshake preamble across the reader/writer split so no pipelined request is ever lost.
     let mut reader = FrameReader::new();
 
-    // ---- Handshake gate (spec §7): the FIRST frame MUST be Hello with matching magic+version. ----
-    let first = match reader.next(&mut stream).await? {
-        Some(f) => f,
-        None => return Ok(()), // client closed before saying anything
-    };
-    let handshake_ok = matches!(
-        &first,
-        Frame::Request { id: 0, req: Request::Hello { magic, proto_version, .. } }
-            if *magic == MAGIC && *proto_version == PROTO_VERSION
-    );
-    if !handshake_ok {
-        // Wrong magic, wrong/out-of-range version, or a non-Hello first frame ⇒ refuse + close.
-        let bytes = encode_frame(&Frame::Response {
-            id: 0,
-            res: Response::Incompatible {
-                min: PROTO_VERSION,
-                max: PROTO_VERSION,
-            },
-        })
-        .map_err(to_io)?;
-        stream.write_all(&bytes).await?;
-        stream.flush().await?;
-        return Ok(()); // close the connection
-    }
-    let welcome = encode_frame(&Frame::Response {
-        id: 0,
-        res: Response::Welcome {
-            proto_version: PROTO_VERSION,
-            daemon_build: deps.daemon_build.clone(),
-        },
-    })
-    .map_err(to_io)?;
-    stream.write_all(&welcome).await?;
-    stream.flush().await?;
+    // TODO(Task5): preamble handshake — accept and proceed. The real handshake gate (spec §7 /
+    // Pv2 §4.2/§4.4: read the codec-agnostic client preamble, negotiate a version via
+    // `bpa_protocol::preamble::negotiate`, reply Accepted/Incompatible) is stubbed out here on
+    // purpose so the workspace compiles against the CBOR-only protocol surface (Request::Hello /
+    // Response::Welcome / Response::Incompatible / MAGIC / PROTO_VERSION were removed in Pv2 §3.1-
+    // §3.3). This daemon currently accepts every connection unconditionally and proceeds straight
+    // into the CBOR frame dispatch loop below — Task 5 replaces this block with the real preamble
+    // read + negotiate + reply. DO NOT ship this stub.
 
     // ---- Split into an independent reader + writer, joined by a bounded outbound queue. ----
     let (mut rd, mut wr) = stream.into_split();
@@ -505,11 +478,6 @@ async fn dispatch(
     req: Request,
 ) -> Response {
     match req {
-        Request::Hello { .. } => Response::Error {
-            code: "UnexpectedHello".into(),
-            message: "handshake already completed".into(),
-        },
-
         Request::ListWorkspaces => {
             let db = deps.db.lock().await;
             match db.list_workspaces() {
@@ -835,21 +803,27 @@ mod tests {
 
     // ---- framing helpers (mirror the server codec on the client side) ----
     async fn send_frame(s: &mut UnixStream, f: &Frame) {
-        let body = bincode::serialize(f).unwrap();
-        s.write_all(&(body.len() as u32).to_le_bytes())
-            .await
-            .unwrap();
-        s.write_all(&body).await.unwrap();
+        // `encode_frame` already prepends the u32-LE length prefix — write its output verbatim,
+        // do NOT add a second prefix on top.
+        let bytes = encode_frame(f).unwrap();
+        s.write_all(&bytes).await.unwrap();
         s.flush().await.unwrap();
     }
 
     async fn recv_frame(s: &mut UnixStream) -> Frame {
+        // Read exactly one length-prefixed CBOR frame via the shared FrameDecoder: read the 4-byte
+        // LE length, then that many body bytes, feed both into the decoder, and take the single
+        // frame it yields (mirrors the length-prefix framing `encode_frame` produces).
         let mut lenb = [0u8; 4];
         s.read_exact(&mut lenb).await.unwrap();
         let len = u32::from_le_bytes(lenb) as usize;
         let mut body = vec![0u8; len];
         s.read_exact(&mut body).await.unwrap();
-        bincode::deserialize(&body).unwrap()
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&lenb);
+        decoder.push(&body);
+        let mut frames = decoder.decode().unwrap();
+        frames.remove(0)
     }
 
     /// Like [`recv_frame`] but bounded: panics on a 3 s timeout so a regressed handshake gate (that
@@ -1460,14 +1434,11 @@ mod tests {
                 id,
                 req: Request::ListWorkspaces,
             };
-            let body = bincode::serialize(&f).unwrap();
-            if a.write_all(&(body.len() as u32).to_le_bytes())
-                .await
-                .is_err()
-            {
-                break;
-            }
-            if a.write_all(&body).await.is_err() {
+            // `encode_frame` already prepends the u32-LE length prefix — write its output
+            // verbatim, do NOT add a second prefix on top (the previous raw-codec serializer had
+            // no framing of its own, hence the hand-rolled prefix this call site used to need).
+            let bytes = encode_frame(&f).unwrap();
+            if a.write_all(&bytes).await.is_err() {
                 break;
             }
             let _ = a.flush().await;

@@ -566,8 +566,7 @@ mod tests {
         // forcing a conscious decision rather than a silent regression.
         fn is_folder_picking_request(r: &Request) -> bool {
             match r {
-                Request::Hello { .. }
-                | Request::ListWorkspaces
+                Request::ListWorkspaces
                 | Request::CreateWorkspace { .. }
                 | Request::ListSessions
                 | Request::CreateSession { .. }
@@ -599,7 +598,9 @@ mod commands_over_stub_daemon {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    use bpa_protocol::{encode_frame, Frame, Request, Response, MAGIC, PROTO_VERSION};
+    use bpa_protocol::{
+        encode_frame, Frame, FrameDecoder, Request, Response, MAGIC, PROTO_VERSION,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
 
@@ -617,12 +618,18 @@ mod commands_over_stub_daemon {
     static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn read_frame(stream: &mut UnixStream) -> Option<Frame> {
+        // Read exactly one length-prefixed CBOR frame via the shared FrameDecoder: read the
+        // 4-byte LE length, then that many body bytes, feed both into the decoder, and take the
+        // single frame it yields (mirrors the length-prefix framing `encode_frame` produces).
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await.ok()?;
         let len = u32::from_le_bytes(len_buf) as usize;
         let mut body = vec![0u8; len];
         stream.read_exact(&mut body).await.ok()?;
-        bincode::deserialize::<Frame>(&body).ok()
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&len_buf);
+        decoder.push(&body);
+        decoder.decode().ok()?.into_iter().next()
     }
 
     async fn write_stub_frame(stream: &mut UnixStream, frame: &Frame) {

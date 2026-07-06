@@ -98,7 +98,8 @@ async fn main() -> ExitCode {
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        proto = bpa_sessiond::protocol::PROTO_VERSION,
+        proto_min = bpa_sessiond::protocol::preamble::DAEMON_MIN_VERSION,
+        proto_max = bpa_sessiond::protocol::preamble::DAEMON_MAX_VERSION,
         "bpa-sessiond starting"
     );
 

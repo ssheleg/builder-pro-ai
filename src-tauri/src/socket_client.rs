@@ -5,7 +5,7 @@
 //!
 //! ## Framing (spec §7)
 //!
-//! Every wire message is a `u32`-LE length prefix + `bincode(Frame)`. We reuse the protocol
+//! Every wire message is a `u32`-LE length prefix + `CBOR(Frame)`. We reuse the protocol
 //! crate's own codec (`bpa_protocol::{encode_frame, FrameDecoder, MAX_FRAME_LEN}`) verbatim so the
 //! core and the daemon can never drift on the oversized-length / partial-frame rules — see
 //! `crates/protocol/src/framing.rs` and `crates/sessiond/src/socket_server.rs` for the daemon-side
@@ -31,9 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bpa_protocol::{
-    encode_frame, Frame, FrameDecoder, Push, Request, Response, MAGIC, PROTO_VERSION,
-};
+use bpa_protocol::{encode_frame, Frame, FrameDecoder, Push, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -390,50 +388,25 @@ impl From<std::io::Error> for HandshakeError {
     }
 }
 
-/// Connect once and perform the `Hello`/`Welcome` handshake (spec §7). Returns the live stream and
-/// a fresh `FrameReader` primed for the connection's lifetime.
+/// Connect once. Returns the live stream and a fresh `FrameReader` primed for the connection's
+/// lifetime.
+///
+/// TODO(Task8): preamble handshake. The real handshake (spec §7 / Pv2 §4.2/§4.5: write the
+/// codec-agnostic client preamble via `bpa_protocol::preamble::encode_client_preamble`, read the
+/// daemon's reply, and raise `ClientError::IncompatibleDaemon` on `Incompatible`/garbage/timeout)
+/// is stubbed out here on purpose so the core compiles against the CBOR-only protocol surface
+/// (`Request::Hello` / `Response::Welcome` / `Response::Incompatible` / `MAGIC` / `PROTO_VERSION`
+/// were removed in Pv2 §3.1-§3.3). This client currently sends nothing before the connection is
+/// considered established and proceeds straight into normal CBOR frame I/O — Task 8 replaces this
+/// function with the real preamble write + reply read + negotiate. DO NOT ship this stub.
 async fn connect_and_handshake(
     socket_path: &Path,
-    client_build: &str,
+    _client_build: &str,
 ) -> Result<(UnixStream, FrameReader), HandshakeError> {
-    let mut stream = UnixStream::connect(socket_path).await?;
-    write_frame(
-        &mut stream,
-        &Frame::Request {
-            id: 0,
-            req: Request::Hello {
-                magic: MAGIC,
-                proto_version: PROTO_VERSION,
-                client_build: client_build.to_string(),
-            },
-        },
-    )
-    .await?;
-
-    let mut reader = FrameReader::new();
-    match reader.next(&mut stream).await? {
-        Some(Frame::Response {
-            id: 0,
-            res:
-                Response::Welcome {
-                    proto_version,
-                    daemon_build,
-                },
-        }) => {
-            tracing::info!(daemon_build = %daemon_build, proto_version, "daemon handshake ok");
-            Ok((stream, reader))
-        }
-        Some(Frame::Response {
-            id: 0,
-            res: Response::Incompatible { min, max },
-        }) => Err(HandshakeError::Incompatible { min, max }),
-        Some(other) => Err(HandshakeError::Protocol(format!(
-            "bad handshake reply: {other:?}"
-        ))),
-        None => Err(HandshakeError::Protocol(
-            "connection closed during handshake".into(),
-        )),
-    }
+    let stream = UnixStream::connect(socket_path).await?;
+    let reader = FrameReader::new();
+    tracing::info!("daemon connection established (handshake stubbed, Task 8)");
+    Ok((stream, reader))
 }
 
 /// Connect with bounded exponential backoff (`BACKOFF_START` doubling up to `BACKOFF_CAP`, spec
@@ -618,7 +591,7 @@ async fn connection_task(
                 tracing::error!(
                     min,
                     max,
-                    client = PROTO_VERSION,
+                    client_max = bpa_protocol::preamble::CLIENT_MAX_VERSION,
                     "daemon became incompatible; giving up reconnect"
                 );
                 return;
@@ -641,12 +614,18 @@ mod tests {
 
     // --- framing helpers reused by the stub daemon ---
     async fn read_frame(stream: &mut UnixStream) -> Option<Frame> {
+        // Read exactly one length-prefixed CBOR frame via the shared FrameDecoder: read the
+        // 4-byte LE length, then that many body bytes, feed both into the decoder, and take the
+        // single frame it yields (mirrors the length-prefix framing `encode_frame` produces).
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await.ok()?;
         let len = u32::from_le_bytes(len_buf) as usize;
         let mut body = vec![0u8; len];
         stream.read_exact(&mut body).await.ok()?;
-        bincode::deserialize::<Frame>(&body).ok()
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&len_buf);
+        decoder.push(&body);
+        decoder.decode().ok()?.into_iter().next()
     }
 
     async fn write_stub_frame(stream: &mut UnixStream, frame: &Frame) {

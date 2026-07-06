@@ -24,7 +24,6 @@ serde_json = { workspace = true }
 bpa-protocol = { workspace = true }
 bpa-paths = { workspace = true }
 tokio = { workspace = true }
-bincode = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
