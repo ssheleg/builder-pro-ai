@@ -104,7 +104,10 @@ async fn planted_secret_never_appears_in_logs() {
     // Boot the real daemon core (same seam as tests/boot_integration.rs) on a temp socket.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let socket_for_task = socket.clone();
-    let boot = tokio::spawn(async move { bpa_sessiond::run(socket_for_task, shutdown_rx).await });
+    let shutdown_tx_for_task = shutdown_tx.clone();
+    let boot = tokio::spawn(async move {
+        bpa_sessiond::run(socket_for_task, shutdown_tx_for_task, shutdown_rx).await
+    });
 
     let mut conn = None;
     for _ in 0..100 {

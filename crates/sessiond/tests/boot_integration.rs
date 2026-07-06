@@ -70,7 +70,10 @@ async fn boot_handshake_create_session_and_clean_shutdown() {
 
     // Boot the daemon core on the temp socket.
     let socket_for_task = socket.clone();
-    let boot = tokio::spawn(async move { bpa_sessiond::run(socket_for_task, shutdown_rx).await });
+    let shutdown_tx_for_task = shutdown_tx.clone();
+    let boot = tokio::spawn(async move {
+        bpa_sessiond::run(socket_for_task, shutdown_tx_for_task, shutdown_rx).await
+    });
 
     // Wait for the socket to appear + accept a connection.
     let mut conn = None;
@@ -186,7 +189,10 @@ async fn stale_socket_file_is_unlinked_and_rebound() {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let socket_for_task = socket.clone();
-    let boot = tokio::spawn(async move { bpa_sessiond::run(socket_for_task, shutdown_rx).await });
+    let shutdown_tx_for_task = shutdown_tx.clone();
+    let boot = tokio::spawn(async move {
+        bpa_sessiond::run(socket_for_task, shutdown_tx_for_task, shutdown_rx).await
+    });
 
     let mut connected = false;
     for _ in 0..100 {

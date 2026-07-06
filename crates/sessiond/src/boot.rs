@@ -100,7 +100,17 @@ fn open_db_degrading(app_support: &Path) -> Db {
 /// `socket` is bound as-is (no path resolution / dir creation here — the caller, `main.rs` in
 /// production or a test harness here, owns `ensure_socket_dir` + resolving the path so this
 /// function stays pure and drivable against a bare temp-dir socket in tests).
-pub async fn run(socket: PathBuf, shutdown: watch::Receiver<bool>) -> std::io::Result<()> {
+///
+/// `shutdown_tx` and `shutdown_rx` are the two halves of ONE `watch::channel` (the caller owns
+/// construction so it can also wire its own triggers, e.g. `main.rs`'s SIGTERM handler, onto the
+/// sender). `shutdown_rx` drives [`serve`]'s accept loop exactly as before; `shutdown_tx` is cloned
+/// into [`ServerDeps`] so the `Request::DaemonShutdown` dispatch arm can flip the SAME watch a
+/// GUI-initiated shutdown and an operator SIGTERM converge on one graceful-exit path (Pv2 §6.1).
+pub async fn run(
+    socket: PathBuf,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
+) -> std::io::Result<()> {
     let listener = bind_fresh(&socket).await?;
 
     let app_support = app_support_dir();
@@ -123,16 +133,17 @@ pub async fn run(socket: PathBuf, shutdown: watch::Receiver<bool>) -> std::io::R
         attach.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
         runtime_root,
+        shutdown_tx,
     ));
 
     tracing::info!(socket = %socket.display(), "sessiond serving");
-    let serve_res = serve(listener, deps, shutdown).await;
+    let serve_res = serve(listener, deps, shutdown_rx).await;
 
     // Drain (spec §8.3 / §13 DaemonShutdown semantics). `serve` already tears down attach
     // forwarders on its own exit path; calling `detach_all` again here is a no-op-safe
     // belt-and-braces in case `run` is ever driven with a `serve` that changes that contract.
     attach.detach_all();
-    supervisor.shutdown_all(); // killpg each session: SIGTERM -> grace -> SIGKILL (T9 owns mechanics)
+    supervisor.shutdown_all(); // killpg each session: SIGTERM -> grace -> SIGKILL
     {
         let db = db.lock().await;
         if let Err(e) = db.checkpoint() {

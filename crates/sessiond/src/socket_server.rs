@@ -20,8 +20,12 @@
 //! [`ServerDeps`] bundle (supervisor / db / attach / build string), and a `watch` shutdown
 //! receiver, it runs the accept loop until `shutdown` flips to `true` or the listener errors, then
 //! returns. Task 13 (daemon boot) owns process concerns around it: the `flock` single-instance
-//! lock, socket-dir permissions, `bind` + stale-socket unlink, SIGTERM handling, and flipping the
-//! shutdown `watch`. `serve` never touches those — it is drivable in isolation by tests.
+//! lock, socket-dir permissions, `bind` + stale-socket unlink, SIGTERM handling, and the post-`serve`
+//! drain (supervisor killpg, DB checkpoint, socket unlink). `serve` never touches those — it is
+//! drivable in isolation by tests. There are now TWO triggers for the one shutdown `watch`: `main.rs`'s
+//! SIGTERM/SIGINT handler, and `Request::DaemonShutdown`'s dispatch arm below (Pv2 §6.1) — both hold
+//! a clone of the same `watch::Sender` (`ServerDeps::shutdown_tx`), so a GUI-initiated shutdown and
+//! an operator signal converge on the identical graceful-exit path.
 //!
 //! ## Framing (spec §7)
 //!
@@ -97,6 +101,13 @@ pub struct ServerDeps {
     /// transient DB error). Entries are added on `CreateSession`; a dead entry is simply skipped
     /// because `supervisor.meta(id)` returns `NoSuchSession` once the session is reaped.
     live_sessions: std::sync::Mutex<std::collections::HashSet<bpa_protocol::SessionId>>,
+    /// The SAME `watch::Sender` whose receiver drives [`serve`]'s accept loop (and every connected
+    /// client's dispatch loop, and the scrollback flusher). `Request::DaemonShutdown` is the only
+    /// dispatch arm that fires this (spec §6.1): flipping it to `true` is exactly the SIGTERM path
+    /// (`main.rs`'s signal watcher flips the same channel), so a GUI-initiated shutdown and an
+    /// operator SIGTERM converge on one graceful-exit mechanism rather than two. Cloned into
+    /// `ServerDeps` (not moved) because `main.rs`/`boot::run` also needs the receiver half.
+    pub shutdown_tx: watch::Sender<bool>,
 }
 
 impl ServerDeps {
@@ -107,6 +118,7 @@ impl ServerDeps {
         attach: Arc<AttachRegistry>,
         daemon_build: String,
         runtime_root: std::path::PathBuf,
+        shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         ServerDeps {
             supervisor,
@@ -115,6 +127,7 @@ impl ServerDeps {
             daemon_build,
             runtime_root,
             live_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
+            shutdown_tx,
         }
     }
 }
@@ -780,8 +793,32 @@ async fn dispatch(
             }
         },
 
-        // S1: a GUI-initiated shutdown just Acks; the real drain is SIGTERM in Task 13.
-        Request::DaemonShutdown { .. } => Response::Ack,
+        // Real DaemonShutdown semantics (Pv2 §6.1): `drain:true` flushes scrollback + command_events
+        // for every live session (best-effort, same routine as the periodic sweep) BEFORE Acking;
+        // `drain:false` skips the flush. Either way we then flip the shared shutdown watch — the
+        // SAME trigger `main.rs`'s SIGTERM handler flips — so a GUI-initiated shutdown converges on
+        // the identical graceful-exit path: `serve()`'s accept loop stops, this connection's dispatch
+        // loop breaks on the next `shutdown.changed()`, and `boot::run` runs its post-`serve` drain
+        // (supervisor killpg, DB checkpoint, socket unlink) and the process exits cleanly. Because
+        // launchd's `KeepAlive{Crashed}` only restarts on a crash, a clean exit here is NOT
+        // auto-restarted (the upgrade flow, Task 10, `kickstart`s the replacement explicitly).
+        //
+        // Ordering is deliberate: the flush and the `send` both happen here, BEFORE this function
+        // returns `Response::Ack`. The caller (`dispatch_loop` in `handle_client`) only enqueues the
+        // reply into this connection's bounded outbound queue AFTER `dispatch` returns, so flipping
+        // the watch first cannot race the client out of receiving its Ack — the accept loop and other
+        // connections' dispatch loops only observe the flip on their NEXT `tokio::select!` poll, and
+        // this connection's own dispatch loop only observes it after this in-flight request/response
+        // round-trip already enqueued the reply. The writer task drains that queue independently of
+        // the shutdown signal, and the existing `WRITER_JOIN_TIMEOUT` cap on connection cleanup gives
+        // it time to flush the already-enqueued Ack before this connection is torn down.
+        Request::DaemonShutdown { drain } => {
+            if drain {
+                flush_scrollback_once(deps).await;
+            }
+            let _ = deps.shutdown_tx.send(true);
+            Response::Ack
+        }
     }
 }
 
@@ -961,7 +998,12 @@ mod tests {
         }
     }
 
-    fn test_deps() -> (Arc<ServerDeps>, tempfile::TempDir) {
+    /// Build [`ServerDeps`] wired to `shutdown_tx` — the SAME sender whose receiver half the caller
+    /// drives [`serve`] with — so `Request::DaemonShutdown`'s dispatch arm (which calls
+    /// `deps.shutdown_tx.send(true)`) flips the identical watch that stops the server under test.
+    fn test_deps_with_shutdown(
+        shutdown_tx: watch::Sender<bool>,
+    ) -> (Arc<ServerDeps>, tempfile::TempDir) {
         let supervisor = Arc::new(Supervisor::new());
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
         let attach = Arc::new(AttachRegistry::new(supervisor.clone()));
@@ -972,8 +1014,14 @@ mod tests {
             attach,
             "test".into(),
             runtime.path().to_path_buf(),
+            shutdown_tx,
         ));
         (deps, runtime)
+    }
+
+    fn test_deps() -> (Arc<ServerDeps>, tempfile::TempDir) {
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        test_deps_with_shutdown(tx)
     }
 
     async fn spawn_server() -> (
@@ -986,8 +1034,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("d.sock");
         let listener = UnixListener::bind(&path).unwrap();
-        let (deps, runtime) = test_deps();
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let (deps, runtime) = test_deps_with_shutdown(tx.clone());
         let jh = tokio::spawn(async move {
             let _ = serve(listener, deps, rx).await;
         });
@@ -1669,6 +1717,226 @@ mod tests {
                 res: Response::Ack
             }
         ));
+    }
+
+    // ---- Task 9 (Pv2 §6.1): `DaemonShutdown{drain}` real semantics — flush + graceful exit,
+    // replacing the old no-op Ack. `drain:true` must (a) persist scrollback (+ command_events) for
+    // every live session, (b) still Ack the requesting client, and (c) stop `serve()` (the SAME
+    // shutdown watch a SIGTERM flips), all in that order — the flush happens BEFORE the watch flips,
+    // and the watch flip happens BEFORE `dispatch` returns the `Ack` a caller-side test can observe. ----
+    #[tokio::test]
+    async fn daemon_shutdown_drain_flushes_then_exits() {
+        // Spawn the server manually (rather than via `spawn_server()`) so the test keeps its own
+        // `Arc<ServerDeps>` handle — needed below to assert directly against `deps.db` after
+        // `serve()` has returned and this connection is gone.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let (deps, _runtime) = test_deps_with_shutdown(tx.clone());
+        let jh = tokio::spawn({
+            let deps = deps.clone();
+            async move {
+                let _ = serve(listener, deps, rx).await;
+            }
+        });
+
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+
+        // A real workspace row first: `session.workspace_id` is `NOT NULL REFERENCES
+        // workspace(id)` with `foreign_keys = ON` (persistence.rs), so `upsert_session` below would
+        // otherwise fail its (best-effort, silently-swallowed) FK check and never persist — which
+        // would make this test pass for the wrong reason (an always-empty scrollback looking like
+        // "the arm didn't flush" instead of "the row was never insertable").
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 1,
+                req: Request::CreateWorkspace {
+                    name: "w".into(),
+                    root_path: "/tmp".into(),
+                },
+            },
+        )
+        .await;
+        let workspace_id = loop {
+            match recv_frame(&mut c).await {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Workspace(w),
+                } => break w.id,
+                Frame::Push(_) => continue,
+                other => panic!("unexpected frame {other:?}"),
+            }
+        };
+
+        // Create a session and make it emit output (a scrollback sweep persists whatever's in the
+        // ring at flush time — `printf` is instant, so by the time we send DaemonShutdown the
+        // supervisor's in-memory ring already has the bytes).
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 2,
+                req: Request::CreateSession {
+                    workspace_id,
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some("/tmp".into()),
+                    env_overrides: vec![],
+                    cols: 80,
+                    rows: 24,
+                },
+            },
+        )
+        .await;
+        let session_id = loop {
+            match recv_frame(&mut c).await {
+                Frame::Response {
+                    id: 2,
+                    res: Response::Session(meta),
+                } => break meta.id,
+                Frame::Response {
+                    id: 2,
+                    res: Response::Error { code, message },
+                } => panic!("create failed: {code}: {message}"),
+                Frame::Push(_) => continue,
+                other => panic!("unexpected frame {other:?}"),
+            }
+        };
+
+        // Attach so we can observe live `Output` pushes: the PTY reader thread appends to the same
+        // scrollback ring it pushes from, so seeing the marker in an `Output` push is proof the ring
+        // already holds those bytes — no arbitrary sleep-and-hope needed before triggering drain.
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 3,
+                req: Request::AttachSession {
+                    session_id: session_id.clone(),
+                },
+            },
+        )
+        .await;
+        loop {
+            match recv_frame(&mut c).await {
+                Frame::Response {
+                    id: 3,
+                    res: Response::Ack,
+                } => break,
+                Frame::Push(_) => continue,
+                other => panic!("expected Ack for attach, got {other:?}"),
+            }
+        }
+
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 4,
+                req: Request::WriteStdin {
+                    session_id: session_id.clone(),
+                    bytes: b"printf 'DRAIN_MARKER\\n'\n".to_vec(),
+                },
+            },
+        )
+        .await;
+        let mut collected = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut c))
+                .await
+            {
+                Ok(Frame::Push(Push::Output {
+                    session_id: sid,
+                    bytes,
+                })) if sid == session_id => {
+                    collected.extend_from_slice(&bytes);
+                    if collected.windows(12).any(|w| w == b"DRAIN_MARKER") {
+                        break;
+                    }
+                }
+                Ok(Frame::Response {
+                    id: 4,
+                    res: Response::Ack,
+                }) => continue,
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            collected.windows(12).any(|w| w == b"DRAIN_MARKER"),
+            "expected live Output containing DRAIN_MARKER before triggering drain, got: {collected:?}"
+        );
+
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 5,
+                req: Request::DaemonShutdown { drain: true },
+            },
+        )
+        .await;
+
+        // (1) The client must actually receive the Ack — proving flush-then-Ack-then-exit ordering
+        // doesn't drop or race the reply out from under the connection.
+        assert!(
+            matches!(
+                recv_frame_t(&mut c).await,
+                Frame::Response {
+                    id: 5,
+                    res: Response::Ack
+                }
+            ),
+            "DaemonShutdown{{drain:true}} must Ack before the connection is torn down"
+        );
+
+        // (3) serve()'s accept loop must stop (graceful exit) — bounded so a regression (the arm
+        // never flipping the shared watch) fails fast instead of hanging the suite.
+        tokio::time::timeout(std::time::Duration::from_secs(3), jh)
+            .await
+            .expect("serve() must return after DaemonShutdown{drain:true} (graceful exit)")
+            .expect("serve() task must not panic");
+
+        // (2) The session's scrollback must be persisted in the DB — proving the arm actually ran
+        // the flush routine rather than just Acking (the old no-op behavior).
+        let db = deps.db.lock().await;
+        let scrollback = db.load_scrollback(&session_id).expect("load_scrollback");
+        assert!(
+            scrollback
+                .windows(b"DRAIN_MARKER".len())
+                .any(|w| w == b"DRAIN_MARKER"),
+            "expected DaemonShutdown{{drain:true}} to have persisted scrollback containing \
+             DRAIN_MARKER, got {} bytes: {:?}",
+            scrollback.len(),
+            String::from_utf8_lossy(&scrollback)
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_shutdown_no_drain_exits_without_flush() {
+        let (path, _tx, jh, _d, _r) = spawn_server().await;
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 1,
+                req: Request::DaemonShutdown { drain: false },
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_frame_t(&mut c).await,
+            Frame::Response {
+                id: 1,
+                res: Response::Ack
+            }
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), jh)
+            .await
+            .expect("serve() must return after DaemonShutdown{drain:false} (graceful exit)")
+            .expect("serve() task must not panic");
     }
 
     // ---- Peer-cred: honest same-process test. A cross-uid peer cannot be forged in the sandbox,

@@ -128,12 +128,15 @@ async fn main() -> ExitCode {
     let socket = args.socket.unwrap_or_else(resolve_socket_path);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    if let Err(e) = spawn_signal_watcher(shutdown_tx) {
+    // `run` also needs a sender clone for `ServerDeps` (so `Request::DaemonShutdown` can flip the
+    // same watch this SIGTERM/SIGINT handler flips — Pv2 §6.1); the signal watcher takes the
+    // original.
+    if let Err(e) = spawn_signal_watcher(shutdown_tx.clone()) {
         tracing::error!(error = %e, "failed to install signal handlers");
         return ExitCode::FAILURE;
     }
 
-    match bpa_sessiond::run(socket, shutdown_rx).await {
+    match bpa_sessiond::run(socket, shutdown_tx, shutdown_rx).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(error = %e, "sessiond run failed");
