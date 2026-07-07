@@ -73,18 +73,31 @@ impl std::fmt::Display for AttachError {
 
 impl std::error::Error for AttachError {}
 
-/// One live attachment's cancellable forwarder handle.
-struct AttachEntry {
-    /// This attachment's unique subscriber id in the supervisor's sink list (Pv2 §5.1/§5.2).
-    /// Passed to `unsubscribe_output` on detach so this attachment's sink is pruned from the
-    /// supervisor without disturbing any other subscriber's sink for the same session.
-    sub_id: u64,
-    /// Aborts the `spawn_blocking` forwarder task. Aborting a `spawn_blocking` task does not
-    /// preempt it mid-`recv()`, so we also flip `cancel` — the forwarder polls it after every
-    /// `recv()` wakeup, including the wakeup caused by the std sender being dropped when
-    /// `unsubscribe_output` removes this attachment's sink in the supervisor.
-    handle: JoinHandle<()>,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
+/// One attachment's teardown state. An attachment is either [`AttachEntry::Live`] (subscribed to
+/// the supervisor's live output fan-out, with its own forwarder task) or
+/// [`AttachEntry::ReplayOnly`] (attached to an INACTIVE session — exited-unreaped or
+/// boot-rehydrated, Pv2 §7/BL-7 — which got a `Push::Replay` but has no live reader to subscribe
+/// to). Both variants are tracked in the same `entries` map so `attachment_count()`/`detach`/
+/// `detach_all_for_conn` behave uniformly regardless of which kind an attachment is; only `Live`
+/// holds a `sub_id`/supervisor sink or a forwarder to cancel — `ReplayOnly` holds nothing to leak
+/// and detaching it is just a map removal.
+enum AttachEntry {
+    Live {
+        /// This attachment's unique subscriber id in the supervisor's sink list (Pv2 §5.1/§5.2).
+        /// Passed to `unsubscribe_output` on detach so this attachment's sink is pruned from the
+        /// supervisor without disturbing any other subscriber's sink for the same session.
+        sub_id: u64,
+        /// Aborts the `spawn_blocking` forwarder task. Aborting a `spawn_blocking` task does not
+        /// preempt it mid-`recv()`, so we also flip `cancel` — the forwarder polls it after every
+        /// `recv()` wakeup, including the wakeup caused by the std sender being dropped when
+        /// `unsubscribe_output` removes this attachment's sink in the supervisor.
+        handle: JoinHandle<()>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    },
+    /// Attached to an inactive session for scrollback replay only: the `Push::Replay` was already
+    /// sent by `attach()`; nothing further ever arrives (no live reader, so no live `Output` can
+    /// ever follow) and there is nothing to unsubscribe/cancel/abort on detach.
+    ReplayOnly,
 }
 
 /// Multi-subscriber attach registry (Pv2 §5.2-5.4). Holds 0..N live [`AttachEntry`] values per
@@ -112,16 +125,65 @@ impl AttachRegistry {
     /// connections may co-attach the same session; this NEVER supersedes/stops another
     /// connection's (or this connection's own prior) attachment for the same session. `conn_id`
     /// records which connection owns this attachment so teardown can be scoped per-connection.
-    /// Allocates a fresh unique `sub_id`, pushes it onto the supervisor's sink list (push, not
-    /// replace), sends a fresh `Push::Replay` (sanitized snapshot at current cols/rows) into
-    /// `sink` first, then spawns a forwarder that streams live `Push::Output` (with injected
-    /// OSC-133/OSC-7 marks stripped) until THIS attachment's own detach or `sink` closes.
+    ///
+    /// Branches on liveness (Pv2 §7, BL-7 cold-rehydrate): "subscribe to live output" and "replay
+    /// scrollback" are separable — only the replay actually needs the ring `snapshot_scrollback`
+    /// reads, not a live reader.
+    /// - **LIVE** (`meta.is_active`): unchanged path — allocate a `sub_id`, `subscribe_output` so
+    ///   no live byte produced between subscribe and snapshot is ever lost, snapshot + send
+    ///   `Push::Replay`, then spawn the forwarder streaming live `Push::Output` (OSC-133/OSC-7
+    ///   stripped) until this attachment's own detach or `sink` closes.
+    /// - **INACTIVE** (exited-but-unreaped, OR boot-rehydrated — `!meta.is_active` but still
+    ///   tracked in the supervisor map): NO `subscribe_output` call at all — there is no live
+    ///   reader thread to feed a fresh std channel, so subscribing would wire a forwarder that
+    ///   polls forever for a byte that will never arrive (a leak). Just `snapshot_scrollback` +
+    ///   send `Push::Replay`, then register a [`AttachEntry::ReplayOnly`] entry — no sink, no
+    ///   forwarder, nothing to unsubscribe/cancel/abort on detach, but still counted so
+    ///   `attachment_count()`/`detach`/`detach_all_for_conn` stay correct.
+    /// - **UNKNOWN** (`supervisor.meta` errors — never created, or already fully reaped by
+    ///   `kill`): `AttachError::NoSuchSession`, the genuine not-found path.
     pub async fn attach(
         &self,
         conn_id: u64,
         session_id: &SessionId,
         sink: PushSink,
     ) -> Result<(), AttachError> {
+        let meta = self
+            .supervisor
+            .meta(session_id)
+            .map_err(|_| AttachError::NoSuchSession)?;
+
+        let entry = if meta.is_active {
+            self.attach_live(session_id, sink).await?
+        } else {
+            self.attach_replay_only(session_id, sink).await?
+        };
+
+        // Insert at this connection's own key. If THIS SAME connection already held an
+        // attachment for this session (a re-attach without an intervening detach — e.g. a client
+        // that sends AttachSession twice), retire that stale entry exactly like `detach` would.
+        // This is NOT a cross-connection supersede (another connection's attachment for the same
+        // session is never touched, and is not reachable through this key) — it only prevents a
+        // same-connection re-attach from silently leaking the previous forwarder's OS thread and
+        // stale supervisor sink (a no-op for a stale `ReplayOnly` entry — nothing to release).
+        let stale = self
+            .entries
+            .lock()
+            .unwrap()
+            .insert((session_id.clone(), conn_id), entry);
+        if let Some(stale) = stale {
+            self.retire(session_id, stale);
+        }
+        Ok(())
+    }
+
+    /// LIVE branch of [`attach`](Self::attach): subscribe-then-snapshot-then-replay-then-forward,
+    /// unchanged from the pre-Pv2-§7-cold-rehydrate behavior.
+    async fn attach_live(
+        &self,
+        session_id: &SessionId,
+        sink: PushSink,
+    ) -> Result<AttachEntry, AttachError> {
         // Allocate this attachment's own unique sub_id (Pv2 §5.1/§5.2). No supersede: multiple
         // connections — and multiple sub_ids — may be live for the same session_id at once.
         let sub_id = self
@@ -192,43 +254,64 @@ impl AttachRegistry {
             }
         });
 
-        // Insert at this connection's own key. If THIS SAME connection already held an
-        // attachment for this session (a re-attach without an intervening detach — e.g. a client
-        // that sends AttachSession twice), retire that stale entry exactly like `detach` would:
-        // unsubscribe its sub_id and cancel+abort its forwarder. This is NOT a cross-connection
-        // supersede (another connection's attachment for the same session is never touched, and
-        // is not reachable through this key) — it only prevents a same-connection re-attach from
-        // silently leaking the previous forwarder's OS thread and stale supervisor sink.
-        let stale = self
-            .entries
-            .lock()
-            .unwrap()
-            .insert(
-                (session_id.clone(), conn_id),
-                AttachEntry {
-                    sub_id,
-                    handle,
-                    cancel,
-                },
-            );
-        if let Some(stale) = stale {
-            self.supervisor
-                .unsubscribe_output(session_id, stale.sub_id);
-            stale
-                .cancel
-                .store(true, std::sync::atomic::Ordering::Release);
-            stale.handle.abort();
+        Ok(AttachEntry::Live {
+            sub_id,
+            handle,
+            cancel,
+        })
+    }
+
+    /// INACTIVE branch of [`attach`](Self::attach) (Pv2 §7, BL-7 cold-rehydrate): replay-only, no
+    /// live subscription. `snapshot_scrollback` alone carries the session's final/persisted
+    /// scrollback — it only reads the in-memory ring, which a rehydrated entry has pre-filled
+    /// (`pty_supervisor::Supervisor::rehydrate_inactive`) even though it has no reader thread.
+    async fn attach_replay_only(
+        &self,
+        session_id: &SessionId,
+        sink: PushSink,
+    ) -> Result<AttachEntry, AttachError> {
+        let (cols, rows, content) = self
+            .supervisor
+            .snapshot_scrollback(session_id)
+            .map_err(|_| AttachError::NoSuchSession)?;
+
+        let replay = Push::Replay {
+            session_id: session_id.clone(),
+            cols,
+            rows,
+            content,
+        };
+        sink.send(replay)
+            .await
+            .map_err(|_| AttachError::SinkClosed)?;
+
+        Ok(AttachEntry::ReplayOnly)
+    }
+
+    /// Release whatever `entry` holds: unsubscribe + cancel + abort for `Live`, nothing for
+    /// `ReplayOnly` (it never held a supervisor sink or a forwarder to begin with).
+    fn retire(&self, session_id: &SessionId, entry: AttachEntry) {
+        if let AttachEntry::Live {
+            sub_id,
+            handle,
+            cancel,
+        } = entry
+        {
+            self.supervisor.unsubscribe_output(session_id, sub_id);
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+            handle.abort();
         }
-        Ok(())
     }
 
     /// Stop `Output` forwarding for THIS connection's attachment to `session_id` only. Other
     /// connections' (or this connection's own, if it had more than one — it never does since a
     /// connection attaches a session at most once) attachments to the same session are completely
     /// unaffected — a detach from a connection that never attached this session is a no-op, so
-    /// one client's `DetachSession` can never tear down another client's live stream. Unsubscribes
-    /// this attachment's `sub_id` from the supervisor's sink list (Pv2 §5.2) so live bytes stop
-    /// being pushed to it. The PTY keeps running and its ring keeps filling (spec §7 keep-alive).
+    /// one client's `DetachSession` can never tear down another client's live stream. For a `Live`
+    /// entry, unsubscribes its `sub_id` from the supervisor's sink list (Pv2 §5.2) so live bytes
+    /// stop being pushed to it; the PTY keeps running and its ring keeps filling (spec §7
+    /// keep-alive). For a `ReplayOnly` entry (Pv2 §7 inactive attach) this is just a map removal —
+    /// there was never a sink/forwarder to release.
     pub fn detach(&self, conn_id: u64, session_id: &SessionId) {
         let entry = self
             .entries
@@ -236,11 +319,7 @@ impl AttachRegistry {
             .unwrap()
             .remove(&(session_id.clone(), conn_id));
         if let Some(entry) = entry {
-            self.supervisor.unsubscribe_output(session_id, entry.sub_id);
-            entry
-                .cancel
-                .store(true, std::sync::atomic::Ordering::Release);
-            entry.handle.abort();
+            self.retire(session_id, entry);
         }
     }
 
@@ -249,12 +328,7 @@ impl AttachRegistry {
     pub fn detach_all(&self) {
         let mut map = self.entries.lock().unwrap();
         for ((session_id, _conn_id), entry) in map.drain() {
-            self.supervisor
-                .unsubscribe_output(&session_id, entry.sub_id);
-            entry
-                .cancel
-                .store(true, std::sync::atomic::Ordering::Release);
-            entry.handle.abort();
+            self.retire(&session_id, entry);
         }
     }
 
@@ -271,27 +345,24 @@ impl AttachRegistry {
             .collect();
         for key in owned {
             if let Some(entry) = map.remove(&key) {
-                self.supervisor.unsubscribe_output(&key.0, entry.sub_id);
-                entry
-                    .cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
-                entry.handle.abort();
+                self.retire(&key.0, entry);
             }
         }
     }
 
     /// Remove EVERY attach entry for `session_id` when the session itself has ENDED (KillSession or
     /// natural child exit) — every connection currently attached to it, not just one. Graceful:
-    /// does NOT cancel/abort any forwarder — the reader thread drops the session's sink(s) on its
-    /// own exit, so each forwarder drains every remaining byte and terminates on `Disconnected`.
+    /// does NOT cancel/abort any `Live` forwarder — the reader thread drops the session's sink(s) on
+    /// its own exit, so each forwarder drains every remaining byte and terminates on `Disconnected`.
     /// Cancelling here instead would race the reader thread and truncate the session's final
     /// output to whichever attached clients are still watching (a real, user-visible loss).
-    /// `unsubscribe_output` is called per removed entry for symmetry/defense-in-depth even though
-    /// it is moot here — the supervisor's reader-exit path has already cleared its own sinks list
-    /// by the time a session ends, so this is a harmless no-op there, not a required step.
-    /// Returns the forwarders' `JoinHandle`s (production callers drop them — each task is detached
-    /// and self-terminating; tests await them to prove termination). Empty if no entry existed for
-    /// this session.
+    /// `unsubscribe_output` is called per removed `Live` entry for symmetry/defense-in-depth even
+    /// though it is moot here — the supervisor's reader-exit path has already cleared its own sinks
+    /// list by the time a session ends, so this is a harmless no-op there, not a required step. A
+    /// `ReplayOnly` entry has nothing to unsubscribe and contributes no handle.
+    /// Returns the `Live` forwarders' `JoinHandle`s (production callers drop them — each task is
+    /// detached and self-terminating; tests await them to prove termination). Empty if no entry
+    /// existed for this session, or if every entry for it was `ReplayOnly`.
     pub fn remove_session(&self, session_id: &SessionId) -> Vec<JoinHandle<()>> {
         let mut map = self.entries.lock().unwrap();
         let owned: Vec<(SessionId, u64)> = map
@@ -301,9 +372,9 @@ impl AttachRegistry {
             .collect();
         let mut handles = Vec::with_capacity(owned.len());
         for key in owned {
-            if let Some(entry) = map.remove(&key) {
-                self.supervisor.unsubscribe_output(session_id, entry.sub_id);
-                handles.push(entry.handle);
+            if let Some(AttachEntry::Live { sub_id, handle, .. }) = map.remove(&key) {
+                self.supervisor.unsubscribe_output(session_id, sub_id);
+                handles.push(handle);
             }
         }
         handles
@@ -911,10 +982,11 @@ mod tests {
             .unwrap()
             .remove(&(id.clone(), 1))
             .expect("entry present");
-        entry
-            .cancel
-            .store(true, std::sync::atomic::Ordering::Release);
-        let joined = tokio::time::timeout(Duration::from_secs(2), entry.handle).await;
+        let AttachEntry::Live { cancel, handle, .. } = entry else {
+            panic!("expected a Live entry for a still-running session");
+        };
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        let joined = tokio::time::timeout(Duration::from_secs(2), handle).await;
         assert!(
             joined.is_ok(),
             "forwarder task must exit promptly once cancelled — a hang here means a leaked thread"
@@ -1240,13 +1312,15 @@ mod tests {
         let _ = sup.kill(&id);
     }
 
-    // ---- Item 1 step 4 guard: after a natural exit the session lingers in the supervisor map
-    // (only `kill`/rehydrate prunes it) but its reader thread has exited and DROPPED the sink's only
-    // producer. A fresh `attach` here must be refused — otherwise the new forwarder's std channel
-    // would never see a producer drop and would poll forever (leak). `subscribe_output` returns
-    // `NoSuchSession` once `!is_active`, which the attach layer maps to `AttachError::NoSuchSession`. ----
+    // ---- Task 12r (Pv2 §7, BL-7 cold-rehydrate): after a natural exit the session lingers in the
+    // supervisor map (only `kill`/rehydrate prunes it) with its reader thread already exited and
+    // its sinks cleared. Attach must now SUCCEED via the replay-only branch: no `subscribe_output`
+    // call is made at all (there's no live reader to feed a forwarder), `snapshot_scrollback` alone
+    // supplies the session's final scrollback, the sink receives exactly one `Push::Replay`
+    // carrying it, an entry IS registered (`attachment_count()==1`), and — because there is no live
+    // reader — no `Push::Output` ever follows. Detach still removes the entry cleanly. ----
     #[tokio::test]
-    async fn attach_on_naturally_exited_session_errors_no_such_session() {
+    async fn attach_on_inactive_session_replays_scrollback_without_live_subscription() {
         let sup = Arc::new(Supervisor::new());
         // Exits immediately on release; NOT killed, so it stays in the map with is_active=false.
         let id = sup
@@ -1268,21 +1342,88 @@ mod tests {
                 "child never recorded its exit within the deadline"
             );
         }
+        // Let the ring settle so the BYE marker is definitely folded in before we snapshot via attach.
+        let settle_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (_c, _r, bytes) = sup.snapshot_scrollback(&id).expect("snapshot pre-attach");
+            if contains(&bytes, b"BYE") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < settle_deadline,
+                "BYE marker never reached the scrollback ring before the deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         let reg = AttachRegistry::new(sup.clone());
+        let (sink, mut client) = mpsc::channel::<Push>(16);
+        reg.attach(1, &id, sink)
+            .await
+            .expect("attach on an inactive-but-tracked session must succeed (replay-only)");
+
+        // Exactly one entry registered for detach/attachment_count bookkeeping.
+        assert_eq!(
+            reg.attachment_count(),
+            1,
+            "a replay-only attach must still register an entry"
+        );
+
+        // The sink must have received a Replay carrying the session's final scrollback.
+        match recv_timeout(&mut client, 2000).await.expect("replay frame") {
+            Push::Replay {
+                session_id,
+                content,
+                ..
+            } => {
+                assert_eq!(session_id, id);
+                assert!(
+                    contains(&content, b"BYE"),
+                    "Replay content must carry the session's final scrollback, got: {content:?}"
+                );
+            }
+            other => panic!("expected Replay, got {other:?}"),
+        }
+
+        // No live Output can ever follow — there is no reader thread left to produce one.
+        let next = recv_timeout(&mut client, 300).await;
+        assert!(
+            next.is_none(),
+            "a replay-only attach must never receive a live Output push, got {next:?}"
+        );
+
+        // Detach removes the entry cleanly even though it never held a sub_id/forwarder.
+        reg.detach(1, &id);
+        assert_eq!(
+            reg.attachment_count(),
+            0,
+            "detach must remove a replay-only entry just like a live one"
+        );
+
+        let _ = sup.kill(&id);
+    }
+
+    // ---- Task 12r: a `session_id` that was never created/persisted/rehydrated must still be
+    // refused — the genuine not-found path is preserved even though inactive-but-tracked sessions
+    // now succeed. ----
+    #[tokio::test]
+    async fn attach_on_unknown_session_errors_no_such_session() {
+        let sup = Arc::new(Supervisor::new());
+        let reg = AttachRegistry::new(sup);
         let (sink, _client) = mpsc::channel::<Push>(16);
-        let err = reg.attach(1, &id, sink).await.unwrap_err();
+        let err = reg
+            .attach(1, &"never-existed-session".to_string(), sink)
+            .await
+            .unwrap_err();
         assert_eq!(
             err,
             AttachError::NoSuchSession,
-            "attach on an exited-but-unreaped session must be refused (no forever-polling forwarder)"
+            "attach on a truly unknown session id must still error"
         );
         assert_eq!(
             reg.attachment_count(),
             0,
             "no entry may be inserted for a refused attach"
         );
-
-        let _ = sup.kill(&id);
     }
 }

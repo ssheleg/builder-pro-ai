@@ -150,8 +150,8 @@ struct Shared {
     exit_signal: Mutex<Option<String>>,
     grid: Mutex<LiveGrid>,
     scrollback: Mutex<ScrollbackRing>,
-    /// Live subscribers for this session's PTY output (Pv2 §5.1: N independent co-viewers — GUI
-    /// + future agents). Keyed by caller-assigned `sub_id` so a specific subscriber can be
+    /// Live subscribers for this session's PTY output (Pv2 §5.1: N independent co-viewers, GUI
+    /// and future agents). Keyed by caller-assigned `sub_id` so a specific subscriber can be
     /// removed without disturbing the others. The reader thread fans every chunk out to all
     /// entries and prunes any whose receiver has been dropped (`send` returns `Err`).
     sinks: Mutex<Vec<(u64, OutputSink)>>,
@@ -169,8 +169,20 @@ struct Shared {
 }
 
 /// Owned per-session runtime state (the PTY master, writer, killer, and worker threads).
+///
+/// `pty` is `None` for a session built by [`Supervisor::rehydrate_inactive`] — a cold-restored,
+/// PTY-less, replay-only entry (Pv2 §7 / BL-7): no live process, no OS threads, no master to
+/// write/resize/kill. Every method that needs the PTY (`write_stdin`/`resize`/`kill`) fails
+/// cleanly with a typed `SupervisorError` on such an entry rather than panicking or silently
+/// no-op'ing — the session really is dead; pretending otherwise would be a lie to the caller.
 struct Session {
     shared: Arc<Shared>,
+    pty: Option<PtyRuntime>,
+}
+
+/// The PTY-backed half of a live [`Session`]: master/writer/killer + worker threads. Absent
+/// entirely on a rehydrated (replay-only) entry — see [`Session::pty`].
+struct PtyRuntime {
     // The master is retained so `resize` can deliver SIGWINCH for the session's lifetime.
     // `Box<dyn MasterPty + Send>` is `Send` but not `Sync`; wrapping it in a `Mutex` makes
     // `Session` (hence `Supervisor`) `Sync` so the broker can share `Arc<Supervisor>`. `resize`
@@ -475,14 +487,16 @@ impl Supervisor {
 
         let session = Arc::new(Session {
             shared: shared.clone(),
-            master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
-            killer: Mutex::new(killer),
-            pgid,
-            reader_thread: Mutex::new(Some(reader_thread)),
-            wait_thread: Mutex::new(Some(wait_thread)),
-            ticker_stop,
-            ticker_thread: Mutex::new(Some(ticker_thread)),
+            pty: Some(PtyRuntime {
+                master: Mutex::new(pair.master),
+                writer: Mutex::new(writer),
+                killer: Mutex::new(killer),
+                pgid,
+                reader_thread: Mutex::new(Some(reader_thread)),
+                wait_thread: Mutex::new(Some(wait_thread)),
+                ticker_stop,
+                ticker_thread: Mutex::new(Some(ticker_thread)),
+            }),
         });
 
         self.sessions.lock().unwrap().insert(id.clone(), session);
@@ -506,10 +520,14 @@ impl Supervisor {
     }
 
     /// Write raw bytes to the session's PTY master (keystrokes / paste). `flush`es after
-    /// (spec §9.5).
+    /// (spec §9.5). A rehydrated (replay-only) entry has no PTY: fails honestly with
+    /// `SupervisorError::NoSuchSession` rather than panicking or silently discarding the write —
+    /// the session really is dead (Pv2 §7 cold-rehydrate; no reader/writer/threads survive a
+    /// restart, only its persisted scrollback does).
     pub fn write_stdin(&self, id: &str, bytes: &[u8]) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
-        let mut w = s.writer.lock().unwrap();
+        let pty = self.require_pty(&s, id)?;
+        let mut w = pty.writer.lock().unwrap();
         w.write_all(bytes)
             .map_err(|e| SupervisorError::Io(format!("write_all: {e}")))?;
         w.flush()
@@ -518,10 +536,12 @@ impl Supervisor {
     }
 
     /// Resize the PTY (delivers SIGWINCH to the child) and update tracked cols/rows + the live
-    /// grid (spec §9.7).
+    /// grid (spec §9.7). A rehydrated (replay-only) entry has no PTY to resize: fails honestly
+    /// with `SupervisorError::NoSuchSession` (see [`write_stdin`](Self::write_stdin)).
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
-        s.master
+        let pty = self.require_pty(&s, id)?;
+        pty.master
             .lock()
             .unwrap()
             .resize(PtySize {
@@ -535,6 +555,15 @@ impl Supervisor {
         *s.shared.rows.lock().unwrap() = rows;
         s.shared.grid.lock().unwrap().resize(cols, rows);
         Ok(())
+    }
+
+    /// Return `s`'s `PtyRuntime`, or a honest `NoSuchSession` error if `s` is a rehydrated
+    /// (replay-only, PTY-less) entry — the session is tracked (so `get()` succeeded) but there is
+    /// nothing live to drive. Shared by every PTY-driving method so each fails the same way.
+    fn require_pty<'a>(&self, s: &'a Session, id: &str) -> Result<&'a PtyRuntime, SupervisorError> {
+        s.pty
+            .as_ref()
+            .ok_or_else(|| SupervisorError::NoSuchSession(id.to_string()))
     }
 
     /// Register an additional live output subscriber for this session, keyed by caller-assigned
@@ -643,9 +672,15 @@ impl Supervisor {
     /// always `killer.kill()` + join the worker threads to reap the child (no zombie / no
     /// orphaned grandchildren). Falls back to `killer.kill()` when there is no process-group
     /// leader (non-POSIX / ConPTY).
+    ///
+    /// A rehydrated (replay-only) entry has no PTY/process/threads to kill: fails honestly with
+    /// `SupervisorError::NoSuchSession` (see [`write_stdin`](Self::write_stdin)) and leaves the
+    /// entry in the map untouched — there is nothing to reap, and removing the entry here would
+    /// destroy the only surviving copy of its scrollback before a future `attach` can replay it.
     pub fn kill(&self, id: &str) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
-        if let Some(pgid) = s.pgid {
+        let pty = self.require_pty(&s, id)?;
+        if let Some(pgid) = pty.pgid {
             // SIGTERM the whole group (the shell + any un-`setsid`'d descendants).
             unsafe {
                 libc::killpg(pgid, libc::SIGTERM);
@@ -665,15 +700,15 @@ impl Supervisor {
             }
         }
         // Always kill the immediate child + reap it (join the wait thread) to avoid a zombie.
-        let _ = s.killer.lock().unwrap().kill();
-        *s.ticker_stop.lock().unwrap() = true;
-        if let Some(h) = s.wait_thread.lock().unwrap().take() {
+        let _ = pty.killer.lock().unwrap().kill();
+        *pty.ticker_stop.lock().unwrap() = true;
+        if let Some(h) = pty.wait_thread.lock().unwrap().take() {
             let _ = h.join();
         }
-        if let Some(h) = s.reader_thread.lock().unwrap().take() {
+        if let Some(h) = pty.reader_thread.lock().unwrap().take() {
             let _ = h.join();
         }
-        if let Some(h) = s.ticker_thread.lock().unwrap().take() {
+        if let Some(h) = pty.ticker_thread.lock().unwrap().take() {
             let _ = h.join();
         }
         // Drop the session from the live map: its PTY is gone and it must not be re-driven.
@@ -682,12 +717,82 @@ impl Supervisor {
     }
 
     /// Kill every live session (SIGTERM → grace → SIGKILL per group, then reap). Used on daemon
-    /// shutdown (spec §9.8 / §13). Idempotent; safe to call with no live sessions.
+    /// shutdown (spec §9.8 / §13). Idempotent; safe to call with no live sessions. A rehydrated
+    /// (replay-only) entry has nothing to kill — `kill()` returns `NoSuchSession` for it, which
+    /// this loop swallows like any other per-id failure, leaving the entry in the map (harmless:
+    /// the whole process is exiting either way).
     pub fn shutdown_all(&self) {
         let ids: Vec<SessionId> = self.sessions.lock().unwrap().keys().cloned().collect();
         for id in ids {
             let _ = self.kill(&id);
         }
+    }
+
+    /// Cold-rehydrate a session loaded purely from persistence (Pv2 §7 / BL-7: "your records and
+    /// scrollback reappear" after a daemon restart) as an INACTIVE, PTY-less, replay-only entry —
+    /// `is_active=false`, `cols`/`rows` from `meta`, a [`ScrollbackRing`] pre-filled with
+    /// `scrollback` (already-sanitized persisted bytes), and **no** reader/wait/ticker threads and
+    /// **no** PTY master (`pty: None`). This is what lets `AttachSession` on it later succeed via
+    /// `snapshot_scrollback` alone (attach.rs), without needing a live reader.
+    ///
+    /// `meta()` on the rehydrated id then returns `meta` (with `is_active` forced false regardless
+    /// of what the persisted row said — a cold-rehydrated session is never "active", even if it
+    /// was killed mid-write and its last persisted row happened to say otherwise);
+    /// `snapshot_scrollback()` returns the (possibly cap-truncated) pre-filled bytes; `write_stdin`/
+    /// `resize`/`kill` all return `SupervisorError::NoSuchSession` — an honest failure (the session
+    /// really is dead), never a panic or a silent no-op lie.
+    ///
+    /// Idempotent-ish: if a LIVE entry with the same id already exists, this is a no-op — a live
+    /// session always wins over a stale persisted copy (boot only calls this before any session can
+    /// have been created in the fresh process, but the guard also protects any future caller that
+    /// might rehydrate against an already-populated supervisor). Overwrites an existing INACTIVE
+    /// entry for the same id (e.g. a second rehydrate attempt) with the fresh persisted state.
+    pub fn rehydrate_inactive(
+        &self,
+        meta: SessionMeta,
+        scrollback: Vec<u8>,
+    ) -> Result<(), SupervisorError> {
+        {
+            let sessions = self.sessions.lock().unwrap();
+            if let Some(existing) = sessions.get(&meta.id) {
+                if *existing.shared.is_active.lock().unwrap() {
+                    // A live session always wins over a stale persisted copy.
+                    return Ok(());
+                }
+            }
+        }
+
+        let mut ring = ScrollbackRing::new(SCROLLBACK_CAP);
+        // `push` itself enforces the cap (keeping the tail), matching the ring's own semantics —
+        // exceeding-cap persisted blobs are truncated exactly like a live ring would truncate.
+        ring.push(&scrollback);
+
+        let shared = Arc::new(Shared {
+            id: meta.id.clone(),
+            workspace_id: meta.workspace_id.clone(),
+            title: meta.title.clone(),
+            shell: meta.shell.clone(),
+            cwd: Mutex::new(meta.cwd.clone()),
+            cols: Mutex::new(meta.cols),
+            rows: Mutex::new(meta.rows),
+            lifecycle: Mutex::new(meta.lifecycle.clone()),
+            is_active: Mutex::new(false),
+            exit_code: Mutex::new(None),
+            exit_signal: Mutex::new(None),
+            grid: Mutex::new(LiveGrid::new(meta.cols, meta.rows)),
+            scrollback: Mutex::new(ring),
+            sinks: Mutex::new(Vec::new()),
+            last_output: Mutex::new(Instant::now()),
+            master_fd: None,
+            waiting: Mutex::new(false),
+            created_at: meta.created_at,
+            pending_command_events: Mutex::new(Vec::new()),
+            command_seq: AtomicU64::new(0),
+        });
+
+        let session = Arc::new(Session { shared, pty: None });
+        self.sessions.lock().unwrap().insert(meta.id.clone(), session);
+        Ok(())
     }
 }
 
@@ -1309,5 +1414,183 @@ mod tests {
             "subscribe on an exited session must return NoSuchSession, got: {err:?}"
         );
         let _ = sup.kill(&id);
+    }
+
+    // ---- Task 12r (Pv2 §7, BL-7 cold-rehydrate): `rehydrate_inactive` builds a tracked,
+    // INACTIVE, PTY-less entry directly from persisted state — `meta()` reports the persisted
+    // fields with `is_active=false`, and `snapshot_scrollback` returns the pre-filled bytes even
+    // though no reader thread ever produced them. ----
+    #[test]
+    fn rehydrate_inactive_builds_tracked_inactive_entry_with_scrollback() {
+        let sup = Supervisor::new();
+        let meta_in = bpa_protocol::SessionMeta {
+            id: "rehydrated-1".into(),
+            workspace_id: "ws-test".into(),
+            title: "old session".into(),
+            shell: "/bin/zsh".into(),
+            cwd: "/tmp/work".into(),
+            cols: 100,
+            rows: 40,
+            lifecycle: bpa_protocol::SessionLifecycle::Exited {
+                code: Some(0),
+                signal: None,
+            },
+            waiting_for_input: true, // must be forced false by rehydrate regardless of input
+            is_active: true,         // must be forced false by rehydrate regardless of input
+            created_at: 1_700_000_000,
+        };
+        sup.rehydrate_inactive(meta_in.clone(), b"persisted scrollback\n".to_vec())
+            .expect("rehydrate_inactive must succeed for a fresh id");
+
+        let meta_out = sup.meta("rehydrated-1").expect("meta after rehydrate");
+        assert!(!meta_out.is_active, "rehydrated entry must be inactive");
+        assert!(
+            !meta_out.waiting_for_input,
+            "rehydrated entry must not be waiting_for_input"
+        );
+        assert_eq!(meta_out.cols, 100);
+        assert_eq!(meta_out.rows, 40);
+        assert_eq!(meta_out.workspace_id, "ws-test");
+        assert_eq!(meta_out.title, "old session");
+        assert_eq!(meta_out.shell, "/bin/zsh");
+        assert_eq!(meta_out.cwd, "/tmp/work");
+        assert_eq!(meta_out.created_at, 1_700_000_000);
+        assert_eq!(meta_out.lifecycle, meta_in.lifecycle);
+
+        let (cols, rows, bytes) = sup
+            .snapshot_scrollback("rehydrated-1")
+            .expect("snapshot_scrollback on a rehydrated entry must succeed");
+        assert_eq!((cols, rows), (100, 40));
+        assert_eq!(bytes, b"persisted scrollback\n".to_vec());
+    }
+
+    // ---- Task 12r: write_stdin/resize/kill on a rehydrated (PTY-less) entry must fail honestly
+    // with SupervisorError::NoSuchSession — never panic, never silently no-op. ----
+    #[test]
+    fn rehydrated_entry_write_resize_kill_all_fail_honestly() {
+        let sup = Supervisor::new();
+        let meta = bpa_protocol::SessionMeta {
+            id: "rehydrated-2".into(),
+            workspace_id: "ws-test".into(),
+            title: "t".into(),
+            shell: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+            lifecycle: bpa_protocol::SessionLifecycle::AtPrompt,
+            waiting_for_input: false,
+            is_active: false,
+            created_at: 1,
+        };
+        sup.rehydrate_inactive(meta, Vec::new()).expect("rehydrate");
+
+        assert!(
+            matches!(
+                sup.write_stdin("rehydrated-2", b"hi"),
+                Err(SupervisorError::NoSuchSession(_))
+            ),
+            "write_stdin on a rehydrated entry must fail honestly, not panic/no-op"
+        );
+        assert!(
+            matches!(
+                sup.resize("rehydrated-2", 100, 30),
+                Err(SupervisorError::NoSuchSession(_))
+            ),
+            "resize on a rehydrated entry must fail honestly, not panic/no-op"
+        );
+        assert!(
+            matches!(
+                sup.kill("rehydrated-2"),
+                Err(SupervisorError::NoSuchSession(_))
+            ),
+            "kill on a rehydrated entry must fail honestly, not panic/no-op"
+        );
+        // The entry must still be present (kill's honest failure must not have removed it — that
+        // would destroy the only surviving copy of its scrollback before a future attach replays
+        // it).
+        assert!(
+            sup.meta("rehydrated-2").is_ok(),
+            "a failed kill on a rehydrated entry must not remove it from the map"
+        );
+    }
+
+    // ---- Task 12r: rehydrate is idempotent-ish — a LIVE entry always wins over a stale persisted
+    // copy with the same id (boot-time defense in depth; the real boot loop never races a live
+    // create, but future callers might). ----
+    #[test]
+    fn rehydrate_inactive_does_not_overwrite_a_live_entry_with_the_same_id() {
+        let sup = Supervisor::new();
+        let id = sup
+            .create(spec_for("/bin/sh", vec!["-c".into(), "sleep 5".into()]))
+            .expect("create");
+        assert!(sup.meta(&id).unwrap().is_active);
+
+        let stale_meta = bpa_protocol::SessionMeta {
+            id: id.clone(),
+            workspace_id: "ws-stale".into(),
+            title: "stale".into(),
+            shell: "/bin/stale-shell".into(),
+            cwd: "/stale".into(),
+            cols: 1,
+            rows: 1,
+            lifecycle: bpa_protocol::SessionLifecycle::AtPrompt,
+            waiting_for_input: false,
+            is_active: false,
+            created_at: 0,
+        };
+        sup.rehydrate_inactive(stale_meta, b"stale bytes".to_vec())
+            .expect("rehydrate_inactive must not error even when it's a no-op");
+
+        let meta_after = sup.meta(&id).expect("meta after no-op rehydrate attempt");
+        assert!(
+            meta_after.is_active,
+            "a live entry must never be overwritten by a stale rehydrate"
+        );
+        assert_ne!(
+            meta_after.workspace_id, "ws-stale",
+            "the live entry's real fields must survive untouched"
+        );
+
+        sup.kill(&id).expect("kill");
+    }
+
+    // ---- Task 12r: a persisted scrollback blob larger than the 256 KiB ring cap is truncated to
+    // its tail on rehydrate, matching the ring's own live-session semantics (never silently keep
+    // an unbounded blob in memory). ----
+    #[test]
+    fn rehydrate_inactive_truncates_oversized_scrollback_to_tail() {
+        let sup = Supervisor::new();
+        let meta = bpa_protocol::SessionMeta {
+            id: "rehydrated-3".into(),
+            workspace_id: "ws-test".into(),
+            title: "t".into(),
+            shell: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+            lifecycle: bpa_protocol::SessionLifecycle::AtPrompt,
+            waiting_for_input: false,
+            is_active: false,
+            created_at: 1,
+        };
+        let mut oversized = vec![b'A'; SCROLLBACK_CAP - 4];
+        oversized.extend_from_slice(b"TAIL");
+        oversized.extend_from_slice(&[b'B'; 100]); // push well past the cap
+        sup.rehydrate_inactive(meta, oversized.clone())
+            .expect("rehydrate");
+
+        let (_c, _r, bytes) = sup
+            .snapshot_scrollback("rehydrated-3")
+            .expect("snapshot_scrollback");
+        assert_eq!(
+            bytes.len(),
+            SCROLLBACK_CAP,
+            "rehydrated ring must respect the same cap a live ring would"
+        );
+        assert_eq!(
+            &bytes[bytes.len() - 100..],
+            vec![b'B'; 100].as_slice(),
+            "only the tail of an oversized persisted blob must survive"
+        );
     }
 }

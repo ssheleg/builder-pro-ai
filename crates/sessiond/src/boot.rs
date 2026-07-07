@@ -94,6 +94,35 @@ fn open_db_degrading(app_support: &Path) -> Db {
     }
 }
 
+/// Cold-rehydrate every persisted session into `supervisor` as an INACTIVE, PTY-less, replay-only
+/// entry (Pv2 §7 / BL-7: "your records and scrollback reappear" after a daemon restart) — BEFORE
+/// `serve()` starts accepting connections, so the very first `AttachSession` a reconnecting client
+/// sends can already succeed via [`crate::pty_supervisor::Supervisor::rehydrate_inactive`] and the
+/// existing `AttachSession → Push::Replay` path (attach.rs), no new wire request needed.
+///
+/// Best-effort at both levels: a failure to list persisted sessions at all is logged and this
+/// function simply rehydrates nothing (the daemon still boots — spec §11, persistence is
+/// best-effort, never a boot-blocking dependency); a failure to rehydrate ONE session (or to load
+/// its scrollback, which best-effort-defaults to empty) is logged and skipped — it must never
+/// abort the loop or the boot.
+async fn cold_rehydrate_sessions(db: &Arc<Mutex<Db>>, supervisor: &Arc<Supervisor>) {
+    let db = db.lock().await;
+    match db.list_sessions() {
+        Ok(sessions) => {
+            for meta in sessions {
+                let sb = db.load_scrollback(&meta.id).unwrap_or_default();
+                let session_id = meta.id.clone();
+                if let Err(e) = supervisor.rehydrate_inactive(meta, sb) {
+                    tracing::warn!(session_id = %session_id, error = %e, "cold-rehydrate skipped");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list persisted sessions for cold-rehydrate");
+        }
+    }
+}
+
 /// Boot core: bind the listener, wire the dependency graph, run [`serve`] until `shutdown`
 /// flips to `true` (or the listener errors), then drain. Returns once fully drained.
 ///
@@ -117,6 +146,7 @@ pub async fn run(
     let db = Arc::new(Mutex::new(open_db_degrading(&app_support)));
 
     let supervisor = Arc::new(Supervisor::new());
+    cold_rehydrate_sessions(&db, &supervisor).await;
     let attach = Arc::new(AttachRegistry::new(supervisor.clone()));
     // Per-session shell-integration assets (ZDOTDIR / bpa-bash.sh) live under a runtime-root
     // subdirectory next to the socket, keeping them on the same short-path filesystem as the
