@@ -26,6 +26,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter};
 use tracing::{debug, warn};
 
+use crate::commands::WriteStdinLocks;
 use crate::socket_client::{ConnState, DaemonClient};
 
 /// Global event names (spec §6.3). Kept as constants so this module and T18's frontend-facing
@@ -269,17 +270,43 @@ impl Broker {
     }
 }
 
+/// Round-3 hardening (H2): evict the per-session `write_stdin` serialization lock when the daemon
+/// reports the session's child exited — `Push::ChildExited` is the one signal the core observes
+/// for EVERY way a session ends (natural exit, `KillSession` from this or any other client), so
+/// hooking eviction here keeps `AppState.write_stdin_locks` shrinking in step with create/kill
+/// churn instead of accumulating one entry per session-id-ever-written for the life of the
+/// process. Pulled out as a plain function (rather than inlined in [`register`]'s closure) so it
+/// is unit-testable without a Tauri `AppHandle` — the same testability seam rationale as
+/// [`map_push`]/[`map_conn_state`]. Takes `&Push` (not `Push`) so [`register`]'s `on_push` closure
+/// can run it BEFORE handing the same `Push` to `Broker::dispatch_push`, without a clone. Every
+/// non-`ChildExited` push is a no-op. Non-blocking (a short `std::sync::Mutex` critical section in
+/// `WriteStdinLocks::evict`), per the module-level on-connection-task contract.
+pub(crate) fn evict_write_lock_on_child_exited(locks: &WriteStdinLocks, push: &Push) {
+    if let Push::ChildExited { session_id, .. } = push {
+        locks.evict(session_id);
+    }
+}
+
 /// Wire a [`Broker`] into a `DaemonClient`'s push/conn callbacks (spec §7 correlation: `Push`
 /// frames are fanned out by the broker; §13: conn transitions raise `daemon://disconnected`/
 /// `daemon://reconnected`). Called once from T18's `setup()`, after both the `DaemonClient` and
-/// the `Broker` (inside `AppState`) exist.
+/// the `Broker` (inside `AppState`) exist. `write_stdin_locks` is the SAME map `AppState` holds
+/// (H2): the `on_push` closure evicts a session's write-serialization lock on its `ChildExited`
+/// before dispatching, so the map cannot grow unboundedly across session churn.
 ///
 /// `client.on_push`/`client.on_conn` callbacks run inline on `DaemonClient`'s connection task
 /// (locked contract) — both closures below only take a short `std::sync::Mutex` lock and call
 /// non-blocking `Channel::send`/`AppHandle::emit`, so neither one blocks that task.
-pub fn register(broker: Arc<Broker>, client: &DaemonClient) {
+pub fn register(
+    broker: Arc<Broker>,
+    client: &DaemonClient,
+    write_stdin_locks: Arc<WriteStdinLocks>,
+) {
     let push_broker = broker.clone();
-    client.on_push(move |push| push_broker.dispatch_push(push));
+    client.on_push(move |push| {
+        evict_write_lock_on_child_exited(&write_stdin_locks, &push);
+        push_broker.dispatch_push(push)
+    });
 
     // One `seen_disconnected` flag per registration, captured by the `on_conn` closure. `on_conn`
     // replays the *current* `ConnState` synchronously before returning (T14 locked contract), so
@@ -529,5 +556,120 @@ mod tests {
             &mut seen,
         );
         assert!(seen, "Incompatible must set seen_disconnected");
+    }
+
+    // ── H2 (round-3 hardening): write_stdin lock eviction on ChildExited ───────────────────
+    //
+    // `evict_write_lock_on_child_exited` is exactly what `register`'s `on_push` closure runs on
+    // every delivered push, before `dispatch_push` — the broker path, minus the AppHandle-bound
+    // dispatch (a `Broker` needs a real Tauri `AppHandle`, unconstructable in `cargo test`; see
+    // `commands.rs`'s AppState-test rationale). Entries are created here through `lock_for`, the
+    // same call `write_stdin_locked` makes on a write.
+
+    #[test]
+    fn child_exited_evicts_only_that_sessions_write_lock() {
+        let locks = WriteStdinLocks::new();
+        let _dead = locks.lock_for(&"dead".to_string()); // a write created this entry
+        let _live = locks.lock_for(&"live".to_string()); // another session was written too
+        assert!(locks.contains(&"dead".to_string()));
+        assert!(locks.contains(&"live".to_string()));
+
+        evict_write_lock_on_child_exited(
+            &locks,
+            &Push::ChildExited {
+                session_id: "dead".to_string(),
+                code: Some(0),
+                signal: None,
+            },
+        );
+
+        assert!(
+            !locks.contains(&"dead".to_string()),
+            "ChildExited must evict the exited session's write lock entry"
+        );
+        assert!(
+            locks.contains(&"live".to_string()),
+            "a still-live session's entry must be untouched"
+        );
+    }
+
+    #[test]
+    fn non_child_exited_pushes_never_evict() {
+        let locks = WriteStdinLocks::new();
+        let _entry = locks.lock_for(&"s1".to_string());
+
+        evict_write_lock_on_child_exited(
+            &locks,
+            &Push::Output {
+                session_id: "s1".to_string(),
+                bytes: vec![1, 2, 3],
+            },
+        );
+        evict_write_lock_on_child_exited(
+            &locks,
+            &Push::StateChanged {
+                session_id: "s1".to_string(),
+                lifecycle: SessionLifecycle::Running,
+                waiting_for_input: false,
+                cwd: "/".to_string(),
+            },
+        );
+        evict_write_lock_on_child_exited(
+            &locks,
+            &Push::Error {
+                session_id: Some("s1".to_string()),
+                code: "boom".into(),
+                message: "bad".into(),
+            },
+        );
+
+        assert!(
+            locks.contains(&"s1".to_string()),
+            "only ChildExited may evict a session's write lock entry"
+        );
+    }
+
+    #[test]
+    fn child_exited_for_an_unknown_session_is_a_harmless_noop() {
+        let locks = WriteStdinLocks::new();
+        let _entry = locks.lock_for(&"s1".to_string());
+
+        // A ChildExited for a session never written to (no entry) must not panic or disturb
+        // other entries — e.g. another client's session this GUI never typed into.
+        evict_write_lock_on_child_exited(
+            &locks,
+            &Push::ChildExited {
+                session_id: "never-written".to_string(),
+                code: None,
+                signal: Some("SIGKILL".to_string()),
+            },
+        );
+        assert!(locks.contains(&"s1".to_string()));
+    }
+
+    #[test]
+    fn late_write_after_eviction_recreates_a_fresh_entry() {
+        // The documented (harmless) re-creation path: a write racing the eviction simply puts a
+        // fresh entry back — the daemon rejects the write anyway (session gone), and different-
+        // session concurrency is unaffected. This locks the "no panic / no stale Arc reuse"
+        // shape of that race.
+        let locks = WriteStdinLocks::new();
+        let first = locks.lock_for(&"s".to_string());
+        evict_write_lock_on_child_exited(
+            &locks,
+            &Push::ChildExited {
+                session_id: "s".to_string(),
+                code: Some(1),
+                signal: None,
+            },
+        );
+        assert!(!locks.contains(&"s".to_string()));
+
+        let second = locks.lock_for(&"s".to_string());
+        assert!(locks.contains(&"s".to_string()));
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "a post-eviction write must get a FRESH lock, not the evicted one"
+        );
     }
 }

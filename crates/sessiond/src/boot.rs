@@ -176,6 +176,9 @@ pub async fn run(
     ));
 
     tracing::info!(socket = %socket.display(), "sessiond serving");
+    // H1: keep our own clone of `deps` — `serve` takes the other one by value — so the post-`serve`
+    // drain below can still reach `deps.await_pending_final_flushes()` after `serve` returns.
+    let deps_for_drain = deps.clone();
     let serve_res = serve(listener, deps, shutdown_rx).await;
 
     // Drain (spec §8.3 / §13 DaemonShutdown semantics). `serve` already tears down attach
@@ -183,6 +186,22 @@ pub async fn run(
     // belt-and-braces in case `run` is ever driven with a `serve` that changes that contract.
     attach.detach_all();
     supervisor.shutdown_all(); // killpg each session: SIGTERM -> grace -> SIGKILL
+
+    // H1 (round-3 hardening): `shutdown_all()` above synchronously kills every still-live session —
+    // each kill joins that session's wait thread, which (inline, before the join unblocks) runs the
+    // `on_exited` callback registered in `socket_server::install_push_callbacks`. That callback
+    // snapshots the session's final scrollback tail + terminal `Exited` lifecycle and schedules the
+    // actual DB write as a task on `deps.pending_final_flushes` — DETACHED with respect to this
+    // function, but tracked. `#[tokio::main]` dropping the runtime after `run()` returns does NOT
+    // await detached tasks, so without this awaited drain, every session killed by the line above
+    // would race the process exit and could lose its final scrollback tail and have its lifecycle
+    // rehydrate on the next boot as whatever it was persisted as last (not `Exited`). Awaiting here,
+    // BEFORE the checkpoint below, guarantees every one of those writes has actually landed on this
+    // same runtime before it goes away. Reuses the exact same `flush_session_final` writer the
+    // mid-life natural-exit path already uses — no new DB-writer code, no double-append risk
+    // (`upsert_session` is a plain upsert; `append_scrollback` always replaces the row at `seq = 0`).
+    deps_for_drain.await_pending_final_flushes().await;
+
     {
         let db = db.lock().await;
         if let Err(e) = db.checkpoint() {

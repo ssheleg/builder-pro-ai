@@ -290,10 +290,19 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
         return;
     }
 
-    // Kickstart is asynchronous: give the daemon a moment to fork and bind its socket. 8 attempts
-    // x 500ms = up to ~4s of bounded retry, inside the spec's "~3-5s" window. IncompatibleDaemon
-    // short-circuits this (no retry, see `connect_with_retry`'s docs).
-    let connect_result = connect_with_retry(client_build(), 8, Duration::from_millis(500)).await;
+    // Kickstart is asynchronous: give the daemon a moment to fork and bind its socket.
+    // BOOT_CONNECT_ATTEMPTS (8) x 500ms = up to ~4s of bounded retry, inside the spec's "~3-5s"
+    // window. IncompatibleDaemon short-circuits this (no retry, see `connect_with_retry`'s docs).
+    // The budget is the NAMED const (round-3 hardening H3), not a literal: it must stay >=
+    // HANDSHAKE_SUSPECT_CAP or the initial-connect Incompatible escalation (round-2 R1) silently
+    // becomes unreachable — enforced by a compile-time assert next to the const and a runtime
+    // clamp inside `DaemonClient::connect_with_retry`.
+    let connect_result = connect_with_retry(
+        client_build(),
+        crate::socket_client::BOOT_CONNECT_ATTEMPTS,
+        Duration::from_millis(500),
+    )
+    .await;
     commands::write_status(&status, status_for_connect_result(&connect_result));
 
     // manage() UNCONDITIONALLY, before inspecting the outcome (locked contract): every branch
@@ -304,17 +313,18 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
         broker: broker.clone(),
         launchd: agent,
         status: status.clone(),
-        write_stdin_locks,
+        write_stdin_locks: write_stdin_locks.clone(),
     });
 
     match connect_result {
         Ok(client) => {
             let client = Arc::new(client);
-            // register() wires both on_push -> broker.dispatch_push and on_conn ->
+            // register() wires both on_push -> broker.dispatch_push (plus the H2 write-lock
+            // eviction on ChildExited, against the SAME lock map AppState holds) and on_conn ->
             // broker.dispatch_conn (which itself emits daemon://disconnected/reconnected/
             // incompatible on future transitions, spec §13/§6.2) — call exactly once (locked
             // contract), BEFORE moving the client into the slot.
-            register(broker, &client);
+            register(broker, &client, write_stdin_locks);
             // Second `on_conn` registration (finding [12]): keeps `AppState.status` in sync with
             // every subsequent mid-session transition (disconnect / reconnect / fatal
             // incompatible), so `daemon_status` always reflects the current truth even for
@@ -622,8 +632,9 @@ mod tests {
     async fn connect_with_retry_gives_up_after_bounded_attempts_without_panicking() {
         // No daemon is listening anywhere near this path, and XDG_RUNTIME_DIR is left whatever
         // the test process inherited — connect() will fail fast (no daemon bound there), so this
-        // exercises the give-up branch of connect_with_retry deterministically and quickly (3
-        // attempts x 5ms).
+        // exercises the give-up branch of connect_with_retry deterministically and quickly (the
+        // requested 3 attempts are clamped up to HANDSHAKE_SUSPECT_CAP = 8 by the H3 guard, so
+        // 8 attempts x 5ms).
         let started = std::time::Instant::now();
         let result =
             connect_with_retry("test-build".to_string(), 3, Duration::from_millis(5)).await;
@@ -640,13 +651,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_with_retry_treats_zero_attempts_as_one() {
-        // attempts.max(1) guards against a misconfigured 0-attempt call silently returning
-        // immediately without ever trying — it must still make exactly one attempt (and thus one
-        // real failure) rather than a no-op success/failure.
+    async fn connect_with_retry_clamps_zero_attempts_to_a_real_bounded_budget() {
+        // A misconfigured 0-attempt call must not silently return without ever trying: the H3
+        // clamp raises it to HANDSHAKE_SUSPECT_CAP (8) real attempts (pre-H3, `attempts.max(1)`
+        // guaranteed exactly one) — still bounded, still an honest Err when nothing is listening.
+        let started = std::time::Instant::now();
         let result =
             connect_with_retry("test-build".to_string(), 0, Duration::from_millis(5)).await;
         assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the clamped budget must stay bounded"
+        );
     }
 
     // Serializes tests that mutate XDG_RUNTIME_DIR (DaemonClient::connect() resolves the socket
@@ -786,10 +802,17 @@ mod tests {
             unsafe {
                 std::env::set_var("XDG_RUNTIME_DIR", dir.path());
             }
-            // Exactly bring_up_daemon's real config (8 attempts == HANDSHAKE_SUSPECT_CAP), except a
-            // 5ms delay instead of 500ms so the test stays fast.
-            let result =
-                connect_with_retry("test-build".to_string(), 8, Duration::from_millis(5)).await;
+            // The ACTUAL production budget const (round-3 hardening H3) — not a hand-picked `8` —
+            // so a future edit lowering `BOOT_CONNECT_ATTEMPTS` below `HANDSHAKE_SUSPECT_CAP`
+            // fails THIS test (the loop would exhaust as Disconnected before the escalation ever
+            // fired), on top of failing the compile-time assert next to the const. Only the delay
+            // differs from production (5ms instead of 500ms) so the test stays fast.
+            let result = connect_with_retry(
+                "test-build".to_string(),
+                crate::socket_client::BOOT_CONNECT_ATTEMPTS,
+                Duration::from_millis(5),
+            )
+            .await;
             unsafe {
                 std::env::remove_var("XDG_RUNTIME_DIR");
             }
@@ -827,5 +850,79 @@ mod tests {
                 daemon_max: 0
             }
         );
+    }
+
+    // ---- Round-3 hardening H3: the `attempts >= HANDSHAKE_SUSPECT_CAP` coupling must be
+    // ---- structurally unbreakable at runtime too, not just by the compile-time assert on
+    // ---- `BOOT_CONNECT_ATTEMPTS`: even a caller that UNDER-sets `attempts` on the boot-path
+    // ---- entry (`connect_with_retry`) must still give the suspect counter its full
+    // ---- HANDSHAKE_SUSPECT_CAP consecutive transient failures — so a present-but-
+    // ---- unhandshakeable daemon still escalates to IncompatibleDaemon (upgrade dialog reachable)
+    // ---- instead of exhausting a too-small loop as a silent `Disconnected` re-break of R1. ----
+    #[tokio::test]
+    async fn connect_with_retry_clamps_underset_attempts_so_escalation_still_fires() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("d.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        // Same always-transient-fail stub as the R1 escalation test above: accepts every
+        // connection, reads the preamble header, closes without ever replying.
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut header = [0u8; 10];
+                let _ = stream.read_exact(&mut header).await;
+                drop(stream);
+            }
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let result = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            // attempts = 1, deliberately UNDER the cap: without the clamp this exhausts the loop
+            // after a single transient failure and returns Disconnected — the exact silent
+            // re-break of the round-2 R1 Critical this test exists to prevent.
+            let result =
+                connect_with_retry("test-build".to_string(), 1, Duration::from_millis(5)).await;
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            result
+        };
+        std::mem::forget(dir);
+
+        match &result {
+            Err(ClientError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            }) => {
+                assert_eq!(
+                    (*daemon_min, *daemon_max),
+                    (0, 0),
+                    "expected the unknown-range sentinel after cap-exhausted transient failures"
+                );
+            }
+            other => panic!(
+                "expected IncompatibleDaemon{{0,0}} even with an under-set attempts budget — \
+                 the boot path must clamp to HANDSHAKE_SUSPECT_CAP so the escalation stays \
+                 reachable, got {other:?}"
+            ),
+        }
     }
 }

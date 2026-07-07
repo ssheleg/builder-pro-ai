@@ -108,6 +108,21 @@ pub struct ServerDeps {
     /// operator SIGTERM converge on one graceful-exit mechanism rather than two. Cloned into
     /// `ServerDeps` (not moved) because `main.rs`/`boot::run` also needs the receiver half.
     pub shutdown_tx: watch::Sender<bool>,
+    /// Round-3 hardening (H1): `JoinHandle`s for every in-flight `on_exited` final-flush task
+    /// (`flush_session_final`, spawned by `install_push_callbacks`'s `on_exited` closure via
+    /// `rt_handle.spawn`). A session killed mid-session (natural exit, or an explicit
+    /// `KillSession`) has its final flush scheduled as a DETACHED task — fine while the tokio
+    /// runtime keeps running, because nothing needs to wait for it. But at CLEAN shutdown,
+    /// `boot::run` calls `supervisor.shutdown_all()` (which synchronously kills every still-live
+    /// session, and each kill's `on_exited` callback schedules exactly this kind of task) and then
+    /// immediately returns and lets `#[tokio::main]` drop the runtime — which does NOT await
+    /// detached tasks. Without tracking, that final scrollback tail and the terminal `Exited`
+    /// lifecycle for every session killed by shutdown can be silently discarded. `boot::run` drains
+    /// this vec (via [`ServerDeps::await_pending_final_flushes`]) AFTER `shutdown_all()` schedules
+    /// them and BEFORE `db.checkpoint()`, awaiting each one so the write is guaranteed to have
+    /// landed before the process exits. `std::sync::Mutex` (not `tokio::sync::Mutex`): only ever
+    /// touched for the instant it takes to push/drain a `Vec`, never held across an `.await`.
+    pending_final_flushes: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl ServerDeps {
@@ -128,6 +143,61 @@ impl ServerDeps {
             runtime_root,
             live_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutdown_tx,
+            pending_final_flushes: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Track a spawned final-flush task so a later clean shutdown can await it (H1). Called only
+    /// from the `on_exited` closure in `install_push_callbacks`, right after `rt_handle.spawn`.
+    ///
+    /// Sweeps already-finished handles first (same no-unbounded-growth bar as the rest of this
+    /// round): a mid-life exit's flush completes within milliseconds and nothing else ever drains
+    /// the vec until shutdown, so without this sweep a days-long daemon with create/kill churn
+    /// would accumulate one dead `JoinHandle` per session-ever-exited. `JoinHandle::is_finished`
+    /// is a cheap atomic read; retaining an in-flight handle (the only kind shutdown actually
+    /// needs) is exactly the awaited-drain contract.
+    fn track_final_flush(&self, handle: tokio::task::JoinHandle<()>) {
+        let mut pending = self
+            .pending_final_flushes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        pending.retain(|h| !h.is_finished());
+        pending.push(handle);
+    }
+
+    /// Current number of tracked, not-yet-collected final-flush handles (after the same
+    /// finished-handle sweep `track_final_flush` performs) — test observability for the
+    /// no-unbounded-growth contract.
+    #[cfg(test)]
+    pub(crate) fn pending_final_flush_count(&self) -> usize {
+        let mut pending = self
+            .pending_final_flushes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        pending.retain(|h| !h.is_finished());
+        pending.len()
+    }
+
+    /// Drain and await every final-flush task scheduled so far (H1): called by `boot::run` after
+    /// `supervisor.shutdown_all()` (which synchronously kills every still-live session and, via
+    /// each kill's `on_exited` callback, schedules that session's final flush onto this vec) and
+    /// BEFORE `db.checkpoint()` — guaranteeing every session's terminal scrollback + `Exited`
+    /// lifecycle is durably written before the process exits, without relying on any detached task
+    /// surviving the `#[tokio::main]` runtime drop. A task that panicked is logged and otherwise
+    /// ignored (`flush_session_final` itself never panics on a DB error — it logs and swallows —
+    /// so a `JoinError` here would only ever come from a genuine bug, not an expected failure mode);
+    /// this must never propagate a panic into the shutdown path itself.
+    pub async fn await_pending_final_flushes(&self) {
+        let handles: Vec<_> = self
+            .pending_final_flushes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for handle in handles {
+            if let Err(e) = handle.await {
+                tracing::warn!(error = %e, "final flush task panicked during shutdown drain");
+            }
         }
     }
 }
@@ -280,6 +350,14 @@ fn install_push_callbacks(deps: &Arc<ServerDeps>, broadcaster: Broadcaster) {
         // BEFORE building the `Push::ChildExited` below, which moves `session_id`. `Weak::upgrade`
         // is `None` only if the whole daemon is already gone, in which case there is nothing to
         // reap.
+        //
+        // H1 (round-3 hardening): the final-flush task spawned below is still detached in the
+        // ordinary mid-session case (nothing needs to wait for it while the runtime keeps running),
+        // but its `JoinHandle` is now ALSO pushed onto `deps.pending_final_flushes` so a clean
+        // shutdown (`boot::run`, after `supervisor.shutdown_all()`) can await every flush scheduled
+        // by the kills that shutdown just triggered, before checkpointing and exiting — closing the
+        // window where `#[tokio::main]` dropping the runtime could silently discard a still-pending
+        // detached task. See `ServerDeps::await_pending_final_flushes`.
         if let Some(attach) = attach_exited.upgrade() {
             let _ = attach.remove_session(&session_id);
         }
@@ -324,7 +402,8 @@ fn install_push_callbacks(deps: &Arc<ServerDeps>, broadcaster: Broadcaster) {
             // clones its own handle to the broadcaster rather than moving the shared one out of the
             // closure's environment.
             let b_exited = b_exited.clone();
-            rt_handle.spawn(async move {
+            let deps_for_track = deps.clone();
+            let handle = rt_handle.spawn(async move {
                 flush_session_final(&deps, &session_id, meta, scrollback, events).await;
                 b_exited.broadcast(Push::ChildExited {
                     session_id,
@@ -332,6 +411,15 @@ fn install_push_callbacks(deps: &Arc<ServerDeps>, broadcaster: Broadcaster) {
                     signal,
                 });
             });
+            // H1: track this handle so a clean shutdown can await it (see the doc comment above and
+            // `ServerDeps::await_pending_final_flushes`). Registering AFTER `spawn()` returns is
+            // safe — `spawn()` itself is synchronous (it only schedules the task onto the runtime;
+            // the task body has not necessarily run yet), so there is no window where a concurrent
+            // `await_pending_final_flushes` drain could run between the spawn and this push and miss
+            // the handle: both this callback and any drain caller execute on the SAME tokio runtime,
+            // and `boot::run` only calls the drain strictly after `shutdown_all()` (which triggers
+            // this very callback synchronously, via `kill()`'s wait-thread join) has returned.
+            deps_for_track.track_final_flush(handle);
         }
     });
 }
@@ -2969,6 +3057,135 @@ mod tests {
             "expected Exited lifecycle in the persisted row, got {:?}",
             row.lifecycle
         );
+    }
+
+    // ---- Round-3 hardening H1: `await_pending_final_flushes` must be a genuine barrier — after
+    // it returns, every final flush scheduled by an earlier kill has ALREADY landed in the DB. No
+    // `wait_for_db` polling here, deliberately: the whole point of the awaited drain is that
+    // `boot::run` can checkpoint and exit immediately after it, so this test reads the DB
+    // synchronously right after the await and requires the terminal state to be present. Pre-fix
+    // (fire-and-forget spawn, nothing to await), the write raced this read nondeterministically —
+    // and raced the runtime drop in production. ----
+    #[tokio::test]
+    async fn await_pending_final_flushes_is_a_barrier_for_killed_sessions_writes() {
+        let (deps, _rt) = test_deps();
+        install_push_callbacks(&deps, Broadcaster::default());
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        let mut spec = sh_spec("printf 'BARRIER_MARKER\\n'; read _hold");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+        {
+            // Mirror the production CreateSession dispatch arm's immediate persist.
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            db.upsert_session(&meta).unwrap();
+        }
+
+        // Let the marker land in the in-memory ring before killing (the printf runs immediately;
+        // poll the supervisor's own snapshot rather than sleeping blind).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok((_c, _r, bytes)) = deps.supervisor.snapshot_scrollback(&id) {
+                if bytes
+                    .windows(b"BARRIER_MARKER".len())
+                    .any(|w| w == b"BARRIER_MARKER")
+                {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "marker never reached the in-memory ring"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Exactly what `boot::run`'s shutdown path does: shutdown_all (kill → on_exited schedules
+        // the flush and tracks its handle) then the awaited drain.
+        deps.supervisor.shutdown_all();
+        deps.await_pending_final_flushes().await;
+
+        // Synchronous read, no polling: the awaited drain must have flushed everything already.
+        let db = deps.db.lock().await;
+        let row = db
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == id)
+            .expect("row must be present after the awaited drain");
+        assert!(
+            matches!(row.lifecycle, bpa_protocol::SessionLifecycle::Exited { .. }),
+            "awaited drain must have persisted the terminal Exited lifecycle, got {:?}",
+            row.lifecycle
+        );
+        let bytes = db.load_scrollback(&id).unwrap();
+        assert!(
+            bytes
+                .windows(b"BARRIER_MARKER".len())
+                .any(|w| w == b"BARRIER_MARKER"),
+            "awaited drain must have persisted the final scrollback tail"
+        );
+    }
+
+    // ---- H1's own no-unbounded-growth guard: the pending-final-flush tracker must not
+    // accumulate one dead JoinHandle per session-ever-exited for the daemon's lifetime — finished
+    // handles are swept (at track time in production; `pending_final_flush_count` applies the same
+    // sweep) so only in-flight flushes are ever retained. ----
+    #[tokio::test]
+    async fn completed_final_flush_handles_are_swept_not_accumulated() {
+        let (deps, _rt) = test_deps();
+        install_push_callbacks(&deps, Broadcaster::default());
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        let mut spec = sh_spec("read _hold");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+        {
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            db.upsert_session(&meta).unwrap();
+        }
+
+        // `kill()` joins the wait thread, whose `on_exited` schedules + tracks the flush task
+        // synchronously — on this (current-thread) test runtime the task cannot have run yet, so
+        // exactly one in-flight handle must be tracked here.
+        deps.supervisor.kill(&id).expect("kill");
+        assert_eq!(
+            deps.pending_final_flush_count(),
+            1,
+            "the just-scheduled final flush must be tracked as in-flight"
+        );
+
+        // Once the flush task completes, its handle must be collectable — the count (which sweeps
+        // exactly like `track_final_flush` does) must drop back to zero, never grow forever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if deps.pending_final_flush_count() == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "completed final-flush handle was never swept"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     // ---- Peer-cred: honest same-process test. A cross-uid peer cannot be forged in the sandbox,

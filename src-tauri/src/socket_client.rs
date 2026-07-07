@@ -71,6 +71,26 @@ const CMD_CHANNEL_CAP: usize = 256;
 /// reaching the upgrade dialog instead of retrying forever.
 const HANDSHAKE_SUSPECT_CAP: u32 = 8;
 
+/// Production initial-connect retry budget (round-3 hardening H3): the `attempts` value `lib.rs`'s
+/// `bring_up_daemon` passes to [`DaemonClient::connect_with_retry`] at app boot (paired with its
+/// 500 ms delay: up to ~4 s of bounded retry, inside the spec's "~3-5 s" window). Named — rather
+/// than a literal `8` at the call site — because the round-2 R1 fix's initial-connect Incompatible
+/// escalation only fires if the retry loop actually reaches `HANDSHAKE_SUSPECT_CAP` consecutive
+/// transient failures: an `attempts` quietly edited below the cap would exhaust the loop as plain
+/// `Disconnected` and silently reintroduce the Critical (upgrade dialog unreachable). The
+/// relationship is enforced twice: the compile-time assertion right below, and the runtime clamp in
+/// [`DaemonClient::connect_with_retry`] itself.
+pub(crate) const BOOT_CONNECT_ATTEMPTS: u32 = 8;
+
+// H3 compile-time guard: the boot path's attempt budget must never be set below
+// HANDSHAKE_SUSPECT_CAP, or the initial-connect Incompatible escalation (round-2 R1, CRITICAL)
+// becomes unreachable — see BOOT_CONNECT_ATTEMPTS's doc. Fails the build, not a test run.
+const _: () = assert!(
+    BOOT_CONNECT_ATTEMPTS >= HANDSHAKE_SUSPECT_CAP,
+    "BOOT_CONNECT_ATTEMPTS must be >= HANDSHAKE_SUSPECT_CAP, or the initial-connect \
+     IncompatibleDaemon escalation (upgrade dialog) becomes unreachable"
+);
+
 // ---------------------------------------------------------------------------------------------
 // Socket path resolution (spec §8.1) — the core is the source of truth; Task 16 (launchd) reuses
 // this exact resolution so the daemon and the core that spawns it always agree on the path.
@@ -274,12 +294,23 @@ impl DaemonClient {
     /// Pulled out as its own function (rather than inlined in `lib.rs`'s `connect_with_retry`, which
     /// now just delegates here) so the handshake classification stays private to this module — the
     /// caller only ever sees the already-mapped `ClientError`.
+    ///
+    /// `attempts` is clamped up to [`HANDSHAKE_SUSPECT_CAP`] (round-3 hardening H3): the transient-
+    /// failure escalation above only ever fires if the loop actually reaches the cap, so an
+    /// `attempts` under it would exhaust the loop as plain `Disconnected` and silently reintroduce
+    /// the round-2 R1 Critical (a present-but-unhandshakeable daemon never surfacing
+    /// `IncompatibleDaemon`, upgrade dialog unreachable). Production passes
+    /// [`BOOT_CONNECT_ATTEMPTS`] (compile-time-asserted `>= HANDSHAKE_SUSPECT_CAP`); this runtime
+    /// clamp is the belt to that suspender for any other/future caller. Clamped HERE, on the boot-
+    /// path entry, and deliberately NOT inside [`connect_at_with_retry`](Self::connect_at_with_retry)
+    /// — tests drive that primitive directly with precise budgets.
     pub async fn connect_with_retry(
         client_build: String,
         attempts: u32,
         delay: Duration,
     ) -> Result<DaemonClient, ClientError> {
         let socket_path = resolve_socket_path();
+        let attempts = attempts.max(HANDSHAKE_SUSPECT_CAP);
         Self::connect_at_with_retry(socket_path, client_build, attempts, delay).await
     }
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bpa_sessiond::protocol::{decode_daemon_reply, encode_client_preamble, encode_frame};
 use bpa_sessiond::protocol::{ClientPreamble, DaemonReply, FrameDecoder};
-use bpa_sessiond::protocol::{Frame, Request, Response};
+use bpa_sessiond::protocol::{Frame, Push, Request, Response, SessionLifecycle};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -37,9 +37,9 @@ async fn recv_frame(s: &mut UnixStream) -> Frame {
 /// 9-byte reply header (plus the trailing build string when accepted) and require `Accepted`.
 /// Distinct from `send_frame`/`recv_frame`: the preamble is a raw byte layout, not a CBOR `Frame`.
 // `boot::run` resolves its on-disk DB path from `$HOME` (see `boot::app_support_dir`), and
-// `HOME` is process-global mutable state. TWO tests in this file boot the real daemon core and
+// `HOME` is process-global mutable state. THREE tests in this file boot the real daemon core and
 // must isolate `HOME` under their own tempdir (D6: never touch the developer's real app-support
-// DB); `cargo test` runs tests from the same file/binary concurrently by default, so both tests
+// DB); `cargo test` runs tests from the same file/binary concurrently by default, so those tests
 // mutating `HOME` at once would race each other's set/read/restore sequence. This lock serializes
 // them — mirrors `singleton.rs`'s `ENV_LOCK`, which documents the identical hazard.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -212,6 +212,301 @@ async fn boot_handshake_create_session_and_clean_shutdown() {
         "socket should be unlinked on clean shutdown"
     );
     // `_home_guard` restores the prior `HOME` (and releases `HOME_LOCK`) on drop here.
+}
+
+/// Round-3 hardening (H1): at CLEAN shutdown, every session that is still LIVE when the shutdown
+/// watch flips must have its FINAL scrollback tail AND its terminal `Exited` (killed) lifecycle
+/// durably persisted BEFORE `run()` returns — via an AWAITED write path, never a detached task
+/// that the `#[tokio::main]` runtime drop can silently discard.
+///
+/// This test reproduces the production runtime semantics EXACTLY, which is what makes it a
+/// deterministic RED pre-fix rather than a flaky one:
+///
+/// - Boot #1 drives `bpa_sessiond::run` as the MAIN future of `Runtime::block_on` on a manually
+///   built current-thread runtime — precisely what `#[tokio::main]` desugars to in `main.rs` —
+///   with the wire-driving client as a SPAWNED task (it runs during `run()`'s own await points).
+/// - The shutdown is triggered through the SAME `watch` flip `main.rs`'s SIGTERM handler uses
+///   (`Request::DaemonShutdown{drain}` converges on the identical post-`serve` path in `run()`).
+/// - The moment `block_on` returns, the runtime is DROPPED — like the production process exiting —
+///   which discards any still-queued detached task unpolled. Pre-fix, the killed session's final
+///   flush was exactly such a task: `shutdown_all()`'s kill fires `on_exited`, which only
+///   SCHEDULED the DB write via `rt_handle.spawn` and nothing ever awaited it, so the `Exited`
+///   lifecycle (and any not-yet-swept scrollback tail) died with the runtime. Post-fix, `run()`
+///   awaits every pending final flush before checkpointing, so the write has landed by the time
+///   `block_on` returns no matter what happens to the runtime afterwards.
+/// - Boot #2 (a fresh runtime, same `$HOME` hence same on-disk DB) then asserts the rehydrated
+///   session reports `lifecycle == Exited` and its replayed scrollback carries the marker.
+#[test]
+fn clean_shutdown_persists_killed_sessions_exited_lifecycle_and_scrollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("d.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    const MARKER: &[u8] = b"H1_SHUTDOWN_MARKER";
+
+    // ---- Boot #1: create a session, land the marker in its ring, then flip the shutdown watch
+    // while the session is STILL LIVE (no DaemonShutdown{drain}, no KillSession — the kill happens
+    // inside `run()`'s own `shutdown_all()`). ----
+    let session_id = {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (sid_tx, sid_rx) = std::sync::mpsc::channel::<String>();
+
+        // The client driver runs as a spawned task on the same runtime; `run()` itself is the
+        // block_on main future (the production shape — see the test doc comment).
+        let socket_for_client = socket.clone();
+        let home_for_client = home_dir.path().to_path_buf();
+        let shutdown_tx_for_client = shutdown_tx.clone();
+        rt.spawn(async move {
+            let mut c = None;
+            for _ in 0..200 {
+                if socket_for_client.exists() {
+                    if let Ok(s) = UnixStream::connect(&socket_for_client).await {
+                        c = Some(s);
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let mut c = c.expect("daemon did not bind socket in time");
+            preamble_handshake(&mut c).await;
+
+            send_frame(
+                &mut c,
+                &Frame::Request {
+                    id: 1,
+                    req: Request::CreateWorkspace {
+                        name: "ws".into(),
+                        root_path: home_for_client.display().to_string(),
+                    },
+                },
+            )
+            .await;
+            let workspace_id = loop {
+                match recv_frame(&mut c).await {
+                    Frame::Response {
+                        id: 1,
+                        res: Response::Workspace(w),
+                    } => break w.id,
+                    Frame::Push(_) => continue,
+                    other => panic!("expected Workspace, got {other:?}"),
+                }
+            };
+
+            send_frame(
+                &mut c,
+                &Frame::Request {
+                    id: 2,
+                    req: Request::CreateSession {
+                        workspace_id,
+                        shell: Some("/bin/sh".into()),
+                        cwd: Some(home_for_client.display().to_string()),
+                        env_overrides: vec![],
+                        cols: 80,
+                        rows: 24,
+                    },
+                },
+            )
+            .await;
+            let session_id = loop {
+                match recv_frame(&mut c).await {
+                    Frame::Response {
+                        id: 2,
+                        res: Response::Session(meta),
+                    } => break meta.id,
+                    Frame::Push(_) => continue,
+                    Frame::Response {
+                        id: 2,
+                        res: Response::Error { code, message },
+                    } => panic!("CreateSession failed: {code}: {message}"),
+                    other => panic!("expected Session, got {other:?}"),
+                }
+            };
+
+            // Attach so the live Output stream proves the marker reached the in-memory ring
+            // before we flip the shutdown watch.
+            send_frame(
+                &mut c,
+                &Frame::Request {
+                    id: 3,
+                    req: Request::AttachSession {
+                        session_id: session_id.clone(),
+                    },
+                },
+            )
+            .await;
+            loop {
+                match recv_frame(&mut c).await {
+                    Frame::Response {
+                        id: 3,
+                        res: Response::Ack,
+                    } => break,
+                    Frame::Push(_) => continue,
+                    other => panic!("expected Ack for AttachSession, got {other:?}"),
+                }
+            }
+
+            send_frame(
+                &mut c,
+                &Frame::Request {
+                    id: 4,
+                    req: Request::WriteStdin {
+                        session_id: session_id.clone(),
+                        bytes: b"printf 'H1_SHUTDOWN_MARKER\\n'\n".to_vec(),
+                    },
+                },
+            )
+            .await;
+
+            let mut seen_marker = false;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !seen_marker && std::time::Instant::now() < deadline {
+                match tokio::time::timeout(Duration::from_millis(500), recv_frame(&mut c)).await {
+                    Ok(Frame::Push(Push::Output { bytes, .. })) => {
+                        if bytes.windows(MARKER.len()).any(|w| w == MARKER) {
+                            seen_marker = true;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(_) => continue,
+                }
+            }
+            assert!(
+                seen_marker,
+                "marker never appeared in live Output before the deadline"
+            );
+
+            sid_tx.send(session_id).unwrap();
+            // Flip the SAME watch main.rs's SIGTERM handler flips — the session is still live, so
+            // `run()`'s post-serve `shutdown_all()` is what kills it.
+            shutdown_tx_for_client.send(true).unwrap();
+        });
+
+        let res = rt.block_on(bpa_sessiond::run(socket.clone(), shutdown_tx, shutdown_rx));
+        assert!(res.is_ok(), "run() returned error: {res:?}");
+        // Production semantics: the runtime dies the moment the main future returns. Any final
+        // flush still sitting in the ready queue as a detached task is dropped unpolled here —
+        // exactly the window H1 closes.
+        drop(rt);
+
+        sid_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("client driver must have created a session before shutdown")
+    };
+
+    // ---- Boot #2: fresh runtime, same HOME/DB. The rehydrated session must report the terminal
+    // Exited lifecycle and replay the marker. ----
+    let rt2 = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt2.block_on(async {
+        let (shutdown_tx2, shutdown_rx2) = tokio::sync::watch::channel(false);
+        let socket_for_task2 = socket.clone();
+        let shutdown_tx_for_task2 = shutdown_tx2.clone();
+        let boot2 = tokio::spawn(async move {
+            bpa_sessiond::run(socket_for_task2, shutdown_tx_for_task2, shutdown_rx2).await
+        });
+
+        let mut c2 = None;
+        for _ in 0..200 {
+            if socket.exists() {
+                if let Ok(s) = UnixStream::connect(&socket).await {
+                    c2 = Some(s);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut c2 = c2.expect("daemon (boot #2) did not bind socket in time");
+        preamble_handshake(&mut c2).await;
+
+        // Lifecycle: the persisted row (rehydrated as-is into the fresh supervisor) must carry the
+        // terminal Exited (killed-at-shutdown) lifecycle — not the live lifecycle the periodic
+        // sweep last saw.
+        send_frame(
+            &mut c2,
+            &Frame::Request {
+                id: 20,
+                req: Request::GetSessionState {
+                    session_id: session_id.clone(),
+                },
+            },
+        )
+        .await;
+        loop {
+            match recv_frame(&mut c2).await {
+                Frame::Response {
+                    id: 20,
+                    res: Response::Session(meta),
+                } => {
+                    assert_eq!(meta.id, session_id);
+                    assert!(
+                        matches!(meta.lifecycle, SessionLifecycle::Exited { .. }),
+                        "a session killed at clean shutdown must rehydrate with the terminal \
+                         Exited lifecycle (awaited final flush), got {:?}",
+                        meta.lifecycle
+                    );
+                    assert!(!meta.is_active, "rehydrated session must be inactive");
+                    break;
+                }
+                Frame::Push(_) => continue,
+                other => panic!("expected Session, got {other:?}"),
+            }
+        }
+
+        // Scrollback: attach and require the replayed content to carry the marker (the final
+        // scrollback tail must have been persisted by the awaited flush, not lost with the
+        // runtime drop).
+        send_frame(
+            &mut c2,
+            &Frame::Request {
+                id: 21,
+                req: Request::AttachSession {
+                    session_id: session_id.clone(),
+                },
+            },
+        )
+        .await;
+        let mut replay_content: Option<Vec<u8>> = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while replay_content.is_none() && std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), recv_frame(&mut c2)).await {
+                Ok(Frame::Push(Push::Replay {
+                    session_id: sid,
+                    content,
+                    ..
+                })) => {
+                    assert_eq!(sid, session_id);
+                    replay_content = Some(content);
+                }
+                Ok(Frame::Response {
+                    id: 21,
+                    res: Response::Error { code, message },
+                }) => panic!("AttachSession (boot #2) failed: {code}: {message}"),
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+        let content = replay_content.expect("Push::Replay must arrive for the rehydrated session");
+        assert!(
+            content.windows(MARKER.len()).any(|w| w == MARKER),
+            "replayed scrollback must carry the marker written right before clean shutdown, \
+             got: {content:?}"
+        );
+
+        shutdown_tx2.send(true).unwrap();
+        let res2 = tokio::time::timeout(Duration::from_secs(5), boot2)
+            .await
+            .expect("run() (boot #2) did not return after shutdown")
+            .expect("join");
+        assert!(res2.is_ok(), "run() (boot #2) returned error: {res2:?}");
+    });
 }
 
 #[tokio::test]

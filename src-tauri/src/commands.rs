@@ -86,14 +86,36 @@ impl WriteStdinLocks {
         Self::default()
     }
 
-    /// Return the per-session lock for `session_id`, creating it on first use. Entries are never
-    /// removed (sessions are few and long-lived relative to a desktop app's process lifetime; the
-    /// map holds one cheap `Arc<Mutex<()>>` per session ever written to, not per write).
-    fn lock_for(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
+    /// Return the per-session lock for `session_id`, creating it on first use. Entries live until
+    /// the session ends: the broker evicts them on `Push::ChildExited` (round-3 hardening H2, see
+    /// [`crate::broker::register`]) so a days-long process with create/kill churn cannot
+    /// accumulate one map entry per session-id-ever-written forever. `pub(crate)` (not private)
+    /// so the broker's eviction tests can create entries the same way `write_stdin_locked` does.
+    pub(crate) fn lock_for(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.inner.lock().unwrap();
         map.entry(session_id.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Drop `session_id`'s lock entry (round-3 hardening H2): called from the broker's `on_push`
+    /// wiring when the daemon reports `Push::ChildExited` for the session, so the map shrinks in
+    /// step with session churn instead of growing unboundedly. Removing while a concurrent
+    /// `write_stdin_locked` still holds the `Arc` is safe — that guard keeps its own clone of the
+    /// `Arc<tokio::sync::Mutex<()>>` alive until it drops, and a late write after eviction simply
+    /// re-creates a fresh entry via `lock_for` (harmless: the session is gone, so that write fails
+    /// `Disconnected`/`NoSuchSession` at the daemon anyway). Runs inline on the `DaemonClient`
+    /// connection task (locked contract, see `broker.rs` module docs) — a short,
+    /// never-held-across-`.await` `std::sync::Mutex` critical section, same as `lock_for`.
+    pub(crate) fn evict(&self, session_id: &SessionId) {
+        self.inner.lock().unwrap().remove(session_id);
+    }
+
+    /// Whether an entry currently exists for `session_id` — test observability for the H2
+    /// eviction contract (`broker.rs`'s eviction tests).
+    #[cfg(test)]
+    pub(crate) fn contains(&self, session_id: &SessionId) -> bool {
+        self.inner.lock().unwrap().contains_key(session_id)
     }
 }
 
