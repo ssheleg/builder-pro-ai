@@ -52,9 +52,9 @@ use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
 
 use crate::broker::{register, Broker};
-use crate::commands::AppState;
+use crate::commands::{AppState, DaemonStatus, StatusSlot};
 use crate::launchd::{LaunchdAgent, LaunchdError, RealLaunchctl};
-use crate::socket_client::{resolve_socket_path, ClientError, DaemonClient};
+use crate::socket_client::{resolve_socket_path, ClientError, ConnState, DaemonClient};
 
 /// Emitted (no payload) when the core loses — or never establishes — the daemon socket (spec
 /// §6.3, §13). Mirrors [`broker::EV_DAEMON_DISCONNECTED`] byte-for-byte; kept as its own constant
@@ -70,8 +70,14 @@ fn ping() -> String {
     "pong".to_string()
 }
 
-/// The exact command surface (spec §6.1) — mirrored by the smoke test and by
+/// The exact command surface (spec §6.1/§6.2) — mirrored by the smoke test and by
 /// `tauri::generate_handler!` in [`run`]. Keep the two lists in lockstep.
+///
+/// `daemon_status` (finding [12] pull-fallback, added in the final-review fix wave) is
+/// deliberately NOT in this list: this function documents/locks the original 12-command spec
+/// surface exactly (see `command_names_are_the_twelve_spec_6_1_and_6_2_commands`), while
+/// `daemon_status` is still registered directly in `run()`'s `invoke_handler!` below so it is
+/// actually callable from the webview.
 pub fn command_names() -> &'static [&'static str] {
     &[
         "create_session",
@@ -198,6 +204,45 @@ fn emit_incompatible(app: &tauri::AppHandle) {
     }
 }
 
+/// Pure mapping from a `DaemonClient::connect`/`connect_with_retry` outcome to the [`DaemonStatus`]
+/// the pull-based `daemon_status` command should report (finding [12]). Pulled out as a plain,
+/// non-async function (rather than inlined at each of `bring_up_daemon`'s three call sites) so it
+/// is unit-testable without a Tauri runtime, and so the status written into `AppState.status`
+/// always agrees byte-for-byte with the event `bring_up_daemon` emits for the same outcome.
+fn status_for_connect_result(result: &Result<DaemonClient, ClientError>) -> DaemonStatus {
+    match result {
+        Ok(_) => DaemonStatus::Connected,
+        Err(ClientError::IncompatibleDaemon {
+            daemon_min,
+            daemon_max,
+        }) => DaemonStatus::Incompatible {
+            daemon_min: *daemon_min,
+            daemon_max: *daemon_max,
+        },
+        Err(_) => DaemonStatus::Disconnected,
+    }
+}
+
+/// Pure mapping from a mid-session [`ConnState`] transition (fired by `DaemonClient::on_conn`,
+/// spec §13/§6.2) to the [`DaemonStatus`] the pull-based `daemon_status` command should report
+/// (finding [12]). Mirrors [`broker::map_conn_state`]'s classification exactly — `Connected`/
+/// `Disconnected` map 1:1, and a fatal `ConnState::Incompatible` (genuine reply, or
+/// `HANDSHAKE_SUSPECT_CAP` transient failures escalated — finding [11]) maps to
+/// `DaemonStatus::Incompatible` with the same range.
+fn status_for_conn_state(state: ConnState) -> DaemonStatus {
+    match state {
+        ConnState::Connected => DaemonStatus::Connected,
+        ConnState::Disconnected => DaemonStatus::Disconnected,
+        ConnState::Incompatible {
+            daemon_min,
+            daemon_max,
+        } => DaemonStatus::Incompatible {
+            daemon_min,
+            daemon_max,
+        },
+    }
+}
+
 /// Bring up the daemon (launchd install+bootstrap+kickstart) and connect to it, wiring the
 /// [`Broker`] into the resulting [`DaemonClient`]'s push/conn callbacks (spec §8.3, §13, §6.2).
 /// `AppState` is `manage`d **unconditionally** before the connect result is known, with an empty
@@ -208,6 +253,11 @@ fn emit_incompatible(app: &tauri::AppHandle) {
 /// returns `Ok(())` immediately so the window still opens while this runs in the background.
 async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
     let slot: commands::ClientSlot = Arc::new(std::sync::RwLock::new(None));
+    // Created BEFORE any `app.manage(...)` call (finding [12]): every branch below needs to write
+    // into this same slot, and the mid-session `on_conn` callback registered after a successful
+    // connect needs to close over a clone of it — cloning an `Arc` created up front is simpler and
+    // less error-prone than trying to pull it back out of `AppState` after `manage()`.
+    let status: StatusSlot = Arc::new(std::sync::Mutex::new(DaemonStatus::Disconnected));
 
     let agent = match build_launchd_agent(&app) {
         Ok(agent) => Arc::new(agent),
@@ -222,6 +272,7 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
                 // surface an honest `UpgradeFailed` if invoked in this state, rather than the app
                 // never managing `AppState` at all.
                 launchd: Arc::new(unreachable_launchd_agent()),
+                status,
             });
             emit_disconnected(&app, "could not resolve the background service binary");
             return;
@@ -234,6 +285,7 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
             client: slot,
             broker,
             launchd: agent,
+            status,
         });
         emit_disconnected(&app, "could not start background service");
         return;
@@ -243,6 +295,7 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
     // x 500ms = up to ~4s of bounded retry, inside the spec's "~3-5s" window. IncompatibleDaemon
     // short-circuits this (no retry, see `connect_with_retry`'s docs).
     let connect_result = connect_with_retry(client_build(), 8, Duration::from_millis(500)).await;
+    commands::write_status(&status, status_for_connect_result(&connect_result));
 
     // manage() UNCONDITIONALLY, before inspecting the outcome (locked contract): every branch
     // below needs `AppState` to already be registered so a later `upgrade_daemon` invocation can
@@ -251,16 +304,29 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
         client: slot.clone(),
         broker: broker.clone(),
         launchd: agent,
+        status: status.clone(),
     });
 
     match connect_result {
         Ok(client) => {
             let client = Arc::new(client);
             // register() wires both on_push -> broker.dispatch_push and on_conn ->
-            // broker.dispatch_conn (which itself emits daemon://disconnected/reconnected on
-            // future transitions, spec §13) — call exactly once (locked contract), BEFORE moving
-            // the client into the slot.
+            // broker.dispatch_conn (which itself emits daemon://disconnected/reconnected/
+            // incompatible on future transitions, spec §13/§6.2) — call exactly once (locked
+            // contract), BEFORE moving the client into the slot.
             register(broker, &client);
+            // Second `on_conn` registration (finding [12]): keeps `AppState.status` in sync with
+            // every subsequent mid-session transition (disconnect / reconnect / fatal
+            // incompatible), so `daemon_status` always reflects the current truth even for
+            // transitions that happen long after this initial connect. Independent of the broker's
+            // own `on_conn` registration above — `DaemonClient::on_conn` supports multiple
+            // callbacks (locked contract) and each one is invoked with the *current* state
+            // immediately upon registration, so this also seeds `status` correctly here even
+            // though `write_status(Connected)` already happened two lines above.
+            let status_for_conn = status.clone();
+            client.on_conn(move |state| {
+                commands::write_status(&status_for_conn, status_for_conn_state(state));
+            });
             slot.write().unwrap().replace(client);
             info!("daemon connected; AppState managed");
         }
@@ -333,6 +399,7 @@ pub fn run() {
             commands::get_session_state,
             commands::pick_folder,
             commands::upgrade_daemon,
+            commands::daemon_status,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -357,6 +424,75 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    // ── DaemonStatus pull-fallback mapping (finding [12], spec §6.2) ───────────────────────
+
+    #[tokio::test]
+    async fn status_for_connect_result_maps_ok_to_connected() {
+        // Real, connected DaemonClient against a stub daemon — exercises the actual `Ok` arm, not
+        // a reconstruction (mirrors the stub-daemon pattern used across this crate).
+        let (client, _sock) = commands::commands_over_stub_daemon::connect_to_stub(|_req| {
+            bpa_protocol::Response::Ack
+        })
+        .await;
+        let result: Result<DaemonClient, ClientError> = Ok(client);
+        assert_eq!(status_for_connect_result(&result), DaemonStatus::Connected);
+    }
+
+    #[test]
+    fn status_for_connect_result_maps_incompatible_daemon() {
+        let result: Result<DaemonClient, ClientError> = Err(ClientError::IncompatibleDaemon {
+            daemon_min: 5,
+            daemon_max: 6,
+        });
+        assert_eq!(
+            status_for_connect_result(&result),
+            DaemonStatus::Incompatible {
+                daemon_min: 5,
+                daemon_max: 6
+            }
+        );
+    }
+
+    #[test]
+    fn status_for_connect_result_maps_other_errors_to_disconnected() {
+        let result: Result<DaemonClient, ClientError> = Err(ClientError::Disconnected);
+        assert_eq!(
+            status_for_connect_result(&result),
+            DaemonStatus::Disconnected
+        );
+
+        let result2: Result<DaemonClient, ClientError> = Err(ClientError::Daemon {
+            code: "X".into(),
+            message: "Y".into(),
+        });
+        assert_eq!(
+            status_for_connect_result(&result2),
+            DaemonStatus::Disconnected
+        );
+    }
+
+    #[test]
+    fn status_for_conn_state_maps_every_variant() {
+        assert_eq!(
+            status_for_conn_state(ConnState::Connected),
+            DaemonStatus::Connected
+        );
+        assert_eq!(
+            status_for_conn_state(ConnState::Disconnected),
+            DaemonStatus::Disconnected
+        );
+        assert_eq!(
+            status_for_conn_state(ConnState::Incompatible {
+                daemon_min: 2,
+                daemon_max: 3
+            }),
+            DaemonStatus::Incompatible {
+                daemon_min: 2,
+                daemon_max: 3
+            }
+        );
+    }
+
     #[test]
     fn command_names_are_the_twelve_spec_6_1_and_6_2_commands() {
         let names = command_names();
@@ -378,6 +514,94 @@ mod tests {
         for e in expected {
             assert!(names.contains(&e), "command surface must include {e}");
         }
+    }
+
+    // Mock-runner pattern mirrors `launchd::tests::MockLaunchctl`/`agent()` exactly (private to
+    // that module's own test suite, so replicated here) — used to prove `ensure_daemon_running`
+    // (the boot path, called on EVERY app launch) invokes the NON-force kickstart shape, never
+    // `-k` (findings [10]/[16]: `-k` on the boot path force-kills a running daemon and destroys
+    // every live session with zero consent, on every single relaunch).
+    struct MockLaunchctl {
+        calls: std::sync::Mutex<std::cell::RefCell<Vec<Vec<String>>>>,
+        scripted: std::sync::Mutex<
+            std::cell::RefCell<std::collections::VecDeque<crate::launchd::LaunchctlOutput>>,
+        >,
+    }
+    impl MockLaunchctl {
+        fn new(outputs: Vec<crate::launchd::LaunchctlOutput>) -> Self {
+            MockLaunchctl {
+                calls: std::sync::Mutex::new(std::cell::RefCell::new(Vec::new())),
+                scripted: std::sync::Mutex::new(std::cell::RefCell::new(
+                    outputs.into_iter().collect(),
+                )),
+            }
+        }
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().borrow().clone()
+        }
+    }
+    impl crate::launchd::LaunchctlRunner for MockLaunchctl {
+        fn run(&self, args: &[&str]) -> std::io::Result<crate::launchd::LaunchctlOutput> {
+            self.calls
+                .lock()
+                .unwrap()
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            let out = self
+                .scripted
+                .lock()
+                .unwrap()
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(crate::launchd::LaunchctlOutput {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            Ok(out)
+        }
+    }
+
+    fn ok_output() -> crate::launchd::LaunchctlOutput {
+        crate::launchd::LaunchctlOutput {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn ensure_daemon_running_uses_non_force_kickstart_on_boot() {
+        // install_agent() does real fs writes but touches no launchctl; bootstrap() and
+        // kickstart() are the two runner calls to script.
+        let mock = MockLaunchctl::new(vec![ok_output(), ok_output()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = crate::launchd::LaunchdAgent {
+            runner: &mock,
+            uid: 501,
+            launch_agents_dir: tmp.path().join("LaunchAgents"),
+            app_support_dir: tmp.path().join("AppSupport"),
+            daemon_path: std::path::PathBuf::from(
+                "/Applications/Builder Pro AI.app/Contents/MacOS/bpa-sessiond",
+            ),
+            socket_path: std::path::PathBuf::from("/tmp/bpa-501/d.sock"),
+        };
+
+        ensure_daemon_running(&agent).expect("boot path must succeed against a scripted-ok mock");
+
+        let calls = mock.calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "expected bootstrap + kickstart, got {calls:?}"
+        );
+        assert_eq!(calls[0][0], "bootstrap");
+        assert_eq!(
+            calls[1],
+            vec!["kickstart", "gui/501/ai.builderpro.desktop.sessiond"],
+            "boot-path kickstart must NEVER carry -k: force-killing a running daemon on every \
+             app launch destroys live sessions with zero consent (findings [10]/[16])"
+        );
     }
 
     #[test]

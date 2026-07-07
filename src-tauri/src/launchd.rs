@@ -193,12 +193,35 @@ impl<'a> LaunchdAgent<'a> {
         Err(LaunchdError::Install(out.stderr))
     }
 
+    /// `launchctl kickstart gui/<uid>/<label>` (no `-k`): idempotent ensure-running. If the
+    /// service is already up, this is a no-op that leaves the running process (and every live
+    /// session it holds) completely untouched — this is the ONLY kickstart variant the boot path
+    /// (`ensure_daemon_running`) may call. Using `-k` here would force-kill a running daemon on
+    /// every single app launch, destroying every live session with zero consent (finding
+    /// [10]/[16] of the final-review wave) and bypassing the upgrade consent dialog before the
+    /// handshake even gets a chance to raise `IncompatibleDaemon`. See [`Self::kickstart_force`]
+    /// for the force-restart variant used by the upgrade flow.
+    pub fn kickstart(&self) -> Result<(), LaunchdError> {
+        let target = self.service_target();
+        let out = self.runner.run(&["kickstart", &target])?;
+        if out.code == 0 || is_already_running(&out) {
+            return Ok(());
+        }
+        Err(LaunchdError::Command {
+            op: "kickstart".into(),
+            code: out.code,
+            stderr: out.stderr,
+        })
+    }
+
     /// `launchctl kickstart -k gui/<uid>/<label>`. `-k` force-kills-then-restarts a running
     /// service (rather than being a no-op when the service is already up) — required so the
     /// upgrade flow (spec §6.2) can force a stale, already-running old-version daemon to relaunch
     /// with the new bundled binary; a plain `kickstart` without `-k` would leave the old process
-    /// running untouched.
-    pub fn kickstart(&self) -> Result<(), LaunchdError> {
+    /// running untouched. ONLY `upgrade_daemon_core` (commands.rs) may call this — it is gated
+    /// behind the T10b consent dialog precisely because it destroys every live session on the old
+    /// daemon. The boot path (`ensure_daemon_running`) must use [`Self::kickstart`] instead.
+    pub fn kickstart_force(&self) -> Result<(), LaunchdError> {
         let target = self.service_target();
         let out = self.runner.run(&["kickstart", "-k", &target])?;
         if out.code == 0 || is_already_running(&out) {
@@ -376,6 +399,10 @@ mod tests {
 
     #[test]
     fn kickstart_cmd_shape() {
+        // Boot-path kickstart must NEVER carry `-k`: `-k` force-kills a running daemon, which on
+        // the boot path (called on EVERY app launch by ensure_daemon_running) would destroy every
+        // live session with zero consent (findings [10]/[16]). Plain `kickstart` is idempotent:
+        // a no-op if already running, starts it if not.
         let mock = MockLaunchctl::new(vec![ok()]);
         let tmp = tempfile::tempdir().unwrap();
         let a = agent(&mock, tmp.path());
@@ -383,8 +410,37 @@ mod tests {
         let calls = mock.calls();
         assert_eq!(
             calls[0],
+            vec!["kickstart", "gui/501/ai.builderpro.desktop.sessiond"]
+        );
+    }
+
+    #[test]
+    fn kickstart_force_cmd_shape() {
+        // The FORCE variant (`-k`) is reserved for the upgrade flow, which is gated behind the
+        // T10b consent dialog — it must remain a distinct method from the boot-path `kickstart()`.
+        let mock = MockLaunchctl::new(vec![ok()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let a = agent(&mock, tmp.path());
+        a.kickstart_force().unwrap();
+        let calls = mock.calls();
+        assert_eq!(
+            calls[0],
             vec!["kickstart", "-k", "gui/501/ai.builderpro.desktop.sessiond"]
         );
+    }
+
+    #[test]
+    fn kickstart_already_running_is_idempotent_success() {
+        let already_running = LaunchctlOutput {
+            code: 1,
+            stdout: String::new(),
+            stderr: "Service is already running".into(),
+        };
+        let mock = MockLaunchctl::new(vec![already_running]);
+        let tmp = tempfile::tempdir().unwrap();
+        let a = agent(&mock, tmp.path());
+        a.kickstart()
+            .expect("already-running must be idempotent success for the non-force kickstart");
     }
 
     #[test]

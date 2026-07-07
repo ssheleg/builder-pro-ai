@@ -53,6 +53,23 @@ const BACKOFF_CAP: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Depth of the command channel from `DaemonClient::request` callers to the owning task.
 const CMD_CHANNEL_CAP: usize = 256;
+/// Number of consecutive *transient* handshake failures (EOF / timeout / garbage / bad magic — the
+/// connection reached the daemon at the socket level, but the handshake itself did not complete
+/// honestly) `connect_with_backoff` tolerates, within one reconnect cycle, before escalating to the
+/// fatal unknown-range `IncompatibleDaemon{0,0}` classification. Does NOT count plain
+/// connect-refused (`HandshakeError::Io` — nothing listening yet), which keeps its existing
+/// unlimited-until-bound retry: a booting daemon that hasn't bound its socket yet is a completely
+/// different, unambiguous case from one that accepted the connection and then failed to speak.
+///
+/// Rationale for the cap value: EOF mid-handshake is inherently ambiguous — it is exactly what a
+/// v2 daemon looks like while it is still inside `cold_rehydrate_sessions` (bound but not yet
+/// serving, spec's ~3-5s window) OR mid-crash-loop, and it is also exactly what a genuine v1
+/// daemon looks like (v1 has no codec-agnostic preamble reader; it reads the connection as a
+/// bincode `Request::Hello` frame it cannot decode and closes). A booting-but-compatible v2 daemon
+/// recovers well within `HANDSHAKE_SUSPECT_CAP` retries (each one backs off up to `BACKOFF_CAP`);
+/// a real v1 daemon closes on every single attempt and so reliably exhausts the cap, correctly
+/// reaching the upgrade dialog instead of retrying forever.
+const HANDSHAKE_SUSPECT_CAP: u32 = 8;
 
 // ---------------------------------------------------------------------------------------------
 // Socket path resolution (spec §8.1) — the core is the source of truth; Task 16 (launchd) reuses
@@ -112,24 +129,47 @@ pub enum ClientError {
     #[error("daemon reported: {code}: {message}")]
     Daemon { code: String, message: String },
     /// The handshake preamble (spec §4.5) found no overlap between this client's `[min, max]` and
-    /// the daemon's — or the daemon's reply couldn't be trusted at all (garbage bytes, a bad magic,
-    /// the connection closing mid-handshake, or the handshake exceeding `PREAMBLE_TIMEOUT`). In the
-    /// unknown-range cases `daemon_min`/`daemon_max` are the `0, 0` sentinel — there was no reply to
-    /// read a real range out of. Fatal: unlike `Disconnected`, this is never retried by the
-    /// reconnect loop (a stale client build will never become compatible by waiting) — it is the
-    /// signal that drives the upgrade flow instead.
+    /// the daemon's (a genuine, well-formed `DaemonReply::Incompatible` was decoded), OR a
+    /// transient handshake failure (EOF / timeout / garbage / bad magic — see
+    /// `HandshakeError::TransientHandshake`) repeated `HANDSHAKE_SUSPECT_CAP` times in a row on the
+    /// same connect cycle, at which point it is no longer treated as "daemon merely slow to boot"
+    /// and is escalated to this same fatal shape. In the unknown-range case `daemon_min`/
+    /// `daemon_max` are the `0, 0` sentinel — there was no reply to read a real range out of.
+    /// Fatal: unlike `Disconnected`, this is never retried by the reconnect loop (a stale client
+    /// build will never become compatible by waiting) — it is the signal that drives the upgrade
+    /// flow instead.
     #[error("incompatible daemon (daemon supports [{daemon_min}, {daemon_max}])")]
     IncompatibleDaemon { daemon_min: u16, daemon_max: u16 },
+    /// This single request, once CBOR-encoded, exceeds `bpa_protocol::MAX_FRAME_LEN` (finding [2]:
+    /// e.g. an ~8.4 MiB `WriteStdin` paste — CBOR encodes `Vec<u8>` as an array of unsigned
+    /// integers, so every byte >= 0x18 costs 2 wire bytes, meaning even moderate text pastes can
+    /// exceed the 16 MiB frame cap). Detected by encoding the frame BEFORE it ever reaches the
+    /// socket-write path, so a single oversized request fails ONLY itself — the connection, and
+    /// every other in-flight/future request on it, stays completely unaffected. `size` is the
+    /// encoded CBOR body length in bytes (matches `bpa_protocol::FrameError::Oversized`'s payload).
+    #[error("request too large once encoded ({size} bytes exceeds the frame cap)")]
+    RequestTooLarge { size: usize },
 }
 
 /// Emitted by the reconnect loop so the broker can raise `daemon://disconnected` /
-/// `daemon://reconnected` (spec §6.3, §13). `Connected` is fired both for the initial connect and
-/// for every successful reconnect; callers that need to distinguish "first connect" from
-/// "reconnected after a drop" can track whether they have already observed a `Disconnected`.
+/// `daemon://reconnected` / `daemon://incompatible` (spec §6.3, §13, §6.2). `Connected` is fired
+/// both for the initial connect and for every successful reconnect; callers that need to
+/// distinguish "first connect" from "reconnected after a drop" can track whether they have already
+/// observed a `Disconnected`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnState {
     Connected,
     Disconnected,
+    /// The reconnect loop hit a fatal handshake classification — either a genuine decoded
+    /// `DaemonReply::Incompatible{min,max}`, or a run of `HANDSHAKE_SUSPECT_CAP` consecutive
+    /// transient handshake failures that got escalated to the same unknown-range (`0, 0`) shape.
+    /// Fired from inside `connection_task` BEFORE it returns (finding [11]: previously this case
+    /// only logged a `tracing::error!` and silently left the client's slot holding a dead
+    /// connection forever, with no event and no honest UI signal).
+    Incompatible {
+        daemon_min: u16,
+        daemon_max: u16,
+    },
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -223,7 +263,14 @@ impl DaemonClient {
         let (stream, reader) = connect_and_handshake(&socket_path, &client_build)
             .await
             .map_err(|e| match e {
-                HandshakeError::Io(_) => ClientError::Disconnected,
+                // A single transient handshake failure on the *initial* connect is ambiguous in
+                // exactly the same way it is on reconnect (finding [1]) — map it to `Disconnected`
+                // so lib.rs's `connect_with_retry` bounded-backoff loop retries it normally, rather
+                // than instantly surfacing a false `IncompatibleDaemon`/upgrade dialog for a daemon
+                // that is merely slow to finish cold-rehydrate.
+                HandshakeError::Io(_) | HandshakeError::TransientHandshake => {
+                    ClientError::Disconnected
+                }
                 HandshakeError::Incompatible { min, max } => ClientError::IncompatibleDaemon {
                     daemon_min: min,
                     daemon_max: max,
@@ -383,32 +430,59 @@ impl FrameReader {
     }
 }
 
-async fn write_frame(
+/// Write already-encoded frame bytes to the socket. Encoding is deliberately NOT done in here
+/// (finding [2]): a `FrameError::Oversized` is a purely LOCAL failure of this one frame — encoding
+/// must happen before a connection is judged dead by it, so the caller encodes first (see
+/// `encode_request_frame`) and only reaches this function with bytes that are already known-good.
+/// Any error from here on really is a dead socket.
+async fn write_encoded_frame(
     stream: &mut (impl AsyncWriteExt + Unpin),
-    frame: &Frame,
+    bytes: &[u8],
 ) -> std::io::Result<()> {
-    let bytes = encode_frame(frame)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    stream.write_all(&bytes).await?;
+    stream.write_all(bytes).await?;
     stream.flush().await
+}
+
+/// Encode a `Frame::Request` for the wire, distinguishing an oversized-once-encoded body
+/// (`ClientError::RequestTooLarge`, finding [2] — resolved directly against that request's own
+/// oneshot, connection untouched) from every other encode failure (mapped to `ClientError::
+/// Disconnected` defensively; in practice `Frame`/`Request` are plain-data types that cannot fail
+/// CBOR encoding any other way, but this keeps the mapping total rather than panicking).
+fn encode_request_frame(frame: &Frame) -> Result<Vec<u8>, ClientError> {
+    encode_frame(frame).map_err(|e| match e {
+        bpa_protocol::FrameError::Oversized(size) => ClientError::RequestTooLarge {
+            size: size as usize,
+        },
+        other => {
+            tracing::error!(error = %other, "unexpected frame encode failure");
+            ClientError::Disconnected
+        }
+    })
 }
 
 /// Errors from a single connect+handshake attempt. Distinct from `ClientError` (the public,
 /// terminal-to-callers error) because `Incompatible` needs to short-circuit the backoff loop while
-/// `Io` (the `UnixStream::connect` itself failing — e.g. the daemon isn't listening yet) should keep
-/// retrying.
+/// `Io` (the `UnixStream::connect` itself failing — e.g. the daemon isn't listening yet) and
+/// `TransientHandshake` should keep retrying (the latter only up to `HANDSHAKE_SUSPECT_CAP` times
+/// in a row — see `connect_with_backoff`).
 enum HandshakeError {
     /// `UnixStream::connect` itself failed (daemon not up yet / ENOENT / connection refused). Not a
-    /// version problem — the bounded-backoff reconnect loop should keep trying.
+    /// version problem — the bounded-backoff reconnect loop should keep trying, unbounded (this is
+    /// unambiguous: nothing is listening yet, which is expected during a cold boot race).
     Io(std::io::Error),
-    /// The connection succeeded but the handshake did not: the daemon explicitly replied
-    /// `Incompatible{min,max}`, OR anything else went wrong reading/decoding its reply (a read
-    /// error, EOF/closed-mid-handshake, a bad magic, a malformed reply, or the read exceeding
-    /// `PREAMBLE_TIMEOUT`). Per spec §4.5 every one of these is treated the same way: fatal, not
-    /// retried — a stale client build will never become compatible by waiting, and a daemon that
-    /// can't even complete the handshake is not going to start working on the next attempt either.
-    /// `min`/`max` carry the daemon's real advertised range for `Incompatible`; every other failure
-    /// mode has no real range to report and uses the `0, 0` sentinel.
+    /// The connection reached the daemon at the socket level, but the handshake itself did not
+    /// complete honestly: a read error, EOF/closed-mid-handshake, a bad magic, a malformed reply, or
+    /// the read exceeding `PREAMBLE_TIMEOUT`. Deliberately distinct from a genuine `Incompatible`
+    /// reply (finding [1]): this is what a v2 daemon looks like while still inside
+    /// `cold_rehydrate_sessions` (bound but not yet serving) or mid-crash-loop — retryable, NOT
+    /// immediately fatal. Counted toward `HANDSHAKE_SUSPECT_CAP` by `connect_with_backoff`; a run of
+    /// `HANDSHAKE_SUSPECT_CAP` consecutive occurrences escalates to `Incompatible` (unknown-range
+    /// sentinel `0, 0`) since a genuinely stale v1 daemon closes the connection this way on every
+    /// single attempt and will never recover.
+    TransientHandshake,
+    /// The daemon explicitly, decodably replied `DaemonReply::Incompatible{min,max}`: a genuine,
+    /// well-formed version-range mismatch. `min`/`max` carry the daemon's real advertised range.
+    /// Fatal and never retried — a stale client build will never become compatible by waiting.
     Incompatible { min: u16, max: u16 },
 }
 
@@ -418,9 +492,9 @@ impl From<std::io::Error> for HandshakeError {
     }
 }
 
-/// Sentinel for "the daemon's real supported range is unknown" — used whenever the handshake fails
-/// before (or without) a well-formed `Incompatible{min,max}` reply ever arriving (spec §4.5: garbage
-/// reply / connection closed during handshake / timeout).
+/// Sentinel for "the daemon's real supported range is unknown" — used only once a run of
+/// `HANDSHAKE_SUSPECT_CAP` consecutive `TransientHandshake` failures has been escalated to fatal
+/// (spec §4.5 unknown-range shape), never for a single ambiguous failure in isolation.
 const UNKNOWN_RANGE: HandshakeError = HandshakeError::Incompatible { min: 0, max: 0 };
 
 /// Read the daemon's preamble reply off `stream` (mirrors
@@ -459,10 +533,13 @@ async fn read_daemon_reply(stream: &mut UnixStream) -> std::io::Result<DaemonRep
 /// Connect once and run the preamble handshake (spec §4.2/§4.5): write the client's
 /// `[CLIENT_MIN_VERSION, CLIENT_MAX_VERSION]` + `client_build`, then read the daemon's reply under
 /// `PREAMBLE_TIMEOUT`. Returns the live stream and a fresh `FrameReader` primed for the connection's
-/// lifetime on `Accepted`. On `Incompatible` — or ANY failure reading/decoding the reply (IO error,
-/// EOF/closed-mid-handshake, bad magic, malformed body, or the read exceeding `PREAMBLE_TIMEOUT`) —
-/// returns `HandshakeError::Incompatible` (real range for an explicit `Incompatible` reply, the
-/// `0, 0` sentinel otherwise): none of those are retryable, per spec §4.5.
+/// lifetime on `Accepted`. On a genuine, well-formed `Incompatible{min,max}` reply, returns
+/// `HandshakeError::Incompatible` with the real range (fatal, not retryable — spec §4.5). On ANY
+/// other failure reading/decoding the reply (IO error, EOF/closed-mid-handshake, bad magic,
+/// malformed body, or the read exceeding `PREAMBLE_TIMEOUT`), returns
+/// `HandshakeError::TransientHandshake` (finding [1]: ambiguous — could be a booting-but-compatible
+/// daemon — so retryable, up to `HANDSHAKE_SUSPECT_CAP` consecutive occurrences, rather than
+/// instantly fatal).
 async fn connect_and_handshake(
     socket_path: &Path,
     client_build: &str,
@@ -484,15 +561,17 @@ async fn connect_and_handshake(
     let reply = match tokio::time::timeout(PREAMBLE_TIMEOUT, handshake).await {
         Ok(Ok(reply)) => reply,
         // Write failed, or the read hit an IO error / EOF / bad magic / malformed body: the
-        // handshake did not complete honestly, and we have no real range to report.
+        // handshake did not complete honestly, but we cannot yet tell a booting-but-compatible
+        // daemon apart from a genuinely stale one — treat it as transient (retryable up to the cap).
         Ok(Err(e)) => {
-            tracing::warn!(error = %e, "handshake failed reading daemon reply");
-            return Err(UNKNOWN_RANGE);
+            tracing::warn!(error = %e, "handshake failed reading daemon reply; treating as transient");
+            return Err(HandshakeError::TransientHandshake);
         }
-        // Silent/stuck peer: give up rather than hang the connection attempt forever.
+        // Silent/stuck peer within PREAMBLE_TIMEOUT: also ambiguous (could be a slow cold-rehydrate)
+        // — transient, not an instant fatal give-up.
         Err(_) => {
-            tracing::warn!("handshake timed out waiting for daemon reply");
-            return Err(UNKNOWN_RANGE);
+            tracing::warn!("handshake timed out waiting for daemon reply; treating as transient");
+            return Err(HandshakeError::TransientHandshake);
         }
     };
 
@@ -507,18 +586,49 @@ async fn connect_and_handshake(
 }
 
 /// Connect with bounded exponential backoff (`BACKOFF_START` doubling up to `BACKOFF_CAP`, spec
-/// §13). `Incompatible` is fatal and returned immediately without retrying — a stale client build
-/// will never become compatible by waiting.
+/// §13). A genuine, well-formed `Incompatible{min,max}` reply is fatal and returned immediately
+/// without retrying — a stale client build will never become compatible by waiting.
+///
+/// `HandshakeError::TransientHandshake` (finding [1]: EOF / timeout / garbage / bad magic — the
+/// daemon accepted the TCP-level connection but the handshake itself didn't complete honestly)
+/// keeps retrying with the same backoff as a plain connect-refused, but only up to
+/// `HANDSHAKE_SUSPECT_CAP` **consecutive** occurrences: once that many transient failures happen in
+/// a row without an intervening plain connect-refused, this is escalated to the same fatal
+/// unknown-range shape as a genuine `Incompatible` (`UNKNOWN_RANGE`) — see that constant's docs for
+/// the EOF-is-ambiguous rationale. The counter resets to zero on a plain `Io` (connect-refused)
+/// failure: that is an unrelated failure mode (nothing listening yet) and must not itself count
+/// toward — or be capped by — the handshake-specific budget.
 async fn connect_with_backoff(
     socket_path: &Path,
     client_build: &str,
 ) -> Result<(UnixStream, FrameReader), HandshakeError> {
     let mut delay = BACKOFF_START;
+    let mut consecutive_transient: u32 = 0;
     loop {
         match connect_and_handshake(socket_path, client_build).await {
             Ok(ok) => return Ok(ok),
             Err(e @ HandshakeError::Incompatible { .. }) => return Err(e),
+            Err(HandshakeError::TransientHandshake) => {
+                consecutive_transient += 1;
+                if consecutive_transient >= HANDSHAKE_SUSPECT_CAP {
+                    tracing::error!(
+                        cap = HANDSHAKE_SUSPECT_CAP,
+                        "transient handshake failure repeated past HANDSHAKE_SUSPECT_CAP; \
+                         escalating to incompatible"
+                    );
+                    return Err(UNKNOWN_RANGE);
+                }
+                tracing::warn!(
+                    consecutive_transient,
+                    cap = HANDSHAKE_SUSPECT_CAP,
+                    delay_ms = delay.as_millis(),
+                    "transient handshake failure; backing off and retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = std::cmp::min(delay * 2, BACKOFF_CAP);
+            }
             Err(HandshakeError::Io(err)) => {
+                consecutive_transient = 0;
                 tracing::warn!(error = %err, delay_ms = delay.as_millis(), "daemon connect failed; backing off");
                 tokio::time::sleep(delay).await;
                 delay = std::cmp::min(delay * 2, BACKOFF_CAP);
@@ -577,8 +687,21 @@ async fn run_connection(
                     None => return LoopEnd::ClientDropped,
                     Some(ClientCmd::Request { req, reply }) => {
                         let id = next_id.fetch_add(1, Ordering::Relaxed);
+                        // Encode BEFORE touching the socket (finding [2]): an oversized-once-encoded
+                        // request (e.g. an ~8.4 MiB write_stdin paste) is a purely LOCAL failure of
+                        // THIS request — it must resolve only this request's oneshot and leave the
+                        // connection (and every other in-flight/future request on it) completely
+                        // untouched, never reach `pending`/be treated as a dead socket.
+                        let bytes = match encode_request_frame(&Frame::Request { id, req }) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "request encode failed; failing only this request");
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
+                        };
                         pending.lock().unwrap().insert(id, reply);
-                        if let Err(e) = write_frame(stream, &Frame::Request { id, req }).await {
+                        if let Err(e) = write_encoded_frame(stream, &bytes).await {
                             tracing::warn!(error = %e, "write failed; dropping connection");
                             // The uniform drain in the outer loop will fail this (and every other
                             // in-flight) sender with Disconnected once we return.
@@ -690,10 +813,27 @@ async fn connection_task(
                     client_max = bpa_protocol::preamble::CLIENT_MAX_VERSION,
                     "daemon became incompatible; giving up reconnect"
                 );
+                // Finding [11]: previously this branch only logged and returned, leaving the
+                // client's slot holding a dead connection forever with no signal at all — the UI
+                // was stuck showing "reconnecting..." with no way to reach the upgrade flow. Fire
+                // the fatal transition BEFORE returning so the broker can map it to
+                // `daemon://incompatible` (spec §6.2) exactly as it does for the initial-connect
+                // path.
+                fire_conn(
+                    &shared.conn_cb,
+                    ConnState::Incompatible {
+                        daemon_min: min,
+                        daemon_max: max,
+                    },
+                );
                 return;
             }
-            // connect_with_backoff only returns Err for Incompatible; Io loops internally.
-            Err(_) => unreachable!("connect_with_backoff retries Io errors internally"),
+            // connect_with_backoff only returns Err for a fatal Incompatible classification (a
+            // genuine reply, or HANDSHAKE_SUSPECT_CAP consecutive transient failures escalated to
+            // the same shape); Io and TransientHandshake both loop internally.
+            Err(_) => unreachable!(
+                "connect_with_backoff only returns Err for HandshakeError::Incompatible"
+            ),
         }
     }
 }
@@ -991,7 +1131,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daemon_closing_during_handshake_is_incompatible_not_hang() {
+    async fn daemon_closing_during_handshake_is_transient_disconnected_not_hang() {
+        // Finding [1]: an EOF mid-handshake on the INITIAL connect is ambiguous (it's exactly what
+        // a booting-but-compatible v2 daemon looks like mid cold-rehydrate) — it must map to the
+        // retryable `Disconnected`, not an instant fatal `IncompatibleDaemon`/false upgrade dialog.
+        // It must still not hang past PREAMBLE_TIMEOUT.
         let path = tmp_sock();
         let ready = Arc::new(AtomicBool::new(false));
         let p = path.clone();
@@ -1001,7 +1145,7 @@ mod tests {
             r.store(true, Ordering::SeqCst);
             // Accept the connection, read the client's preamble, then close without replying —
             // the client must not hang waiting for a reply that will never come; it must give up
-            // by PREAMBLE_TIMEOUT (or sooner, on the EOF) and surface IncompatibleDaemon.
+            // by PREAMBLE_TIMEOUT (or sooner, on the EOF) and surface a retryable Disconnected.
             let (mut stream, _) = listener.accept().await.unwrap();
             let _client_preamble = read_client_preamble_stub(&mut stream).await;
             drop(stream);
@@ -1019,8 +1163,8 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ClientError::IncompatibleDaemon { .. }),
-            "expected IncompatibleDaemon, got {err:?}"
+            matches!(err, ClientError::Disconnected),
+            "expected the retryable Disconnected (transient handshake failure), got {err:?}"
         );
         assert!(
             elapsed < PREAMBLE_TIMEOUT + Duration::from_secs(1),
@@ -1155,6 +1299,47 @@ mod tests {
         );
     }
 
+    // ---- Finding [2]: an oversized-once-encoded request must fail ONLY itself, never the
+    // ---- connection — a subsequent normal request on the same connection must still succeed. ----
+
+    #[tokio::test]
+    async fn oversized_request_fails_itself_only_connection_stays_alive() {
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        spawn_stub(path.clone(), ready.clone());
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+
+        // ~8.5 MB of bytes all >= 0x18 (ASCII 'A' = 65): CBOR encodes each as a 2-byte item, so
+        // this comfortably exceeds bpa_protocol::MAX_FRAME_LEN (16 MiB) once encoded — mirrors the
+        // real-world "~8.4 MB paste" scenario from finding [2].
+        let oversized = vec![b'A'; 8_500_000];
+        let err = client
+            .request(Request::WriteStdin {
+                session_id: "s".into(),
+                bytes: oversized,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ClientError::RequestTooLarge { .. }),
+            "expected RequestTooLarge, got {err:?}"
+        );
+
+        // The connection must still be alive: a normal request right after must succeed, with NO
+        // reconnect/disconnect cycle in between (this stub only ever accepts ONE connection —
+        // spawn_stub's `listener.accept().await` is called exactly once — so success here already
+        // proves the same connection served both requests).
+        let ok = client
+            .request(Request::KillSession {
+                session_id: "x".into(),
+            })
+            .await
+            .expect("a normal request on the same connection must still succeed");
+        assert!(matches!(ok, Response::Ack));
+    }
+
     /// Test-only alias: exercises `DaemonClient`'s private `connect_at` directly (bypassing
     /// `resolve_socket_path()`) so the stub daemon can bind an arbitrary tempdir path. Same
     /// codepath `connect()` uses in production.
@@ -1261,5 +1446,240 @@ mod tests {
             "a callback registered after connect() (with an intervening await) must observe \
              ConnState::Connected immediately, got {s:?}"
         );
+    }
+
+    // ---- Finding [1]/[11]: transient handshake failures (EOF/timeout/garbage/bad-magic) must be
+    // ---- retried up to HANDSHAKE_SUSPECT_CAP, and only escalate to a fatal, mid-session
+    // ---- ConnState::Incompatible once the cap is actually exhausted. -----------------------------
+
+    /// Accept a connection, read the client's preamble, then close WITHOUT replying — this is the
+    /// "transient handshake failure" shape (EOF mid-handshake): exactly what a v2 daemon still
+    /// inside `cold_rehydrate_sessions` looks like from the outside, and also exactly what a
+    /// genuine v1 daemon (no codec-agnostic preamble reader) looks like.
+    async fn accept_and_eof(listener: &UnixListener) {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _client_preamble = read_client_preamble_stub(&mut s).await;
+        drop(s);
+    }
+
+    #[tokio::test]
+    async fn transient_handshake_failures_below_cap_eventually_connect_with_no_incompatible_event()
+    {
+        // N < HANDSHAKE_SUSPECT_CAP EOFs on RECONNECT attempts, then a real handshake succeeds.
+        // The client must reconnect cleanly with no IncompatibleDaemon anywhere in the process and
+        // no ConnState::Incompatible ever fired.
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+
+            // connection #1: real handshake, then drop (simulates the very first disconnect).
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                drop(s);
+            }
+            // reconnect attempts #2..#4: EOF mid-handshake (transient), well under the cap of 8.
+            for _ in 0..3 {
+                accept_and_eof(&listener).await;
+            }
+            // reconnect attempt #5: real handshake succeeds.
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                if let Some(Frame::Request { id, .. }) = read_frame(&mut s).await {
+                    write_stub_frame(
+                        &mut s,
+                        &Frame::Response {
+                            id,
+                            res: Response::Ack,
+                        },
+                    )
+                    .await;
+                }
+                std::future::pending::<()>().await;
+            }
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        // Retry KillSession until it succeeds against the eventually-recovered connection —
+        // proves the client reconnected fine despite the 3 transient EOFs in between.
+        let mut got_ack = false;
+        for _ in 0..200 {
+            match client
+                .request(Request::KillSession {
+                    session_id: "x".into(),
+                })
+                .await
+            {
+                Ok(Response::Ack) => {
+                    got_ack = true;
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        assert!(
+            got_ack,
+            "client must recover and connect after transient handshake failures below the cap"
+        );
+
+        let s = states.lock().unwrap().clone();
+        assert!(
+            !s.iter()
+                .any(|x| matches!(x, ConnState::Incompatible { .. })),
+            "no ConnState::Incompatible must fire while under HANDSHAKE_SUSPECT_CAP: {s:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_handshake_failures_exceeding_cap_surface_incompatible_daemon() {
+        // The daemon ALWAYS EOFs mid-handshake, forever — a stand-in for a genuine, permanently
+        // incompatible v1 daemon that can never complete the v2 preamble. After
+        // HANDSHAKE_SUSPECT_CAP consecutive transient failures, the reconnect loop must give up
+        // and fire ConnState::Incompatible{0,0} (unknown range).
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            // connection #1: real handshake, then drop, to get the client into the reconnect loop.
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                drop(s);
+            }
+            // Every subsequent attempt EOFs mid-handshake, forever.
+            loop {
+                accept_and_eof(&listener).await;
+            }
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        // Backoff doubles from 100ms up to 5s over 8 attempts — bound the wait generously.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            if states
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|x| matches!(x, ConnState::Incompatible { .. }))
+            {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let s = states.lock().unwrap().clone();
+        assert!(
+            found,
+            "expected ConnState::Incompatible after HANDSHAKE_SUSPECT_CAP transient failures: {s:?}"
+        );
+        match s
+            .iter()
+            .find(|x| matches!(x, ConnState::Incompatible { .. }))
+            .unwrap()
+        {
+            ConnState::Incompatible {
+                daemon_min,
+                daemon_max,
+            } => {
+                assert_eq!((*daemon_min, *daemon_max), (0, 0), "unknown-range sentinel");
+            }
+            _ => unreachable!(),
+        }
+
+        // The client must now be permanently dead: further requests fail Disconnected forever
+        // rather than hanging (request() checks `live` before enqueuing).
+        let err = client
+            .request(Request::KillSession {
+                session_id: "x".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn genuine_incompatible_reply_on_reconnect_is_immediately_fatal_and_fires_conn_state() {
+        // A GENUINE, well-formed Incompatible{2,2} reply (not an ambiguous EOF) must remain
+        // immediately fatal with no retry at all — and must fire ConnState::Incompatible with the
+        // real daemon-advertised range, not the 0,0 unknown-range sentinel.
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            // connection #1: real handshake, then drop.
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                drop(s);
+            }
+            // reconnect attempt: a genuine Incompatible{2,2} reply.
+            let (mut s, _) = listener.accept().await.unwrap();
+            let _client_preamble = read_client_preamble_stub(&mut s).await;
+            let reply = encode_daemon_reply(&DaemonReply::Incompatible { min: 2, max: 2 });
+            s.write_all(&reply).await.unwrap();
+            s.flush().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        let started = std::time::Instant::now();
+        let mut found = false;
+        for _ in 0..100 {
+            if states
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|x| matches!(x, ConnState::Incompatible { .. }))
+            {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let elapsed = started.elapsed();
+        let s = states.lock().unwrap().clone();
+        assert!(found, "expected ConnState::Incompatible: {s:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a genuine Incompatible reply must be immediately fatal, not retried: took {elapsed:?}"
+        );
+        match s
+            .iter()
+            .find(|x| matches!(x, ConnState::Incompatible { .. }))
+            .unwrap()
+        {
+            ConnState::Incompatible {
+                daemon_min,
+                daemon_max,
+            } => assert_eq!((*daemon_min, *daemon_max), (2, 2)),
+            _ => unreachable!(),
+        }
     }
 }

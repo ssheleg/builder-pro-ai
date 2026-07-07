@@ -35,14 +35,42 @@ use crate::socket_client::{ClientError, DaemonClient};
 /// `Disconnected` instead of a `State<AppState>` extraction panicking.
 pub type ClientSlot = std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<DaemonClient>>>>;
 
-/// Shared, Tauri-managed application state: the swappable daemon-client slot, the push broker, and
-/// the launchd agent (used by `upgrade_daemon`). Constructed once in `lib.rs`'s `setup()` and
-/// **always** registered via `app.manage(...)` — unlike the old design, `AppState` is never left
-/// unmanaged, even when the daemon is down or speaks an incompatible protocol version (spec §6.2).
+/// Queryable daemon connection status (finding [12], spec §6.2): a pull-based fallback for the
+/// single-shot `daemon://incompatible`/`daemon://disconnected`/`daemon://reconnected` events. The
+/// boot-time `daemon://incompatible` emit races webview `listen()` registration — if it fires
+/// before React mounts, it is lost forever (Tauri events are not replayed to late subscribers) and
+/// the upgrade flow becomes unreachable. `daemon_status` lets the frontend poll the current truth
+/// instead of depending solely on catching that one emit.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DaemonStatus {
+    Connected,
+    Disconnected,
+    /// Per-variant `rename_all` kept even though only `daemon_min`/`daemon_max` exist here (Task-8
+    /// lesson, same as `CommandError::IncompatibleDaemon`): the container's `rename_all` does NOT
+    /// cascade into struct-variant fields.
+    #[serde(rename_all = "camelCase")]
+    Incompatible {
+        daemon_min: u16,
+        daemon_max: u16,
+    },
+}
+
+/// Shared, mutex-guarded slot for the current [`DaemonStatus`], written at every place the truth
+/// changes (both of `bring_up_daemon`'s outcomes in `lib.rs`, and the second `on_conn` callback
+/// registered alongside the broker's) and read by the `daemon_status` command.
+pub type StatusSlot = Arc<std::sync::Mutex<DaemonStatus>>;
+
+/// Shared, Tauri-managed application state: the swappable daemon-client slot, the push broker, the
+/// launchd agent (used by `upgrade_daemon`), and the pull-queryable daemon status (finding [12]).
+/// Constructed once in `lib.rs`'s `setup()` and **always** registered via `app.manage(...)` —
+/// unlike the old design, `AppState` is never left unmanaged, even when the daemon is down or
+/// speaks an incompatible protocol version (spec §6.2).
 pub struct AppState {
     pub client: ClientSlot,
     pub broker: Arc<Broker>,
     pub launchd: Arc<crate::launchd::LaunchdAgent<'static>>,
+    pub status: StatusSlot,
 }
 
 /// The exact logic behind `AppState::client()`, pulled out as a free function over a bare
@@ -55,6 +83,17 @@ pub(crate) fn slot_client(slot: &ClientSlot) -> Result<Arc<DaemonClient>, Comman
         .unwrap()
         .clone()
         .ok_or(CommandError::Disconnected)
+}
+
+/// Read the current [`DaemonStatus`] out of a bare `StatusSlot` — pulled out as a free function for
+/// the same unit-testability reason as `slot_client` above.
+pub(crate) fn read_status(slot: &StatusSlot) -> DaemonStatus {
+    slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Write a new [`DaemonStatus`] into a bare `StatusSlot`.
+pub(crate) fn write_status(slot: &StatusSlot, status: DaemonStatus) {
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = status;
 }
 
 impl AppState {
@@ -118,6 +157,13 @@ pub enum CommandError {
     /// cascade into struct-variant fields.
     #[serde(rename_all = "camelCase")]
     UpgradeFailed { reason: String },
+    /// A single request, once CBOR-encoded, exceeded `bpa_protocol::MAX_FRAME_LEN` (finding [2]:
+    /// e.g. an ~8.4 MiB `write_stdin` paste). Distinct from `Internal`/`Daemon`: this is a LOCAL,
+    /// per-request encode failure caught before the socket write, never a daemon-side rejection or
+    /// a dead connection — the connection stays alive and every other request keeps working.
+    /// `size` is the encoded CBOR body length in bytes.
+    #[serde(rename_all = "camelCase")]
+    TooLarge { size: usize },
 }
 
 impl std::fmt::Display for CommandError {
@@ -134,6 +180,9 @@ impl std::fmt::Display for CommandError {
                 "incompatible daemon (daemon supports [{daemon_min}, {daemon_max}])"
             ),
             CommandError::UpgradeFailed { reason } => write!(f, "daemon upgrade failed: {reason}"),
+            CommandError::TooLarge { size } => {
+                write!(f, "request too large once encoded ({size} bytes)")
+            }
         }
     }
 }
@@ -152,6 +201,7 @@ impl From<ClientError> for CommandError {
                 daemon_min,
                 daemon_max,
             },
+            ClientError::RequestTooLarge { size } => CommandError::TooLarge { size },
         }
     }
 }
@@ -171,11 +221,35 @@ pub(crate) fn build_create_session(workspace_id: WorkspaceId, opts: Option<Creat
     }
 }
 
-pub(crate) fn build_write_stdin(session_id: SessionId, data: String) -> Request {
-    Request::WriteStdin {
-        session_id,
-        bytes: data.into_bytes(),
+/// Chunk size for `write_stdin` (finding [2]): 1 MiB of raw bytes CBOR-encodes to at most ~2 MiB
+/// (CBOR encodes `Vec<u8>` as an array of unsigned integers — worst case every byte costs 2 wire
+/// bytes), far under `bpa_protocol::MAX_FRAME_LEN` (16 MiB), leaving generous headroom for the rest
+/// of the `Request::WriteStdin` frame envelope.
+pub(crate) const WRITE_STDIN_CHUNK: usize = 1024 * 1024;
+
+/// Split `data`'s raw UTF-8 bytes into `Request::WriteStdin` requests of at most
+/// `WRITE_STDIN_CHUNK` bytes each (finding [2]: a single large paste, once CBOR-encoded, can exceed
+/// the 16 MiB frame cap and tear down the whole connection). Splits on raw byte boundaries (not
+/// UTF-8 char boundaries) — the daemon/PTY treat `WriteStdin`'s `bytes` as an opaque byte stream, so
+/// a chunk boundary landing mid-multi-byte-codepoint is harmless: the two chunks are written to the
+/// same PTY fd back-to-back, in order (`write_stdin`'s caller awaits each chunk sequentially on the
+/// same connection before sending the next, so FIFO delivery order is preserved), and the shell/PTY
+/// reassembles the byte stream exactly as if it had arrived in one write. Returns a single
+/// (possibly empty-bytes) request for input at or under the chunk size, so the common case (a
+/// normal keystroke or small paste) is still exactly one `Request::WriteStdin`, same as before
+/// chunking existed.
+pub(crate) fn build_write_stdin_chunks(session_id: SessionId, data: String) -> Vec<Request> {
+    let bytes = data.into_bytes();
+    if bytes.len() <= WRITE_STDIN_CHUNK {
+        return vec![Request::WriteStdin { session_id, bytes }];
     }
+    bytes
+        .chunks(WRITE_STDIN_CHUNK)
+        .map(|chunk| Request::WriteStdin {
+            session_id: session_id.clone(),
+            bytes: chunk.to_vec(),
+        })
+        .collect()
 }
 
 // ── core-side path pre-flights (spec §13/§16 defense in depth) ─────────────────────────────
@@ -337,12 +411,16 @@ pub async fn write_stdin(
     session_id: SessionId,
     data: String,
 ) -> Result<(), CommandError> {
-    expect_ack(
-        state
-            .client()?
-            .request(build_write_stdin(session_id, data))
-            .await?,
-    )
+    // Chunked (finding [2]): a single oversized paste, once CBOR-encoded, could exceed the 16 MiB
+    // frame cap and tear down the whole daemon connection. Send each ≤1 MiB chunk as a sequential
+    // `Request::WriteStdin` on the SAME connection — awaiting each one before sending the next
+    // preserves FIFO order at the PTY. On any chunk failure, stop immediately and surface that
+    // error honestly rather than silently dropping the remaining chunks or retrying.
+    let client = state.client()?;
+    for req in build_write_stdin_chunks(session_id, data) {
+        expect_ack(client.request(req).await?)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -416,6 +494,17 @@ pub async fn get_session_state(
     )
 }
 
+/// CORE-ONLY (finding [12], spec §6.2): pull-based fallback for the single-shot
+/// `daemon://incompatible`/`daemon://disconnected`/`daemon://reconnected` events, which can be
+/// lost if they fire before the webview's `listen()` registrations complete (Tauri events are not
+/// replayed to late subscribers). Never errors in practice — always returns `Ok` with whatever the
+/// status slot currently holds, so the frontend can poll it on mount/reconnect-retry without
+/// needing its own error-recovery path for this specific call.
+#[tauri::command]
+pub async fn daemon_status(state: State<'_, AppState>) -> Result<DaemonStatus, CommandError> {
+    Ok(read_status(&state.status))
+}
+
 /// CORE-ONLY (spec §6.1): the native folder picker must run in the GUI process, never brokered to
 /// the daemon — there is deliberately no `Request` variant for it (see
 /// `pick_folder_is_core_only_no_daemon_request` below). Returns the chosen absolute path, or
@@ -445,6 +534,11 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, CommandError>
 /// expected and must never block the upgrade. (b) The kickstart is the opposite — its failure is
 /// the one honest, surfaced error (spec §6.2.4): never claim success when `launchctl kickstart -k`
 /// actually failed.
+///
+/// Uses [`crate::launchd::LaunchdAgent::kickstart_force`] (`-k`) deliberately, NOT the plain
+/// boot-path `kickstart()`: this function only ever runs from the `upgrade_daemon` command, which
+/// is gated behind the T10b consent dialog — the user has already agreed that the running
+/// daemon's live sessions will end. The boot path must never reach this function.
 pub async fn upgrade_daemon_core(
     client: Option<Arc<DaemonClient>>,
     agent: &crate::launchd::LaunchdAgent<'_>,
@@ -452,9 +546,11 @@ pub async fn upgrade_daemon_core(
     if let Some(c) = client {
         let _ = c.request(Request::DaemonShutdown { drain: true }).await;
     }
-    agent.kickstart().map_err(|e| CommandError::UpgradeFailed {
-        reason: e.to_string(),
-    })?;
+    agent
+        .kickstart_force()
+        .map_err(|e| CommandError::UpgradeFailed {
+            reason: e.to_string(),
+        })?;
     Ok(())
 }
 
@@ -577,13 +673,90 @@ mod tests {
     }
 
     #[test]
-    fn write_stdin_builds_request_utf8_bytes() {
-        let req = build_write_stdin("s".to_string(), "héllo".to_string());
-        match req {
+    fn write_stdin_chunks_builds_single_request_utf8_bytes_under_chunk_size() {
+        let reqs = build_write_stdin_chunks("s".to_string(), "héllo".to_string());
+        assert_eq!(
+            reqs.len(),
+            1,
+            "input under WRITE_STDIN_CHUNK must be one request"
+        );
+        match &reqs[0] {
             Request::WriteStdin { session_id, bytes } => {
                 assert_eq!(session_id, "s");
-                assert_eq!(bytes, "héllo".as_bytes().to_vec());
+                assert_eq!(bytes, &"héllo".as_bytes().to_vec());
             }
+            other => panic!("expected WriteStdin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_stdin_chunks_splits_oversized_input_into_ordered_1mib_chunks() {
+        // 3.5 MiB of input -> 4 sequential chunks (3 full 1 MiB + one 0.5 MiB remainder), in order,
+        // reassembling byte-identically to the original input (finding [2]).
+        let total = WRITE_STDIN_CHUNK * 3 + WRITE_STDIN_CHUNK / 2;
+        let data: String = (0..total)
+            .map(|i| (b'a' + (i % 26) as u8) as char)
+            .collect();
+        let expected_bytes = data.clone().into_bytes();
+
+        let reqs = build_write_stdin_chunks("sess-1".to_string(), data);
+        assert_eq!(reqs.len(), 4, "expected 4 chunks for 3.5 MiB input");
+
+        let mut reassembled = Vec::new();
+        for (i, req) in reqs.iter().enumerate() {
+            match req {
+                Request::WriteStdin { session_id, bytes } => {
+                    assert_eq!(
+                        session_id, "sess-1",
+                        "chunk {i} must target the same session"
+                    );
+                    assert!(
+                        bytes.len() <= WRITE_STDIN_CHUNK,
+                        "chunk {i} exceeds WRITE_STDIN_CHUNK: {}",
+                        bytes.len()
+                    );
+                    reassembled.extend_from_slice(bytes);
+                }
+                other => panic!("expected WriteStdin, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            reqs[0].clone(),
+            Request::WriteStdin {
+                session_id: "sess-1".to_string(),
+                bytes: expected_bytes[0..WRITE_STDIN_CHUNK].to_vec(),
+            }
+        );
+        assert_eq!(
+            reassembled, expected_bytes,
+            "chunks must reassemble byte-identically, in order"
+        );
+    }
+
+    #[test]
+    fn write_stdin_chunks_exact_multiple_of_chunk_size() {
+        // Exactly on a chunk boundary: must not produce a trailing empty chunk.
+        let data: String = "x".repeat(WRITE_STDIN_CHUNK * 2);
+        let reqs = build_write_stdin_chunks("s".to_string(), data);
+        assert_eq!(
+            reqs.len(),
+            2,
+            "exact multiple must not leave a trailing empty chunk"
+        );
+        for req in &reqs {
+            match req {
+                Request::WriteStdin { bytes, .. } => assert_eq!(bytes.len(), WRITE_STDIN_CHUNK),
+                other => panic!("expected WriteStdin, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn write_stdin_chunks_empty_input_yields_single_empty_request() {
+        let reqs = build_write_stdin_chunks("s".to_string(), String::new());
+        assert_eq!(reqs.len(), 1);
+        match &reqs[0] {
+            Request::WriteStdin { bytes, .. } => assert!(bytes.is_empty()),
             other => panic!("expected WriteStdin, got {other:?}"),
         }
     }
@@ -897,6 +1070,86 @@ mod tests {
         assert!(
             got.request(Request::ListWorkspaces).await.is_ok(),
             "the returned client must be the real, live one"
+        );
+    }
+
+    // ── DaemonStatus / StatusSlot (finding [12], spec §6.2) ─────────────────────────────────
+    //
+    // Tested here directly against a bare `StatusSlot`, same rationale as `slot_client` above
+    // (`AppState` itself needs a real Tauri `AppHandle` to construct) — `read_status`/
+    // `write_status` are exactly what `AppState.status`/the `daemon_status` command delegate to.
+
+    #[test]
+    fn daemon_status_serializes_with_camel_case_tag() {
+        let v = serde_json::to_value(DaemonStatus::Connected).unwrap();
+        assert_eq!(v["kind"], "connected");
+
+        let v2 = serde_json::to_value(DaemonStatus::Disconnected).unwrap();
+        assert_eq!(v2["kind"], "disconnected");
+
+        let v3 = serde_json::to_value(DaemonStatus::Incompatible {
+            daemon_min: 2,
+            daemon_max: 2,
+        })
+        .unwrap();
+        assert_eq!(v3["kind"], "incompatible");
+        assert_eq!(v3["daemonMin"], 2);
+        assert_eq!(v3["daemonMax"], 2);
+    }
+
+    #[test]
+    fn status_slot_starts_disconnected_and_reflects_writes() {
+        let slot: StatusSlot = Arc::new(std::sync::Mutex::new(DaemonStatus::Disconnected));
+        assert_eq!(read_status(&slot), DaemonStatus::Disconnected);
+
+        write_status(&slot, DaemonStatus::Connected);
+        assert_eq!(read_status(&slot), DaemonStatus::Connected);
+
+        write_status(
+            &slot,
+            DaemonStatus::Incompatible {
+                daemon_min: 3,
+                daemon_max: 3,
+            },
+        );
+        assert_eq!(
+            read_status(&slot),
+            DaemonStatus::Incompatible {
+                daemon_min: 3,
+                daemon_max: 3
+            }
+        );
+
+        // Reflects a later recovery too (mid-session reconnect after a manual fix).
+        write_status(&slot, DaemonStatus::Connected);
+        assert_eq!(read_status(&slot), DaemonStatus::Connected);
+    }
+
+    #[tokio::test]
+    async fn daemon_status_command_returns_whatever_the_slot_holds() {
+        // `daemon_status` itself needs a live `State<AppState>` (requires a real AppHandle), so
+        // this exercises the identical underlying logic (`read_status` over a `StatusSlot`) the
+        // command is a one-line delegate to — the command body is `Ok(read_status(&state.status))`,
+        // nothing else to diverge.
+        let slot: StatusSlot = Arc::new(std::sync::Mutex::new(DaemonStatus::Disconnected));
+        assert_eq!(
+            Ok::<DaemonStatus, CommandError>(read_status(&slot)),
+            Ok(DaemonStatus::Disconnected)
+        );
+
+        write_status(
+            &slot,
+            DaemonStatus::Incompatible {
+                daemon_min: 5,
+                daemon_max: 6,
+            },
+        );
+        assert_eq!(
+            Ok::<DaemonStatus, CommandError>(read_status(&slot)),
+            Ok(DaemonStatus::Incompatible {
+                daemon_min: 5,
+                daemon_max: 6
+            })
         );
     }
 }
@@ -1242,5 +1495,170 @@ pub(crate) mod commands_over_stub_daemon {
         let ws = expect_workspace(res).unwrap();
         assert_eq!(ws.id, "w-1");
         assert_eq!(ws.root_path, expected_str);
+    }
+
+    // ── write_stdin chunking end-to-end (finding [2], spec's item C4) ──────────────────────────
+    //
+    // `write_stdin` (the `#[tauri::command]`) needs a live `State<AppState>`/`AppHandle` (out of
+    // scope for a unit test, same limitation documented at this module's top) — but its entire body
+    // is `for req in build_write_stdin_chunks(...) { expect_ack(client.request(req).await?)?; }`.
+    // These tests drive that exact loop directly against a real `DaemonClient` + stub daemon, which
+    // is real coverage of the whole chunking behavior, not a reconstruction.
+
+    /// Bind a stub daemon that replies to an unbounded SEQUENCE of requests (unlike `connect_to_stub`,
+    /// which only ever answers one) — each incoming `Frame::Request` is handed to `respond`, in
+    /// order, and the reply is written back before the next read. Needed for the chunking tests,
+    /// which send several sequential `WriteStdin` requests on the same connection.
+    async fn connect_to_stub_sequence<F>(mut respond: F) -> (DaemonClient, PathBuf)
+    where
+        F: FnMut(Request) -> Response + Send + 'static,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("d.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _client_preamble = read_client_preamble_stub(&mut stream).await;
+            let reply = encode_daemon_reply(&DaemonReply::Accepted {
+                chosen: 2,
+                build: "stub".into(),
+            });
+            stream.write_all(&reply).await.unwrap();
+            stream.flush().await.unwrap();
+
+            loop {
+                let Some(Frame::Request { id, req }) = read_frame(&mut stream).await else {
+                    break;
+                };
+                let res = respond(req);
+                write_stub_frame(&mut stream, &Frame::Response { id, res }).await;
+            }
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let client = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            let client = DaemonClient::connect("test-build".to_string())
+                .await
+                .unwrap();
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            client
+        };
+        std::mem::forget(dir);
+
+        (client, sock_path)
+    }
+
+    /// Drive `build_write_stdin_chunks`' output through `client.request` sequentially, exactly like
+    /// `write_stdin`'s command body — stops and returns the first error, same as the real command.
+    async fn drive_write_stdin(
+        client: &DaemonClient,
+        session_id: SessionId,
+        data: String,
+    ) -> Result<(), CommandError> {
+        for req in build_write_stdin_chunks(session_id, data) {
+            expect_ack(client.request(req).await?)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_stdin_chunking_sends_ordered_chunks_stub_observes_and_reassembles() {
+        // 3.5 MiB input -> 4 sequential WriteStdin frames, observed by the stub in order; the
+        // reassembled bytes must exactly match the original input.
+        let total = WRITE_STDIN_CHUNK * 3 + WRITE_STDIN_CHUNK / 2;
+        let data: String = (0..total)
+            .map(|i| (b'a' + (i % 26) as u8) as char)
+            .collect();
+        let expected_bytes = data.clone().into_bytes();
+
+        let observed: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed2 = observed.clone();
+        let (client, _sock) = connect_to_stub_sequence(move |req| match req {
+            Request::WriteStdin { session_id, bytes } => {
+                assert_eq!(
+                    session_id, "sess-1",
+                    "every chunk must target the same session"
+                );
+                observed2.lock().unwrap().push(bytes);
+                Response::Ack
+            }
+            other => panic!("expected WriteStdin, got {other:?}"),
+        })
+        .await;
+
+        drive_write_stdin(&client, "sess-1".to_string(), data)
+            .await
+            .expect("chunked write_stdin must succeed end to end");
+
+        let chunks = observed.lock().unwrap().clone();
+        assert_eq!(chunks.len(), 4, "expected 4 sequential WriteStdin frames");
+        for (i, c) in chunks.iter().enumerate() {
+            assert!(
+                c.len() <= WRITE_STDIN_CHUNK,
+                "chunk {i} exceeds WRITE_STDIN_CHUNK: {}",
+                c.len()
+            );
+        }
+        let reassembled: Vec<u8> = chunks.into_iter().flatten().collect();
+        assert_eq!(
+            reassembled, expected_bytes,
+            "chunks observed by the stub, in order, must reassemble byte-identically"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_stdin_chunking_stops_and_surfaces_error_on_chunk_failure() {
+        // The stub Acks the first chunk, then rejects the second with a daemon error. The chunk
+        // loop must stop immediately (never send the 3rd/4th chunks) and surface that error
+        // honestly, rather than silently swallowing it or continuing.
+        let total = WRITE_STDIN_CHUNK * 3 + WRITE_STDIN_CHUNK / 2; // 4 chunks worth
+        let data: String = "z".repeat(total);
+
+        let seen: Arc<std::sync::atomic::AtomicUsize> =
+            Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen2 = seen.clone();
+        let (client, _sock) = connect_to_stub_sequence(move |req| match req {
+            Request::WriteStdin { .. } => {
+                let n = seen2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 1 {
+                    Response::Error {
+                        code: "NoSuchSession".into(),
+                        message: "session gone mid-paste".into(),
+                    }
+                } else {
+                    Response::Ack
+                }
+            }
+            other => panic!("expected WriteStdin, got {other:?}"),
+        })
+        .await;
+
+        let err = drive_write_stdin(&client, "sess-1".to_string(), data)
+            .await
+            .unwrap_err();
+        match err {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "NoSuchSession"),
+            other => panic!("expected Daemon error surfaced honestly, got {other:?}"),
+        }
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "must stop after the failing chunk, never sending the remaining ones"
+        );
     }
 }

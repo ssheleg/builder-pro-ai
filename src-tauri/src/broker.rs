@@ -139,13 +139,13 @@ pub fn map_push(push: Push) -> BrokerAction {
     }
 }
 
-/// Conn-state tracking (spec §13: "On reconnect -> `daemon://reconnected`"). `DaemonClient::
-/// on_conn` fires `Connected` both for the **initial** connect and for every successful
-/// reconnect (locked contract, T14 docs) — this function is the pure decision of which of the
-/// two global events (if any) that transition should raise, given whether a `Disconnected` has
-/// already been observed. `seen_disconnected` is read-then-written by the caller (see
-/// [`Broker::on_conn`]) so this stays a plain, easily-tested function rather than needing to own
-/// the flag itself.
+/// Conn-state tracking (spec §13: "On reconnect -> `daemon://reconnected`"; spec §6.2: "On fatal
+/// handshake mismatch -> `daemon://incompatible`"). `DaemonClient::on_conn` fires `Connected` both
+/// for the **initial** connect and for every successful reconnect (locked contract, T14 docs) —
+/// this function is the pure decision of which of the three global events (if any) that transition
+/// should raise, given whether a `Disconnected` has already been observed. `seen_disconnected` is
+/// read-then-written by the caller (see [`Broker::on_conn`]) so this stays a plain, easily-tested
+/// function rather than needing to own the flag itself.
 ///
 /// Returns the event name to emit, or `None` (the very first `Connected`, before any
 /// `Disconnected` was ever seen, is not a "reconnect" and gets no event per spec §6.3's table,
@@ -162,6 +162,19 @@ pub fn map_conn_state(state: ConnState, seen_disconnected: &mut bool) -> Option<
             } else {
                 None
             }
+        }
+        // Finding [11]: a mid-session fatal handshake classification (genuine Incompatible reply,
+        // or HANDSHAKE_SUSPECT_CAP consecutive transient failures escalated to the same shape) must
+        // reach the frontend exactly like the initial-connect path does, so the upgrade dialog is
+        // reachable instead of the connection task silently dying with no event at all. Set
+        // `seen_disconnected = true` (this connection is now permanently dead — the connection task
+        // has already returned) so that IF the user manually recovers later (quit+relaunch,
+        // upgrade+restart) and a fresh client eventually connects, the resulting `Connected`
+        // correctly fires `daemon://reconnected` rather than being silently swallowed as "not a
+        // reconnect" by the `seen_disconnected == false` branch above.
+        ConnState::Incompatible { .. } => {
+            *seen_disconnected = true;
+            Some(EV_DAEMON_INCOMPATIBLE)
         }
     }
 }
@@ -483,5 +496,38 @@ mod tests {
         map_conn_state(ConnState::Connected, &mut seen); // -> reconnected, clears flag
         let ev = map_conn_state(ConnState::Connected, &mut seen);
         assert_eq!(ev, None);
+    }
+
+    // ── map_conn_state: mid-session Incompatible (finding [11], spec §6.2) ─────────────────
+
+    #[test]
+    fn incompatible_maps_to_daemon_incompatible_event() {
+        let mut seen = false;
+        let ev = map_conn_state(
+            ConnState::Incompatible {
+                daemon_min: 3,
+                daemon_max: 3,
+            },
+            &mut seen,
+        );
+        assert_eq!(ev, Some(EV_DAEMON_INCOMPATIBLE));
+    }
+
+    #[test]
+    fn incompatible_sets_seen_disconnected_so_a_later_recovery_fires_reconnected() {
+        // The connection task has permanently died at this point (no more reconnect attempts will
+        // happen on THIS client) — but if the whole app later recovers (manual restart, or the
+        // upgrade flow's app.restart()) and a fresh client connects, that Connected transition
+        // must still be recognized as "recovering from a bad state", i.e. fire reconnected, not
+        // silently be treated as a fresh first-ever connect.
+        let mut seen = false;
+        map_conn_state(
+            ConnState::Incompatible {
+                daemon_min: 0,
+                daemon_max: 0,
+            },
+            &mut seen,
+        );
+        assert!(seen, "Incompatible must set seen_disconnected");
     }
 }
