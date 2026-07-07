@@ -20,7 +20,7 @@ All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: s
 - Upgrade consent flow: incompatible-daemon detection (typed, fatal, never auto-retried) →
   honest banner + consent dialog (N live sessions counted) → best-effort drain →
   `launchctl kickstart -k` → app relaunch; kickstart failure surfaces honestly.
-- Schema v2: `command_events` table (best-effort от OSC-133 C/D marks, `origin` column),
+- Schema v2: `command_events` table (best-effort from OSC-133 C/D marks, `origin` column),
   fail-closed forward-only migration from v1.
 - Cold-rehydrate: at boot the daemon loads every persisted session as an inactive replay-only
   entry; attaching an inactive session replays its scrollback (no new wire request needed).
