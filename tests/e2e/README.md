@@ -22,19 +22,24 @@ real user session and decreasing order of how cheaply/automatically they run:
 
 ### What it does
 
-`survive-restart.mjs` re-implements the exact bincode 1.3.3 (fixint, little-endian)
-encoding for the Hop-B wire protocol (spec §7) directly in Node — no Rust bridge, no
-test-runner dependency, no WKWebView. It drives a locally-spawned `bpa-sessiond`
-through the full lifecycle:
+`survive-restart.mjs` speaks the v2 wire (Pv2 §4.2/§7) directly against a
+locally-spawned `bpa-sessiond`: a codec-agnostic **preamble** handshake (raw
+little-endian primitives, magic `0x42504141` "BPAA") immediately after connect,
+followed by a **CBOR** (RFC 8949) frame stream — `u32-LE length prefix | CBOR(Frame)
+body`, matching `crates/protocol/src/framing.rs` exactly. `daemon-harness.mjs`
+hand-rolls both the preamble codec and a minimal CBOR encoder/decoder (no
+dependency — see its module doc comment) rather than pulling in a general-purpose
+CBOR library, no Rust bridge, no test-runner dependency, no WKWebView. It drives the
+daemon through the full lifecycle:
 
-- **phase0** — spawn the daemon on a scratch socket **isolated from the real user socket**
-  (a fresh `mkdtemp` dir with its own `XDG_RUNTIME_DIR`, so it can never collide with — or
+- **phase0** — spawn the daemon on a scratch socket **isolated from the real user
+  socket AND the real user state dir** (a fresh `mkdtemp` dir for `XDG_RUNTIME_DIR`
+  and a SEPARATE fresh `mkdtemp` dir for `HOME`, so it can never collide with — or
   during cleanup, signal — an actual running daemon at `/tmp/bpa-<uid>` or
-  `$XDG_RUNTIME_DIR/bpa`), connect, `Hello` → `Welcome` handshake. The `Hello` request is
-  sent with the fixed request id `0` (spec §7) — the daemon's handshake gate
-  (`crates/sessiond/src/socket_server.rs`) matches the first frame as literally `id: 0` and
-  always replies `Response { id: 0, .. }` for it; any other id on that first frame silently
-  desyncs response correlation and manifests as `request Hello timed out`.
+  `$XDG_RUNTIME_DIR/bpa`, nor read/write the real `~/Library/Application
+  Support/ai.builderpro.desktop/bpa.db`), connect, and complete the v2 preamble
+  handshake (`connect()` performs this internally — see `preambleHandshake()` in
+  `daemon-harness.mjs`). Asserts the negotiated `chosenVersion === 2`.
 - **phase1** — `CreateWorkspace` (rooted in a fresh temp dir under `target/`),
   `CreateSession` (a real `/bin/zsh`).
 - **phase2** — `AttachSession` → first push is `Replay`; `WriteStdin` an
@@ -49,15 +54,46 @@ through the full lifecycle:
   - assert `pgrep bpa-sessiond` still lists the daemon's pid;
   - assert the shell's pid (found as a child of the daemon via `pgrep -P`) is still
     alive (`kill -0`);
-  - open a **fresh** client connection (simulating app relaunch), `Hello` again,
-    `ListSessions` and assert the session is still listed;
+  - open a **fresh** client connection (simulating app relaunch), preamble handshake
+    again, `ListSessions` and assert the session is still listed;
   - `AttachSession` again and assert the `Replay` push's `content` still contains the
-    marker written in phase2 (scrollback survived the "restart").
-  - clean up: `SIGTERM` the daemon it spawned, remove the temp workspace dir.
+    marker written in phase2 (scrollback survived the "restart" — but note the
+    daemon PROCESS itself never stopped in this phase; only the client reconnected).
+- **phase5 (daemon-restart rehydration, closes BL-7, Pv2 §9.8)** — a REAL daemon
+  process restart, not just a client reconnect:
+  - `DaemonShutdown{drain:true}` over the still-open phase4 connection; assert `Ack`.
+  - poll `kill -0` on the exact pid this harness spawned until the daemon PROCESS
+    actually exits (bounded, 10s deadline — fails loudly if it doesn't).
+  - relaunch the SAME `bpa-sessiond` binary against the SAME socket path AND the SAME
+    isolated `XDG_RUNTIME_DIR`/`HOME` env overrides phase0 used (`daemonEnvOverrides`,
+    reused verbatim) — this is what makes `resolve_socket_path()` AND
+    `app_support_dir()` (`crates/sessiond/src/boot.rs`, keyed off `HOME`, NOT
+    `XDG_RUNTIME_DIR`) resolve to the identical `bpa.db` the pre-restart daemon's
+    drain-flush wrote to.
+  - reconnect (fresh preamble handshake) and **assert 1**: `ListSessions` shows the
+    phase-1 session `sid` present with `isActive === false` — proving
+    `Db::rehydrate()`/`list_sessions()` correctly rehydrates session metadata from
+    SQLite as inactive after a real process restart.
+  - **assert 2**: reattach (`AttachSession{sid}` must `Ack`) and assert the `Replay`
+    push's scrollback still contains the phase-2 marker. This exercises the daemon's
+    cold-rehydrate path (`bpa-sessiond` boot loads every persisted session from
+    SQLite into the Supervisor as an inactive, replay-only entry, so `AttachSession`
+    on a rehydrated session serves `Push::Replay` from the persisted scrollback
+    rather than returning `NoSuchSession`; unknown session ids still error).
 
 No assertion is weakened to pass vacuously — a missing daemon binary, a broken
 handshake, absent lifecycle pushes, or lost scrollback each fail with a specific,
 actionable message and a non-zero exit code.
+
+> **History note:** phase5's assertion 2 was blocked when first authored — at the
+> time, the daemon's `AttachRegistry` refused attach on any session absent from the
+> in-memory Supervisor (returning `NoSuchSession` for every rehydrated-from-SQLite
+> session by design), and no wire request exposed `Db::load_scrollback` out-of-band.
+> The harness failed loudly at that assertion rather than weakening it. The gap was
+> closed daemon-side by the cold-rehydrate change (`feat(sessiond): cold-rehydrate
+> persisted sessions as inactive + attach-inactive replays scrollback`), after which
+> phases 0-5 pass unmodified. See `.superpowers/sdd/task-12-report.md` for the full
+> investigation.
 
 ### Prerequisites
 
@@ -87,36 +123,48 @@ with `BPA_SESSIOND=/path/to/bpa-sessiond npm run e2e:survive` (defaults to
 Expected output on success:
 
 ```
-[e2e] phase0 OK: handshake
+[e2e] phase0 OK: preamble handshake (chosen=2, daemonBuild="0.1.0")
 [e2e] phase1 OK: session <uuid>
 [e2e] phase2 OK: command output observed
 [e2e] phase3 OK: OSC-133 lifecycle running -> atPrompt
 [e2e] phase4a OK: daemon + shell survived client quit
 [e2e] phase4b OK: reattach + scrollback intact
+[e2e] phase5 OK: DaemonShutdown Ack received
+[e2e] phase5 OK: daemon (pid <pid>) process exited
+[e2e] phase5 OK: reconnected to relaunched daemon (pid <pid>)
+[e2e] phase5 OK: session <uuid> rehydrated with isActive=false
+[e2e] phase5 OK: reattach after daemon restart replays scrollback with marker intact (BL-7 closed)
 [e2e] ALL PHASES PASSED
 ```
 exit code `0`.
 
 ### `tests/e2e/lib/daemon-harness.mjs`
 
-The reusable client library: frame codec (`encodeFrame`/`decodeFrame`), a
-length-prefixed-framing socket wrapper (`connect`, `request`, `nextPush`, `hello`),
-and process probes (`pgrepDaemon`, `pgrepShell`, `pidAlive`, `spawnDaemon`,
-`launchctlKickstart`, `killGui`). The variant orders transcribed into the codec are
-commented with exactly which `crates/protocol/src/lib.rs` enum they must track
-(`Frame`, `Request`, `Response`, `Push`) — if that file's variant order ever changes,
-update the corresponding `u32le(N)` calls here to match, and the codec doc comments
-name the enum to diff against.
+The reusable client library:
+- **Preamble handshake** (`encodeClientPreamble`, `preambleHandshake`) — the fixed,
+  codec-independent header that precedes any framed traffic (Pv2 §4.2), mirroring
+  `crates/protocol/src/preamble.rs::encode_client_preamble`/`decode_daemon_reply`
+  byte-for-byte. `connect()` performs this automatically before resolving.
+- **Minimal hand-rolled CBOR codec** (`cborEncode`/`cborDecode`) plus the
+  `Frame`/`Request`/`Response`/`Push` shape mapping (`encodeFrame`/`decodeFrame`) —
+  see the codec's module doc comment for the exact externally-tagged/camelCase/
+  `Vec<u8>`-as-array shape rules transcribed from `crates/protocol/src/lib.rs`. Every
+  shape here was cross-verified byte-for-byte against the REAL `ciborium`/protocol
+  crate (both encode and decode directions) during authoring — see
+  `.superpowers/sdd/task-12-report.md` for the verification transcript.
+- A length-prefixed-framing socket wrapper (`connect`, `request`, `nextPush`) and
+  process probes (`pgrepDaemon`, `pgrepShell`, `pidAlive`, `spawnDaemon`,
+  `launchctlKickstart`, `killGui`).
 
-One subtlety worth calling out explicitly: `SessionLifecycle` is **not** encoded as a
-raw bincode enum discriminant on the wire. Per the dual-codec note in
-`crates/protocol/src/lib.rs`, it has a hand-written `Serialize`/`Deserialize` that,
-under a non-human-readable codec (bincode/Hop-B), serializes the tagged JSON shape
-(`{"kind":"atPrompt"}`, `{"kind":"exited","code":0,"signal":null}`, …) into a plain
-bincode `String`. `decLifecycle` in the harness therefore reads a length-prefixed
-UTF-8 string and `JSON.parse`s it, rather than reading a `u32` variant index — get this
-wrong and every `SessionMeta`/`StateChanged` decode desyncs the cursor on the very
-first field after it.
+If `crates/protocol/src/lib.rs`'s field names/variant names ever change, update the
+corresponding `enc*`/`dec*` functions in `daemon-harness.mjs` to match — the codec's
+doc comments name the exact struct/field being mirrored throughout.
+
+One subtlety worth calling out explicitly: `SessionLifecycle` is internally tagged on
+`kind` (camelCase — `crates/protocol/src/lib.rs`, `#[serde(tag = "kind", rename_all =
+"camelCase")]`). Under CBOR this derives plainly (unlike the old bincode dual-codec
+shim it used to need) — it decodes as `{"kind":"atPrompt"}` or
+`{"kind":"exited","code":0,"signal":null}` directly, no JSON re-parsing step needed.
 
 ## 2. launchd-managed variant
 
@@ -248,14 +296,46 @@ cause (Task 23 follow-up fix) — **not** a daemon bug:
   in `survive-restart.mjs`. A prior failed run (while phase0 was still broken) had left
   a stray `bpa-sessiond` running on the real socket path; this closes that gap.
 
-With both fixes, `npm run e2e:survive` passes all phases (`phase0` through `phase4b`,
+With both fixes, `npm run e2e:survive` passed all phases (`phase0` through `phase4b`,
 `ALL PHASES PASSED`, exit code 0) against a real `cargo build -p bpa-sessiond` binary,
-and `pgrep -fl bpa-sessiond` finds nothing left running afterward. The bincode codec
+and `pgrep -fl bpa-sessiond` found nothing left running afterward. The bincode codec
 itself (the part validated by re-deriving it from `crates/protocol/src/lib.rs` /
-`framing.rs` at authoring time) needed no changes — the `SessionLifecycle` dual-codec
-handling (`decLifecycle` reads a length-prefixed JSON **string**, not a raw `u32` enum
-discriminant — see the "Dual-codec note" in `crates/protocol/src/lib.rs`) was correct
-from the start; the bug was the handshake request id, not frame encoding.
+`framing.rs` at authoring time) needed no changes at that point — the `SessionLifecycle`
+dual-codec handling (`decLifecycle` reads a length-prefixed JSON **string**, not a raw
+`u32` enum discriminant — see the "Dual-codec note" in `crates/protocol/src/lib.rs`)
+was correct from the start; the bug was the handshake request id, not frame encoding.
+
+### v2 wire migration (preamble + CBOR) + phase5 daemon-restart rehydration
+
+The retired v1 wire (bincode 1.3.3 + a `Hello`/`Welcome` framed handshake, magic
+`0x42504131` "BPA1") was replaced with the v2 wire (Pv2 §4.2/§4.3): a codec-agnostic
+raw-bytes preamble handshake (magic `0x42504141` "BPAA") ahead of a standard CBOR
+frame stream. `daemon-harness.mjs`'s bincode encoder/decoder and `hello()` helper were
+deleted outright and replaced with `preambleHandshake()` + a hand-rolled minimal CBOR
+codec (`cborEncode`/`cborDecode` + the `Frame`/`Request`/`Response`/`Push` shape
+mapping) — no new dependency; `cbor-x` was considered but its default non-standard
+record/tag-105 extension is rejected by `ciborium`, and the shape surface here
+(externally-tagged enums, camelCase nested structs, `Vec<u8>`-as-array) is small
+enough that a ~350-line hand-rolled codec (matching the harness's existing
+hand-rolled-codec philosophy) avoids that whole class of interop risk.
+
+One real bug surfaced and was fixed during this migration: the first working draft of
+`readExactly()` (the preamble reply reader) used `sock.unshift()` to push back any
+bytes read past what the CURRENT call needed, so the NEXT `readExactly` call could
+pick them up. This is unsafe once a `data` listener has already put the stream into
+flowing mode — the unshifted bytes re-emit as a fresh `data` event on a later tick,
+and if the next `readExactly` call's own listener isn't attached yet (it wasn't; the
+`await` between the header read and the build-bytes read gives the event loop a tick
+to fire the re-emission first), the event fires with nothing listening and the bytes
+are lost, hanging the caller forever. Fixed by threading one shared mutable buffer
+`state` across both `readExactly` calls in `preambleHandshake` instead of round-tripping
+data through the socket. See `readExactly`'s doc comment in `daemon-harness.mjs`.
+
+**Phase5 (daemon-restart rehydration, BL-7) was added.** Its second assertion
+(reattach-after-restart replays scrollback) was initially blocked by a daemon
+architecture gap (see the "History note" in §1 above); once the daemon's
+cold-rehydrate change landed, phases 0-5 all pass unmodified (`ALL PHASES PASSED`,
+exit code 0).
 
 Build the daemon and run the harness with:
 

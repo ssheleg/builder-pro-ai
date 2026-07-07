@@ -23,7 +23,6 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   connect,
-  hello,
   request,
   nextPush,
   resolveSocketPath,
@@ -40,7 +39,8 @@ const DAEMON_BIN = process.env.BPA_SESSIOND ?? path.join(REPO, "target", "debug"
 // own daemon and does not send SIGTERM to it during cleanup — launchd owns the lifecycle.
 const EXTERNAL_DAEMON = process.env.BPA_E2E_EXTERNAL_DAEMON === "1";
 
-// ---- socket isolation (never touch the real user socket at /tmp/bpa-<uid> or $XDG_RUNTIME_DIR/bpa) ----
+// ---- state isolation (never touch the real user socket/DB at /tmp/bpa-<uid>, $XDG_RUNTIME_DIR/bpa,
+// or ~/Library/Application Support/ai.builderpro.desktop) ----
 //
 // The harness used to call `resolveSocketPath()` unconditionally, which resolves against this
 // process's REAL `XDG_RUNTIME_DIR` (or `/tmp/bpa-<uid>`) — the same path a real, user-facing
@@ -51,13 +51,26 @@ const EXTERNAL_DAEMON = process.env.BPA_E2E_EXTERNAL_DAEMON === "1";
 // (`spawnDaemon`'s `envOverrides`), so `resolve_socket_path()`/`resolve_lockfile()` on the daemon
 // side (`crates/sessiond/src/singleton.rs`, which derives both from `XDG_RUNTIME_DIR`) and
 // `resolveSocketPath()` here agree on an isolated `<tmp>/bpa/d.sock` that cannot collide with any
-// real daemon on this machine. The launchd-managed variant (`EXTERNAL_DAEMON`) deliberately keeps
-// using the real, ambient `XDG_RUNTIME_DIR` — it is attaching to an already-running,
-// launchd-supervised daemon at the real path, by design (see README §2).
+// real daemon on this machine.
+//
+// The daemon's DURABLE state (the SQLite DB + logs) is a SEPARATE resolution path
+// (`crates/sessiond/src/boot.rs::app_support_dir()` / `main.rs::init_tracing()`), keyed off `HOME`
+// — `~/Library/Application Support/ai.builderpro.desktop/bpa.db` — NOT `XDG_RUNTIME_DIR`. Phase 5
+// (daemon-restart rehydration) needs the relaunched daemon to open the exact same `bpa.db` the
+// pre-restart daemon wrote to, so `HOME` is isolated here too via a scratch `<tmp>/home` dir passed
+// through the SAME `envOverrides` object every `spawnDaemon` call in this file uses — one isolated
+// env, reused verbatim across phase 0's initial spawn and phase 5's relaunch, guaranteeing both
+// runs resolve to the identical `bpa.db` path without hardcoding or re-deriving it here.
+// The launchd-managed variant (`EXTERNAL_DAEMON`) deliberately keeps using the real, ambient
+// `XDG_RUNTIME_DIR`/`HOME` — it is attaching to an already-running, launchd-supervised daemon at
+// the real path, by design (see README §2).
 let isolatedTmpDir = null;
+let daemonEnvOverrides = {};
 if (!EXTERNAL_DAEMON) {
   isolatedTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bpa-e2e-"));
   process.env.XDG_RUNTIME_DIR = isolatedTmpDir;
+  const isolatedHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "bpa-e2e-home-"));
+  daemonEnvOverrides = { XDG_RUNTIME_DIR: isolatedTmpDir, HOME: isolatedHomeDir };
 }
 const SOCK = resolveSocketPath();
 
@@ -98,17 +111,18 @@ const cleanup = {
 };
 
 async function main() {
-  // ---- phase 0: spawn (or attach to) the daemon and complete the Hop-B handshake ----
+  // ---- phase 0: spawn (or attach to) the daemon and complete the v2 preamble handshake ----
   let daemonProc = null;
   if (EXTERNAL_DAEMON) {
     log(`phase0: attaching to externally-managed daemon at socket ${SOCK}`);
   } else {
     assertRealBinary(DAEMON_BIN);
-    log(`phase0: spawn daemon ${DAEMON_BIN} (isolated XDG_RUNTIME_DIR=${isolatedTmpDir})`);
-    // envOverrides pins the CHILD's XDG_RUNTIME_DIR too (belt-and-suspenders alongside setting it
-    // on `process.env` above): the daemon's own lockfile/log-dir resolution must never fall back
-    // to the real user path even if something upstream of `spawn()` stripped an inherited var.
-    daemonProc = spawnDaemon(DAEMON_BIN, SOCK, isolatedTmpDir ? { XDG_RUNTIME_DIR: isolatedTmpDir } : {});
+    log(`phase0: spawn daemon ${DAEMON_BIN} (isolated XDG_RUNTIME_DIR=${isolatedTmpDir}, HOME=${daemonEnvOverrides.HOME})`);
+    // envOverrides pins the CHILD's XDG_RUNTIME_DIR + HOME too (belt-and-suspenders alongside
+    // setting XDG_RUNTIME_DIR on `process.env` above): the daemon's own lockfile/log-dir/DB
+    // resolution must never fall back to the real user path even if something upstream of
+    // `spawn()` stripped an inherited var.
+    daemonProc = spawnDaemon(DAEMON_BIN, SOCK, daemonEnvOverrides);
     cleanup.daemonPid = daemonProc.pid;
   }
 
@@ -123,10 +137,13 @@ async function main() {
   }
   assert.ok(conn, `could not connect to daemon socket at ${SOCK} within 5s`);
   cleanup.conns.push(conn);
-  const welcome = await hello(conn);
-  assert.equal(welcome.t, "Welcome", `expected Welcome, got ${JSON.stringify(welcome)}`);
-  assert.equal(welcome.protoVersion, 1, `proto version mismatch: ${JSON.stringify(welcome)}`);
-  log("phase0 OK: handshake");
+  // `connect()` itself performs the v2 preamble handshake (magic/version negotiation) before
+  // resolving — see `preambleHandshake()` in daemon-harness.mjs. A bad magic, an Incompatible
+  // result, or an unexpected chosen version throws loudly from inside `connect()` itself, so
+  // reaching here already proves the handshake succeeded; assert the negotiated version explicitly
+  // too, matching the old harness's self-checking `Welcome` roundtrip assertion style.
+  assert.equal(conn.chosenVersion, 2, `preamble negotiated unexpected version: ${JSON.stringify(conn)}`);
+  log(`phase0 OK: preamble handshake (chosen=${conn.chosenVersion}, daemonBuild=${JSON.stringify(conn.daemonBuild)})`);
 
   // ---- phase 1: create a workspace + session rooted in a temp dir ----
   log("phase1: create workspace + session");
@@ -211,12 +228,12 @@ async function main() {
   );
   log("phase4a OK: daemon + shell survived client quit");
 
-  // Relaunch: a brand-new client connects, lists sessions, reattaches, and expects the
-  // scrollback replay to still contain the marker written before the "quit".
+  // Relaunch: a brand-new client connects (performing its own fresh preamble handshake inside
+  // `connect()`), lists sessions, reattaches, and expects the scrollback replay to still contain
+  // the marker written before the "quit".
   const conn2 = await connect(SOCK);
   cleanup.conns.push(conn2);
-  const w2 = await hello(conn2);
-  assert.equal(w2.t, "Welcome", `reattach handshake failed: ${JSON.stringify(w2)}`);
+  assert.equal(conn2.chosenVersion, 2, `reattach handshake negotiated unexpected version: ${JSON.stringify(conn2)}`);
 
   const sessions = await request(conn2, { t: "ListSessions" });
   assert.equal(sessions.t, "Sessions", `ListSessions failed after relaunch: ${JSON.stringify(sessions)}`);
@@ -238,9 +255,128 @@ async function main() {
     // Under the launchd-managed variant we own only the session, not the daemon lifecycle: best-effort
     // kill the test session so it doesn't linger under the shared, externally-managed daemon. The
     // shared `cleanupAll()` in `finally` still closes our connections but must NOT touch the daemon
-    // process itself in this variant (see `EXTERNAL_DAEMON` guard there).
+    // process itself in this variant (see `EXTERNAL_DAEMON` guard there), and phase 5 below (a real
+    // DaemonShutdown + process-level relaunch) is skipped entirely — under this variant the daemon
+    // lifecycle belongs to launchd (README §2's `KeepAlive{Crashed}` is the mechanism that tracks;
+    // this harness deliberately doesn't drain/replace a daemon it doesn't own).
     await request(conn2, { t: "KillSession", sessionId: sid }).catch(() => {});
+    log("ALL PHASES PASSED (phase5 skipped: BPA_E2E_EXTERNAL_DAEMON=1)");
+    return;
   }
+
+  // ---- phase 5: daemon-restart rehydration (closes BL-7, Pv2 §9.8) ----
+  // Drain-shutdown the daemon over the wire, wait for the OS process to actually exit, relaunch the
+  // SAME binary against the SAME state dir (isolated XDG_RUNTIME_DIR + HOME from phase 0/4, reused
+  // verbatim via `daemonEnvOverrides`), reconnect, and assert the phase-1 session rehydrates as
+  // present-but-inactive with its phase-2 scrollback marker intact — proving persistence survived a
+  // real daemon process restart, not just a client reconnect (phase 4 above only killed the CLIENT
+  // side; the daemon process itself never stopped).
+  log("phase5: DaemonShutdown{drain:true} -> wait for exit -> relaunch same state dir -> rehydrate");
+
+  const shutdownAck = await request(conn2, { t: "DaemonShutdown", drain: true });
+  assert.equal(shutdownAck.t, "Ack", `DaemonShutdown{drain:true} -> ${JSON.stringify(shutdownAck)}`);
+  log("phase5 OK: DaemonShutdown Ack received");
+
+  // The Ack is enqueued before the shared shutdown watch flips (socket_server.rs's ordering
+  // guarantee — see the comment on the Rust `Request::DaemonShutdown` dispatch arm), so by the time
+  // we've read the Ack the daemon is already draining/exiting. Poll `kill -0` on the exact pid this
+  // harness spawned (never a name-based `pgrep`, for the same disambiguation reason phase4 uses
+  // `cleanup.daemonPid`) until it's gone, bounded so a daemon that fails to exit fails the phase
+  // loudly instead of hanging the suite forever.
+  const exitDeadline = Date.now() + 10000;
+  while (pidAlive(daemonPid) && Date.now() < exitDeadline) {
+    await sleep(100);
+  }
+  assert.ok(
+    !pidAlive(daemonPid),
+    `daemon (pid ${daemonPid}) did not exit within 10s of DaemonShutdown{drain:true} — graceful exit failed`,
+  );
+  log(`phase5 OK: daemon (pid ${daemonPid}) process exited`);
+
+  // Also drop this harness's own two live connections to the now-dead daemon before relaunching —
+  // both sockets are already EOF/reset from the daemon's own teardown, but destroying them
+  // explicitly avoids any stale entry in `cleanup.conns` racing the fresh connections below.
+  for (const c of [conn, conn2]) {
+    try {
+      c.sock.destroy();
+    } catch {
+      /* already closed */
+    }
+  }
+  cleanup.conns = [];
+
+  // Relaunch the SAME daemon binary, bound to the SAME socket path, with the SAME env overrides
+  // (`daemonEnvOverrides` — the identical `XDG_RUNTIME_DIR`/`HOME` object phase 0 used) so
+  // `resolve_socket_path()` and `app_support_dir()` on the daemon side resolve to the exact same
+  // paths as before — same `d.sock`, and critically the same `bpa.db` SQLite file the pre-restart
+  // daemon's `DaemonShutdown{drain:true}` flush persisted the session + scrollback into.
+  log(`phase5: relaunching ${DAEMON_BIN} against the same state dir`);
+  const daemonProc2 = spawnDaemon(DAEMON_BIN, SOCK, daemonEnvOverrides);
+  cleanup.daemonPid = daemonProc2.pid;
+
+  let conn3;
+  for (let i = 0; i < 50; i++) {
+    try {
+      conn3 = await connect(SOCK);
+      break;
+    } catch {
+      await sleep(100);
+    }
+  }
+  assert.ok(conn3, `could not reconnect to relaunched daemon socket at ${SOCK} within 5s`);
+  cleanup.conns.push(conn3);
+  assert.equal(
+    conn3.chosenVersion,
+    2,
+    `post-relaunch preamble handshake negotiated unexpected version: ${JSON.stringify(conn3)}`,
+  );
+  log(`phase5 OK: reconnected to relaunched daemon (pid ${cleanup.daemonPid})`);
+
+  // Assertion 1: the phase-1 session `sid` reappears in ListSessions, and is rehydrated INACTIVE
+  // (`isActive === false`) — its PTY died along with the old daemon process, so a fresh daemon
+  // reading it back out of SQLite must report it as inactive rather than fabricating liveness.
+  const rehydratedSessions = await request(conn3, { t: "ListSessions" });
+  assert.equal(
+    rehydratedSessions.t,
+    "Sessions",
+    `ListSessions after daemon relaunch -> ${JSON.stringify(rehydratedSessions)}`,
+  );
+  const rehydrated = rehydratedSessions.value.find((s) => s.id === sid);
+  assert.ok(
+    rehydrated,
+    `session ${sid} did NOT reappear after daemon restart (ListSessions returned: ` +
+      `${JSON.stringify(rehydratedSessions.value.map((s) => s.id))}) — rehydration from SQLite failed`,
+  );
+  assert.equal(
+    rehydrated.isActive,
+    false,
+    `session ${sid} reappeared but isActive=${rehydrated.isActive} (expected false: rehydrated ` +
+      `sessions must be inactive — their PTY died with the old daemon process)`,
+  );
+  assert.equal(rehydrated.workspaceId, ws.value.id, `rehydrated session ${sid} lost its workspaceId`);
+  log(`phase5 OK: session ${sid} rehydrated with isActive=false`);
+
+  // Assertion 2: reattaching still replays scrollback containing the phase-1/2 MARKER — the
+  // pre-restart `DaemonShutdown{drain:true}` flush persisted it to SQLite, and the fresh daemon's
+  // cold-rehydrate path (boot loads every persisted session into the Supervisor as an inactive
+  // replay-only entry; `AttachSession` on it Acks and sends `Push::Replay` with the persisted
+  // scrollback) must load it back rather than starting the session's scrollback from empty.
+  const attachResp = await request(conn3, { t: "AttachSession", sessionId: sid });
+  assert.equal(
+    attachResp.t,
+    "Ack",
+    `AttachSession on rehydrated session ${sid} -> ${JSON.stringify(attachResp)} (expected Ack + ` +
+      `Replay push: attach-on-inactive must serve the persisted scrollback after a daemon restart)`,
+  );
+  const replay3 = await nextPush(conn3, (p) => p.t === "Replay" && p.sessionId === sid);
+  const replayText3 = Buffer.from(replay3.content).toString("utf8");
+  assert.ok(
+    replayText3.includes(MARKER),
+    `scrollback replay missing marker ${MARKER} after daemon restart (BL-7 rehydration property ` +
+      `violated — got: ${JSON.stringify(replayText3)})`,
+  );
+  log("phase5 OK: reattach after daemon restart replays scrollback with marker intact (BL-7 closed)");
+
   log("ALL PHASES PASSED");
 }
 
@@ -287,6 +423,14 @@ async function cleanupAll() {
   if (isolatedTmpDir) {
     try {
       fs.rmSync(isolatedTmpDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+
+  if (daemonEnvOverrides.HOME) {
+    try {
+      fs.rmSync(daemonEnvOverrides.HOME, { recursive: true, force: true });
     } catch {
       /* best-effort cleanup */
     }
