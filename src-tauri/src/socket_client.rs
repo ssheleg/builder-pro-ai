@@ -253,9 +253,79 @@ impl DaemonClient {
         Self::connect_at(socket_path, client_build).await
     }
 
+    /// Bounded-retry initial connect (round-2 regression R1): resolves the socket path, then
+    /// attempts [`connect_and_handshake`] up to `attempts` times (fixed `delay` between tries),
+    /// applying the SAME [`HandshakeSuspectCounter`] classification `connect_with_backoff` (the
+    /// reconnect loop) uses — this is the fix for R1: pre-fix, the initial-connect path had no
+    /// counter at all and mapped every transient handshake failure straight to
+    /// `ClientError::Disconnected` forever, so a present-but-unhandshakeable daemon (the dominant
+    /// upgrade scenario: an old v1 daemon still running under launchd, which EOFs on every v2
+    /// preamble it's handed) could never reach `IncompatibleDaemon` and the upgrade dialog was
+    /// unreachable. Three outcomes, matching `connect_with_backoff`'s contract exactly:
+    /// - connect-refused (`HandshakeError::Io`, nothing listening yet) never escalates — normal at
+    ///   boot, keeps retrying for the full `attempts` budget.
+    /// - `HANDSHAKE_SUSPECT_CAP` CONSECUTIVE transient handshake failures (EOF / timeout / garbage /
+    ///   bad magic — the socket accepted but the handshake itself never completed honestly) escalate
+    ///   to `ClientError::IncompatibleDaemon{daemon_min: 0, daemon_max: 0}` (the same unknown-range
+    ///   sentinel the reconnect loop uses) rather than being retried past the cap.
+    /// - a genuine, well-formed `DaemonReply::Incompatible{min,max}` is immediately fatal, exactly as
+    ///   before (never retried, real range surfaced).
+    ///
+    /// Pulled out as its own function (rather than inlined in `lib.rs`'s `connect_with_retry`, which
+    /// now just delegates here) so the handshake classification stays private to this module — the
+    /// caller only ever sees the already-mapped `ClientError`.
+    pub async fn connect_with_retry(
+        client_build: String,
+        attempts: u32,
+        delay: Duration,
+    ) -> Result<DaemonClient, ClientError> {
+        let socket_path = resolve_socket_path();
+        Self::connect_at_with_retry(socket_path, client_build, attempts, delay).await
+    }
+
+    /// Shared implementation behind [`connect_with_retry`](Self::connect_with_retry): connects at an
+    /// explicit socket path (production always resolves via `resolve_socket_path()`; tests point
+    /// this at a stub daemon's tempdir socket instead).
+    async fn connect_at_with_retry(
+        socket_path: PathBuf,
+        client_build: String,
+        attempts: u32,
+        delay: Duration,
+    ) -> Result<DaemonClient, ClientError> {
+        let mut counter = HandshakeSuspectCounter::new();
+        let mut last_err = ClientError::Disconnected;
+        for attempt in 1..=attempts.max(1) {
+            let result = connect_and_handshake(&socket_path, &client_build).await;
+            match counter.classify(result) {
+                RetryDecision::Connected(stream, reader) => {
+                    return Ok(Self::finish_connect(socket_path, client_build, stream, reader));
+                }
+                RetryDecision::Fatal(HandshakeError::Incompatible { min, max }) => {
+                    tracing::warn!(attempt, daemon_min = min, daemon_max = max, "daemon incompatible; not retrying");
+                    return Err(ClientError::IncompatibleDaemon {
+                        daemon_min: min,
+                        daemon_max: max,
+                    });
+                }
+                RetryDecision::Fatal(_) => unreachable!(
+                    "HandshakeSuspectCounter::classify only returns RetryDecision::Fatal for HandshakeError::Incompatible"
+                ),
+                RetryDecision::Retry => {
+                    tracing::warn!(attempt, attempts, "daemon connect attempt failed");
+                    last_err = ClientError::Disconnected;
+                    if attempt < attempts.max(1) {
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+        Err(last_err)
+    }
+
     /// Shared implementation behind `connect()`: connects at an explicit socket path (production
     /// always resolves via `resolve_socket_path()`; tests point this at a stub daemon's tempdir
-    /// socket instead).
+    /// socket instead). A single try (see `connect()`'s own docs) — `connect_with_retry` above is
+    /// the bounded-retry-with-escalation entry point production boot uses instead.
     async fn connect_at(
         socket_path: PathBuf,
         client_build: String,
@@ -265,9 +335,11 @@ impl DaemonClient {
             .map_err(|e| match e {
                 // A single transient handshake failure on the *initial* connect is ambiguous in
                 // exactly the same way it is on reconnect (finding [1]) — map it to `Disconnected`
-                // so lib.rs's `connect_with_retry` bounded-backoff loop retries it normally, rather
-                // than instantly surfacing a false `IncompatibleDaemon`/upgrade dialog for a daemon
-                // that is merely slow to finish cold-rehydrate.
+                // rather than instantly surfacing a false `IncompatibleDaemon`/upgrade dialog for a
+                // daemon that is merely slow to finish cold-rehydrate. A CALLER retrying this single
+                // try repeatedly must use `connect_with_retry` (above) instead of calling this
+                // directly in a loop, so consecutive transient failures actually get counted and
+                // escalated (round-2 regression R1) rather than retried forever.
                 HandshakeError::Io(_) | HandshakeError::TransientHandshake => {
                     ClientError::Disconnected
                 }
@@ -277,12 +349,30 @@ impl DaemonClient {
                 },
             })?;
 
+        Ok(Self::finish_connect(
+            socket_path,
+            client_build,
+            stream,
+            reader,
+        ))
+    }
+
+    /// Shared tail of both `connect_at` (single try) and `connect_at_with_retry` (bounded retry with
+    /// escalation, round-2 regression R1): the handshake has already succeeded — build the shared
+    /// state, seed it `Connected`/live (see the inline rationale below), and spawn the owning
+    /// connection task.
+    fn finish_connect(
+        socket_path: PathBuf,
+        client_build: String,
+        stream: UnixStream,
+        reader: FrameReader,
+    ) -> DaemonClient {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ClientCmd>(CMD_CHANNEL_CAP);
         // Seeded at `Connected`/`live=true` here — synchronously, before `tokio::spawn` even
         // schedules `connection_task` to run — because the handshake above already completed: the
         // connection genuinely *is* live at this point. Deferring this seed to the first statement
         // inside `connection_task` (as an alternative design) would reopen exactly the race this
-        // fix closes: `connect_at` could return to a caller that immediately calls `request()`
+        // fix closes: the caller could get back a `DaemonClient` and immediately call `request()`
         // before the freshly-spawned task ever gets scheduled, observing a stale `live == false`
         // and failing with a spurious `Disconnected` on a connection that is, in fact, up.
         // `connection_task` itself must NOT re-fire `Connected`/re-set `live` as its first act —
@@ -306,7 +396,7 @@ impl DaemonClient {
             shared.clone(),
         ));
 
-        Ok(DaemonClient { cmd_tx, shared })
+        DaemonClient { cmd_tx, shared }
     }
 
     /// Allocate a monotonic id, send `Request { id, .. }`, and await the correlated `Response`.
@@ -497,6 +587,80 @@ impl From<std::io::Error> for HandshakeError {
 /// (spec §4.5 unknown-range shape), never for a single ambiguous failure in isolation.
 const UNKNOWN_RANGE: HandshakeError = HandshakeError::Incompatible { min: 0, max: 0 };
 
+/// What a caller's retry loop should do after one `connect_and_handshake` attempt, decided by
+/// [`HandshakeSuspectCounter::classify`]. Both `connect_with_backoff` (the reconnect loop) and
+/// `DaemonClient::connect_at`'s initial-connect retry loop (round-2 regression R1) drive their own
+/// sleep/backoff shape around this SAME classification, so the two paths can never again drift on
+/// what counts as "give up and escalate" vs. "keep trying" — the exact bug R1 fixes (the initial
+/// path had its own, simpler mapping that never escalated at all).
+enum RetryDecision {
+    /// The connection is live; stop retrying.
+    Connected(UnixStream, FrameReader),
+    /// Fatal: a genuine, well-formed `Incompatible{min,max}` reply, or `HANDSHAKE_SUSPECT_CAP`
+    /// consecutive transient failures escalated to the same shape. Never retried further.
+    Fatal(HandshakeError),
+    /// Keep retrying (either a plain connect-refused, which never counts toward the cap, or a
+    /// transient handshake failure that has not yet hit the cap).
+    Retry,
+}
+
+/// Shared "classify + count consecutive transient handshake failures + escalate" state (round-2
+/// regression R1): pulled out of `connect_with_backoff` so `DaemonClient::connect_at`'s
+/// initial-connect retry loop can apply the IDENTICAL escalation rule instead of duplicating (or,
+/// pre-fix, omitting) the counter. Only `TransientHandshake` (EOF / timeout / garbage / bad magic —
+/// the daemon accepted the connection but the handshake itself did not complete honestly) increments
+/// the counter; a plain `Io` (connect-refused — nothing listening yet, unambiguous and expected
+/// during a cold boot race) resets it to zero and is never itself escalated, regardless of how many
+/// times it happens. See `HANDSHAKE_SUSPECT_CAP`'s doc for the full EOF-is-ambiguous rationale.
+#[derive(Default)]
+struct HandshakeSuspectCounter {
+    consecutive_transient: u32,
+}
+
+impl HandshakeSuspectCounter {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Classify the outcome of one `connect_and_handshake` attempt, updating the internal
+    /// consecutive-transient-failure count as a side effect.
+    fn classify(
+        &mut self,
+        result: Result<(UnixStream, FrameReader), HandshakeError>,
+    ) -> RetryDecision {
+        match result {
+            Ok((stream, reader)) => {
+                self.consecutive_transient = 0;
+                RetryDecision::Connected(stream, reader)
+            }
+            Err(e @ HandshakeError::Incompatible { .. }) => RetryDecision::Fatal(e),
+            Err(HandshakeError::TransientHandshake) => {
+                self.consecutive_transient += 1;
+                if self.consecutive_transient >= HANDSHAKE_SUSPECT_CAP {
+                    tracing::error!(
+                        cap = HANDSHAKE_SUSPECT_CAP,
+                        "transient handshake failure repeated past HANDSHAKE_SUSPECT_CAP; \
+                         escalating to incompatible"
+                    );
+                    RetryDecision::Fatal(UNKNOWN_RANGE)
+                } else {
+                    tracing::warn!(
+                        consecutive_transient = self.consecutive_transient,
+                        cap = HANDSHAKE_SUSPECT_CAP,
+                        "transient handshake failure; will retry"
+                    );
+                    RetryDecision::Retry
+                }
+            }
+            Err(HandshakeError::Io(err)) => {
+                self.consecutive_transient = 0;
+                tracing::warn!(error = %err, "daemon connect failed; will retry");
+                RetryDecision::Retry
+            }
+        }
+    }
+}
+
 /// Read the daemon's preamble reply off `stream` (mirrors
 /// `bpa_sessiond::socket_server::read_client_preamble`'s shape on the other side of the handshake):
 /// read the fixed 9-byte header (`magic:u32 | result:u8 | a:u16 | b:u16`) first, then branch — for
@@ -603,33 +767,17 @@ async fn connect_with_backoff(
     client_build: &str,
 ) -> Result<(UnixStream, FrameReader), HandshakeError> {
     let mut delay = BACKOFF_START;
-    let mut consecutive_transient: u32 = 0;
+    let mut counter = HandshakeSuspectCounter::new();
     loop {
-        match connect_and_handshake(socket_path, client_build).await {
-            Ok(ok) => return Ok(ok),
-            Err(e @ HandshakeError::Incompatible { .. }) => return Err(e),
-            Err(HandshakeError::TransientHandshake) => {
-                consecutive_transient += 1;
-                if consecutive_transient >= HANDSHAKE_SUSPECT_CAP {
-                    tracing::error!(
-                        cap = HANDSHAKE_SUSPECT_CAP,
-                        "transient handshake failure repeated past HANDSHAKE_SUSPECT_CAP; \
-                         escalating to incompatible"
-                    );
-                    return Err(UNKNOWN_RANGE);
-                }
+        let result = connect_and_handshake(socket_path, client_build).await;
+        match counter.classify(result) {
+            RetryDecision::Connected(stream, reader) => return Ok((stream, reader)),
+            RetryDecision::Fatal(e) => return Err(e),
+            RetryDecision::Retry => {
                 tracing::warn!(
-                    consecutive_transient,
-                    cap = HANDSHAKE_SUSPECT_CAP,
                     delay_ms = delay.as_millis(),
-                    "transient handshake failure; backing off and retrying"
+                    "backing off before next attempt"
                 );
-                tokio::time::sleep(delay).await;
-                delay = std::cmp::min(delay * 2, BACKOFF_CAP);
-            }
-            Err(HandshakeError::Io(err)) => {
-                consecutive_transient = 0;
-                tracing::warn!(error = %err, delay_ms = delay.as_millis(), "daemon connect failed; backing off");
                 tokio::time::sleep(delay).await;
                 delay = std::cmp::min(delay * 2, BACKOFF_CAP);
             }
@@ -1350,6 +1498,19 @@ mod tests {
         DaemonClient::connect_at(socket_path, client_build).await
     }
 
+    /// Test-only alias: exercises `DaemonClient`'s private `connect_at_with_retry` directly
+    /// (bypassing `resolve_socket_path()`), mirroring `connect_at` above. Same codepath
+    /// `lib.rs`'s `connect_with_retry`/`bring_up_daemon` uses in production for the INITIAL connect
+    /// (round-2 regression R1).
+    async fn connect_at_with_retry(
+        socket_path: PathBuf,
+        client_build: String,
+        attempts: u32,
+        delay: Duration,
+    ) -> Result<DaemonClient, ClientError> {
+        DaemonClient::connect_at_with_retry(socket_path, client_build, attempts, delay).await
+    }
+
     // ---- Defect 1: request() must fail promptly (not silently queue) during the reconnect gap ---
 
     #[tokio::test]
@@ -1614,6 +1775,200 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ClientError::Disconnected));
+    }
+
+    // ---- Round-2 regression R1 (CRITICAL): the INITIAL connect path (`connect_at_with_retry`,
+    // ---- what `lib.rs`'s `connect_with_retry`/`bring_up_daemon` calls at app boot) must apply the
+    // ---- IDENTICAL HANDSHAKE_SUSPECT_CAP escalation the reconnect loop already had — this is the
+    // ---- dominant upgrade scenario: a present-but-unhandshakeable OLD daemon (e.g. a v1 daemon
+    // ---- still running under launchd after installing a v2 app build) that accepts every TCP
+    // ---- connection but EOFs on every v2 preamble, forever. Pre-fix, `connect_with_retry` mapped
+    // ---- every such failure to `ClientError::Disconnected` and retried "daemon unreachable"
+    // ---- forever — `daemon://incompatible` never fired and the upgrade dialog was unreachable. ----
+
+    #[tokio::test]
+    async fn initial_connect_escalates_to_incompatible_after_cap_exhausted_transient_failures() {
+        // The daemon ALWAYS EOFs mid-handshake, forever, from the very FIRST connection — no live
+        // connection ever existed to "reconnect" from; this is the initial-connect path, not the
+        // reconnect loop. After HANDSHAKE_SUSPECT_CAP consecutive transient failures,
+        // `connect_at_with_retry` must give up and return `IncompatibleDaemon{0,0}` (the same
+        // unknown-range sentinel the reconnect loop uses), never an infinite `Disconnected` retry.
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            loop {
+                accept_and_eof(&listener).await;
+            }
+        });
+        wait_ready(&ready).await;
+
+        // HANDSHAKE_SUSPECT_CAP is 8; give it exactly 8 attempts with a tiny delay so the test is
+        // fast and deterministic (mirrors bring_up_daemon's real 8-attempts config, just with a
+        // millisecond delay instead of 500ms).
+        let started = std::time::Instant::now();
+        let result = connect_at_with_retry(
+            path,
+            "test".into(),
+            HANDSHAKE_SUSPECT_CAP,
+            Duration::from_millis(5),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(ClientError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            }) => {
+                assert_eq!(
+                    (daemon_min, daemon_max),
+                    (0, 0),
+                    "expected the unknown-range sentinel, not a genuine daemon-advertised range"
+                );
+            }
+            other => panic!(
+                "expected IncompatibleDaemon{{0,0}} after {HANDSHAKE_SUSPECT_CAP} consecutive \
+                 transient failures on the INITIAL connect, got {other:?}"
+            ),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect_at_with_retry took {elapsed:?}; expected a prompt escalation once the cap \
+             is exhausted, not a hang"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_connect_refused_never_escalates_within_the_cap() {
+        // Plain connect-refused (nothing listening at all — no UnixListener bound anywhere near
+        // this path) is a completely different failure mode from a transient handshake failure: it
+        // must keep retrying as plain "daemon not up yet" and NEVER escalate to Incompatible, even
+        // across a full HANDSHAKE_SUSPECT_CAP-sized attempt budget (mirrors
+        // `connect_with_retry_gives_up_after_bounded_attempts_without_panicking`'s existing
+        // give-up-cleanly coverage, but proves the OUTCOME is specifically Disconnected, not
+        // IncompatibleDaemon).
+        let dir = tempfile::tempdir().unwrap();
+        let unreachable = dir.path().join("nothing-listens-here.sock");
+
+        let started = std::time::Instant::now();
+        let result = connect_at_with_retry(
+            unreachable,
+            "test".into(),
+            HANDSHAKE_SUSPECT_CAP,
+            Duration::from_millis(5),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(ClientError::Disconnected)),
+            "connect-refused must stay Disconnected, never escalate to Incompatible: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect_at_with_retry took {elapsed:?}; expected a prompt bounded give-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_connect_transient_failures_below_cap_still_eventually_connect() {
+        // N < HANDSHAKE_SUSPECT_CAP EOFs, then a real handshake succeeds — mirrors
+        // `transient_handshake_failures_below_cap_eventually_connect_with_no_incompatible_event`
+        // but for the INITIAL connect path: proves the escalation counter doesn't fire a false
+        // positive before the cap is actually exhausted.
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            for _ in 0..3 {
+                accept_and_eof(&listener).await;
+            }
+            let (mut s, _) = listener.accept().await.unwrap();
+            accept_handshake(&mut s).await;
+            if let Some(Frame::Request { id, .. }) = read_frame(&mut s).await {
+                write_stub_frame(
+                    &mut s,
+                    &Frame::Response {
+                        id,
+                        res: Response::Ack,
+                    },
+                )
+                .await;
+            }
+            std::future::pending::<()>().await;
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at_with_retry(
+            path,
+            "test".into(),
+            HANDSHAKE_SUSPECT_CAP,
+            Duration::from_millis(5),
+        )
+        .await
+        .expect("must connect once the real handshake attempt is reached, well under the cap");
+
+        let ok = client
+            .request(Request::KillSession {
+                session_id: "x".into(),
+            })
+            .await
+            .expect("a normal request on the connected client must succeed");
+        assert!(matches!(ok, Response::Ack));
+    }
+
+    #[tokio::test]
+    async fn genuine_incompatible_reply_on_initial_connect_is_immediately_fatal_no_retry() {
+        // A GENUINE, well-formed Incompatible{5,6} reply on the very FIRST connect attempt must
+        // remain immediately fatal with the real advertised range — no retry at all, exactly like
+        // `connect_with_retry_does_not_retry_incompatible` in lib.rs already covers end-to-end via
+        // `bring_up_daemon`'s real config; this proves the same at the `connect_at_with_retry`
+        // level directly, with a bound tight enough to prove NO retry happened (not just "returned
+        // within a generous ceiling").
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            let (mut s, _) = listener.accept().await.unwrap();
+            let _client_preamble = read_client_preamble_stub(&mut s).await;
+            let reply = encode_daemon_reply(&DaemonReply::Incompatible { min: 5, max: 6 });
+            s.write_all(&reply).await.unwrap();
+            s.flush().await.unwrap();
+            // A second accept here would prove a retry happened; the test's wall-clock bound below
+            // catches that without needing to assert on it directly.
+            std::future::pending::<()>().await;
+        });
+        wait_ready(&ready).await;
+
+        let started = std::time::Instant::now();
+        // 8 attempts x 500ms (bring_up_daemon's real config) would take ~3.5s if this incorrectly
+        // retried; a prompt return well under that bound proves no retry happened.
+        let result =
+            connect_at_with_retry(path, "test".into(), 8, Duration::from_millis(500)).await;
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(ClientError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            }) => assert_eq!((daemon_min, daemon_max), (5, 6)),
+            other => panic!("expected IncompatibleDaemon{{5,6}}, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "connect_at_with_retry took {elapsed:?}; a genuine Incompatible reply must return \
+             promptly with no retry, not run the full ~3.5s of bounded backoff"
+        );
     }
 
     #[tokio::test]

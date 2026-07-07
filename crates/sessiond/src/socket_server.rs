@@ -174,7 +174,7 @@ pub async fn serve(
     let mut next_conn_id: u64 = 1;
 
     // ---- Wire supervisor callbacks → Push fan-out (spec §7). Registered ONCE. ----
-    install_push_callbacks(&deps.supervisor, &deps.attach, broadcaster.clone());
+    install_push_callbacks(&deps, broadcaster.clone());
 
     // ---- Best-effort periodic scrollback persistence (spec §11). ----
     let flush_task = spawn_scrollback_flusher(deps.clone(), shutdown.clone());
@@ -225,23 +225,25 @@ pub async fn serve(
 }
 
 /// Register the supervisor's status/created/exited callbacks so each becomes a broadcast `Push`.
-/// The `attach` registry is passed so a session that ends drops its attach entry (orphan cleanup)
+/// Takes the whole `deps` bundle (rather than separate `supervisor`/`attach` params) because the
+/// `on_exited` closure below also needs `deps.db` for the round-2-regression (R2) final flush.
+///
+/// The `attach` registry is used so a session that ends drops its attach entry (orphan cleanup)
 /// before the `ChildExited` push is built — keeping the registry from growing unbounded across
 /// create/kill churn. The drop is GRACEFUL (`remove_session` removes the map entry without
 /// cancelling the forwarder): the reader thread closes the sink on its own exit, so the forwarder
 /// delivers the session's trailing output and then self-terminates rather than being truncated.
 ///
-/// The `on_exited` closure holds a `Weak<AttachRegistry>`, NOT a strong `Arc`: the registry itself
-/// owns an `Arc<Supervisor>`, and the supervisor owns this callback, so a strong reference here
-/// would form a `Supervisor ⇄ AttachRegistry` cycle that leaks the supervisor (and its live PTY
-/// sessions) forever. That leak would keep an attach forwarder's std channel alive across a test's
-/// runtime drop, hanging `Runtime` teardown. Upgrading the `Weak` per call is cheap and yields
-/// `None` only once the daemon is already tearing down (nothing left to clean up).
-fn install_push_callbacks(
-    supervisor: &Arc<Supervisor>,
-    attach: &Arc<AttachRegistry>,
-    broadcaster: Broadcaster,
-) {
+/// The `on_exited` closure holds a `Weak<AttachRegistry>` and a `Weak<ServerDeps>`, NOT strong
+/// `Arc`s: `deps.supervisor` owns this callback (directly, and transitively via `deps.attach`), so a
+/// strong reference back to either from here would form a reference cycle that leaks the supervisor
+/// (and its live PTY sessions) forever — the same rationale that already applied to `attach` before
+/// this fix, now extended to `deps`. Upgrading each `Weak` per call is cheap and yields `None` only
+/// once the daemon is already tearing down (nothing left to clean up/flush).
+fn install_push_callbacks(deps: &Arc<ServerDeps>, broadcaster: Broadcaster) {
+    let supervisor = &deps.supervisor;
+    let attach = &deps.attach;
+
     let b_created = broadcaster.clone();
     supervisor.on_created(move |meta: SessionMeta| {
         b_created.broadcast(Push::SessionCreated { meta });
@@ -259,6 +261,14 @@ fn install_push_callbacks(
 
     let b_exited = broadcaster;
     let attach_exited = Arc::downgrade(attach);
+    let deps_exited = Arc::downgrade(deps);
+    // `on_exited` fires on the supervisor's WAIT THREAD (a plain `std::thread`, see
+    // `pty_supervisor.rs`'s module-level threading contract) — not a tokio task — so the final flush
+    // (an async DB write) cannot be `.await`ed inline here. Capture the current runtime `Handle` once,
+    // at registration time (this function itself always runs from inside a tokio context: `serve`'s
+    // async body, or a test's `#[tokio::test]`), and use it to spawn the flush as its own task from
+    // inside the sync callback.
+    let rt_handle = tokio::runtime::Handle::current();
     supervisor.on_exited(move |session_id, code, signal| {
         // A session that ends (kill or natural exit, both reaped by the wait thread) drops its
         // attach entry so the registry can't grow unbounded across create/kill churn. This is a
@@ -273,12 +283,116 @@ fn install_push_callbacks(
         if let Some(attach) = attach_exited.upgrade() {
             let _ = attach.remove_session(&session_id);
         }
-        b_exited.broadcast(Push::ChildExited {
-            session_id,
-            code,
-            signal,
+
+        // Round-2 regression R2: a session's FINAL scrollback tail + terminal `Exited` lifecycle
+        // must be persisted exactly once, right here, before it stops being covered by the
+        // live-only periodic flush sweep (`flush_scrollback_once` skips any `!is_active` session,
+        // and by the time this callback runs the wait thread has already flipped `is_active` to
+        // `false` — see that field's write, above this callback in `pty_supervisor.rs`). Without
+        // this, a session that exits between two flush ticks (or lives under one whole
+        // `SCROLLBACK_FLUSH_INTERVAL`) loses its trailing output and is rehydrated on the next boot
+        // still reporting a live lifecycle. `on_exited` firing at all is itself the "exited THIS
+        // process lifetime" signal (a cold-rehydrated session from `boot::cold_rehydrate_sessions`/
+        // `rehydrate_inactive` has no wait thread and so can never reach this callback) — no
+        // additional liveness check is needed to distinguish it from the periodic sweep's
+        // rehydrated-inactive skip, which stays untouched.
+        //
+        // CAPTURE SYNCHRONOUSLY, HERE, before spawning: `KillSession`'s dispatch arm calls
+        // `Supervisor::kill`, which joins this exact wait thread (blocking on it) and then, the
+        // MOMENT it unblocks, removes the session from the supervisor's live map — a race between
+        // that removal and an async task merely SCHEDULED (not yet run) by `rt_handle.spawn` below
+        // would make `supervisor.meta`/`snapshot_scrollback` from inside the spawned task
+        // nondeterministically fail with `NoSuchSession`, silently dropping exactly the data this
+        // fix exists to save. `meta()`/`snapshot_scrollback()`/`drain_command_events()` are all
+        // cheap, synchronous, mutex-guarded reads — safe to call directly on this thread while the
+        // session is still guaranteed present in the map (removal happens strictly after this
+        // callback returns, both for `kill()`'s join and for a natural exit, which never removes
+        // the map entry at all until a later reap).
+        let snapshot = deps_exited.upgrade().and_then(|deps| {
+            let meta = deps.supervisor.meta(&session_id).ok()?;
+            let scrollback = deps
+                .supervisor
+                .snapshot_scrollback(&session_id)
+                .ok()
+                .map(|(_c, _r, bytes)| bytes);
+            let events = deps.supervisor.drain_command_events(&session_id);
+            Some((deps, meta, scrollback, events))
         });
+
+        if let Some((deps, meta, scrollback, events)) = snapshot {
+            // `on_exited` is an `Fn` (may be called again for a future session), so each invocation
+            // clones its own handle to the broadcaster rather than moving the shared one out of the
+            // closure's environment.
+            let b_exited = b_exited.clone();
+            rt_handle.spawn(async move {
+                flush_session_final(&deps, &session_id, meta, scrollback, events).await;
+                b_exited.broadcast(Push::ChildExited {
+                    session_id,
+                    code,
+                    signal,
+                });
+            });
+        }
     });
+}
+
+/// One-shot final persist for a session that just exited THIS process lifetime (round-2 regression
+/// R2): persists the given, already-captured meta snapshot (terminal `Exited{code,signal}`
+/// lifecycle + final cwd/cols/rows — by the time `on_exited` fires the wait thread has already
+/// written all of these into the supervisor's in-memory state) and scrollback ring snapshot, then
+/// the given drained `command_events`. `meta`/`scrollback`/`events` are captured SYNCHRONOUSLY by
+/// the caller (`install_push_callbacks`'s `on_exited` closure) before this async fn is even spawned
+/// — see that call site's doc comment for why: reading them here, after an `.await` hop onto the
+/// tokio scheduler, would race a concurrent `Supervisor::kill`'s post-join map removal and could
+/// silently lose the very data this fix exists to save. Reuses the exact same
+/// `upsert_session`/`append_scrollback`/`append_command_event` calls the periodic sweep
+/// (`flush_scrollback_once`) uses — no new DB-writer pattern — but, unlike that sweep, does NOT gate
+/// on `is_active` (the caller already captured the final in-memory state regardless of it).
+/// Idempotent with any prior periodic tick: `upsert_session` is a plain upsert and
+/// `append_scrollback` always replaces the row at `seq = 0` (never appends a second row), so calling
+/// this after (or racing) a flush tick for the same session converges on the same final state rather
+/// than duplicating anything. A DB failure here is logged and swallowed, exactly like the periodic
+/// sweep — persistence is best-effort and must never propagate into (or block) the exit-notification
+/// path.
+async fn flush_session_final(
+    deps: &Arc<ServerDeps>,
+    session_id: &bpa_protocol::SessionId,
+    meta: SessionMeta,
+    scrollback: Option<Vec<u8>>,
+    events: Vec<crate::pty_supervisor::CommandEvent>,
+) {
+    {
+        let db = deps.db.lock().await;
+        if let Err(e) = db.upsert_session(&meta) {
+            tracing::debug!(session = %session_id, error = %e, "final flush: meta persist failed");
+        }
+    }
+
+    if let Some(bytes) = scrollback {
+        let ts = now_secs();
+        let db = deps.db.lock().await;
+        if let Err(e) = db.append_scrollback(session_id, 0, &bytes, ts) {
+            tracing::debug!(session = %session_id, error = %e, "final flush: scrollback append failed");
+        }
+    }
+
+    if !events.is_empty() {
+        let db = deps.db.lock().await;
+        for ev in events {
+            if let Err(e) = db.append_command_event(
+                session_id,
+                ev.seq as i64,
+                ev.ts,
+                ev.kind,
+                ev.exit_code,
+                "gui",
+            ) {
+                tracing::debug!(
+                    session = %session_id, error = %e, "final flush: command_events append failed"
+                );
+            }
+        }
+    }
 }
 
 /// Spawn the best-effort scrollback persistence sweep (spec §11). Every
@@ -2585,6 +2699,278 @@ mod tests {
         let _ = deps.supervisor.kill(&id);
     }
 
+    // ---- Round-2 regression R2: a session's FINAL scrollback tail + terminal lifecycle must be
+    // persisted on natural exit, even though `flush_scrollback_once`'s periodic sweep now correctly
+    // (D1) skips it the instant `is_active` flips to `false`. `install_push_callbacks` must be
+    // wired (mirrors `killed_session_attach_entry_is_reaped`) so `on_exited`'s final-flush spawn
+    // actually runs — `test_deps()` alone does not register it. ----
+
+    /// Poll until `deps.supervisor.meta(id)` reports `is_active == false` (the wait thread has run)
+    /// — bounded so a regression that never reaps hangs the test fast instead of forever.
+    async fn wait_until_inactive(deps: &Arc<ServerDeps>, id: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(meta) = deps.supervisor.meta(id) {
+                if !meta.is_active {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session {id} never went inactive"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Poll the DB directly until `f` returns `Some`, or panic at the deadline. The final flush
+    /// (round-2 R2) runs on a spawned task off the wait thread's sync callback, so it is not
+    /// synchronous with `wait_until_inactive` above — tests must poll rather than assume the write
+    /// has landed the instant `is_active` flips.
+    async fn wait_for_db<T, F>(deps: &Arc<ServerDeps>, mut f: F) -> T
+    where
+        F: FnMut(&Db) -> Option<T>,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let db = deps.db.lock().await;
+                if let Some(v) = f(&db) {
+                    return v;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected DB state never arrived within the deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    // ---- (a) create -> print marker -> exit naturally (exited-unreaped, no daemon restart) ->
+    // the DB scrollback row must contain the marker AND the session row's lifecycle must be
+    // Exited. Pre-fix: `flush_scrollback_once`'s `is_active` gate flips false the instant the wait
+    // thread reaps the child, racing (and normally beating) the very next periodic tick, so this
+    // session's trailing output/terminal lifecycle was NEVER persisted — the row stayed absent (if
+    // the create-time flush never ran) or stuck reporting the create-time lifecycle. ----
+    #[tokio::test]
+    async fn on_exit_flush_persists_final_scrollback_and_exited_lifecycle() {
+        let (deps, _rt) = test_deps();
+        install_push_callbacks(&deps, Broadcaster::default());
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        let mut spec = sh_spec("printf 'EXIT_MARKER\\n'; exit 7");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+        {
+            // Mirror the production CreateSession dispatch arm's immediate persist.
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            db.upsert_session(&meta).unwrap();
+        }
+
+        wait_until_inactive(&deps, &id).await;
+
+        let scrollback = wait_for_db(&deps, |db| {
+            let bytes = db.load_scrollback(&id).ok()?;
+            bytes
+                .windows(b"EXIT_MARKER".len())
+                .any(|w| w == b"EXIT_MARKER")
+                .then_some(bytes)
+        })
+        .await;
+        assert!(
+            scrollback
+                .windows(b"EXIT_MARKER".len())
+                .any(|w| w == b"EXIT_MARKER"),
+            "final flush must persist the trailing output emitted right before exit"
+        );
+
+        let row = wait_for_db(&deps, |db| {
+            db.list_sessions().ok()?.into_iter().find(|m| {
+                m.id == id && matches!(m.lifecycle, bpa_protocol::SessionLifecycle::Exited { .. })
+            })
+        })
+        .await;
+        match row.lifecycle {
+            bpa_protocol::SessionLifecycle::Exited { code, .. } => {
+                assert_eq!(code, Some(7), "exit code must be persisted");
+            }
+            other => panic!("expected Exited lifecycle in the persisted row, got {other:?}"),
+        }
+    }
+
+    // ---- (b) a session that lives under ONE whole SCROLLBACK_FLUSH_INTERVAL (create, print, exit
+    // fast — the periodic sweep never gets a tick against it while it's still live) must still have
+    // its scrollback persisted via the on-exit final flush, not just the periodic sweep. ----
+    #[tokio::test]
+    async fn on_exit_flush_persists_scrollback_for_a_session_shorter_than_one_flush_interval() {
+        let (deps, _rt) = test_deps();
+        install_push_callbacks(&deps, Broadcaster::default());
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        // No `read _hold`: exits as fast as the shell can print and return — well under
+        // SCROLLBACK_FLUSH_INTERVAL (1s), so no periodic tick ever observes this session live.
+        let mut spec = sh_spec("printf 'FAST_MARKER\\n'");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+        {
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            db.upsert_session(&meta).unwrap();
+        }
+
+        wait_until_inactive(&deps, &id).await;
+
+        let scrollback = wait_for_db(&deps, |db| {
+            let bytes = db.load_scrollback(&id).ok()?;
+            bytes
+                .windows(b"FAST_MARKER".len())
+                .any(|w| w == b"FAST_MARKER")
+                .then_some(bytes)
+        })
+        .await;
+        assert!(
+            scrollback
+                .windows(b"FAST_MARKER".len())
+                .any(|w| w == b"FAST_MARKER"),
+            "a session shorter-lived than one flush interval must still have its scrollback \
+             persisted by the on-exit final flush"
+        );
+    }
+
+    // ---- (c) D1 regression guard: a rehydrated (loaded-from-disk, never-live-this-process)
+    // inactive session must still NOT be re-flushed by a periodic tick — the final-flush addition
+    // must not reopen the write-amplification bug D1 fixed. `rehydrate_inactive` never spawns a
+    // wait thread, so `on_exited` (and thus the new final flush) can never fire for it either;
+    // this test proves BOTH mechanisms leave it alone. ----
+    #[tokio::test]
+    async fn rehydrated_inactive_session_is_not_reflushed_by_periodic_tick_or_final_flush() {
+        let (deps, _rt) = test_deps();
+        install_push_callbacks(&deps, Broadcaster::default());
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        let dead_id = "dead-r2".to_string();
+        let dead_meta = SessionMeta {
+            id: dead_id.clone(),
+            workspace_id: "ws".into(),
+            title: "t".into(),
+            shell: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+            lifecycle: bpa_protocol::SessionLifecycle::Exited {
+                code: Some(0),
+                signal: None,
+            },
+            waiting_for_input: false,
+            is_active: false,
+            created_at: 1_700_000_000,
+        };
+        {
+            let db = deps.db.lock().await;
+            db.upsert_session(&dead_meta).unwrap();
+            db.append_scrollback(&dead_id, 0, b"OLD_PERSISTED_BYTES", 222)
+                .unwrap();
+        }
+        deps.supervisor
+            .rehydrate_inactive(dead_meta, b"OLD_PERSISTED_BYTES".to_vec())
+            .expect("rehydrate_inactive");
+
+        // Give any (incorrect) async final-flush spawn a generous window to have run if it were
+        // ever going to — rehydrate_inactive never spawns a wait thread, so on_exited cannot fire,
+        // but this also guards against a future regression that called the flush unconditionally
+        // from somewhere else.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        flush_scrollback_once(&deps).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let db = deps.db.lock().await;
+        let ts = db
+            .scrollback_row_ts_for_test(&dead_id)
+            .unwrap()
+            .expect("dead row must still exist");
+        assert_eq!(
+            ts, 222,
+            "a rehydrated (never-live-this-process) inactive session must not be re-flushed by \
+             either the periodic sweep or the on-exit final flush"
+        );
+    }
+
+    // ---- (d) resize -> exit -> read row directly: persisted cols/rows must reflect the resize
+    // AND lifecycle must be Exited — the final flush must persist the CURRENT meta (like the
+    // periodic sweep's D2 fix), not a stale create-time snapshot. ----
+    #[tokio::test]
+    async fn on_exit_flush_persists_resized_cols_rows_and_exited_lifecycle() {
+        let (deps, _rt) = test_deps();
+        install_push_callbacks(&deps, Broadcaster::default());
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        let mut spec = sh_spec("read _hold");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+        {
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            assert_eq!((meta.cols, meta.rows), (80, 24));
+            db.upsert_session(&meta).unwrap();
+        }
+
+        deps.supervisor.resize(&id, 132, 43).expect("resize");
+        // `kill()` synchronously joins the wait thread (which runs `on_exited` up through spawning
+        // the final flush) AND removes the session from the supervisor's live map before returning
+        // — unlike a natural exit, there is no `Ok(meta.is_active == false)` state to poll for here,
+        // `meta(&id)` goes straight to `Err(NoSuchSession)`. Go straight to polling the DB below.
+        deps.supervisor.kill(&id).expect("kill");
+
+        let row = wait_for_db(&deps, |db| {
+            db.list_sessions().ok()?.into_iter().find(|m| {
+                m.id == id
+                    && (m.cols, m.rows) == (132, 43)
+                    && matches!(m.lifecycle, bpa_protocol::SessionLifecycle::Exited { .. })
+            })
+        })
+        .await;
+        assert_eq!((row.cols, row.rows), (132, 43));
+        assert!(
+            matches!(row.lifecycle, bpa_protocol::SessionLifecycle::Exited { .. }),
+            "expected Exited lifecycle in the persisted row, got {:?}",
+            row.lifecycle
+        );
+    }
+
     // ---- Peer-cred: honest same-process test. A cross-uid peer cannot be forged in the sandbox,
     // so we assert the accepted (same-euid) path works end to end; the rejection logic itself is
     // unit-tested in `singleton.rs` (peer_cred_rejects_foreign_uid_simulated). ----
@@ -2722,7 +3108,7 @@ mod tests {
     #[tokio::test]
     async fn killed_session_attach_entry_is_reaped() {
         let (deps, _rt) = test_deps();
-        install_push_callbacks(&deps.supervisor, &deps.attach, Broadcaster::default());
+        install_push_callbacks(&deps, Broadcaster::default());
 
         // Create a live session directly via the supervisor (a long sleep so it stays alive).
         let id = deps.supervisor.create(sh_spec("sleep 5")).expect("create");

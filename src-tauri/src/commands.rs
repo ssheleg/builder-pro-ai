@@ -61,16 +61,54 @@ pub enum DaemonStatus {
 /// registered alongside the broker's) and read by the `daemon_status` command.
 pub type StatusSlot = Arc<std::sync::Mutex<DaemonStatus>>;
 
+/// Per-session write-serialization locks (round-2 regression R3): a chunked `write_stdin` (finding
+/// [2]/C4) sends several sequential `Request::WriteStdin` frames on the shared connection, awaiting
+/// each `Ack` before sending the next. The frontend fires `writeStdin` fire-and-forget per xterm
+/// `onData` with no client-side serialization, and Tauri runs overlapping `#[tauri::command]`
+/// invocations concurrently — so a second `write_stdin` call for the SAME session (a fast keystroke,
+/// or a second paste) invoked while a multi-chunk paste is still in flight can enqueue its own
+/// `WriteStdin` request on the client's FIFO command channel BETWEEN two chunks of the first call,
+/// corrupting byte order at the PTY. Holding this session's lock across the whole chunk loop makes a
+/// chunked write atomic with respect to every other write to the SAME session, while writes to
+/// DIFFERENT sessions stay fully concurrent (each session gets its own `tokio::sync::Mutex`).
+///
+/// Keyed by `SessionId` behind a `std::sync::Mutex` (not `tokio::sync::Mutex`): the outer map is
+/// only ever touched for the instant it takes to look up/insert an `Arc<tokio::sync::Mutex<()>>`,
+/// never held across an `.await` — the actual serialization happens on the per-session
+/// `tokio::sync::Mutex` returned from `lock_for`.
+#[derive(Default)]
+pub struct WriteStdinLocks {
+    inner: std::sync::Mutex<std::collections::HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl WriteStdinLocks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the per-session lock for `session_id`, creating it on first use. Entries are never
+    /// removed (sessions are few and long-lived relative to a desktop app's process lifetime; the
+    /// map holds one cheap `Arc<Mutex<()>>` per session ever written to, not per write).
+    fn lock_for(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.inner.lock().unwrap();
+        map.entry(session_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+}
+
 /// Shared, Tauri-managed application state: the swappable daemon-client slot, the push broker, the
-/// launchd agent (used by `upgrade_daemon`), and the pull-queryable daemon status (finding [12]).
-/// Constructed once in `lib.rs`'s `setup()` and **always** registered via `app.manage(...)` —
-/// unlike the old design, `AppState` is never left unmanaged, even when the daemon is down or
-/// speaks an incompatible protocol version (spec §6.2).
+/// launchd agent (used by `upgrade_daemon`), the pull-queryable daemon status (finding [12]), and
+/// the per-session `write_stdin` serialization locks (round-2 regression R3). Constructed once in
+/// `lib.rs`'s `setup()` and **always** registered via `app.manage(...)` — unlike the old design,
+/// `AppState` is never left unmanaged, even when the daemon is down or speaks an incompatible
+/// protocol version (spec §6.2).
 pub struct AppState {
     pub client: ClientSlot,
     pub broker: Arc<Broker>,
     pub launchd: Arc<crate::launchd::LaunchdAgent<'static>>,
     pub status: StatusSlot,
+    pub write_stdin_locks: Arc<WriteStdinLocks>,
 }
 
 /// The exact logic behind `AppState::client()`, pulled out as a free function over a bare
@@ -252,6 +290,29 @@ pub(crate) fn build_write_stdin_chunks(session_id: SessionId, data: String) -> V
         .collect()
 }
 
+/// Send `data` to `session_id`'s stdin, chunked (`build_write_stdin_chunks`), while holding that
+/// session's write-serialization lock (round-2 regression R3) across the whole chunk loop — so a
+/// concurrent call for the SAME session (a keystroke or a second paste racing a multi-chunk paste,
+/// both possible since Tauri runs overlapping command invocations and the frontend does not
+/// serialize `writeStdin` calls itself) cannot interleave its own `WriteStdin` request between two
+/// chunks of this one. A different session's lock is untouched, so writes to different sessions
+/// never block each other. Pulled out as a plain function (rather than inlined in the
+/// `#[tauri::command]`) so it is unit-testable against a real `DaemonClient` + stub daemon without a
+/// Tauri runtime, mirroring `build_write_stdin_chunks`'s own testability rationale.
+pub(crate) async fn write_stdin_locked(
+    locks: &WriteStdinLocks,
+    client: &DaemonClient,
+    session_id: SessionId,
+    data: String,
+) -> Result<(), CommandError> {
+    let lock = locks.lock_for(&session_id);
+    let _guard = lock.lock().await;
+    for req in build_write_stdin_chunks(session_id.clone(), data) {
+        expect_ack(client.request(req).await?)?;
+    }
+    Ok(())
+}
+
 // ── core-side path pre-flights (spec §13/§16 defense in depth) ─────────────────────────────
 //
 // The daemon is the security-authoritative validator (S6 agents drive the same surface), but the
@@ -416,11 +477,12 @@ pub async fn write_stdin(
     // `Request::WriteStdin` on the SAME connection — awaiting each one before sending the next
     // preserves FIFO order at the PTY. On any chunk failure, stop immediately and surface that
     // error honestly rather than silently dropping the remaining chunks or retrying.
+    //
+    // Serialized per session (round-2 regression R3): `write_stdin_locked` holds this session's
+    // lock across the whole chunk loop so a concurrent call for the SAME session cannot interleave
+    // a request between two chunks of this one; a different session's write proceeds unblocked.
     let client = state.client()?;
-    for req in build_write_stdin_chunks(session_id, data) {
-        expect_ack(client.request(req).await?)?;
-    }
-    Ok(())
+    write_stdin_locked(&state.write_stdin_locks, &client, session_id, data).await
 }
 
 #[tauri::command]
@@ -1659,6 +1721,241 @@ pub(crate) mod commands_over_stub_daemon {
             seen.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "must stop after the failing chunk, never sending the remaining ones"
+        );
+    }
+
+    // ── write_stdin per-session serialization (round-2 regression R3) ──────────────────────────
+    //
+    // `write_stdin_locked` must hold session A's lock across A's whole chunk loop so a concurrent
+    // call for A (issued mid-paste, exactly like a fast keystroke or a second paste racing the
+    // frontend's fire-and-forget `writeStdin` invocations) cannot interleave a request between two
+    // of A's chunks; a concurrent call for a DIFFERENT session B must NOT be blocked by A's lock.
+
+    /// A stub daemon that Acks every request but stalls the FIRST `WriteStdin` chunk for session
+    /// `stall_session` until `release` is notified — so a concurrent second call for the same
+    /// session has a wide window to (if unserialized) enqueue its own request in between this
+    /// call's chunks. Requests are read and responded to sequentially off the one connection
+    /// (mirroring the real daemon's per-connection dispatch loop), recording each observed
+    /// `(session_id, bytes)` pair in arrival order.
+    type ObservedWrites = Arc<std::sync::Mutex<Vec<(SessionId, Vec<u8>)>>>;
+
+    async fn connect_to_stub_recording(
+        stall_session: SessionId,
+        release: Arc<tokio::sync::Notify>,
+    ) -> (DaemonClient, PathBuf, ObservedWrites) {
+        let observed: ObservedWrites = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed2 = observed.clone();
+
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("d.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _client_preamble = read_client_preamble_stub(&mut stream).await;
+            let reply = encode_daemon_reply(&DaemonReply::Accepted {
+                chosen: 2,
+                build: "stub".into(),
+            });
+            stream.write_all(&reply).await.unwrap();
+            stream.flush().await.unwrap();
+
+            let mut stalled_once = false;
+            loop {
+                let Some(Frame::Request { id, req }) = read_frame(&mut stream).await else {
+                    break;
+                };
+                if let Request::WriteStdin { session_id, bytes } = &req {
+                    observed2
+                        .lock()
+                        .unwrap()
+                        .push((session_id.clone(), bytes.clone()));
+                    if !stalled_once && *session_id == stall_session {
+                        stalled_once = true;
+                        // Hold this reply back so the caller's chunk loop is mid-flight, widening
+                        // the window for a concurrent second call (if unserialized) to enqueue its
+                        // own request before this one's next chunk goes out.
+                        release.notified().await;
+                    }
+                }
+                let res = Response::Ack;
+                write_stub_frame(&mut stream, &Frame::Response { id, res }).await;
+            }
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let client = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            let client = DaemonClient::connect("test-build".to_string())
+                .await
+                .unwrap();
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            client
+        };
+        std::mem::forget(dir);
+
+        (client, sock_path, observed)
+    }
+
+    #[tokio::test]
+    async fn write_stdin_locked_keeps_same_session_chunks_contiguous_under_concurrency() {
+        // Session "A" gets a 3-chunk paste whose first chunk is held by the stub; while it's held,
+        // a second, single-chunk write_stdin call for the SAME session A is fired concurrently.
+        // Without per-session serialization, A's second call could enqueue its request between A's
+        // first and second chunk. With `write_stdin_locked`, A's second call must wait for A's
+        // whole first call to finish, so every chunk observed for A stays contiguous, in order.
+        let session_a: SessionId = "sess-A".to_string();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (client, _sock, observed) =
+            connect_to_stub_recording(session_a.clone(), release.clone()).await;
+        let client = Arc::new(client);
+        let locks = Arc::new(WriteStdinLocks::new());
+
+        let total = WRITE_STDIN_CHUNK * 2 + WRITE_STDIN_CHUNK / 2; // 3 chunks
+        let data_a1: String = "a".repeat(total);
+        let expected_a1_bytes = data_a1.clone().into_bytes();
+        let data_a2 = "SECOND".to_string();
+
+        let client_c1 = client.clone();
+        let locks_c1 = locks.clone();
+        let session_a_c1 = session_a.clone();
+        let call1 = tokio::spawn(async move {
+            write_stdin_locked(&locks_c1, &client_c1, session_a_c1, data_a1).await
+        });
+
+        // Give call1 time to enqueue its first chunk and have the stub stall on it.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client_c2 = client.clone();
+        let locks_c2 = locks.clone();
+        let session_a_c2 = session_a.clone();
+        let data_a2_clone = data_a2.clone();
+        let call2 = tokio::spawn(async move {
+            write_stdin_locked(&locks_c2, &client_c2, session_a_c2, data_a2_clone).await
+        });
+
+        // Give call2 a chance to race in (it must block on the lock, not send anything yet).
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        release.notify_one();
+
+        call1.await.unwrap().expect("call1 must succeed");
+        call2.await.unwrap().expect("call2 must succeed");
+
+        let rows = observed.lock().unwrap().clone();
+        let a_rows: Vec<Vec<u8>> = rows
+            .iter()
+            .filter(|(sid, _)| *sid == session_a)
+            .map(|(_, b)| b.clone())
+            .collect();
+        assert_eq!(
+            a_rows.len(),
+            4,
+            "expected 3 chunks from call1 + 1 chunk from call2, got {}",
+            a_rows.len()
+        );
+        // call1's 3 chunks must be contiguous and in order — call2's single chunk must not have
+        // been interleaved between them.
+        let reassembled_first_three: Vec<u8> = a_rows[0..3].iter().flatten().copied().collect();
+        assert_eq!(
+            reassembled_first_three, expected_a1_bytes,
+            "call1's chunks must arrive contiguously and reassemble byte-identically — a \
+             concurrent call2 for the SAME session must not interleave into the middle of call1's \
+             multi-chunk paste"
+        );
+        assert_eq!(
+            a_rows[3],
+            data_a2.into_bytes(),
+            "call2's single chunk must arrive only after call1's chunks are fully sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_stdin_locked_different_sessions_are_not_blocked_by_each_other() {
+        // `WriteStdinLocks` hands out one `tokio::sync::Mutex` PER session (`lock_for`) — holding
+        // session A's lock across a slow operation must never contend with session B's lock. This
+        // exercises the lock map directly (independent of any daemon/stub round-trip, which is
+        // strictly serialized per-connection regardless of session — a real property of this
+        // single-connection design, not something a per-session lock could or should change): if
+        // `lock_for` returned the SAME mutex for every session (the bug this map exists to avoid),
+        // session B's `try_lock` below would fail while A's guard is held.
+        let locks = WriteStdinLocks::new();
+        let session_a: SessionId = "sess-A".to_string();
+        let session_b: SessionId = "sess-B".to_string();
+
+        let lock_a = locks.lock_for(&session_a);
+        let _guard_a = lock_a.lock().await;
+
+        let lock_b = locks.lock_for(&session_b);
+        let started = std::time::Instant::now();
+        let guard_b = tokio::time::timeout(std::time::Duration::from_millis(500), lock_b.lock())
+            .await
+            .expect("session B's lock must be acquirable promptly while A's is held");
+        let elapsed = started.elapsed();
+        drop(guard_b);
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "acquiring session B's lock took {elapsed:?} while session A's lock was held; \
+             different sessions must use independent locks and never block each other"
+        );
+    }
+
+    // End-to-end companion: with two real, concurrent `write_stdin_locked` calls against two
+    // different sessions on a stub that never stalls, both must complete and each session's bytes
+    // must be observed exactly once, proving the lock map doesn't accidentally serialize the whole
+    // client (e.g. via a single global mutex) even under real request/response round-trips.
+    #[tokio::test]
+    async fn write_stdin_locked_different_sessions_both_complete_concurrently_over_stub() {
+        let session_a: SessionId = "sess-A".to_string();
+        let session_b: SessionId = "sess-B".to_string();
+        let never_stall: SessionId = "unused".to_string();
+        let release = Arc::new(tokio::sync::Notify::new());
+        // never_stall never matches session_a/session_b, so the stub never stalls either call.
+        let (client, _sock, observed) =
+            connect_to_stub_recording(never_stall, release.clone()).await;
+        let client = Arc::new(client);
+        let locks = Arc::new(WriteStdinLocks::new());
+
+        let client_a = client.clone();
+        let locks_a = locks.clone();
+        let call_a = tokio::spawn(async move {
+            write_stdin_locked(&locks_a, &client_a, session_a.clone(), "from-a".to_string()).await
+        });
+        let client_b = client.clone();
+        let locks_b = locks.clone();
+        let call_b = tokio::spawn(async move {
+            write_stdin_locked(&locks_b, &client_b, session_b.clone(), "from-b".to_string()).await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            call_a.await.unwrap().expect("call_a must succeed");
+            call_b.await.unwrap().expect("call_b must succeed");
+        })
+        .await
+        .expect("both concurrent per-session writes must complete promptly");
+
+        let rows = observed.lock().unwrap().clone();
+        assert!(
+            rows.iter()
+                .any(|(sid, b)| sid == "sess-A" && b == b"from-a"),
+            "session A's chunk must have been observed"
+        );
+        assert!(
+            rows.iter()
+                .any(|(sid, b)| sid == "sess-B" && b == b"from-b"),
+            "session B's chunk must have been observed"
         );
     }
 }

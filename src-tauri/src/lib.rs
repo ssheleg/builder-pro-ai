@@ -110,34 +110,27 @@ fn client_build() -> String {
 /// runtime: a `delay` of a few milliseconds and an unreachable socket path let a test exercise
 /// the give-up-and-return-`Err` path quickly and deterministically.
 ///
+/// A thin delegate to [`DaemonClient::connect_with_retry`] (round-2 regression R1): the actual
+/// bounded-retry-with-escalation loop now lives in `socket_client.rs` so it shares its
+/// `HandshakeSuspectCounter` classification with the reconnect loop's `connect_with_backoff`
+/// (see that type's docs) — this wrapper is kept, with its exact pre-fix name/signature, purely so
+/// existing call sites and this module's own unit tests below don't need a Tauri runtime to exercise
+/// it either.
+///
 /// `ClientError::IncompatibleDaemon` is fatal and returned immediately, with **no retry and no
-/// sleep** (spec §6.2): a version mismatch will never resolve itself by waiting, so retrying it up
-/// to `attempts` times would only delay the `daemon://incompatible` signal that drives the upgrade
-/// flow. Every other error (the daemon not being up yet, most commonly `Disconnected`) keeps the
-/// bounded backoff.
+/// sleep** (spec §6.2) — a version mismatch will never resolve itself by waiting. This now covers
+/// TWO ways to reach it: a genuine, well-formed `DaemonReply::Incompatible` (unchanged), and
+/// (round-2 regression R1) `HANDSHAKE_SUSPECT_CAP` CONSECUTIVE transient handshake failures (EOF /
+/// timeout / garbage / bad magic — a present-but-unhandshakeable daemon, the dominant upgrade
+/// scenario: an old v1 daemon still running under launchd that EOFs on every v2 preamble). Every
+/// other error (plain connect-refused, most commonly `Disconnected` — nothing listening yet, normal
+/// at boot) keeps the bounded backoff, never escalating.
 async fn connect_with_retry(
     client_build: String,
     attempts: u32,
     delay: Duration,
 ) -> Result<DaemonClient, ClientError> {
-    let mut last_err = ClientError::Disconnected;
-    for attempt in 1..=attempts.max(1) {
-        match DaemonClient::connect(client_build.clone()).await {
-            Ok(client) => return Ok(client),
-            Err(e @ ClientError::IncompatibleDaemon { .. }) => {
-                warn!(attempt, error = %e, "daemon incompatible; not retrying");
-                return Err(e);
-            }
-            Err(e) => {
-                warn!(attempt, attempts, error = %e, "daemon connect attempt failed");
-                last_err = e;
-                if attempt < attempts {
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-    Err(last_err)
+    DaemonClient::connect_with_retry(client_build, attempts, delay).await
 }
 
 /// Build a [`LaunchdAgent`] for the current user against the real `launchctl` (production only;
@@ -258,6 +251,10 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
     // connect needs to close over a clone of it — cloning an `Arc` created up front is simpler and
     // less error-prone than trying to pull it back out of `AppState` after `manage()`.
     let status: StatusSlot = Arc::new(std::sync::Mutex::new(DaemonStatus::Disconnected));
+    // Round-2 regression R3: one lock map per app process, shared across every `AppState` branch
+    // below exactly like `status` — `write_stdin`'s per-session serialization must hold regardless
+    // of which of `bring_up_daemon`'s three outcomes this connect attempt lands on.
+    let write_stdin_locks = Arc::new(commands::WriteStdinLocks::new());
 
     let agent = match build_launchd_agent(&app) {
         Ok(agent) => Arc::new(agent),
@@ -273,6 +270,7 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
                 // never managing `AppState` at all.
                 launchd: Arc::new(unreachable_launchd_agent()),
                 status,
+                write_stdin_locks,
             });
             emit_disconnected(&app, "could not resolve the background service binary");
             return;
@@ -286,6 +284,7 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
             broker,
             launchd: agent,
             status,
+            write_stdin_locks,
         });
         emit_disconnected(&app, "could not start background service");
         return;
@@ -305,6 +304,7 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
         broker: broker.clone(),
         launchd: agent,
         status: status.clone(),
+        write_stdin_locks,
     });
 
     match connect_result {
@@ -731,6 +731,101 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "connect_with_retry took {elapsed:?}; IncompatibleDaemon must return promptly with no retry, not run the full ~3.5s of bounded backoff"
+        );
+    }
+
+    // ---- Round-2 regression R1 (CRITICAL): `connect_with_retry` — the EXACT function
+    // ---- `bring_up_daemon` calls for the INITIAL connect at app boot — must escalate to
+    // ---- `IncompatibleDaemon{0,0}` once a present-but-unhandshakeable daemon (a stub that accepts
+    // ---- every TCP connection but never completes the handshake, e.g. a genuine v1 daemon that
+    // ---- EOFs reading a v2 preamble it cannot decode) has failed HANDSHAKE_SUSPECT_CAP consecutive
+    // ---- times — never an infinite `Disconnected` retry that leaves the upgrade dialog
+    // ---- unreachable. Combined with `status_for_connect_result_maps_incompatible_daemon` (this
+    // ---- file) and `connect_with_retry_does_not_retry_incompatible` (above), this proves
+    // ---- `bring_up_daemon`'s full match arm chain: connect_result -> write_status ->
+    // ---- Err(IncompatibleDaemon) -> emit_incompatible + DaemonStatus::Incompatible, all reachable
+    // ---- from this scenario now that connect_with_retry itself yields that variant. ----
+    #[tokio::test]
+    async fn connect_with_retry_escalates_to_incompatible_when_daemon_accepts_but_never_handshakes()
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("d.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        // A stub daemon that accepts every connection, reads the client's preamble, then closes
+        // WITHOUT replying at all — exactly what a genuine v1/bincode daemon looks like from the
+        // outside when handed a v2 CBOR preamble it cannot decode (it reads the connection as a
+        // `Request::Hello` frame, fails, and closes). Never sends a real Accepted/Incompatible reply
+        // on any attempt, so a correctly-fixed `connect_with_retry` must escalate once the cap of
+        // HANDSHAKE_SUSPECT_CAP (8) consecutive such failures is exhausted, not retry forever.
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut header = [0u8; 10];
+                let _ = stream.read_exact(&mut header).await;
+                drop(stream);
+            }
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let result = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            // Exactly bring_up_daemon's real config (8 attempts == HANDSHAKE_SUSPECT_CAP), except a
+            // 5ms delay instead of 500ms so the test stays fast.
+            let result =
+                connect_with_retry("test-build".to_string(), 8, Duration::from_millis(5)).await;
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            result
+        };
+        std::mem::forget(dir);
+
+        match &result {
+            Err(ClientError::IncompatibleDaemon {
+                daemon_min,
+                daemon_max,
+            }) => {
+                assert_eq!(
+                    (*daemon_min, *daemon_max),
+                    (0, 0),
+                    "expected the unknown-range sentinel after cap-exhausted transient failures"
+                );
+            }
+            other => panic!(
+                "expected IncompatibleDaemon{{0,0}} after the initial connect exhausted \
+                 HANDSHAKE_SUSPECT_CAP consecutive transient failures, got {other:?} — a present-\
+                 but-unhandshakeable daemon must reach the upgrade dialog, not retry \"daemon \
+                 unreachable\" forever"
+            ),
+        }
+
+        // The SAME outcome must also map to the pull-fallback DaemonStatus the frontend can poll
+        // (finding [12]) — proving bring_up_daemon's `write_status(status_for_connect_result(..))`
+        // call, immediately following connect_with_retry in production, would surface this
+        // correctly too.
+        assert_eq!(
+            status_for_connect_result(&result),
+            DaemonStatus::Incompatible {
+                daemon_min: 0,
+                daemon_max: 0
+            }
         );
     }
 }
