@@ -45,7 +45,8 @@ without killing a running shell (tmux/re-attach model) — full detail in
 │  • Zustand (metadata only)         • app settings (tauri-plugin-store)│
 └───────────────────────────────────│────────────────────────────────┘
                                      │ Hop B: Unix domain socket
-                                     │ (u32-LE length prefix + bincode Frame)
+                                     │ (codec-agnostic preamble handshake, then u32-LE length
+                                     │  prefix + CBOR Frame)
                           ┌──────────▼────────────┐
                           │  bpa-sessiond (daemon) │ ◄─ launchd LaunchAgent
                           │  • PTY supervisor      │    (KeepAlive{Crashed:true})
@@ -76,8 +77,9 @@ This is an honest boundary, not a bug: any daemon stop (restart, upgrade, or cra
 child processes down with it, and logging out tears down every per-user LaunchAgent along with
 everything it supervises. What *does* survive — GUI restart with live shells, and daemon restart
 for records + scrollback (rehydrated as inactive) — is stated in the table above.
-`npm run e2e:survive` proves the client-restart half end-to-end; a daemon-restart rehydration e2e
-is tracked as BL-7 in [`docs/backlog.md`](docs/backlog.md).
+`npm run e2e:survive` proves both halves end-to-end: phases 0-4 the client-restart half, phase 5
+the daemon-restart half (SIGTERM-equivalent drain → relaunch → rehydrated inactive + scrollback
+intact — Pv2 §9.8, closes BL-7 in [`docs/backlog.md`](docs/backlog.md)).
 
 ## Quickstart
 
@@ -109,9 +111,9 @@ bash scripts/build-universal.sh
 
 | Suite | Command | What it covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | daemon (`bpa-sessiond`), shared protocol (`bpa-protocol`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — 205 tests as of the last full run |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store, terminal-manager (attach state machine), IPC wrappers, components — 107 tests |
-| End-to-end | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (the core S1 promise, spec §14.1) |
+| Rust workspace | `cargo test --workspace` | daemon (`bpa-sessiond`), shared protocol (`bpa-protocol`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — 238 tests as of the last full run |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store, terminal-manager (attach state machine), IPC wrappers, components — 118 tests |
+| End-to-end | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
 | Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` — a real, enforcing ≥80% line-coverage gate on the daemon crate (requires `cargo install cargo-llvm-cov`) |
 | Everything, in order | `bash scripts/final-suite.sh` | 8 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff → coverage gate → e2e; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) |
 

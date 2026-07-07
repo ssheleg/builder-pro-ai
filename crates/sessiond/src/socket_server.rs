@@ -340,14 +340,9 @@ async fn flush_scrollback_once(deps: &Arc<ServerDeps>) {
         if !events.is_empty() {
             let db = deps.db.lock().await;
             for ev in events {
-                if let Err(e) = db.append_command_event(
-                    &id,
-                    ev.seq as i64,
-                    ev.ts,
-                    ev.kind,
-                    ev.exit_code,
-                    "gui",
-                ) {
+                if let Err(e) =
+                    db.append_command_event(&id, ev.seq as i64, ev.ts, ev.kind, ev.exit_code, "gui")
+                {
                     tracing::debug!(
                         session = %id, error = %e, "command_events flush: append failed"
                     );
@@ -416,7 +411,7 @@ async fn handle_client(
             }
         }
         Ok(Err(_)) => return Ok(()), // malformed/garbage preamble ⇒ close without a reply
-        Err(_) => return Ok(()),    // preamble never arrived within PREAMBLE_TIMEOUT ⇒ close
+        Err(_) => return Ok(()),     // preamble never arrived within PREAMBLE_TIMEOUT ⇒ close
     }
 
     // ---- Split into an independent reader + writer, joined by a bounded outbound queue. ----
@@ -1136,14 +1131,20 @@ mod tests {
         .await
         .expect("server must close a garbage preamble within PREAMBLE_TIMEOUT (timed out waiting)")
         .unwrap();
-        assert_eq!(n, 0, "server must close the connection on a garbage/short preamble");
+        assert_eq!(
+            n, 0,
+            "server must close the connection on a garbage/short preamble"
+        );
     }
 
     #[tokio::test]
     async fn requests_are_answered_with_matching_ids_concurrently() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         // Fire three ListWorkspaces requests with distinct ids back-to-back.
         for id in [11u64, 22, 33] {
@@ -1175,7 +1176,10 @@ mod tests {
     async fn create_workspace_persists_and_pushes() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         // /tmp is a real, existing directory — passes §16 validation.
         send_frame(
@@ -1233,7 +1237,10 @@ mod tests {
     async fn create_workspace_rejects_missing_dir() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -1260,7 +1267,10 @@ mod tests {
     async fn create_session_persists_and_get_reflects_it() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         // Use /bin/sh (unrecognized by classify_shell) so no integration assets are needed and the
         // resolution is deterministic; cwd=/tmp exists.
@@ -1365,7 +1375,10 @@ mod tests {
     async fn create_session_rejects_missing_cwd() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -1396,7 +1409,10 @@ mod tests {
     async fn create_session_rejects_relative_cwd() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
         // A relative path that does not exist relative to the daemon's cwd ⇒ rejected.
         send_frame(
             &mut c,
@@ -1428,7 +1444,10 @@ mod tests {
     async fn attach_first_push_is_replay_then_output() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         // Create a shell that waits for a go-signal, so we can attach before any output.
         // We drive the child via WriteStdin over the same connection.
@@ -1580,7 +1599,10 @@ mod tests {
 
         // Client A connects, handshakes, then STOPS reading — we flood its outq with replies.
         let mut a = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut a).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut a).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         for id in 0..(CLIENT_OUTQ_CAP as u64 + 512) {
             let f = Frame::Request {
@@ -1599,7 +1621,10 @@ mod tests {
 
         // Client B connects fresh and MUST be served normally.
         let mut b = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut b).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut b).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut b,
             &Frame::Request {
@@ -1622,7 +1647,10 @@ mod tests {
     async fn oversized_frame_is_rejected() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
         // Announce a length beyond MAX_FRAME_LEN; the server must disconnect without allocating.
         let bogus_len = bpa_protocol::MAX_FRAME_LEN + 1;
         c.write_all(&bogus_len.to_le_bytes()).await.unwrap();
@@ -1639,7 +1667,10 @@ mod tests {
     async fn write_resize_kill_unknown_session_errors() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         for (id, req) in [
             (
@@ -1682,7 +1713,10 @@ mod tests {
     async fn detach_and_daemon_shutdown_ack() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         send_frame(
             &mut c,
@@ -1742,7 +1776,10 @@ mod tests {
         });
 
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         // A real workspace row first: `session.workspace_id` is `NOT NULL REFERENCES
         // workspace(id)` with `foreign_keys = ON` (persistence.rs), so `upsert_session` below would
@@ -1915,7 +1952,10 @@ mod tests {
     async fn daemon_shutdown_no_drain_exits_without_flush() {
         let (path, _tx, jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
 
         send_frame(
             &mut c,
@@ -1947,7 +1987,10 @@ mod tests {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
         // If peer-cred wrongly rejected our own euid, the handshake would never complete.
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
     }
 
     /// Build a real escaping-symlink layout under a fresh tempdir and return `(tempdir, link_path)`.
@@ -1978,7 +2021,10 @@ mod tests {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let (_layout, link) = escaping_symlink_layout();
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -2011,7 +2057,10 @@ mod tests {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let (_layout, link) = escaping_symlink_layout();
         let mut c = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut c).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut c,
             &Frame::Request {
@@ -2100,7 +2149,10 @@ mod tests {
 
         // ---- Client A: connect, create SA, attach (drain its Ack + Replay). ----
         let mut a = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut a).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut a).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut a,
             &Frame::Request {
@@ -2162,7 +2214,10 @@ mod tests {
 
         // ---- Client B: connect, create SB, prime it, attach, prove it is streaming (B_BEFORE). ----
         let mut b = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut b).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut b).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut b,
             &Frame::Request {
@@ -2360,7 +2415,10 @@ mod tests {
 
         // ---- Client A: connect, create+prime the shared session, attach it. ----
         let mut a = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut a).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut a).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut a,
             &Frame::Request {
@@ -2431,9 +2489,9 @@ mod tests {
                     id: 3,
                     res: Response::Ack,
                 } => a_ack = true,
-                Frame::Push(Push::Replay { session_id: sid, .. }) if sid == session_id => {
-                    a_replay = true
-                }
+                Frame::Push(Push::Replay {
+                    session_id: sid, ..
+                }) if sid == session_id => a_replay = true,
                 Frame::Push(_) => continue,
                 other => panic!("A unexpected before attach settle {other:?}"),
             }
@@ -2446,7 +2504,10 @@ mod tests {
         // ---- Client B: connect, attach the SAME session. Must ALSO get its own Replay — proving
         // no supersede of A's attachment. ----
         let mut b = UnixStream::connect(&path).await.unwrap();
-        assert!(matches!(preamble(&mut b).await, DaemonReply::Accepted { .. }));
+        assert!(matches!(
+            preamble(&mut b).await,
+            DaemonReply::Accepted { .. }
+        ));
         send_frame(
             &mut b,
             &Frame::Request {
@@ -2464,9 +2525,9 @@ mod tests {
                     id: 1,
                     res: Response::Ack,
                 } => b_ack = true,
-                Frame::Push(Push::Replay { session_id: sid, .. }) if sid == session_id => {
-                    b_replay = true
-                }
+                Frame::Push(Push::Replay {
+                    session_id: sid, ..
+                }) if sid == session_id => b_replay = true,
                 Frame::Push(_) => continue,
                 other => panic!("B unexpected before attach settle {other:?}"),
             }
@@ -2509,7 +2570,10 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut a))
                 .await
             {
-                Ok(Frame::Push(Push::Output { session_id: sid, bytes })) if sid == session_id => {
+                Ok(Frame::Push(Push::Output {
+                    session_id: sid,
+                    bytes,
+                })) if sid == session_id => {
                     a_out.extend_from_slice(&bytes);
                 }
                 Ok(_) => continue,
@@ -2527,7 +2591,10 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b))
                 .await
             {
-                Ok(Frame::Push(Push::Output { session_id: sid, bytes })) if sid == session_id => {
+                Ok(Frame::Push(Push::Output {
+                    session_id: sid,
+                    bytes,
+                })) if sid == session_id => {
                     b_out.extend_from_slice(&bytes);
                 }
                 Ok(_) => continue,
@@ -2587,9 +2654,9 @@ mod tests {
         let a_after_detach = tokio::time::timeout(std::time::Duration::from_millis(400), async {
             loop {
                 match recv_frame(&mut a).await {
-                    Frame::Push(Push::Output { session_id: sid, .. }) if sid == session_id => {
-                        return true
-                    }
+                    Frame::Push(Push::Output {
+                        session_id: sid, ..
+                    }) if sid == session_id => return true,
                     _ => continue,
                 }
             }
@@ -2607,7 +2674,10 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b))
                 .await
             {
-                Ok(Frame::Push(Push::Output { session_id: sid, bytes })) if sid == session_id => {
+                Ok(Frame::Push(Push::Output {
+                    session_id: sid,
+                    bytes,
+                })) if sid == session_id => {
                     b_out2.extend_from_slice(&bytes);
                 }
                 Ok(_) => continue,
@@ -2643,7 +2713,9 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b))
                 .await
             {
-                Ok(Frame::Push(Push::ChildExited { session_id: sid, .. })) if sid == session_id => {
+                Ok(Frame::Push(Push::ChildExited {
+                    session_id: sid, ..
+                })) if sid == session_id => {
                     b_saw_exit = true;
                     break;
                 }

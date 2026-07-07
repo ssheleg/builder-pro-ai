@@ -78,11 +78,14 @@ commits carry the agent trailer line used throughout this repo's history.
 ## Protocol change rules (Hop-B wire)
 
 - **Append-only wire discipline:** enum variant order is frozen; new requests/pushes are appended;
-  fields are added additively. Every protocol change ships a cross-version decode test.
-- **Locked contract:** DO NOT re-derive Serialize/Deserialize on SessionLifecycle or
-  TerminalEvent, and DO NOT add new serde-tagged enums to the Hop-B protocol, until protocol v2
-  replaces the codec.
-- Background: the built wire uses bincode 1.3.3 with a hand-written dual-codec bridge for tagged
-  enums — see the amended codec section of
+  fields are added additively. Every protocol change ships a cross-version decode test. (Still true
+  — see the Pv2.1 reserved-batch amendment in
+  [`docs/superpowers/specs/2026-07-06-protocol-v2-design.md`](docs/superpowers/specs/2026-07-06-protocol-v2-design.md)
+  §"Vision v2–v4 amendments": future request variants are named and order-reserved now, implemented
+  later, so indices are never reused.)
+- Hop-B codec is CBOR (`ciborium`); tagged enums (`SessionLifecycle`, `TerminalEvent`) are plain
+  `#[derive(Serialize, Deserialize)]`. The v1 dual-codec bridge (bincode 1.3.3 + the
+  `is_human_readable()`-branching hand-written impls) was retired in Pv2 (`[0.2.0]`) — see the
+  amended codec section of
   [`docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
   (§3) and [`docs/architecture.md`](docs/architecture.md).

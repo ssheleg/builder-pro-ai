@@ -361,18 +361,10 @@ impl Supervisor {
                                         *reader_shared.cwd.lock().unwrap() = path.clone();
                                     }
                                     OscEvent::CommandStart => {
-                                        push_command_event(
-                                            &reader_shared,
-                                            "started",
-                                            None,
-                                        );
+                                        push_command_event(&reader_shared, "started", None);
                                     }
                                     OscEvent::CommandEnd(code) => {
-                                        push_command_event(
-                                            &reader_shared,
-                                            "finished",
-                                            *code,
-                                        );
+                                        push_command_event(&reader_shared, "finished", *code);
                                     }
                                     _ => {}
                                 }
@@ -615,7 +607,11 @@ impl Supervisor {
     /// callers (e.g. a detaching connection) never need to special-case "already gone".
     pub fn unsubscribe_output(&self, id: &str, sub_id: u64) {
         if let Ok(s) = self.get(id) {
-            s.shared.sinks.lock().unwrap().retain(|(sid, _)| *sid != sub_id);
+            s.shared
+                .sinks
+                .lock()
+                .unwrap()
+                .retain(|(sid, _)| *sid != sub_id);
         }
     }
 
@@ -791,7 +787,10 @@ impl Supervisor {
         });
 
         let session = Arc::new(Session { shared, pty: None });
-        self.sessions.lock().unwrap().insert(meta.id.clone(), session);
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(meta.id.clone(), session);
         Ok(())
     }
 }
@@ -808,12 +807,16 @@ impl Default for Supervisor {
 /// sweep in `socket_server.rs` drains and persists these separately.
 fn push_command_event(shared: &Arc<Shared>, kind: &'static str, exit_code: Option<u8>) {
     let seq = shared.command_seq.fetch_add(1, Ordering::SeqCst);
-    shared.pending_command_events.lock().unwrap().push(CommandEvent {
-        seq,
-        ts: now_secs(),
-        kind,
-        exit_code,
-    });
+    shared
+        .pending_command_events
+        .lock()
+        .unwrap()
+        .push(CommandEvent {
+            seq,
+            ts: now_secs(),
+            kind,
+            exit_code,
+        });
 }
 
 /// Build + fire a [`StatusUpdate`] from the current shared state.
@@ -1276,7 +1279,10 @@ mod tests {
     fn two_subscribers_both_receive_output() {
         let sup = Supervisor::new();
         let id = sup
-            .create(spec_for("/bin/sh", vec!["-c".into(), "echo hi; sleep 1".into()]))
+            .create(spec_for(
+                "/bin/sh",
+                vec!["-c".into(), "echo hi; sleep 1".into()],
+            ))
             .expect("create");
         let (tx1, rx1) = mpsc::channel::<Vec<u8>>();
         let (tx2, rx2) = mpsc::channel::<Vec<u8>>();
@@ -1363,7 +1369,10 @@ mod tests {
             },
             Duration::from_secs(5),
         );
-        assert!(ok, "expected lifecycle to reach Exited(Some(7)) via the D mark");
+        assert!(
+            ok,
+            "expected lifecycle to reach Exited(Some(7)) via the D mark"
+        );
 
         let events = sup.drain_command_events(&id);
         assert_eq!(

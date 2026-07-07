@@ -338,11 +338,8 @@ impl AttachRegistry {
     /// Pv2 §5.2).
     pub fn detach_all_for_conn(&self, conn_id: u64) {
         let mut map = self.entries.lock().unwrap();
-        let owned: Vec<(SessionId, u64)> = map
-            .keys()
-            .filter(|(_, c)| *c == conn_id)
-            .cloned()
-            .collect();
+        let owned: Vec<(SessionId, u64)> =
+            map.keys().filter(|(_, c)| *c == conn_id).cloned().collect();
         for key in owned {
             if let Some(entry) = map.remove(&key) {
                 self.retire(&key.0, entry);

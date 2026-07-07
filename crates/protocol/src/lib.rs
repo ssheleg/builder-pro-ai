@@ -172,10 +172,7 @@ pub enum Response {
     Sessions(Vec<SessionMeta>),
     Session(SessionMeta),
     Ack,
-    Error {
-        code: String,
-        message: String,
-    },
+    Error { code: String, message: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

@@ -27,6 +27,21 @@ single executable truth for zero-context implementers. Full audit:
 | Resource model honest posture + planned cap | §9, §13 | A21 |
 | Survival truth wording | §13 | A12 |
 
+## Post-implementation amendments (2026-07-07, Protocol v2 / Pv2, `[0.2.0]`)
+
+Protocol v2 (`docs/superpowers/specs/2026-07-06-protocol-v2-design.md`) shipped in this cycle,
+superseding the codec and attach-model sections below. Amended IN PLACE per the same convention;
+see the Pv2 design doc for the full contract and `CHANGELOG.md` `[0.2.0]` for the shipped summary.
+
+| Amendment | Sections | Finding |
+|-----------|----------|---------|
+| Codec: bincode dual-codec bridge → CBOR (ciborium) plain derives; never-re-derive box retired | §3, §5, §7 | Pv2 §3 |
+| Handshake: `Hello`/`Welcome`/`MAGIC`/`PROTO_VERSION` frames → codec-agnostic preamble + version-range negotiation | §7 | Pv2 §4 |
+| Attach model: single-attach-supersede → multi-subscriber attach registry keyed `(session, conn)` | §4 (file tree), §7 | Pv2 §5 |
+| `DaemonShutdown{drain}`: reserved no-op → real flush + graceful exit | §7, §13 | Pv2 §6.1 |
+| Rehydrate: cold-rehydrate at boot as inactive replay-only entries; attach-inactive replays scrollback (closes BL-7) | §11 | Pv2 §9.8 (execution: Task 12r) |
+| Schema v2: `command_events` table + `origin` attribution column | §11 | Pv2 §7 |
+
 ---
 
 ## 1. Goals / non-goals
@@ -64,7 +79,8 @@ sessions (tmux/retach model).
 │  • Zustand (metadata only)         • app settings (tauri-plugin-store)│
 └───────────────────────────────────│────────────────────────────────┘
                                      │ Hop B: Unix domain socket
-                                     │ (u32-LE length prefix + bincode Frame)
+                                     │ (preamble handshake, then u32-LE length prefix + CBOR Frame
+                                     │  — Pv2 `[0.2.0]`; was bincode Frame as originally built)
                           ┌──────────▼────────────┐
                           │  bpa-sessiond (daemon) │ ◄─ launchd LaunchAgent
                           │  • PTY supervisor      │    (KeepAlive{Crashed:true})
@@ -109,7 +125,7 @@ sessions (tmux/retach model).
 | PTY | `portable-pty` (wezterm) | **0.9.0** |
 | VT (live grid state) | `alacritty_terminal` | pin exact (0.24/0.25) — used for cursor/alt-screen/size, **not** serialized |
 | DB | `rusqlite` (bundled sqlite) | 0.32 (≥0.31) |
-| Codec | `bincode` | **1.3.3** (fixint LE framing; tagged enums via hand-written dual-codec impls — see below) |
+| Codec | `ciborium` (CBOR, RFC 8949) | current — superseded 2026-07-07, Pv2 `[0.2.0]`; was `bincode` **1.3.3** (fixint LE framing; tagged enums via hand-written dual-codec impls) as originally locked here — see the codec-decision box below |
 | Async | `tokio` | 1.x (`net, io-util, rt-multi-thread, macros, sync, time`) |
 | Lock/creds | `rustix` (flock, `getsockopt`/peer creds) | current |
 | Detach fallback | `daemonize` (dev/non-launchd only, feature-flagged) | 0.5 |
@@ -123,21 +139,25 @@ sessions (tmux/retach model).
 | Term addons | `@xterm/addon-fit` / `-webgl` / `-search` / `-web-links` / `-serialize` | 0.11 / 0.19 / 0.15 / 0.11 / 0.13 |
 | Type parity | `ts-rs` (Rust→TS type gen for `crates/protocol`) | current |
 
-**Codec decision (amended 2026-07-04, A2):** `bincode` **1.3.3**. As built, bincode 1.3
-CANNOT deserialize serde internally/adjacently-tagged enums. `SessionLifecycle` and
-`TerminalEvent` therefore ship hand-written `Serialize`/`Deserialize` impls that branch on
-`is_human_readable()`: JSON (and ts-rs) see the tagged shape; bincode tunnels a JSON string
-inside the binary frame (dual codec). See `crates/protocol/src/lib.rs` (dual-codec note) and
-`crates/protocol/tests/roundtrip.rs` (every variant round-trips both ways).
+**Codec decision (superseded 2026-07-07, Pv2 `[0.2.0]` — was amended 2026-07-04, A2, for the
+original bincode 1.3.3 dual-codec bridge described below).** Hop-B codec is **CBOR** (`ciborium`);
+tagged enums are plain `#[derive(Serialize, Deserialize)]`. The v1 dual-codec bridge — bincode
+1.3.3 could not deserialize serde internally/adjacently-tagged enums, so `SessionLifecycle` and
+`TerminalEvent` shipped hand-written `Serialize`/`Deserialize` impls branching on
+`is_human_readable()` (JSON/ts-rs saw the tagged shape; bincode tunneled a JSON string inside the
+binary frame) — was retired in Pv2. See `docs/superpowers/specs/2026-07-06-protocol-v2-design.md`
+§3 for the migration design and `crates/protocol/src/lib.rs` for the current plain derives.
 
-> **Locked contract:** DO NOT re-derive Serialize/Deserialize on SessionLifecycle or
-> TerminalEvent, and DO NOT add new serde-tagged enums to the Hop-B protocol, until
-> protocol v2 replaces the codec.
+The append-only wire-discipline rule (enum variant order frozen; new requests/pushes appended;
+fields added additively; every protocol change ships a cross-version decode test) REMAINS in
+force — see the Pv2.1 reserved-batch amendment (2026-07-06-protocol-v2-design.md, "Vision v2–v4
+amendments") for how future request variants are named and order-reserved without another wire
+break. Only the now-false "never re-derive Serialize/Deserialize" box (below, historical) is
+retired: CBOR's self-describing encoding removed the reason for the ban.
 
-Trajectory (owner decision D3): protocol v2 (Cycle 2) migrates to a tagged-enum-safe codec
-(postcard or bincode 2 serde-compat — decided in the Cycle 2 spec) bundled with version
-negotiation; the bridge and this contract box then retire. Both crates depend on the exact
-same bincode version.
+> *(Historical, pre-Pv2 contract — no longer in force:* DO NOT re-derive Serialize/Deserialize on
+> SessionLifecycle or TerminalEvent, and DO NOT add new serde-tagged enums to the Hop-B protocol,
+> until protocol v2 replaces the codec. *Protocol v2 shipped in `[0.2.0]`; this box is retired.)*
 
 Renderer chain is **WebGL → DOM** (guaranteed); do not depend on a canvas addon.
 
@@ -183,7 +203,7 @@ builder-pro-ai/
 │        ├─ osc_parser.rs            # OSC-133/OSC-7 streaming tokenizer + lifecycle state machine
 │        ├─ shell_integration/       # zsh + bash injection assets + installer
 │        ├─ persistence.rs           # rusqlite (WAL), schema, migrations, degradation, rehydrate
-│        ├─ attach.rs                # per-session single-attach registry + replay
+│        ├─ attach.rs                # multi-subscriber attach registry + replay (Pv2 §5)
 │        └─ singleton.rs             # flock single-instance + socket path resolution + perms
 ├─ docs/superpowers/{specs,plans}/
 └─ .gitignore  README.md
@@ -210,8 +230,10 @@ pub type WorkspaceId = String; // UUID v4
 pub struct Workspace { pub id: WorkspaceId, pub name: String, pub root_path: String }
 
 // Internally tagged (tag only, no content) — works for unit + struct variants, matches TS below.
-// AS BUILT (A2): this derive shows the LOGICAL shape ts-rs exports. The real impls are
-// hand-written (dual codec, §3) — do not re-derive.
+// CURRENT (Pv2, [0.2.0]): this IS the real derive now — CBOR is self-describing, so the plain
+// #[derive] below is exactly what ships in crates/protocol/src/lib.rs. (Historical: pre-Pv2, this
+// derive was only the LOGICAL shape ts-rs exported; the real impls were hand-written, dual-codec,
+// §3 — that bridge is retired.)
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionLifecycle {
@@ -331,8 +353,21 @@ duplicate of the terminal `Exited` transition; both are emitted.
 
 ## 7. Hop B — core ⇄ daemon (Unix domain socket)
 
-**Framing (byte-for-byte):** every message = `u32` little-endian length prefix + `bincode(Frame)`.
-No separate raw preamble. `bincode` = 1.3.3 defaults (fixint, little-endian), identical both sides.
+> **Superseded 2026-07-07 (Pv2, `[0.2.0]`) — historical section, kept for the original S0+S1
+> contract shape.** The `Frame`/`Request`/`Response`/`Push` enum shapes below are still accurate
+> (Pv2 is additive: no variant removed except `Hello`/`Welcome`/`Incompatible` on `Request`/
+> `Response`, which moved OUT of the frame entirely into the preamble). What changed: the codec is
+> now CBOR (`ciborium`), not `bincode`; the handshake is now a **codec-agnostic preamble**
+> exchanged BEFORE any `Frame` is sent (not a `Hello`/`Welcome` `Frame` pair); `MAGIC`/
+> `PROTO_VERSION` constants were replaced by `PREAMBLE_MAGIC`/`CLIENT_MIN_VERSION`/
+> `CLIENT_MAX_VERSION`/`DAEMON_MIN_VERSION`/`DAEMON_MAX_VERSION`; attach is multi-subscriber, not
+> single-attach-supersede (see the amendment further down this section); `DaemonShutdown{drain}`
+> now has real semantics. Full current contract:
+> `docs/superpowers/specs/2026-07-06-protocol-v2-design.md` §3-§6.
+
+**Framing (byte-for-byte, AS ORIGINALLY BUILT — see the superseded-box above for what's current):**
+every message = `u32` little-endian length prefix + `bincode(Frame)`. No separate raw preamble.
+`bincode` = 1.3.3 defaults (fixint, little-endian), identical both sides.
 
 ```rust
 pub const MAGIC: u32 = 0x4250_4131;     // "BPA1"
@@ -346,11 +381,13 @@ pub enum Frame {
 }
 ```
 
-**Handshake:** the client's **first** Frame MUST be `Request{ id: 0, req: Hello{ magic: MAGIC,
+**Handshake (AS ORIGINALLY BUILT — superseded by the Pv2 preamble, see the box above):** the
+client's **first** Frame MUST be `Request{ id: 0, req: Hello{ magic: MAGIC,
 proto_version: PROTO_VERSION, client_build } }`. The daemon validates `magic` + `proto_version` and
 replies `Response{ id: 0, res: Welcome{ proto_version, daemon_build } }` **or**
 `Response{ id: 0, res: Incompatible{ min, max } }` and closes. On any mismatch: **refuse**, never
-misparse.
+misparse. *(Current: this whole exchange happens BEFORE any `Frame` — a raw codec-agnostic
+preamble — not as a `Hello`/`Welcome` `Frame` pair; see Pv2 §4.)*
 
 ```rust
 #[derive(Serialize, Deserialize)]
@@ -411,12 +448,23 @@ Error` rejects that Promise. `Push` frames are fanned out to Channels / global e
 | `Push::SessionCreated` / `WorkspaceCreated` | `session://created` / `workspace://created` |
 | `Push::Error{ session_id }` | log + (if `session_id`) mark that session errored in UI |
 
-**Attach model (single-attach, GUI is one client):** the daemon tracks **one active channel per
-session**. `AttachSession` (re)registers the GUI as the consumer and triggers a fresh `Replay`
-followed by live `Output`. A second `AttachSession` for the same session **supersedes** the prior
-registration (idempotent for one GUI; a hypothetical second client would take over). `DetachSession`
-stops `Output` for that session (but the PTY keeps running and the ring keeps filling — see §12
-keep-alive). Backpressure watermark is per-PTY (§12).
+**Attach model (superseded 2026-07-07, Pv2 §5 — was single-attach as originally built):** the
+daemon supports **N independent subscribers per session**, keyed `(session_id, conn_id)`
+(`crates/sessiond/src/attach.rs`, `AttachRegistry`). `AttachSession` registers a NEW subscriber
+entry and triggers a fresh `Replay` (that subscriber's own snapshot) followed by live `Output`
+fanned out to it. A second `AttachSession` for the same session from a different connection **no
+longer supersedes** the first — both stream independently, each with its own bounded outbound
+queue and backpressure. The GUI remains a single subscriber today (no co-view UI consumer until
+S6); the wire/daemon capacity is what changed. `DetachSession` stops `Output` for that one
+subscriber only (the PTY keeps running, the ring keeps filling, and any other subscriber's stream
+is unaffected — see §12 keep-alive). Backpressure watermark is per-PTY per-subscriber (§12).
+
+**Attach on an inactive session (added Pv2/Task 12r — cold-rehydrate):** at boot the daemon
+cold-rehydrates every persisted session as an inactive, PTY-less, replay-only `Supervisor` entry
+(`crates/sessiond/src/boot.rs`, `cold_rehydrate_sessions`). `AttachSession` on such a session — or
+on any session whose PTY has already exited — now **succeeds**: it replays scrollback (no live
+subscription, since there is no PTY to stream from) rather than erroring. Only a truly unknown
+session id (never created, or fully reaped with no persisted row) returns `NoSuchSession`.
 
 **Reattach flow:** `attach_session(id, channel)` → core `AttachSession` → daemon `Response::Ack`,
 then `Push::Replay` (sanitized ring at current cols/rows), then streamed `Push::Output`. Flow control:
@@ -651,9 +699,16 @@ CREATE TABLE scrollback (
   constant `SCROLLBACK_CAP`, `crates/sessiond/src/pty_supervisor.rs`). Snapshot-replace semantics:
   each sweep REPLACES the stored blob at `seq 0` (no append log). Dirty-check + write-architecture
   review: BL-8 (`docs/backlog.md`).
-- **Rehydrate on restart:** rebuild rings from `scrollback`; every rehydrated session is
-  `is_active = false` and `waiting_for_input = false` (its PTY is gone); `lifecycle` = stored value
-  (typically `Exited`). Round-trips each `SessionLifecycle` variant losslessly (test in §14).
+- **Rehydrate on restart (NOW IMPLEMENTED, Pv2/Task 12r — was planned-but-unbuilt as originally
+  written):** at boot the daemon cold-rehydrates **every** persisted session from `scrollback`,
+  registering each as an inactive, PTY-less, replay-only `Supervisor` entry
+  (`crates/sessiond/src/boot.rs::cold_rehydrate_sessions`) — not merely on first attach. Every
+  rehydrated session is `is_active = false` and `waiting_for_input = false` (its PTY is gone);
+  `lifecycle` = stored value (typically `Exited`). Round-trips each `SessionLifecycle` variant
+  losslessly (test in §14). `AttachSession` on a rehydrated (or otherwise exited) session
+  **succeeds** and replays scrollback — no live subscription is created, and no error is returned;
+  only an unknown session id errors `NoSuchSession`. Proven end-to-end by the e2e phase 5
+  daemon-restart test (closes BL-7, `docs/backlog.md`).
 - **Degradation (honest):** the in-memory ring is the Layer-1 source of truth. If the DB is
   unavailable (locked past `busy_timeout`, disk-full, read-only), the daemon **logs and keeps serving
   live sessions** — persistence is best-effort. On corruption/malformed-image at open, **quarantine**
@@ -780,8 +835,9 @@ surface — tracked as BL-6.
 - Persistence: WAL persist + rehydrate; each `SessionLifecycle` variant round-trips; **corrupt-db
   quarantine + recreate**; `busy_timeout` under concurrent access; migration on old `user_version`;
   kill -9 mid-write → restart opens + rehydrates committed rows.
-- Protocol: table-driven `bincode` round-trip for **every** `Request`/`Response`/`Push` variant;
-  framing (u32-LE length, partial frame across reads, oversized/garbage-frame rejection, magic +
+- Protocol: table-driven codec round-trip (originally `bincode`, now CBOR/`ciborium` post-Pv2 —
+  same table-driven shape, `crates/protocol/tests/roundtrip.rs`) for **every**
+  `Request`/`Response`/`Push` variant; framing (u32-LE length, partial frame across reads, oversized/garbage-frame rejection, magic +
   version mismatch → refuse); request/response **correlation** (concurrent in-flight ids resolve
   correctly).
 - Socket: `flock` single-instance (second daemon exits); **peer-cred** rejection (wrong uid refused);
@@ -850,7 +906,7 @@ assert daemon + shell survive (`pgrep`) → relaunch → reattach + scrollback i
 |---|---|
 | 15.1 exact pins | Verified & recorded: bincode 1.3.3, portable-pty 0.9.0, rusqlite 0.32, alacritty_terminal =0.25.0 (exact pin), xterm 6.0.0, Zustand 5, React 19 (`Cargo.toml` / `package.json`). |
 | 15.2 alacritty live-grid API | Verified at 0.25.0 — cursor column, alt-screen/mode flags, resize all used in `crates/sessiond/src/live_grid.rs`. |
-| 15.3 binary Channel payload | **Resolved: NOT binary.** `Channel<TerminalEvent>` serializes via serde (JSON path of the dual codec); `Vec<u8>` crosses Hop-A as `number[]`. Acceptable at S1 throughput; revisit with protocol v2 if profiling demands. |
+| 15.3 binary Channel payload | **Resolved: NOT binary.** `Channel<TerminalEvent>` serializes via serde; `Vec<u8>` crosses Hop-A as `number[]`. Acceptable at S1 throughput; Pv2 shipped without revisiting this (Hop-A/Channel is unchanged by Pv2 — only Hop-B's wire codec changed) — still a possible future optimization if profiling demands. |
 | 15.4 ts-rs emission | Verified — `crates/protocol/tests/ts_export.rs` regenerates and asserts `src/ipc/types.ts`; parity is a final-suite + CI gate. |
 | 15.5 bincode covers all variants | **DIVERGED** — bincode 1.3 cannot DEserialize tagged enums; resolved by the hand-written dual-codec impls (§3 amendment, A2). |
 | §3 `daemonize` dev fallback row | **NOT BUILT** — no `daemonize` dependency exists. Dev mode uses the SAME launchd path as production (the plist just points at `target/debug/bpa-sessiond`); only the e2e harness spawns the daemon directly. Row kept in §3 for history; treat as dropped (A30). |

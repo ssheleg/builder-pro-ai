@@ -31,6 +31,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(test)]
+use bpa_protocol::preamble::encode_daemon_reply;
 use bpa_protocol::preamble::{
     decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply, PREAMBLE_TIMEOUT,
 };
@@ -38,8 +40,6 @@ use bpa_protocol::{
     encode_frame, Frame, FrameDecoder, Push, Request, Response, CLIENT_MAX_VERSION,
     CLIENT_MIN_VERSION,
 };
-#[cfg(test)]
-use bpa_protocol::preamble::encode_daemon_reply;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -502,9 +502,7 @@ async fn connect_and_handshake(
             tracing::info!(chosen, daemon_build = %build, "daemon handshake accepted");
             Ok((stream, reader))
         }
-        DaemonReply::Incompatible { min, max } => {
-            Err(HandshakeError::Incompatible { min, max })
-        }
+        DaemonReply::Incompatible { min, max } => Err(HandshakeError::Incompatible { min, max }),
     }
 }
 

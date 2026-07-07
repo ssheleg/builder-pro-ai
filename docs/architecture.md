@@ -19,7 +19,7 @@ by the app.
 │  • Zustand (metadata only)         • app settings (tauri-plugin-store)│
 └───────────────────────────────────│────────────────────────────────┘
                                      │ Hop B: Unix domain socket
-                                     │ (u32-LE length prefix + bincode Frame)
+                                     │ (codec-agnostic preamble, then u32-LE length prefix + CBOR Frame)
                           ┌──────────▼────────────┐
                           │  bpa-sessiond (daemon) │ ◄─ launchd LaunchAgent
                           │  • PTY supervisor      │    (KeepAlive{Crashed:true})
@@ -51,25 +51,28 @@ kinds of push data from the core:
 ### Hop B — core ⇄ daemon (Unix domain socket)
 
 `src-tauri/src/socket_client.rs` (Hop-B client) and `crates/sessiond/src/socket_server.rs` (Hop-B
-server) speak the same wire protocol: a `u32`-LE length prefix followed by a `bincode` 1.3.3
-(fixint, deterministic little-endian)-encoded `Frame` (`Request { id, req }` /
-`Response { id, res }` / `Push(..)`), defined once in `crates/protocol` and shared by both binaries
-— the shared crate prevents *type* drift. The codec itself carries one non-obvious mechanism:
-bincode 1.3 cannot deserialize serde-tagged enums, so `SessionLifecycle` and `TerminalEvent` use
-hand-written dual-codec impls (JSON shape for ts-rs/Channel, a JSON string tunneled inside the
-bincode frame on the wire — see the spec §3 amendment).
-
-> **Locked contract:** DO NOT re-derive Serialize/Deserialize on SessionLifecycle or
-> TerminalEvent, and DO NOT add new serde-tagged enums to the Hop-B protocol, until
-> protocol v2 replaces the codec.
+server) speak the same wire protocol. Every connection opens with a **codec-agnostic preamble**
+(fixed-format raw LE bytes, magic `BPAA`, client `[min,max]` version range → daemon
+`Accepted{chosen}`/`Incompatible{min,max}`, bounded read timeout, 256-byte build-string cap) —
+version negotiation happens before either side commits to a codec, so a future codec change can
+never be misparsed as a frame. Once negotiated (`chosen == 2` today), both sides switch to `u32`-LE
+length-prefixed **CBOR** (`ciborium`)-encoded `Frame` (`Request { id, req }` / `Response { id, res
+}` / `Push(..)`), defined once in `crates/protocol` and shared by both binaries — the shared crate
+prevents *type* drift. CBOR is self-describing, so `SessionLifecycle` and `TerminalEvent` are plain
+`#[derive(Serialize, Deserialize)]` tagged enums — the v1 dual-codec bridge (bincode 1.3 cannot
+deserialize serde-tagged enums; the old workaround hand-wrote impls that tunneled a JSON string
+inside the bincode frame) was retired in Pv2 (`[0.2.0]`). The append-only wire-discipline rule
+(enum variant order frozen, fields added additively, every change ships a cross-version decode
+test) remains — see the Pv2.1 reserved-batch amendment in
+`docs/superpowers/specs/2026-07-06-protocol-v2-design.md`.
 
 Every request/response is correlated by a client-chosen `id`; pushes (state changes, output,
-replay) are unsolicited and fan out to whichever client currently has that session attached.
+replay) are unsolicited and fan out to every client attached to that session (Pv2 multi-subscriber
+attach, §5 below).
 
-The daemon accepts a connection, requires a `Hello`/`Welcome` handshake (magic + protocol version;
-mismatches are refused, never misparsed), verifies the peer's effective uid via `getpeereid`
-(`crates/sessiond/src/singleton.rs`), and gives each connection a bounded outbound queue — a slow
-or dead client is dropped without stalling the daemon or any other session (spec §13).
+The daemon verifies the peer's effective uid via `getpeereid` (`crates/sessiond/src/singleton.rs`)
+during the preamble exchange, and gives each connection a bounded outbound queue — a slow or dead
+client is dropped without stalling the daemon or any other session (spec §13).
 
 ## Module ownership map (spec §4)
 
@@ -105,7 +108,7 @@ crates/sessiond/src/              # the daemon binary
 ├─ osc_parser.rs                  # OSC-133/OSC-7 streaming tokenizer + lifecycle state machine
 ├─ shell_integration/             # zsh + bash injection assets + installer
 ├─ persistence.rs                 # rusqlite (WAL), schema, migrations, degradation, rehydrate
-├─ attach.rs                      # per-session single-attach registry + replay + live OSC strip
+├─ attach.rs                      # multi-subscriber attach registry + replay + live OSC strip
 ├─ singleton.rs                   # flock single-instance + socket path resolution + perms
 └─ logging.rs                     # test-only structured-log-to-file seam (Task 25)
 ```

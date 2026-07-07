@@ -114,21 +114,38 @@ with the daemon; only records + scrollback survive.)
 
 ---
 
-## Protocol evolution & upgrade policy (added 2026-07-04 — A3/A14; owner decisions D3/D4)
+## Protocol evolution & upgrade policy (added 2026-07-04 — A3/A14; owner decisions D3/D4;
+amended 2026-07-07 — Pv2 shipped, `[0.2.0]`)
 
 The Hop-B wire (core ⇄ daemon) outlives app updates by design, so its evolution is policy, not
 improvisation:
 
 - **Wire discipline:** enum variant order is FROZEN (append-only); new requests/pushes are
   appended; fields are added additively. Every protocol change ships a cross-version decode test.
-- **Version negotiation (protocol v2, Cycle 2):** the client sends its supported range; the daemon
-  answers in-range or `Incompatible{min,max}`, and the GUI shows a remediation dialog (below) —
-  never a silent misparse. Today PROTO_VERSION=1 is exact-match; negotiation lands with v2.
-- **Daemon upgrade choreography (owner decision D4):** when a new app version carries a new
-  daemon, the GUI shows a consent dialog — *"Update background service — N live sessions will
-  end; records + scrollback survive"* — then drains via SIGTERM and replaces the daemon with
-  `launchctl kickstart -k`. `DaemonShutdown{drain}` is currently a no-op Ack and is **reserved**
-  until protocol v2 defines real drain semantics.
+  Still true post-Pv2 — see the Pv2.1 reserved-batch amendment in
+  `docs/superpowers/specs/2026-07-06-protocol-v2-design.md` ("Vision v2–v4 amendments"): future
+  request variants (command+argv spawn, typed exit-status wait, `ReadOutput{since_seq}`, a
+  rendered-text snapshot) are named and order-reserved now, implemented later, without another
+  wire break.
+- **Version negotiation (SHIPPED, Pv2 §4):** a codec-agnostic preamble (magic `BPAA`, 5 s bound,
+  256-byte build-string cap) carries the client's supported `[min,max]` range; the daemon answers
+  `Accepted{chosen}` (highest common version) or `Incompatible{min,max}` — never a silent misparse.
+  Today `[2,2]` is exact-match (clean break from v1); the negotiation machinery is built for
+  `[min,max]`-style ranges in future cycles. *(Historical: this row previously described
+  PROTO_VERSION=1 exact-match with negotiation "landing with v2" — that is now the current state,
+  not a future one.)*
+- **Daemon upgrade choreography (owner decision D4; SHIPPED, Pv2 §6):** when the core detects an
+  incompatible daemon (typed, fatal `IncompatibleDaemon`, never auto-retried), the GUI shows a
+  consent dialog — *"Обновить фоновый сервис — N живых сессий завершатся. Их записи и scrollback
+  сохранены и появятся снова как неактивные"* (N = last known live-session count) — the user
+  confirms or cancels. On confirm: best-effort `DaemonShutdown{drain:true}` (flushes scrollback +
+  `command_events`, real semantics now — no longer a no-op) → `launchctl kickstart -k` → **the core
+  process itself calls `app.restart()`** (a full app relaunch, not an in-place socket reconnect —
+  simpler and avoids reasoning about mid-flight state across a version jump); on relaunch the core
+  reconnects, negotiates v2, and rehydrated-inactive sessions appear. Kickstart failure surfaces an
+  honest banner, never a fake "connected" state. *(Historical: this row previously said SIGTERM +
+  `DaemonShutdown` no-op-Ack + in-place reconnect — the app.restart() step and the real drain were
+  added during Pv2 implementation, not part of the original plan.)*
 - **Release channel:** manual notarized DMG for v0.x; Tauri auto-updater is a named roadmap item
   (BL-19, `docs/backlog.md`).
 - **Workspace evolution (A14):** multi-root workspaces arrive as an additive
@@ -144,7 +161,7 @@ Build spine-first. Each row is an independent spec/plan/build unit.
 |---|---|---|---|
 | **S0** | App shell + foundation (window, theme, settings) | — | Skeleton everything plugs into. *(Amended: durable storage is DAEMON-owned SQLite, built in S1 — see Data-layer charter.)* **DONE.** |
 | **S1** | **Terminal engine** — real PTYs, multi-terminal, lifecycle states, survive-restart, reattach | S0 | Highest technical risk; heart of the product. **DONE** (merged @ 285cb2e). |
-| **Pv2** | **Protocol v2** — codec migration (tagged-enum-safe), version-range negotiation, wire-level **multi-subscriber attach** (D5), real `DaemonShutdown{drain}`, `bpa.db` schema-migration policy + `command_events` | S1 | One planned wire break before the protocol grows. DoD: old GUI vs new daemon shows the remediation dialog (never misparses); two subscribers stream one session; cross-version decode tests green. Metric: zero silent protocol failures. |
+| **Pv2** | **Protocol v2** — codec migration (tagged-enum-safe), version-range negotiation, wire-level **multi-subscriber attach** (D5), real `DaemonShutdown{drain}`, `bpa.db` schema-migration policy + `command_events` | S1 | One planned wire break before the protocol grows. DoD: old GUI vs new daemon shows the remediation dialog (never misparses); two subscribers stream one session; cross-version decode tests green. Metric: zero silent protocol failures. **SHIPPED/DONE this branch (`[0.2.0]`).** Two execution deltas vs. the DoD as originally scoped: (1) the upgrade choreography is consent dialog → best-effort drain → `launchctl kickstart -k` → `app.restart()` (a full app relaunch, not an in-place socket reconnect — simpler and more honest about the codec/version jump); (2) cold-rehydrate + attach-inactive shipped as part of this cycle (Task 12r) rather than later — the daemon-restart e2e (closes BL-7) forced the honest "scrollback появится снова как неактивная сессия" path to actually exist, not just be documented. |
 | **S2** | Workspace + file explorer (multi-root repos, open/create files & folders, live file-watch) | S0 | React to files agents create; additive `workspace_roots`. DoD: create/open a multi-repo workspace ≤3 clicks; file tree reflects an external `touch` <1 s; explorer stays responsive at 10k files. Metric: time-to-first-terminal in a fresh workspace. |
 | **S3** | **Projects + Goal hierarchy + Ideas + Tasks/Subtasks + RuleSet** data model | S0, ADR-HOST (orchd store) | The app-domain foundation. Adds: Goal hierarchy (1 strategic + N additional, owner-editable); Idea (nullable project_id — «spawn project from idea»); Insight; unified Task/Subtask (kanban is a VIEW); RuleSet (global + per-project). DoD: goals + ideas + tasks CRUD survive restart; Project⇄Workspace enforced; export/import round-trips. Metric: ideas reaching «specced». Open decision — default: RuleSet has BOTH a markdown layer (agent-read, Claude-Code-style global + per-project) AND a typed policy layer (gate-enforced: spend caps, approval classes, path allowlists) (Q13). |
 | **S4** | Knowledge graph (per-project + cross-project links, viz) | S3 | `@xyflow/react`; storage + UUID node identity + **agent retrieval API** are S4-spec decisions. **Hard-blocks S6 (owner decision D6).** DoD: cross-project link survives both projects' restarts; retrieval API returns a goal's subgraph <100 ms; graph editable in UI. Metric: graph nodes retrieved per CEO decision. |
@@ -185,8 +202,9 @@ S0 ─┬─ S1 ─ Pv2 ──────────────────�
                      S6c + S7 + SW1 run state + S-IDEA + S9a/S9b)
 ```
 
-**Current slice:** S0+S1 **DONE**; docs-truth/CI pass **DONE**; vision-alignment pass (this
-cycle). Next: Pv2 implementation → S2 → S3 → S4 ∥ S-EXT ∥ S5 → S-IDEA → S6a → SW1 → …
+**Current slice:** S0+S1 **DONE**; docs-truth/CI pass **DONE**; vision-alignment pass **DONE**;
+**Pv2 (Protocol v2) DONE (`[0.2.0]`, this branch).** Next: S2 → S3 → S4 ∥ S-EXT ∥ S5 → S-IDEA →
+S6a → SW1 → …
 Spec: `2026-07-01-builderpro-s0s1-foundation-terminal-design.md`.
 
 ---
@@ -225,10 +243,13 @@ The default orchestration definition (unchanged vision):
 
 **Contract corrections locked now (so S6 doesn't build on false assumptions):**
 
-- **Co-viewing (owner decision D5):** human and agent watching one session simultaneously is
-  served by **wire-level multi-subscriber attach** (N subscribers per session, each getting its
-  own Replay) — designed and implemented in **protocol v2**. Until then S1's single-attach
-  (connection-owned) stands.
+- **Co-viewing (owner decision D5, SHIPPED at the wire/daemon level in Pv2 `[0.2.0]`):** human and
+  agent watching one session simultaneously is served by **wire-level multi-subscriber attach** (N
+  subscribers per session, keyed `(session, conn)`, each getting its own Replay + backpressure) —
+  the daemon supports this today. No UI consumer exists yet: the GUI remains a single subscriber
+  until S6 wires a second (agent) client. *(Historical: this row previously said "designed and
+  implemented in protocol v2" as a forward-looking statement with S1 single-attach standing until
+  then — Pv2 has since shipped, so the wire/daemon capability described is now real, not planned.)*
 - **`waiting_for_input` honest scope:** it is a **canonical-mode line-input heuristic only**. It
   is structurally blind to raw-mode TUIs — which includes every named worker CLI (claude-code,
   opencode, …). Worker liveness / stuck detection is therefore a **named S6d subsystem** (worker

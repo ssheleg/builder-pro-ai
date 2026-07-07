@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use bpa_sessiond::protocol::{decode_daemon_reply, encode_client_preamble, encode_frame};
 use bpa_sessiond::protocol::{ClientPreamble, DaemonReply, FrameDecoder};
-use bpa_sessiond::protocol::{Frame, Request, Response, Push};
+use bpa_sessiond::protocol::{Frame, Push, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -209,7 +209,10 @@ async fn cold_rehydrate_then_attach_replays_persisted_marker_as_inactive() {
                 Err(_) => continue, // timeout on this poll; loop re-checks the deadline
             }
         }
-        assert!(seen_marker, "marker never appeared in live Output before the deadline");
+        assert!(
+            seen_marker,
+            "marker never appeared in live Output before the deadline"
+        );
 
         // Force a synchronous flush via DaemonShutdown{drain:true} (the same best-effort sweep the
         // periodic ticker runs) so the marker is durably in the on-disk DB before we tear down —
@@ -296,8 +299,12 @@ async fn cold_rehydrate_then_attach_replays_persisted_marker_as_inactive() {
             Err(_) => continue,
         }
     }
-    assert!(got_ack, "AttachSession must Ack for a cold-rehydrated session");
-    let content = replay_content.expect("Push::Replay must have been sent for the rehydrated session");
+    assert!(
+        got_ack,
+        "AttachSession must Ack for a cold-rehydrated session"
+    );
+    let content =
+        replay_content.expect("Push::Replay must have been sent for the rehydrated session");
     assert!(
         content.windows(16).any(|w| w == b"REHYDRATE_MARKER"),
         "Replay content must carry the persisted marker, got: {content:?}"
