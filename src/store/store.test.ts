@@ -30,6 +30,8 @@ describe("useAppStore", () => {
         daemonConnected: false,
         daemonIncompatible: false,
         upgradeDialogOpen: false,
+        upgradeError: null,
+        hydrated: false,
       },
       false,
     );
@@ -43,7 +45,33 @@ describe("useAppStore", () => {
     expect(s.daemonConnected).toBe(false);
     expect(s.daemonIncompatible).toBe(false);
     expect(s.upgradeDialogOpen).toBe(false);
+    expect(s.upgradeError).toBeNull();
+    expect(s.hydrated).toBe(false);
     expect(typeof initial.upsertSession).toBe("function");
+  });
+
+  it("setUpgradeError sets and clears the error message (finding [13])", () => {
+    expect(useAppStore.getState().upgradeError).toBeNull();
+    useAppStore.getState().setUpgradeError("Operation not permitted");
+    expect(useAppStore.getState().upgradeError).toBe("Operation not permitted");
+    useAppStore.getState().setUpgradeError(null);
+    expect(useAppStore.getState().upgradeError).toBeNull();
+  });
+
+  it("setHydrated flips the flag from the false default (finding [14])", () => {
+    expect(useAppStore.getState().hydrated).toBe(false);
+    useAppStore.getState().setHydrated(true);
+    expect(useAppStore.getState().hydrated).toBe(true);
+  });
+
+  it("setUpgradeDialogOpen(true) clears a stale upgradeError; setUpgradeDialogOpen(false) leaves it untouched (finding [13])", () => {
+    useAppStore.getState().setUpgradeError("Operation not permitted");
+    useAppStore.getState().setUpgradeDialogOpen(true);
+    expect(useAppStore.getState().upgradeError).toBeNull();
+
+    useAppStore.getState().setUpgradeError("Operation not permitted");
+    useAppStore.getState().setUpgradeDialogOpen(false);
+    expect(useAppStore.getState().upgradeError).toBe("Operation not permitted");
   });
 
   it("setDaemonIncompatible and setUpgradeDialogOpen flip their flags from the false default", () => {

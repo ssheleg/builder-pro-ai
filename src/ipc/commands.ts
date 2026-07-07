@@ -92,8 +92,32 @@ export function pickFolder(): Promise<string | null> {
  * Triggers the daemon upgrade (Pv2 §6.2, `src-tauri/src/commands.rs::upgrade_daemon`). The core
  * kickstarts a new daemon and then calls `app.restart()`, which kills this webview process —
  * so this promise NEVER resolves on the happy path. Callers MUST treat this as fire-and-forget
- * (`void upgradeDaemon()`), never `await` it, and never treat non-resolution as failure.
+ * (never `await`-block the UI on it), but MUST attach a `.catch` (finding [13]): a REJECTED
+ * promise (e.g. `CommandError::UpgradeFailed` from a TCC/MDM-denied `launchctl kickstart`) is the
+ * one honest failure this flow can surface, and dropping it silently violates spec §6.2.4.
  */
 export function upgradeDaemon(): Promise<void> {
   return invoke<void>("upgrade_daemon");
+}
+
+/**
+ * Mirrors `src-tauri/src/commands.rs::DaemonStatus` (`#[serde(tag = "kind", rename_all =
+ * "camelCase")]`) field-for-field. Pull-based truth for the daemon connection (finding [12], spec
+ * §6.2): exists because the boot-time `daemon://incompatible` emit is single-shot and can race
+ * webview `listen()` registration — if lost, nothing else ever tells the frontend the daemon is
+ * incompatible. `Incompatible`'s struct-variant fields keep their own `rename_all` (the
+ * container's does not cascade into struct-variant fields — same Task-8 lesson as `CommandError`).
+ */
+export type DaemonStatus =
+  | { kind: "connected" }
+  | { kind: "disconnected" }
+  | { kind: "incompatible"; daemonMin: number; daemonMax: number };
+
+/**
+ * CORE-ONLY (finding [12], spec §6.2): poll the daemon connection status directly instead of
+ * relying solely on the single-shot `daemon://*` events. Never rejects in practice — the core
+ * always returns `Ok` with whatever its status slot currently holds.
+ */
+export function daemonStatus(): Promise<DaemonStatus> {
+  return invoke<DaemonStatus>("daemon_status");
 }

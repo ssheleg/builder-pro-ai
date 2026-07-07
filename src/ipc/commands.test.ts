@@ -20,6 +20,7 @@ import {
   createWorkspace,
   getSessionState,
   pickFolder,
+  daemonStatus,
 } from "./commands";
 import { Channel } from "@tauri-apps/api/core";
 import type { SessionMeta, Workspace, TerminalEvent } from "./types";
@@ -122,5 +123,22 @@ describe("ipc/commands", () => {
     expect(await pickFolder()).toBe("/chosen");
     invokeMock.mockResolvedValueOnce(null);
     expect(await pickFolder()).toBeNull();
+  });
+
+  it("daemonStatus calls daemon_status with no args, resolves the connected variant", async () => {
+    invokeMock.mockResolvedValueOnce({ kind: "connected" });
+    const res = await daemonStatus();
+    expect(invokeMock).toHaveBeenCalledWith("daemon_status");
+    expect(res).toEqual({ kind: "connected" });
+  });
+
+  it("daemonStatus resolves the disconnected variant", async () => {
+    invokeMock.mockResolvedValueOnce({ kind: "disconnected" });
+    expect(await daemonStatus()).toEqual({ kind: "disconnected" });
+  });
+
+  it("daemonStatus resolves the incompatible variant with daemonMin/daemonMax", async () => {
+    invokeMock.mockResolvedValueOnce({ kind: "incompatible", daemonMin: 3, daemonMax: 4 });
+    expect(await daemonStatus()).toEqual({ kind: "incompatible", daemonMin: 3, daemonMax: 4 });
   });
 });

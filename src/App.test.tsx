@@ -42,6 +42,7 @@ const createSessionMock = vi.fn().mockResolvedValue(undefined);
 const killSessionMock = vi.fn().mockResolvedValue(undefined);
 const createWorkspaceMock = vi.fn().mockResolvedValue(undefined);
 const pickFolderMock = vi.fn().mockResolvedValue(null);
+const daemonStatusMock = vi.fn().mockResolvedValue({ kind: "disconnected" });
 vi.mock("./ipc/commands", () => ({
   listSessions: (...a: unknown[]) => listSessionsMock(...a),
   listWorkspaces: (...a: unknown[]) => listWorkspacesMock(...a),
@@ -49,6 +50,7 @@ vi.mock("./ipc/commands", () => ({
   killSession: (...a: unknown[]) => killSessionMock(...a),
   createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
   pickFolder: (...a: unknown[]) => pickFolderMock(...a),
+  daemonStatus: (...a: unknown[]) => daemonStatusMock(...a),
 }));
 
 const disposeMock = vi.fn();
@@ -111,6 +113,7 @@ beforeEach(() => {
   killSessionMock.mockClear();
   createWorkspaceMock.mockClear();
   pickFolderMock.mockClear();
+  daemonStatusMock.mockReset().mockResolvedValue({ kind: "disconnected" });
   useAppStore.setState(
     {
       sessions: {},
@@ -119,6 +122,8 @@ beforeEach(() => {
       daemonConnected: false,
       daemonIncompatible: false,
       upgradeDialogOpen: false,
+      upgradeError: null,
+      hydrated: false,
     },
     false,
   );
@@ -142,13 +147,14 @@ describe("App", () => {
     }
   });
 
-  it("hydrates on mount: listWorkspaces+listSessions succeed -> daemonConnected true", async () => {
+  it("hydrates on mount: listWorkspaces+listSessions succeed -> daemonConnected true, hydrated true", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
     expect(listWorkspacesMock).toHaveBeenCalled();
     expect(listSessionsMock).toHaveBeenCalled();
     expect(useAppStore.getState().daemonConnected).toBe(true);
+    expect(useAppStore.getState().hydrated).toBe(true);
   });
 
   it("hydrate retries on rejection then succeeds (bounded backoff)", async () => {
@@ -223,6 +229,80 @@ describe("App", () => {
     });
     expect(useAppStore.getState().daemonIncompatible).toBe(true);
     expect(useAppStore.getState().upgradeDialogOpen).toBe(true);
+  });
+
+  describe("finding [12]/[F3]: daemon_status pull fallback closes the lost-event race", () => {
+    it("hydrate failure (disconnected) + daemonStatus incompatible -> sets both flags once, opens dialog on first detection", async () => {
+      vi.useFakeTimers();
+      listWorkspacesMock.mockRejectedValue(new Error("disconnected"));
+      daemonStatusMock.mockResolvedValue({ kind: "incompatible", daemonMin: 3, daemonMax: 4 });
+
+      render(<App manager={fakeManager} />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(useAppStore.getState().daemonIncompatible).toBe(true);
+      expect(useAppStore.getState().upgradeDialogOpen).toBe(true);
+      expect(daemonStatusMock).toHaveBeenCalled();
+
+      // Close the dialog (simulate user Cancel) and let another poll cycle happen — it must NOT
+      // reopen the dialog, only the FIRST detection opens it.
+      act(() => useAppStore.getState().setUpgradeDialogOpen(false));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+      expect(useAppStore.getState().daemonIncompatible).toBe(true);
+      expect(useAppStore.getState().upgradeDialogOpen).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it("hydrate failure + daemonStatus disconnected (not incompatible) -> flags stay false, no dialog", async () => {
+      vi.useFakeTimers();
+      listWorkspacesMock.mockRejectedValue(new Error("disconnected"));
+      daemonStatusMock.mockResolvedValue({ kind: "disconnected" });
+
+      render(<App manager={fakeManager} />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(useAppStore.getState().daemonIncompatible).toBe(false);
+      expect(useAppStore.getState().upgradeDialogOpen).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it("daemonStatus rejecting (best-effort) does not crash the hydrate retry loop", async () => {
+      vi.useFakeTimers();
+      listWorkspacesMock.mockRejectedValue(new Error("disconnected"));
+      daemonStatusMock.mockRejectedValue(new Error("ipc not ready"));
+
+      render(<App manager={fakeManager} />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(useAppStore.getState().daemonIncompatible).toBe(false);
+      expect(useAppStore.getState().daemonConnected).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it("connected path unaffected: successful hydrate never calls daemonStatus", async () => {
+      await act(async () => {
+        render(<App manager={fakeManager} />);
+      });
+      expect(useAppStore.getState().daemonConnected).toBe(true);
+      expect(daemonStatusMock).not.toHaveBeenCalled();
+    });
   });
 
   it("daemon disconnect shows the banner; reconnect hides it and re-hydrates", async () => {

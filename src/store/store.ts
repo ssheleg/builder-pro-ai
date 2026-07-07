@@ -29,6 +29,24 @@ export interface AppState {
   /** Pure UI visibility for `UpgradeDialog`. `true` when the event fires; `false` on Cancel;
    * re-openable from `DaemonBanner`'s action. Independent of `daemonIncompatible` (see above). */
   upgradeDialogOpen: boolean;
+  /**
+   * Honest failure surface for the upgrade flow (finding [13], spec §6.2.4): `upgradeDaemon()`
+   * never resolves on the happy path (the daemon restart kills this webview), but a REJECTED
+   * promise (e.g. `CommandError::UpgradeFailed` from a TCC/MDM-denied `launchctl kickstart`) must
+   * not vanish silently. `null` = no error to show. Cleared whenever the dialog (re)opens fresh
+   * (`setUpgradeDialogOpen(true)`) or the user retries, so a stale error never lingers past a new
+   * attempt.
+   */
+  upgradeError: string | null;
+  /**
+   * Set `true` only after the FIRST successful hydrate (`list_sessions`/`list_workspaces` both
+   * resolving) — finding [14]: while `false`, `sessions` may simply not have been populated yet
+   * (e.g. the client slot is `None` at boot-incompatible, so hydrate can never succeed), and any
+   * "N live sessions" count derived from the store would silently understate reality. Consumers
+   * (e.g. `UpgradeDialog`) must branch on this flag before trusting a session count. Never reset
+   * back to `false` once true (a later disconnect doesn't un-hydrate the snapshot already held).
+   */
+  hydrated: boolean;
 
   /** Insert or replace a session by `meta.id`. Idempotent. */
   upsertSession: (meta: SessionMeta) => void;
@@ -48,6 +66,10 @@ export interface AppState {
   setDaemonConnected: (connected: boolean) => void;
   setDaemonIncompatible: (v: boolean) => void;
   setUpgradeDialogOpen: (v: boolean) => void;
+  /** Set the upgrade-failure message (or clear it with `null`). See `upgradeError` doc above. */
+  setUpgradeError: (v: string | null) => void;
+  /** Set `true` after the first successful hydrate. See `hydrated` doc above. */
+  setHydrated: (v: boolean) => void;
   /** Insert or replace a workspace by `ws.id`. Idempotent. */
   upsertWorkspace: (ws: Workspace) => void;
   setActiveSession: (id: SessionId | null) => void;
@@ -60,6 +82,8 @@ export const useAppStore = create<AppState>((set) => ({
   daemonConnected: false,
   daemonIncompatible: false,
   upgradeDialogOpen: false,
+  upgradeError: null,
+  hydrated: false,
 
   upsertSession: (meta) =>
     set((s) => ({ sessions: { ...s.sessions, [meta.id]: meta } })),
@@ -109,7 +133,14 @@ export const useAppStore = create<AppState>((set) => ({
 
   setDaemonConnected: (connected) => set({ daemonConnected: connected }),
   setDaemonIncompatible: (v) => set({ daemonIncompatible: v }),
-  setUpgradeDialogOpen: (v) => set({ upgradeDialogOpen: v }),
+  // Opening the dialog fresh (v=true) clears any stale upgradeError from a previous attempt
+  // (finding [13]): every reopen path (daemon://incompatible, DaemonBanner's "Обновить" action)
+  // goes through this setter, so this is the single place that guarantees a fresh open never
+  // shows a leftover error from an earlier session/attempt. Closing (v=false) leaves the error
+  // untouched — Cancel doesn't need to erase it, only a fresh open does.
+  setUpgradeDialogOpen: (v) => set(v ? { upgradeDialogOpen: v, upgradeError: null } : { upgradeDialogOpen: v }),
+  setUpgradeError: (v) => set({ upgradeError: v }),
+  setHydrated: (v) => set({ hydrated: v }),
 
   upsertWorkspace: (ws) =>
     set((s) => ({ workspaces: { ...s.workspaces, [ws.id]: ws } })),

@@ -10,17 +10,41 @@ import { theme } from "../theme";
  * dialog (`upgradeDialogOpen=false`) but never touches `daemonIncompatible` — the daemon really
  * is incompatible until the app restarts, and the banner must keep saying so.
  *
- * `upgradeDaemon()` is called fire-and-forget: the daemon kickstart ends in `app.restart()`,
- * which kills this webview process, so the returned promise never resolves on the happy path.
+ * `upgradeDaemon()` is invoked fire-and-forget with respect to the SUCCESS path: the daemon
+ * kickstart ends in `app.restart()`, which kills this webview process, so the returned promise
+ * never resolves when it works — this component must never `await`-block on it. But a REJECTION
+ * (finding [13]: e.g. `CommandError::UpgradeFailed` from a TCC/MDM-denied `launchctl kickstart`)
+ * is the one honest failure this flow can surface (spec §6.2.4) — it is caught via `.catch` and
+ * stored in `upgradeError` so the dialog can render it, stay open, and let the user retry.
  */
 export function UpgradeDialog(): JSX.Element | null {
   const daemonIncompatible = useAppStore((s) => s.daemonIncompatible);
   const upgradeDialogOpen = useAppStore((s) => s.upgradeDialogOpen);
   const sessions = useAppStore((s) => s.sessions);
+  const hydrated = useAppStore((s) => s.hydrated);
+  const upgradeError = useAppStore((s) => s.upgradeError);
   const setUpgradeDialogOpen = useAppStore((s) => s.setUpgradeDialogOpen);
+  const setUpgradeError = useAppStore((s) => s.setUpgradeError);
 
   const open = daemonIncompatible && upgradeDialogOpen;
   const primaryRef = useRef<HTMLButtonElement>(null);
+
+  /**
+   * Retry-safe click handler (finding [13]): attach `.catch` — never `await` — so a rejection
+   * surfaces as `upgradeError` instead of vanishing, while a successful kickstart's
+   * never-resolving promise never blocks anything here. Clears any previous error up front so a
+   * retry doesn't briefly show a stale message before the new attempt settles.
+   */
+  const handleUpgradeClick = (): void => {
+    setUpgradeError(null);
+    upgradeDaemon().catch((err: unknown) => {
+      const reason =
+        err && typeof err === "object" && "reason" in err && typeof err.reason === "string"
+          ? err.reason
+          : String(err);
+      setUpgradeError(reason);
+    });
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -35,8 +59,15 @@ export function UpgradeDialog(): JSX.Element | null {
 
   if (!open) return null;
 
+  // Finding [14]: `sessions` can only be populated by a successful hydrate. In the DOMINANT
+  // boot-incompatible scenario the client slot is `None`, so hydrate can never succeed and
+  // `sessions` stays `{}` forever — reporting "0 живых сессий" there would materially understate
+  // the destruction (the OLD daemon may hold N live shells this store has never seen). Only claim
+  // a count once `hydrated` proves the store reflects a real snapshot.
   const n = Object.values(sessions).filter((s) => s.isActive).length;
-  const copy = `Обновить фоновый сервис — ${n} живых сессий завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.`;
+  const copy = hydrated
+    ? `Обновить фоновый сервис — ${n} живых сессий завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.`
+    : "Обновить фоновый сервис — все его живые сессии завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.";
 
   return (
     <div
@@ -78,6 +109,23 @@ export function UpgradeDialog(): JSX.Element | null {
           Требуется обновление
         </div>
         <div style={{ fontSize: 13, lineHeight: 1.5, color: theme.colors.text }}>{copy}</div>
+        {upgradeError !== null && (
+          // Error state (finding [13], spec §6.2.4 "honest failure"): red statusExited accent —
+          // never amber (amber is reserved for "a human is needed", not for a failure that
+          // already happened). Reason + an actionable hint so the user knows what to check.
+          <div
+            role="alert"
+            style={{
+              fontSize: 13,
+              lineHeight: 1.5,
+              color: theme.colors.statusExited,
+              borderLeft: `3px solid ${theme.colors.statusExited}`,
+              paddingLeft: 8,
+            }}
+          >
+            {`Не удалось перезапустить фоновый сервис: ${upgradeError}. Проверьте разрешения (launchctl) и повторите.`}
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button
             type="button"
@@ -97,7 +145,7 @@ export function UpgradeDialog(): JSX.Element | null {
           <button
             ref={primaryRef}
             type="button"
-            onClick={() => void upgradeDaemon()}
+            onClick={handleUpgradeClick}
             style={{
               padding: "6px 12px",
               borderRadius: 6,

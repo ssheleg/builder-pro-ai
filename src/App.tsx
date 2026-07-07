@@ -9,7 +9,7 @@ import {
   onDaemonReconnected,
   onDaemonIncompatible,
 } from "./ipc/events";
-import { listSessions, listWorkspaces } from "./ipc/commands";
+import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
 import { TerminalManager } from "./terminal/terminal-manager";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
@@ -102,6 +102,17 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
      * `list_workspaces`/`list_sessions` reject while the core hasn't finished connecting to
      * the daemon yet (no event marks that first success). Retry with a bounded backoff until
      * it succeeds; each attempt sets `daemonConnected` honestly (spec §13: never fake it).
+     *
+     * Finding [14]: only a SUCCESSFUL hydrate proves `sessions` reflects reality — `setHydrated`
+     * flips to `true` here and nowhere else, so `UpgradeDialog` can tell "count known" from
+     * "count never populated" (e.g. boot-incompatible, where the client slot is `None` and this
+     * branch can never run).
+     *
+     * Finding [12]/F3: on a rejection, ALSO pull `daemon_status()` as a best-effort fallback for
+     * the single-shot `daemon://incompatible` event, which can race webview `listen()`
+     * registration and be lost forever. If the pull reveals `kind:"incompatible"`, set both store
+     * flags — but only open the dialog on the FIRST detection (don't re-open it every retry tick
+     * if the user already dismissed it) — mirroring exactly what `onDaemonIncompatible` does.
      */
     async function hydrate(attempt: number): Promise<void> {
       if (disposed) return;
@@ -115,6 +126,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           s.setActiveSession(ss[0].id);
         }
         s.setDaemonConnected(true);
+        s.setHydrated(true);
         // Default the active workspace so "+ New terminal" isn't stuck disabled after a
         // fresh launch that restores existing workspaces (no sidebar click has happened
         // yet). Prefer the active session's workspace; else the first hydrated workspace.
@@ -128,6 +140,29 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       } catch {
         if (disposed) return;
         useAppStore.getState().setDaemonConnected(false);
+
+        // Best-effort pull fallback (finding [12]/F3): never let a failure here break the
+        // existing retry cadence — swallow it exactly like the event-driven path would simply
+        // not fire.
+        try {
+          const status = await daemonStatus();
+          if (disposed) return;
+          if (status.kind === "incompatible") {
+            const s = useAppStore.getState();
+            const alreadyDetected = s.daemonIncompatible;
+            s.setDaemonIncompatible(true);
+            // Open the dialog only on the FIRST detection: if it was already flagged
+            // incompatible (e.g. a prior poll tick, or the user already Cancel'd), a later poll
+            // must not spam it back open.
+            if (!alreadyDetected) {
+              s.setUpgradeDialogOpen(true);
+            }
+          }
+        } catch {
+          // best-effort only — the bounded hydrate retry loop below is the honest fallback.
+        }
+        if (disposed) return;
+
         const delay = HYDRATE_RETRY_MS[Math.min(attempt, HYDRATE_RETRY_MS.length - 1)];
         retryTimer = setTimeout(() => void hydrate(attempt + 1), delay);
       }
