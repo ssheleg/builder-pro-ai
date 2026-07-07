@@ -631,7 +631,11 @@ impl FrameReader {
 /// degradation instead: log a structured warning and fire `overflow_notify` so `handle_client`'s
 /// dispatch loop tears down THIS WHOLE connection, driving the client through its normal
 /// reconnect+replay path to a consistent state — no unbounded buffering, no half-alive connection.
-fn make_push_sink(out_tx: mpsc::Sender<Frame>, conn_id: u64, overflow_notify: Arc<Notify>) -> PushSink {
+fn make_push_sink(
+    out_tx: mpsc::Sender<Frame>,
+    conn_id: u64,
+    overflow_notify: Arc<Notify>,
+) -> PushSink {
     let (tx, mut rx) = mpsc::channel::<Push>(CLIENT_OUTQ_CAP);
     tokio::spawn(async move {
         while let Some(push) = rx.recv().await {
@@ -1838,9 +1842,9 @@ mod tests {
             let mut buf = [0u8; 65536];
             loop {
                 match a.read(&mut buf).await {
-                    Ok(0) => return true,   // EOF: the daemon closed the connection
-                    Ok(_) => continue,      // still draining backlog; keep going until EOF or error
-                    Err(_) => return true,  // reset/closed also counts as "connection gone"
+                    Ok(0) => return true,  // EOF: the daemon closed the connection
+                    Ok(_) => continue,     // still draining backlog; keep going until EOF or error
+                    Err(_) => return true, // reset/closed also counts as "connection gone"
                 }
             }
         })
@@ -1933,9 +1937,9 @@ mod tests {
                     id: 3,
                     res: Response::Ack,
                 } => b_ack = true,
-                Frame::Push(Push::Replay { session_id: sid, .. }) if sid == quiet_id => {
-                    b_replay = true
-                }
+                Frame::Push(Push::Replay {
+                    session_id: sid, ..
+                }) if sid == quiet_id => b_replay = true,
                 Frame::Push(_) => continue,
                 other => panic!("unexpected before attach settle {other:?}"),
             }
@@ -2555,7 +2559,8 @@ mod tests {
         // Wait for the OSC-133 C mark to drive the in-memory lifecycle to Running.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if deps.supervisor.meta(&id).unwrap().lifecycle == bpa_protocol::SessionLifecycle::Running
+            if deps.supervisor.meta(&id).unwrap().lifecycle
+                == bpa_protocol::SessionLifecycle::Running
             {
                 break;
             }

@@ -1533,9 +1533,9 @@ mod tests {
                 match sup_for_hook.meta(&id_for_hook) {
                     Ok(m) if !m.is_active => break,
                     Ok(_) => std::thread::sleep(Duration::from_millis(10)),
-                    Err(e) => panic!(
-                        "session vanished before the hook could observe its exit: {e}"
-                    ),
+                    Err(e) => {
+                        panic!("session vanished before the hook could observe its exit: {e}")
+                    }
                 }
                 assert!(
                     std::time::Instant::now() < deadline,

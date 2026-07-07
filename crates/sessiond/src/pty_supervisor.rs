@@ -1567,7 +1567,10 @@ mod tests {
             created_at: 1,
         };
         sup.rehydrate_inactive(meta, Vec::new()).expect("rehydrate");
-        assert!(sup.meta("rehydrated-remove").is_ok(), "precondition: tracked");
+        assert!(
+            sup.meta("rehydrated-remove").is_ok(),
+            "precondition: tracked"
+        );
 
         sup.remove_inactive("rehydrated-remove")
             .expect("remove_inactive must succeed for a PTY-less rehydrated entry");
