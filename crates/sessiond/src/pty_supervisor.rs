@@ -712,6 +712,30 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Remove an INACTIVE session's map entry (D3): the honest-close counterpart to [`kill`](Self::kill)
+    /// for a session with no live process to signal — either a cold-rehydrated, PTY-less entry
+    /// ([`rehydrate_inactive`](Self::rehydrate_inactive)) or one whose child already exited but was
+    /// never reaped by `kill` (the exited-but-unreaped window). Pre-D3, `KillSession` on such a
+    /// session called `kill()`, which fails with `NoSuchSession` via [`require_pty`](Self::require_pty)
+    /// WITHOUT removing the map entry — leaving it an unkillable zombie that every future
+    /// `ListSessions` kept surfacing and every restart kept resurrecting.
+    ///
+    /// Refuses (`NoSuchSession`) for an id that is genuinely untracked, and — defense in depth —
+    /// for an entry that is still LIVE: this method is never the right path for a live session
+    /// (that's [`kill`](Self::kill), which actually signals the process); a caller must not be able
+    /// to silently "remove" a live session out from under its running child instead of killing it.
+    pub fn remove_inactive(&self, id: &str) -> Result<(), SupervisorError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(s) = sessions.get(id) else {
+            return Err(SupervisorError::NoSuchSession(id.to_string()));
+        };
+        if *s.shared.is_active.lock().unwrap() {
+            return Err(SupervisorError::NoSuchSession(id.to_string()));
+        }
+        sessions.remove(id);
+        Ok(())
+    }
+
     /// Kill every live session (SIGTERM → grace → SIGKILL per group, then reap). Used on daemon
     /// shutdown (spec §9.8 / §13). Idempotent; safe to call with no live sessions. A rehydrated
     /// (replay-only) entry has nothing to kill — `kill()` returns `NoSuchSession` for it, which
@@ -1521,6 +1545,112 @@ mod tests {
             sup.meta("rehydrated-2").is_ok(),
             "a failed kill on a rehydrated entry must not remove it from the map"
         );
+    }
+
+    // ---- D3: remove_inactive is the honest-close counterpart to kill() for a PTY-less
+    // rehydrated entry — kill() fails NoSuchSession and leaves it in the map (proven above);
+    // remove_inactive must succeed and actually remove it, so a subsequent meta() reports gone. ----
+    #[test]
+    fn remove_inactive_removes_a_rehydrated_entry_from_the_map() {
+        let sup = Supervisor::new();
+        let meta = bpa_protocol::SessionMeta {
+            id: "rehydrated-remove".into(),
+            workspace_id: "ws-test".into(),
+            title: "t".into(),
+            shell: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+            lifecycle: bpa_protocol::SessionLifecycle::AtPrompt,
+            waiting_for_input: false,
+            is_active: false,
+            created_at: 1,
+        };
+        sup.rehydrate_inactive(meta, Vec::new()).expect("rehydrate");
+        assert!(sup.meta("rehydrated-remove").is_ok(), "precondition: tracked");
+
+        sup.remove_inactive("rehydrated-remove")
+            .expect("remove_inactive must succeed for a PTY-less rehydrated entry");
+
+        assert!(
+            matches!(
+                sup.meta("rehydrated-remove"),
+                Err(SupervisorError::NoSuchSession(_))
+            ),
+            "the entry must be genuinely gone from the map after remove_inactive"
+        );
+        // Idempotent-with-an-error: a second call on the now-gone id is a clean NoSuchSession, not
+        // a panic.
+        assert!(matches!(
+            sup.remove_inactive("rehydrated-remove"),
+            Err(SupervisorError::NoSuchSession(_))
+        ));
+    }
+
+    // ---- D3: remove_inactive also succeeds for an exited-but-unreaped session (child exited
+    // naturally, is_active flipped false, but `kill` was never called so the map entry — and its
+    // PTY runtime — still lingers). This is the second "inactive" shape the finding calls out,
+    // distinct from a cold-rehydrated (never-had-a-PTY) entry. ----
+    #[test]
+    fn remove_inactive_removes_an_exited_but_unreaped_session() {
+        let sup = Supervisor::new();
+        let id = sup
+            .create(spec_for("/bin/sh", vec!["-c".into(), "exit 0".into()]))
+            .expect("create");
+
+        // Wait for the wait thread to record the exit WITHOUT calling kill() (the exited-but-
+        // unreaped window this method exists to clean up).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !sup.meta(&id).expect("meta").is_active {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child never recorded its exit");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        sup.remove_inactive(&id)
+            .expect("remove_inactive must succeed for an exited-but-unreaped session");
+        assert!(
+            matches!(sup.meta(&id), Err(SupervisorError::NoSuchSession(_))),
+            "the exited-but-unreaped entry must be gone from the map after remove_inactive"
+        );
+    }
+
+    // ---- D3 defense-in-depth: remove_inactive must REFUSE a still-LIVE session — this method is
+    // never the right path for a running child (that's kill(), which actually signals the
+    // process); a caller must not be able to silently vanish a live session's map entry instead of
+    // killing it. ----
+    #[test]
+    fn remove_inactive_refuses_a_live_session() {
+        let sup = Supervisor::new();
+        let id = sup
+            .create(spec_for("/bin/sh", vec!["-c".into(), "sleep 100".into()]))
+            .expect("create");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(sup.meta(&id).expect("meta").is_active, "precondition: live");
+
+        let err = sup.remove_inactive(&id).unwrap_err();
+        assert!(
+            matches!(err, SupervisorError::NoSuchSession(_)),
+            "remove_inactive on a LIVE session must refuse, got: {err:?}"
+        );
+        assert!(
+            sup.meta(&id).expect("meta").is_active,
+            "a refused remove_inactive must not disturb the still-live session"
+        );
+
+        sup.kill(&id).expect("cleanup");
+    }
+
+    // ---- D3: remove_inactive on a genuinely unknown id is NoSuchSession, not a panic. ----
+    #[test]
+    fn remove_inactive_on_unknown_session_errors() {
+        let sup = Supervisor::new();
+        assert!(matches!(
+            sup.remove_inactive("never-existed"),
+            Err(SupervisorError::NoSuchSession(_))
+        ));
     }
 
     // ---- Task 12r: rehydrate is idempotent-ish — a LIVE entry always wins over a stale persisted

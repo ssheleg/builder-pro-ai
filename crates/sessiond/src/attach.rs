@@ -73,6 +73,20 @@ impl std::fmt::Display for AttachError {
 
 impl std::error::Error for AttachError {}
 
+/// Internal outcome of [`AttachRegistry::attach_live`] (D5): distinguishes the race-lost case
+/// (`subscribe_output` refused because `is_active` flipped after `attach()`'s own read — the
+/// session is still tracked, just no longer live) from a genuinely closed client sink, so
+/// [`AttachRegistry::attach`] can fall back to replay-only for the former instead of surfacing a
+/// spurious `NoSuchSession`. Not part of the public API — `attach()` maps this to [`AttachError`]
+/// (or consumes it to retry) before returning.
+enum LiveAttachError {
+    /// `subscribe_output` refused because the session raced to inactive; caller should retry via
+    /// `attach_replay_only`.
+    LostRace,
+    /// The client's sink was already closed before the first `Push::Replay` could be sent.
+    SinkClosed,
+}
+
 /// One attachment's teardown state. An attachment is either [`AttachEntry::Live`] (subscribed to
 /// the supervisor's live output fan-out, with its own forwarder task) or
 /// [`AttachEntry::ReplayOnly`] (attached to an INACTIVE session — exited-unreaped or
@@ -110,6 +124,16 @@ pub struct AttachRegistry {
     /// (Pv2 §5.1: the supervisor's sink list is keyed by caller-assigned `sub_id`; this registry
     /// is the one caller responsible for assigning them, so it owns uniqueness).
     next_sub_id: std::sync::atomic::AtomicU64,
+    /// D5 test-only race hook: invoked in [`attach_live`](Self::attach_live) at the EXACT point
+    /// between `attach()`'s `meta.is_active` read (still observed `true`) and the
+    /// `subscribe_output` call — the same window `is_active` can flip false in production (the
+    /// wait thread races ahead of `subscribe_output`'s own under-lock re-check,
+    /// `pty_supervisor.rs`'s `subscribe_output`). Production always leaves this `None`; a test can
+    /// install a closure here (e.g. one that kills the session out from under the in-flight
+    /// `attach()` call) to deterministically reproduce the race instead of hoping wall-clock
+    /// timing happens to hit a window a few CPU instructions wide.
+    #[cfg(test)]
+    before_subscribe_hook: StdMutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl AttachRegistry {
@@ -118,7 +142,18 @@ impl AttachRegistry {
             supervisor,
             entries: StdMutex::new(std::collections::HashMap::new()),
             next_sub_id: std::sync::atomic::AtomicU64::new(1),
+            #[cfg(test)]
+            before_subscribe_hook: StdMutex::new(None),
         }
+    }
+
+    /// D5 test-only: install a closure run once, synchronously, at the exact race window
+    /// described on [`before_subscribe_hook`](Self::before_subscribe_hook). Not part of the
+    /// production API.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn set_before_subscribe_hook_for_test(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.before_subscribe_hook.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Register `sink` as an ADDITIONAL independent consumer for `session_id` — Pv2 §5.2: N
@@ -142,6 +177,18 @@ impl AttachRegistry {
     ///   `attachment_count()`/`detach`/`detach_all_for_conn` stay correct.
     /// - **UNKNOWN** (`supervisor.meta` errors — never created, or already fully reaped by
     ///   `kill`): `AttachError::NoSuchSession`, the genuine not-found path.
+    ///
+    /// **D5 race**: between this `meta.is_active` read (observed `true`) and `attach_live`'s
+    /// `subscribe_output` call, the wait thread can flip `is_active` to `false` and clear the
+    /// sinks list — `subscribe_output`'s own under-lock re-check (`pty_supervisor.rs`) then
+    /// refuses. Pre-fix this surfaced as a spurious `NoSuchSession` for a session that IS still
+    /// attachable, just replay-only now (the session is genuinely still in the supervisor map —
+    /// only its liveness flipped mid-call). `attach_live` reports this distinctly (as opposed to
+    /// the genuine "session was never tracked at all" case) so `attach()` can fall back to
+    /// [`attach_replay_only`](Self::attach_replay_only) instead of erroring — nothing has been
+    /// sent to `sink` yet at the point `subscribe_output` can fail (it is the very first
+    /// operation in `attach_live`), so the fallback is a clean do-over, not a partial/corrupt
+    /// attach.
     pub async fn attach(
         &self,
         conn_id: u64,
@@ -154,7 +201,18 @@ impl AttachRegistry {
             .map_err(|_| AttachError::NoSuchSession)?;
 
         let entry = if meta.is_active {
-            self.attach_live(session_id, sink).await?
+            match self.attach_live(session_id, sink.clone()).await {
+                Ok(entry) => entry,
+                Err(LiveAttachError::LostRace) => {
+                    // The is_active flip raced ahead of subscribe_output; fall back to
+                    // replay-only rather than surfacing a spurious NoSuchSession. If the session
+                    // has ALSO vanished from the map entirely by now (e.g. immediately killed
+                    // right after exiting), attach_replay_only's own `meta`-backed calls will
+                    // correctly fail NoSuchSession — the genuine not-found path is preserved.
+                    self.attach_replay_only(session_id, sink).await?
+                }
+                Err(LiveAttachError::SinkClosed) => return Err(AttachError::SinkClosed),
+            }
         } else {
             self.attach_replay_only(session_id, sink).await?
         };
@@ -177,33 +235,47 @@ impl AttachRegistry {
         Ok(())
     }
 
-    /// LIVE branch of [`attach`](Self::attach): subscribe-then-snapshot-then-replay-then-forward,
-    /// unchanged from the pre-Pv2-§7-cold-rehydrate behavior.
+    /// LIVE branch of [`attach`](Self::attach): subscribe-then-snapshot-then-replay-then-forward.
+    /// Returns [`LiveAttachError::LostRace`] (D5) specifically when `subscribe_output` refuses
+    /// because `is_active` flipped to `false` between `attach()`'s read and this call — the
+    /// caller falls back to `attach_replay_only` for that case rather than erroring; every other
+    /// failure here still means "no such session" (surfaced by the caller as `AttachError`).
     async fn attach_live(
         &self,
         session_id: &SessionId,
         sink: PushSink,
-    ) -> Result<AttachEntry, AttachError> {
+    ) -> Result<AttachEntry, LiveAttachError> {
         // Allocate this attachment's own unique sub_id (Pv2 §5.1/§5.2). No supersede: multiple
         // connections — and multiple sub_ids — may be live for the same session_id at once.
         let sub_id = self
             .next_sub_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // D5 test-only race hook: fires here, right before `subscribe_output`, at the exact
+        // window `is_active` can flip in production between `attach()`'s read and this call. A
+        // no-op in production (the hook is always `None` there).
+        #[cfg(test)]
+        if let Some(hook) = self.before_subscribe_hook.lock().unwrap().as_ref() {
+            hook();
+        }
+
         // Bridge: std channel fed by the supervisor's blocking reader thread. `subscribe_output`
         // PUSHES this sink onto the session's sink list alongside any other live subscriber.
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         self.supervisor
             .subscribe_output(session_id, sub_id, std_tx)
-            .map_err(|_| AttachError::NoSuchSession)?;
+            .map_err(|_| LiveAttachError::LostRace)?;
 
         // Snapshot AFTER subscribing: any byte the reader thread produces from this point on is
         // captured by `std_rx`; anything before is covered by the snapshot. No gap, no double
-        // delivery beyond what the ring itself already coalesces.
+        // delivery beyond what the ring itself already coalesces. A failure here is a narrower,
+        // later race (the session vanished entirely AFTER a successful subscribe) — genuinely
+        // "gone", not the is_active-flip race `LostRace` exists for, so it still surfaces via the
+        // catch-all mapping below.
         let (cols, rows, content) = self
             .supervisor
             .snapshot_scrollback(session_id)
-            .map_err(|_| AttachError::NoSuchSession)?;
+            .map_err(|_| LiveAttachError::LostRace)?;
 
         // Replay MUST be the first frame the client observes.
         let replay = Push::Replay {
@@ -214,7 +286,7 @@ impl AttachRegistry {
         };
         sink.send(replay)
             .await
-            .map_err(|_| AttachError::SinkClosed)?;
+            .map_err(|_| LiveAttachError::SinkClosed)?;
 
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel_bg = cancel.clone();
@@ -1422,5 +1494,95 @@ mod tests {
             0,
             "no entry may be inserted for a refused attach"
         );
+    }
+
+    // ---- D5: attach races the child's own exit — `attach()` reads `meta.is_active == true`,
+    // but by the time `attach_live` calls `subscribe_output`, the wait thread has already flipped
+    // `is_active` to `false` and the reader thread has cleared the sinks list (the exact TOCTOU
+    // window `pty_supervisor.rs`'s `subscribe_output` documents). Pre-fix this surfaced as a
+    // spurious `AttachError::NoSuchSession` for a session that is genuinely still attachable —
+    // just replay-only now. The `before_subscribe_hook_for_test` deterministically reproduces the
+    // race by blocking `attach_live` right before `subscribe_output` until the child has
+    // genuinely exited (the natural exited-but-unreaped pattern other tests in this file already
+    // use, e.g. `attach_on_inactive_session_replays_scrollback_without_live_subscription`), so
+    // this test proves the FIX, not a timing coincidence. ----
+    #[tokio::test]
+    async fn attach_falls_back_to_replay_only_when_is_active_flips_during_subscribe() {
+        let sup = Arc::new(Supervisor::new());
+        // Exits immediately once released, printing a marker first — NOT killed, so it lingers in
+        // the exited-but-unreaped window `subscribe_output` refuses to subscribe into.
+        let id = sup
+            .create(spec(vec![
+                "-c".into(),
+                "read _go; printf 'RACE_MARKER\\n'".into(),
+            ]))
+            .expect("create");
+        sup.write_stdin(&id, b"go\n").expect("write go");
+
+        let reg = AttachRegistry::new(sup.clone());
+
+        // Install the race hook BEFORE calling attach(): it blocks attach_live right before
+        // subscribe_output until the child has genuinely exited (is_active observed false) —
+        // this is what makes attach()'s EARLIER meta.is_active read (still true) stale by the
+        // time subscribe_output actually runs, deterministically reproducing the race window.
+        let sup_for_hook = sup.clone();
+        let id_for_hook = id.clone();
+        reg.set_before_subscribe_hook_for_test(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match sup_for_hook.meta(&id_for_hook) {
+                    Ok(m) if !m.is_active => break,
+                    Ok(_) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(e) => panic!(
+                        "session vanished before the hook could observe its exit: {e}"
+                    ),
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child never recorded its exit while the hook waited"
+                );
+            }
+        });
+
+        let (sink, mut client) = mpsc::channel::<Push>(64);
+        let result = reg.attach(1, &id, sink).await;
+
+        assert!(
+            result.is_ok(),
+            "attach must fall back to replay-only (not error) when is_active flips during \
+             subscribe_output, got: {result:?}"
+        );
+        assert_eq!(
+            reg.attachment_count(),
+            1,
+            "the fallback replay-only attach must still register an entry"
+        );
+
+        // The sink must have received a Replay (the replay-only path), carrying the marker the
+        // child printed before it exited.
+        match recv_timeout(&mut client, 2000).await.expect("replay frame") {
+            Push::Replay {
+                session_id,
+                content,
+                ..
+            } => {
+                assert_eq!(session_id, id);
+                assert!(
+                    contains(&content, b"RACE_MARKER"),
+                    "Replay content must carry the session's scrollback, got: {content:?}"
+                );
+            }
+            other => panic!("expected Replay, got {other:?}"),
+        }
+
+        // No live Output can ever follow — the fallback took the replay-only path, which never
+        // subscribes a live forwarder.
+        let next = recv_timeout(&mut client, 300).await;
+        assert!(
+            next.is_none(),
+            "a race-fallback attach must never receive a live Output push, got {next:?}"
+        );
+
+        let _ = sup.kill(&id);
     }
 }

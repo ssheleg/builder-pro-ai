@@ -421,6 +421,52 @@ impl Db {
         Ok(())
     }
 
+    /// Permanently remove a session and everything persisted under it — the `session` row, every
+    /// `scrollback` row, and every `command_events` row — in ONE transaction (D3: an honest close
+    /// for `KillSession` on an inactive/PTY-less rehydrated session, which has no live process to
+    /// kill but must still stop being resurrected on every future restart). All three deletes
+    /// commit atomically: a partial delete (e.g. scrollback gone but the session row surviving)
+    /// would either resurrect an empty session on the next cold-rehydrate or leave orphaned rows
+    /// with no owning session — this makes both impossible. Idempotent: deleting an id that was
+    /// never persisted (or already deleted) is a no-op success, not an error.
+    pub fn delete_session(&self, session_id: &SessionId) -> Result<(), PersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM command_events WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM scrollback WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM session WHERE id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Read back the `ts` column of the `scrollback` row at `(session_id, seq=0)` (test-support,
+    /// D1: proves whether a flush sweep re-wrote a session's scrollback blob — `append_scrollback`
+    /// upserts `ts` on every write, so an unchanged `ts` across two sweeps means the row was
+    /// genuinely skipped, not just written with byte-identical content). `None` if no such row
+    /// exists yet.
+    #[doc(hidden)]
+    pub fn scrollback_row_ts_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<i64>, PersistError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ts FROM scrollback WHERE session_id = ?1 AND seq = 0")?;
+        let mut rows = stmt.query_map([session_id], |r| r.get::<_, i64>(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     /// Read back every command-history row for a session, ordered by `seq` (test-support / future
     /// history queries).
     pub fn list_command_events(
@@ -867,5 +913,66 @@ mod tests {
         assert_eq!(events[1].kind, "finished");
         assert_eq!(events[1].exit_code, Some(7));
         assert_eq!(events[1].origin, "gui");
+    }
+
+    // ---- D3: delete_session removes the session row + scrollback + command_events rows in one
+    // transaction, leaves an unrelated session untouched, and is idempotent on a second call. ----
+    #[test]
+    fn delete_session_removes_session_scrollback_and_command_events_atomically() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws("w1")).unwrap();
+        db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+            .unwrap();
+        db.upsert_session(&meta("s2", "w1", SessionLifecycle::Running))
+            .unwrap();
+        db.append_scrollback(&"s1".to_string(), 0, b"gone soon", 1)
+            .unwrap();
+        db.append_scrollback(&"s2".to_string(), 0, b"kept", 1)
+            .unwrap();
+        db.append_command_event("s1", 0, 1_700_000_000, "started", None, "gui")
+            .unwrap();
+        db.append_command_event("s2", 0, 1_700_000_000, "started", None, "gui")
+            .unwrap();
+
+        db.delete_session(&"s1".to_string()).unwrap();
+
+        // s1 is fully gone: no session row, no scrollback, no command_events.
+        assert!(
+            db.list_sessions().unwrap().iter().all(|m| m.id != "s1"),
+            "s1's session row must be gone"
+        );
+        assert_eq!(
+            db.load_scrollback(&"s1".to_string()).unwrap(),
+            Vec::<u8>::new(),
+            "s1's scrollback rows must be gone"
+        );
+        assert!(
+            db.list_command_events("s1").unwrap().is_empty(),
+            "s1's command_events rows must be gone"
+        );
+
+        // s2 (a different session) is completely untouched.
+        let s2 = db
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == "s2")
+            .expect("s2 must survive s1's deletion");
+        assert_eq!(s2.id, "s2");
+        assert_eq!(db.load_scrollback(&"s2".to_string()).unwrap(), b"kept");
+        assert_eq!(db.list_command_events("s2").unwrap().len(), 1);
+
+        // A restart-equivalent (rehydrate) must not resurrect s1.
+        let rehydrated = db.rehydrate().unwrap();
+        assert!(
+            rehydrated.iter().all(|m| m.id != "s1"),
+            "a deleted session must never be resurrected by rehydrate"
+        );
+
+        // Idempotent: deleting an already-deleted (or never-existing) id is a no-op success.
+        db.delete_session(&"s1".to_string())
+            .expect("deleting an already-gone session must be a no-op success, not an error");
+        db.delete_session(&"never-existed".to_string())
+            .expect("deleting a never-persisted session must be a no-op success");
     }
 }

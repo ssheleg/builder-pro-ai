@@ -50,7 +50,7 @@ use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 
 use crate::attach::{AttachError, AttachRegistry, PushSink};
 use crate::persistence::Db;
@@ -307,14 +307,21 @@ fn spawn_scrollback_flusher(
     })
 }
 
-/// One persistence sweep: for every session known to the DB, if it is still live in the supervisor,
-/// snapshot its scrollback and replace the stored blob, and drain + persist any accumulated
-/// best-effort `command_events` (schema v2, spec §7, Pv2 `origin` amendment). Best-effort; logs and
+/// One persistence sweep: for every session known to the DB that is STILL LIVE in the supervisor
+/// (`supervisor.meta(id).is_active`), persist its current meta (cols/rows/cwd/lifecycle — spec
+/// §11: resize/cwd/lifecycle changes are otherwise only ever mutated in-memory, so without this a
+/// restart would rehydrate stale create-time columns), snapshot its scrollback and replace the
+/// stored blob, and drain + persist any accumulated best-effort `command_events` (schema v2, spec
+/// §7, Pv2 `origin` amendment). A cold-rehydrated or exited-but-unreaped (inactive) session is
+/// SKIPPED entirely: its persisted rows are already the final/immutable copy (no live reader ever
+/// changes them again), so re-upserting them every tick would be pure write amplification with no
+/// data ever changing — across daemon restarts, N accumulated dead rehydrated sessions would
+/// otherwise mean N needless SQLite writes every second, forever (D1). Best-effort; logs and
 /// continues on error — a DB failure here must never stall a live PTY. This is the ONLY place
 /// `command_events` reach the DB: the reader thread that accumulates them has no DB handle (see the
 /// `pty_supervisor` module-level threading contract), so draining happens here, outside that thread.
 async fn flush_scrollback_once(deps: &Arc<ServerDeps>) {
-    // Snapshot live session ids + their scrollback OUTSIDE the DB lock (supervisor calls are sync).
+    // Snapshot every persisted session id OUTSIDE the DB lock (supervisor calls are sync).
     let ids: Vec<String> = {
         let db = deps.db.lock().await;
         match db.list_sessions() {
@@ -327,6 +334,25 @@ async fn flush_scrollback_once(deps: &Arc<ServerDeps>) {
     };
     let ts = now_secs();
     for id in ids {
+        // Live-only gate (D1/D2): `meta()` returns `Err(NoSuchSession)` for an id the supervisor
+        // doesn't track at all, and `Ok(meta)` with `is_active == false` for a cold-rehydrated or
+        // exited-but-unreaped entry — either way there is no live reader that could have changed
+        // this session's rows since it was persisted, so skip the sweep for it entirely.
+        let meta = match deps.supervisor.meta(&id) {
+            Ok(meta) if meta.is_active => meta,
+            _ => continue,
+        };
+
+        // Persist the current meta (D2): resize/cwd/lifecycle are otherwise only mutated
+        // in-memory (the only production `upsert_session` call is at CreateSession), so without
+        // this a restart would rehydrate stale create-time cols/rows/cwd/lifecycle.
+        {
+            let db = deps.db.lock().await;
+            if let Err(e) = db.upsert_session(&meta) {
+                tracing::debug!(session = %id, error = %e, "scrollback flush: meta persist failed");
+            }
+        }
+
         if let Ok((_c, _r, bytes)) = deps.supervisor.snapshot_scrollback(&id) {
             let db = deps.db.lock().await;
             if let Err(e) = db.append_scrollback(&id, 0, &bytes, ts) {
@@ -440,8 +466,14 @@ async fn handle_client(
 
     // The `PushSink` (`mpsc::Sender<Push>`) handed to `AttachRegistry`: a thin adapter that maps
     // each `Push` into `Frame::Push` on THIS client's bounded queue, so replay/output backpressure
-    // is uniform with everything else.
-    let push_sink = make_push_sink(out_tx.clone());
+    // is uniform with everything else. `overflow_notify` is D4's honest-degradation signal: the
+    // adapter's OWN forwarding task runs independently of the dispatch loop below (it is fed by
+    // `AttachRegistry`'s per-attachment forwarders, not by inbound requests), so a `try_send`
+    // overflow there — flood output + a slow/stalled GUI — must be able to tear down this whole
+    // connection exactly like a request/response overflow does, rather than silently stopping
+    // only the push path while the connection stays "up" and every future push is dropped.
+    let overflow_notify = Arc::new(Notify::new());
+    let push_sink = make_push_sink(out_tx.clone(), conn_id, overflow_notify.clone());
 
     // ---- Dispatch loop: correlate every Request{id} with exactly one Response{id}. ----
     let outcome: std::io::Result<()> = loop {
@@ -450,6 +482,16 @@ async fn handle_client(
                 if changed.is_err() || *shutdown.borrow() {
                     break Ok(());
                 }
+            }
+            // D4: the push-forwarding task hit an outbound-queue overflow (a slow/stalled client
+            // during a flood) and could not enqueue further pushes. Tear down THIS connection the
+            // same way a request/response overflow does, so the client's reconnect+replay path
+            // restores a consistent state instead of silently losing every future push forever.
+            _ = overflow_notify.notified() => {
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "client outbound queue overflow (push forwarder)",
+                ));
             }
             frame = reader.next(&mut rd) => {
                 match frame {
@@ -580,14 +622,31 @@ impl FrameReader {
     }
 }
 
-/// Wrap a `Push` sink over the client's bounded `Frame` queue. Overflow / a gone writer stops the
-/// forwarder (the client is being torn down anyway).
-fn make_push_sink(out_tx: mpsc::Sender<Frame>) -> PushSink {
+/// Wrap a `Push` sink over the client's bounded `Frame` queue. A gone writer (queue closed — the
+/// connection is already being torn down for some other reason) just stops the forwarder, same as
+/// before. An OUTBOUND-QUEUE OVERFLOW (`try_send` returns `Full`) is different (D4): silently
+/// stopping only this forwarder would leave the connection's dispatch loop running normally while
+/// every future push for it is dropped forever — "up" but not actually delivering anything, so a
+/// re-attach on the same connection later fails `SinkClosed` instead of recovering. Honest
+/// degradation instead: log a structured warning and fire `overflow_notify` so `handle_client`'s
+/// dispatch loop tears down THIS WHOLE connection, driving the client through its normal
+/// reconnect+replay path to a consistent state — no unbounded buffering, no half-alive connection.
+fn make_push_sink(out_tx: mpsc::Sender<Frame>, conn_id: u64, overflow_notify: Arc<Notify>) -> PushSink {
     let (tx, mut rx) = mpsc::channel::<Push>(CLIENT_OUTQ_CAP);
     tokio::spawn(async move {
         while let Some(push) = rx.recv().await {
-            if out_tx.try_send(Frame::Push(push)).is_err() {
-                break; // overflow or writer gone ⇒ stop forwarding
+            match out_tx.try_send(Frame::Push(push)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        conn = conn_id,
+                        reason = "outbound overflow — disconnecting slow client",
+                        "push forwarder: outbound queue full; disconnecting connection"
+                    );
+                    overflow_notify.notify_one();
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => break, // writer already gone
             }
         }
     });
@@ -767,6 +826,35 @@ async fn dispatch(
 
         Request::KillSession { session_id } => match deps.supervisor.kill(&session_id) {
             Ok(()) => Response::Ack,
+            Err(SupervisorError::NoSuchSession(_)) => {
+                // D3: `kill()` fails `NoSuchSession` for a PTY-less entry too — an inactive
+                // (cold-rehydrated or exited-but-unreaped) session has nothing to signal, but
+                // pre-fix that left it an unkillable zombie: still in the supervisor map (so
+                // `ListSessions` kept surfacing it) and its rows still in the DB (so every future
+                // restart kept resurrecting it). Distinguish "genuinely unknown" from "known but
+                // inactive" via `meta()`, and for the latter perform an honest close: drop any
+                // replay-only attach entries, remove the supervisor map entry, and delete the
+                // persisted rows — so ListSessions stops showing it and it never comes back.
+                match deps.supervisor.meta(&session_id) {
+                    Ok(meta) if !meta.is_active => {
+                        let _ = deps.attach.remove_session(&session_id);
+                        let _ = deps.supervisor.remove_inactive(&session_id);
+                        deps.live_sessions.lock().unwrap().remove(&session_id);
+                        let db = deps.db.lock().await;
+                        if let Err(e) = db.delete_session(&session_id) {
+                            tracing::warn!(
+                                session = %session_id, error = %e,
+                                "KillSession: honest-close delete_session failed (best-effort)"
+                            );
+                        }
+                        Response::Ack
+                    }
+                    _ => Response::Error {
+                        code: "NoSuchSession".into(),
+                        message: format!("no session {session_id}"),
+                    },
+                }
+            }
             Err(e) => err(code_for(&e), e),
         },
 
@@ -1643,6 +1731,271 @@ mod tests {
         }
     }
 
+    // ---- D4 (Important, pre-existing but amplified by multi-attach): a transient overflow of THE
+    // PUSH-FORWARDING PATH specifically (not the request/response path the test above already
+    // covers) must disconnect the slow client honestly rather than silently killing only the push
+    // pipe while the connection stays "up". Attach a session that floods live `Push::Output`, never
+    // read from the socket, and drive the forwarder's `try_send` into `CLIENT_OUTQ_CAP` overflow —
+    // then assert the socket observes EOF (the connection was actually torn down), and that a FRESH
+    // connection can attach the SAME session and receive pushes normally (no lingering
+    // daemon-side damage from the disconnected client). ----
+    #[tokio::test]
+    async fn push_forwarder_overflow_disconnects_the_slow_client_and_a_fresh_reattach_recovers() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+
+        // ---- Client A: create + attach a session that floods output continuously, then STOP
+        // reading entirely so `AttachRegistry`'s forwarder backs up `push_sink` -> `out_tx` until
+        // `make_push_sink`'s `try_send` overflows `CLIENT_OUTQ_CAP`. ----
+        let mut a = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut a).await,
+            DaemonReply::Accepted { .. }
+        ));
+        send_frame(
+            &mut a,
+            &Frame::Request {
+                id: 1,
+                req: Request::CreateSession {
+                    workspace_id: "ws".into(),
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some("/tmp".into()),
+                    env_overrides: vec![],
+                    cols: 80,
+                    rows: 24,
+                },
+            },
+        )
+        .await;
+        let session_id = loop {
+            match recv_frame_t(&mut a).await {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Session(m),
+                } => break m.id,
+                Frame::Response {
+                    id: 1,
+                    res: Response::Error { code, message },
+                } => panic!("create failed: {code}: {message}"),
+                Frame::Push(_) => continue,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        send_frame(
+            &mut a,
+            &Frame::Request {
+                id: 2,
+                req: Request::AttachSession {
+                    session_id: session_id.clone(),
+                },
+            },
+        )
+        .await;
+        // Drain the Ack + initial Replay so both are off the wire before we stop reading.
+        let (mut ack, mut replay) = (false, false);
+        for _ in 0..4 {
+            match recv_frame_t(&mut a).await {
+                Frame::Response {
+                    id: 2,
+                    res: Response::Ack,
+                } => ack = true,
+                Frame::Push(Push::Replay { .. }) => replay = true,
+                Frame::Push(_) => continue,
+                other => panic!("unexpected before attach settle {other:?}"),
+            }
+            if ack && replay {
+                break;
+            }
+        }
+        assert!(ack && replay, "attach must Ack and deliver Replay first");
+
+        // Flood a large volume of output so the reader thread keeps feeding `Push::Output` frames
+        // into A's forwarder far faster than a non-reading client can ever drain — this is what
+        // eventually overflows `CLIENT_OUTQ_CAP` on the push path specifically.
+        send_frame(
+            &mut a,
+            &Frame::Request {
+                id: 3,
+                req: Request::WriteStdin {
+                    session_id: session_id.clone(),
+                    bytes: b"yes | head -c 20000000\n".to_vec(),
+                },
+            },
+        )
+        .await;
+
+        // STOP reading entirely for a while: the socket is left open but nothing drains it, so
+        // the kernel send buffer fills, `wr.write_all` in the writer task blocks, `out_tx` backs
+        // up to its `CLIENT_OUTQ_CAP` bound, and `make_push_sink`'s forwarder's `try_send` starts
+        // returning `Full`. Genuinely NOT reading (not even to discard) is what creates the
+        // backpressure — a loop that keeps calling `read()` (even discarding the bytes) would
+        // keep draining the kernel buffer and the queue would never actually fill.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // NOW drain whatever backlog is sitting in the kernel buffer; once that backlog is
+        // exhausted the daemon must have already torn the connection down (D4), so the read loop
+        // terminates in EOF (or an error) rather than blocking forever waiting for more.
+        let eof_seen = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut buf = [0u8; 65536];
+            loop {
+                match a.read(&mut buf).await {
+                    Ok(0) => return true,   // EOF: the daemon closed the connection
+                    Ok(_) => continue,      // still draining backlog; keep going until EOF or error
+                    Err(_) => return true,  // reset/closed also counts as "connection gone"
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            eof_seen,
+            Ok(true),
+            "a push-forwarder outbound-queue overflow must disconnect the slow client (EOF), \
+             not leave the connection silently half-alive"
+        );
+
+        // ---- A fresh connection must be able to attach and receive pushes normally — proving the
+        // daemon-side connection-registry/writer-task machinery is NOT corrupted by A's forced
+        // disconnect (no lingering half-torn-down state blocking a fresh connection). The FLOODING
+        // session's child (`yes | head -c ...`) is still running at this point (session keep-alive,
+        // spec §7) and would immediately re-trigger the SAME overflow against any new slow reader —
+        // that repeat trip is D4 working as intended, not a regression, but it would make THIS
+        // specific assertion (does a fresh connection recover) indistinguishable from a second
+        // overflow. Kill the flooding session first, then prove recovery on a brand-new QUIET
+        // session — a clean, deterministic proof that the daemon itself is healthy post-disconnect. ----
+        let mut b = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut b).await,
+            DaemonReply::Accepted { .. }
+        ));
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 1,
+                req: Request::KillSession {
+                    session_id: session_id.clone(),
+                },
+            },
+        )
+        .await;
+        loop {
+            match recv_frame_t(&mut b).await {
+                Frame::Response {
+                    id: 1,
+                    res: Response::Ack,
+                } => break,
+                Frame::Push(_) => continue,
+                other => panic!("expected Ack killing the flooding session, got {other:?}"),
+            }
+        }
+
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 2,
+                req: Request::CreateSession {
+                    workspace_id: "ws".into(),
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some("/tmp".into()),
+                    env_overrides: vec![],
+                    cols: 80,
+                    rows: 24,
+                },
+            },
+        )
+        .await;
+        let quiet_id = loop {
+            match recv_frame_t(&mut b).await {
+                Frame::Response {
+                    id: 2,
+                    res: Response::Session(m),
+                } => break m.id,
+                Frame::Response {
+                    id: 2,
+                    res: Response::Error { code, message },
+                } => panic!("create failed: {code}: {message}"),
+                Frame::Push(_) => continue,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 3,
+                req: Request::AttachSession {
+                    session_id: quiet_id.clone(),
+                },
+            },
+        )
+        .await;
+        let (mut b_ack, mut b_replay) = (false, false);
+        for _ in 0..4 {
+            match recv_frame_t(&mut b).await {
+                Frame::Response {
+                    id: 3,
+                    res: Response::Ack,
+                } => b_ack = true,
+                Frame::Push(Push::Replay { session_id: sid, .. }) if sid == quiet_id => {
+                    b_replay = true
+                }
+                Frame::Push(_) => continue,
+                other => panic!("unexpected before attach settle {other:?}"),
+            }
+            if b_ack && b_replay {
+                break;
+            }
+        }
+        assert!(
+            b_ack && b_replay,
+            "a fresh connection must be able to attach a session after A's forced disconnect \
+             (b_ack={b_ack}, b_replay={b_replay})"
+        );
+
+        // And live Output actually reaches B (the daemon's push fan-out is fully healthy
+        // post-disconnect, not just its request/response path).
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 4,
+                req: Request::WriteStdin {
+                    session_id: quiet_id.clone(),
+                    bytes: b"printf 'RECOVERY_MARKER\\n'\n".to_vec(),
+                },
+            },
+        )
+        .await;
+        let mut collected = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), recv_frame(&mut b))
+                .await
+            {
+                Ok(Frame::Push(Push::Output { bytes, .. })) => {
+                    collected.extend_from_slice(&bytes);
+                    if collected.windows(15).any(|w| w == b"RECOVERY_MARKER") {
+                        break;
+                    }
+                }
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            collected.windows(15).any(|w| w == b"RECOVERY_MARKER"),
+            "fresh connection must receive live pushes after recovering from A's overflow \
+             disconnect, got: {collected:?}"
+        );
+
+        send_frame(
+            &mut b,
+            &Frame::Request {
+                id: 5,
+                req: Request::KillSession {
+                    session_id: quiet_id,
+                },
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn oversized_frame_is_rejected() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
@@ -1979,6 +2332,254 @@ mod tests {
             .expect("serve() task must not panic");
     }
 
+    // ---- D1 (Important): the periodic flush sweep must NOT re-write a cold-rehydrated INACTIVE
+    // session's scrollback blob — its persisted bytes are already the final/immutable copy (no
+    // live reader will ever change them again). Pre-fix, `flush_scrollback_once` iterated every
+    // row `db.list_sessions()` returned regardless of liveness, so N accumulated dead rehydrated
+    // sessions meant N needless SQLite writes every tick, forever. This proves the live/inactive
+    // split via the `ts` column `append_scrollback` upserts on every write: an unchanged `ts`
+    // across two sweeps means the inactive session's row was genuinely skipped. ----
+    #[tokio::test]
+    async fn flush_skips_inactive_rehydrated_session_but_still_flushes_a_live_one() {
+        let (deps, _rt) = test_deps();
+
+        // ---- Inactive (cold-rehydrated) session: persisted directly, then rehydrated into the
+        // supervisor as a PTY-less, replay-only entry — exactly the boot::cold_rehydrate_sessions
+        // path, without needing a real process restart. ----
+        let dead_id = "dead-rehydrated".to_string();
+        let dead_meta = SessionMeta {
+            id: dead_id.clone(),
+            workspace_id: "ws".into(),
+            title: "t".into(),
+            shell: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+            lifecycle: bpa_protocol::SessionLifecycle::Exited {
+                code: Some(0),
+                signal: None,
+            },
+            waiting_for_input: false,
+            is_active: false,
+            created_at: 1_700_000_000,
+        };
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+            db.upsert_session(&dead_meta).unwrap();
+            db.append_scrollback(&dead_id, 0, b"OLD_PERSISTED_BYTES", 111)
+                .unwrap();
+        }
+        deps.supervisor
+            .rehydrate_inactive(dead_meta, b"OLD_PERSISTED_BYTES".to_vec())
+            .expect("rehydrate_inactive");
+
+        // ---- Live session: created for real, with an attach so its ring definitely has bytes.
+        // `workspace_id` must match the "ws" row seeded above — `session.workspace_id` is `NOT
+        // NULL REFERENCES workspace(id)` with `foreign_keys = ON`, so an unmatched id would make
+        // `upsert_session` fail its (best-effort, silently-swallowed) FK check and never persist,
+        // which would make this test pass for the wrong reason. ----
+        let mut live_spec = sh_spec("printf LIVE_BYTES; read _hold");
+        live_spec.workspace_id = "ws".into();
+        let live_id = deps
+            .supervisor
+            .create(live_spec)
+            .expect("create live session");
+        // Persist the create-time row, mirroring the production `CreateSession` dispatch arm
+        // (`socket_server.rs`'s `Request::CreateSession` handler) — the flush sweep keeps an
+        // already-persisted live session's row FRESH; it is not the only place a session's row
+        // is ever written.
+        {
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&live_id).unwrap();
+            db.upsert_session(&meta).unwrap();
+        }
+        // Give the reader thread a moment to feed the ring so the flush snapshot is non-empty.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let (_c, _r, bytes) = deps.supervisor.snapshot_scrollback(&live_id).unwrap();
+            if bytes.windows(10).any(|w| w == b"LIVE_BYTES") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "live session's scrollback never filled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // ---- First sweep: seeds the live row's scrollback and leaves the dead row exactly as
+        // pre-seeded. ----
+        flush_scrollback_once(&deps).await;
+
+        let dead_ts_after_first = {
+            let db = deps.db.lock().await;
+            db.scrollback_row_ts_for_test(&dead_id)
+                .unwrap()
+                .expect("dead row must still exist")
+        };
+        assert_eq!(
+            dead_ts_after_first, 111,
+            "an inactive rehydrated session's scrollback row must NOT be re-written by a flush \
+             tick — ts must stay at its pre-seeded value"
+        );
+        let live_ts_after_first = {
+            let db = deps.db.lock().await;
+            db.scrollback_row_ts_for_test(&live_id)
+                .unwrap()
+                .expect("live row must have been written by the first sweep")
+        };
+
+        // ---- Second sweep, forced to a distinguishable later timestamp boundary: the live
+        // session's row must be written AGAIN (ts advances or content is confirmed live), while
+        // the dead row must remain untouched. ----
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        flush_scrollback_once(&deps).await;
+
+        let dead_ts_after_second = {
+            let db = deps.db.lock().await;
+            db.scrollback_row_ts_for_test(&dead_id)
+                .unwrap()
+                .expect("dead row must still exist")
+        };
+        assert_eq!(
+            dead_ts_after_second, 111,
+            "a SECOND flush tick must still skip the inactive rehydrated session entirely"
+        );
+
+        let live_ts_after_second = {
+            let db = deps.db.lock().await;
+            db.scrollback_row_ts_for_test(&live_id)
+                .unwrap()
+                .expect("live row must still exist")
+        };
+        assert!(
+            live_ts_after_second > live_ts_after_first,
+            "a live session's scrollback row MUST still be re-written on every flush tick \
+             (live_ts_after_first={live_ts_after_first}, live_ts_after_second={live_ts_after_second})"
+        );
+
+        let _ = deps.supervisor.kill(&live_id);
+    }
+
+    // ---- D2 (Important): the SAME live-only flush sweep must also persist the session's CURRENT
+    // meta (cols/rows/cwd/lifecycle), not just its scrollback — otherwise a resize is only ever
+    // reflected in-memory (the sole production `upsert_session` call is at CreateSession) and a
+    // restart rehydrates stale create-time columns. Create -> resize -> flush -> read the DB row
+    // directly and assert cols/rows match the resize. ----
+    #[tokio::test]
+    async fn flush_persists_resized_cols_rows_for_a_live_session() {
+        let (deps, _rt) = test_deps();
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        let mut spec = sh_spec("read _hold");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+
+        // Persist the create-time row (mirrors the production CreateSession dispatch arm) so the
+        // row exists at 80x24 before the resize.
+        {
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            assert_eq!((meta.cols, meta.rows), (80, 24));
+            db.upsert_session(&meta).unwrap();
+        }
+
+        deps.supervisor.resize(&id, 220, 55).expect("resize");
+
+        // The DB row must still say 80x24 until a flush sweep runs (proves the fix isn't a no-op
+        // that happened to already be correct via some other path).
+        {
+            let db = deps.db.lock().await;
+            let rows = db.list_sessions().unwrap();
+            let row = rows.iter().find(|m| m.id == id).expect("row present");
+            assert_eq!(
+                (row.cols, row.rows),
+                (80, 24),
+                "precondition: DB row must still be stale pre-flush"
+            );
+        }
+
+        flush_scrollback_once(&deps).await;
+
+        let db = deps.db.lock().await;
+        let rows = db.list_sessions().unwrap();
+        let row = rows.iter().find(|m| m.id == id).expect("row present");
+        assert_eq!(
+            (row.cols, row.rows),
+            (220, 55),
+            "a flush sweep must persist the resized cols/rows for a live session"
+        );
+
+        let _ = deps.supervisor.kill(&id);
+    }
+
+    // ---- D2: lifecycle/cwd freshness through the same flush-persists-meta path. A session that
+    // moves past AtPrompt into Running (via a real OSC-133 C mark) must have that lifecycle
+    // reflected in the DB row after a flush sweep, not just in-memory. ----
+    #[tokio::test]
+    async fn flush_persists_lifecycle_freshness_for_a_live_session() {
+        let (deps, _rt) = test_deps();
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+        }
+
+        let mut spec = sh_spec("printf '\\033]133;C\\007'; read _hold");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+        {
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            db.upsert_session(&meta).unwrap();
+        }
+
+        // Wait for the OSC-133 C mark to drive the in-memory lifecycle to Running.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if deps.supervisor.meta(&id).unwrap().lifecycle == bpa_protocol::SessionLifecycle::Running
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lifecycle never advanced to Running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        flush_scrollback_once(&deps).await;
+
+        let db = deps.db.lock().await;
+        let rows = db.list_sessions().unwrap();
+        let row = rows.iter().find(|m| m.id == id).expect("row present");
+        assert_eq!(
+            row.lifecycle,
+            bpa_protocol::SessionLifecycle::Running,
+            "a flush sweep must persist the live lifecycle, not the create-time AtPrompt"
+        );
+
+        let _ = deps.supervisor.kill(&id);
+    }
+
     // ---- Peer-cred: honest same-process test. A cross-uid peer cannot be forged in the sandbox,
     // so we assert the accepted (same-euid) path works end to end; the rejection logic itself is
     // unit-tested in `singleton.rs` (peer_cred_rejects_foreign_uid_simulated). ----
@@ -2137,6 +2738,207 @@ mod tests {
             0,
             "killed session's attach entry must be reaped (no orphan)"
         );
+    }
+
+    // ---- D3 (Important): KillSession on a rehydrated (PTY-less, inactive) session must be an
+    // HONEST CLOSE, not the pre-fix unkillable-zombie behavior — Ack (not NoSuchSession),
+    // ListSessions no longer contains it, and its DB rows (session + scrollback) are gone so a
+    // second cold-rehydrate never resurrects it. Drives the real dispatch arm over the wire, then
+    // asserts directly against the DB (same `deps` the test keeps its own handle to, mirroring
+    // `daemon_shutdown_drain_flushes_then_exits`'s pattern for post-`serve()` DB assertions). ----
+    #[tokio::test]
+    async fn kill_session_on_rehydrated_inactive_session_is_an_honest_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let (deps, _runtime) = test_deps_with_shutdown(tx.clone());
+        let jh = tokio::spawn({
+            let deps = deps.clone();
+            async move {
+                let _ = serve(listener, deps.clone(), rx).await;
+            }
+        });
+
+        // Seed a persisted, INACTIVE session directly (mirrors what `boot::cold_rehydrate_sessions`
+        // does on a real restart) — a workspace row + session row + scrollback row, then rehydrate
+        // it into the running supervisor as a PTY-less replay-only entry.
+        let dead_id = "dead-rehydrated-honest-close".to_string();
+        let dead_meta = SessionMeta {
+            id: dead_id.clone(),
+            workspace_id: "ws".into(),
+            title: "t".into(),
+            shell: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+            lifecycle: bpa_protocol::SessionLifecycle::Exited {
+                code: Some(0),
+                signal: None,
+            },
+            waiting_for_input: false,
+            is_active: false,
+            created_at: 1_700_000_000,
+        };
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+            })
+            .unwrap();
+            db.upsert_session(&dead_meta).unwrap();
+            db.append_scrollback(&dead_id, 0, b"OLD_MARKER", 1).unwrap();
+        }
+        deps.supervisor
+            .rehydrate_inactive(dead_meta, b"OLD_MARKER".to_vec())
+            .expect("rehydrate_inactive");
+
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
+
+        // KillSession must Ack — NOT NoSuchSession (the pre-fix zombie behavior).
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 1,
+                req: Request::KillSession {
+                    session_id: dead_id.clone(),
+                },
+            },
+        )
+        .await;
+        match recv_frame_t(&mut c).await {
+            Frame::Response {
+                id: 1,
+                res: Response::Ack,
+            } => {}
+            other => panic!(
+                "KillSession on a rehydrated inactive session must Ack (honest close), got {other:?}"
+            ),
+        }
+
+        // ListSessions no longer contains it.
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 2,
+                req: Request::ListSessions,
+            },
+        )
+        .await;
+        loop {
+            match recv_frame_t(&mut c).await {
+                Frame::Response {
+                    id: 2,
+                    res: Response::Sessions(v),
+                } => {
+                    assert!(
+                        v.iter().all(|m| m.id != dead_id),
+                        "killed rehydrated session must no longer appear in ListSessions, got: {v:?}"
+                    );
+                    break;
+                }
+                Frame::Push(_) => continue,
+                other => panic!("expected Sessions, got {other:?}"),
+            }
+        }
+
+        // DB rows are gone.
+        {
+            let db = deps.db.lock().await;
+            assert!(
+                db.list_sessions().unwrap().iter().all(|m| m.id != dead_id),
+                "DB session row must be deleted"
+            );
+            assert_eq!(
+                db.load_scrollback(&dead_id).unwrap(),
+                Vec::<u8>::new(),
+                "DB scrollback rows must be deleted"
+            );
+        }
+
+        // A second "daemon restart" (cold-rehydrate against the same DB) must NOT resurrect it.
+        let fresh_supervisor = Arc::new(Supervisor::new());
+        {
+            let db = deps.db.lock().await;
+            for meta in db.list_sessions().unwrap() {
+                let sb = db.load_scrollback(&meta.id).unwrap_or_default();
+                let _ = fresh_supervisor.rehydrate_inactive(meta, sb);
+            }
+        }
+        assert!(
+            matches!(
+                fresh_supervisor.meta(&dead_id),
+                Err(SupervisorError::NoSuchSession(_))
+            ),
+            "a killed rehydrated session must never be resurrected by a subsequent cold-rehydrate"
+        );
+
+        // ---- Also: kill on a LIVE session still works (regression guard on the unchanged path). ----
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 3,
+                req: Request::CreateSession {
+                    workspace_id: "ws".into(),
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some("/tmp".into()),
+                    env_overrides: vec![],
+                    cols: 80,
+                    rows: 24,
+                },
+            },
+        )
+        .await;
+        let live_id = loop {
+            match recv_frame_t(&mut c).await {
+                Frame::Response {
+                    id: 3,
+                    res: Response::Session(m),
+                } => break m.id,
+                Frame::Response {
+                    id: 3,
+                    res: Response::Error { code, message },
+                } => panic!("create failed: {code}: {message}"),
+                Frame::Push(_) => continue,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 4,
+                req: Request::KillSession {
+                    session_id: live_id.clone(),
+                },
+            },
+        )
+        .await;
+        loop {
+            match recv_frame_t(&mut c).await {
+                Frame::Response {
+                    id: 4,
+                    res: Response::Ack,
+                } => break,
+                Frame::Push(_) => continue,
+                other => panic!("KillSession on a live session must still Ack, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(
+                deps.supervisor.meta(&live_id),
+                Err(SupervisorError::NoSuchSession(_))
+            ),
+            "a killed live session must be fully reaped/removed exactly as before"
+        );
+
+        tx.send(true).unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), jh).await;
     }
 
     // ---- Blocker A end-to-end (the verdict's required two-client regression): client A's

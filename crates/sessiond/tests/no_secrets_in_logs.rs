@@ -95,6 +95,22 @@ async fn planted_secret_never_appears_in_logs() {
     // DO share a binary.
     std::env::set_var("DAEMON_SECRET", secret);
 
+    // Isolate `$HOME` (D6): this test boots the REAL daemon core (`bpa_sessiond::run`), whose
+    // on-disk DB path resolves under `$HOME` (`boot::app_support_dir`). Without this, a dev
+    // machine with the real app installed would have this test read/write the real
+    // `~/Library/Application Support/.../bpa.db` — ambient-$HOME test pollution (D6). Single test
+    // in this file/binary, so no cross-test race — same reasoning as `tests/rehydrate_attach.rs`.
+    let home_dir = tempfile::tempdir().expect("home tempdir");
+    let prior_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home_dir.path());
+    assert_eq!(
+        bpa_sessiond::app_support_dir_for_test(),
+        home_dir
+            .path()
+            .join("Library/Application Support/ai.builderpro.desktop"),
+        "HOME isolation must actually redirect the daemon's app-support/DB path under the tempdir"
+    );
+
     let tmp = tempfile::tempdir().expect("tempdir");
     let log_path = tmp.path().join("sessiond.test.log");
     let socket = tmp.path().join("d.sock");
@@ -268,4 +284,10 @@ async fn planted_secret_never_appears_in_logs() {
     );
 
     std::env::remove_var("DAEMON_SECRET");
+
+    // Restore the real HOME so any later test in this (single-test) binary is unaffected.
+    match prior_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
 }

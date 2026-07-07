@@ -17,3 +17,6 @@ mod boot;
 /// Testable daemon boot core (spec §8.1-8.3, §13): bind, wire deps, run `serve` until
 /// shutdown, then drain. `main.rs` is a thin process-concerns wrapper over this.
 pub use boot::run;
+/// Test-support hook (D6) so integration tests can assert their `$HOME` isolation actually
+/// redirects the daemon's on-disk DB path. See [`boot::app_support_dir_for_test`].
+pub use boot::app_support_dir_for_test;

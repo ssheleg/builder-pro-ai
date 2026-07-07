@@ -36,6 +36,40 @@ async fn recv_frame(s: &mut UnixStream) -> Frame {
 /// codec-agnostic client preamble (`min:2, max:2`), then read + `decode_daemon_reply` the fixed
 /// 9-byte reply header (plus the trailing build string when accepted) and require `Accepted`.
 /// Distinct from `send_frame`/`recv_frame`: the preamble is a raw byte layout, not a CBOR `Frame`.
+// `boot::run` resolves its on-disk DB path from `$HOME` (see `boot::app_support_dir`), and
+// `HOME` is process-global mutable state. TWO tests in this file boot the real daemon core and
+// must isolate `HOME` under their own tempdir (D6: never touch the developer's real app-support
+// DB); `cargo test` runs tests from the same file/binary concurrently by default, so both tests
+// mutating `HOME` at once would race each other's set/read/restore sequence. This lock serializes
+// them — mirrors `singleton.rs`'s `ENV_LOCK`, which documents the identical hazard.
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Set `HOME` to `dir` under [`HOME_LOCK`] and return a guard that restores the prior value (and
+/// releases the lock) on drop — so every HOME-touching test in this file is fully serialized
+/// against the others even across a panic.
+struct HomeGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prior: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn set(dir: &std::path::Path) -> Self {
+        let lock = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir);
+        HomeGuard { _lock: lock, prior }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.prior.take() {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
 async fn preamble_handshake(s: &mut UnixStream) {
     let bytes = encode_client_preamble(&ClientPreamble {
         min: 2,
@@ -66,6 +100,21 @@ async fn preamble_handshake(s: &mut UnixStream) {
 async fn boot_handshake_create_session_and_clean_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("d.sock");
+
+    // Isolate `$HOME` (`boot::app_support_dir` resolves the on-disk DB path under it — see
+    // `boot.rs::app_support_dir`) under this test's own tempdir so `bpa_sessiond::run`, which
+    // boots the REAL daemon core below, never reads/writes the developer's actual
+    // `~/Library/Application Support/.../bpa.db` (D6: ambient-$HOME test pollution).
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+    assert_eq!(
+        bpa_sessiond::app_support_dir_for_test(),
+        home_dir
+            .path()
+            .join("Library/Application Support/ai.builderpro.desktop"),
+        "HOME isolation must actually redirect the daemon's app-support/DB path under the tempdir"
+    );
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Boot the daemon core on the temp socket.
@@ -162,6 +211,7 @@ async fn boot_handshake_create_session_and_clean_shutdown() {
         !socket.exists(),
         "socket should be unlinked on clean shutdown"
     );
+    // `_home_guard` restores the prior `HOME` (and releases `HOME_LOCK`) on drop here.
 }
 
 #[tokio::test]
@@ -186,6 +236,12 @@ async fn stale_socket_file_is_unlinked_and_rebound() {
     // file at the socket path (not a live listening socket).
     std::fs::write(&socket, b"").unwrap();
     assert!(socket.exists());
+
+    // Isolate `$HOME` (D6): this test also boots the real daemon core via `bpa_sessiond::run`,
+    // so its on-disk DB path must be redirected under a tempdir rather than the developer's real
+    // app-support dir.
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let socket_for_task = socket.clone();

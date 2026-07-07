@@ -23,6 +23,15 @@ pub(crate) fn app_support_dir() -> PathBuf {
     home.join("Library/Application Support/ai.builderpro.desktop")
 }
 
+/// Test-support wrapper exposing [`app_support_dir`] to integration tests (D6: proves a test's
+/// `$HOME` isolation actually redirects the daemon's on-disk DB path under its own tempdir,
+/// rather than the developer's real app-support dir) without widening the crate's real boot
+/// entry point beyond [`run`]. Not part of the daemon boot contract.
+#[doc(hidden)]
+pub fn app_support_dir_for_test() -> PathBuf {
+    app_support_dir()
+}
+
 /// Bind a fresh [`UnixListener`] at `socket`, cleaning up a stale socket file left behind by a
 /// crashed daemon (spec §8.2). The caller is expected to already hold the single-instance flock,
 /// so any pre-existing file at `socket` is necessarily a stale artifact rather than a live peer:
