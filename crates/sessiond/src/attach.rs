@@ -1250,20 +1250,34 @@ mod tests {
             // Release the child; it prints then exits. The trailing output MUST reach the client.
             sup.write_stdin(&id, b"go\n").expect("write go");
 
+            // Drain until the marker arrives OR the channel genuinely CLOSES (the forwarder dropped
+            // its sender ⇒ it forwarded every byte then terminated). Do NOT break on
+            // `attachment_count() == 0`: under parallel-test load the wait thread's `remove_session`
+            // reaps the map entry BEFORE the `spawn_blocking` forwarder finishes draining the final
+            // `FINAL_MARKER` chunk, so an early break there races the in-flight tail and reports a
+            // spurious loss. `recv()` returning `None` means the sender was dropped (graceful
+            // end-of-stream after a full drain) — the only correct signal that "everything the
+            // forwarder will ever send has been seen". A generous overall cap guards against a true
+            // hang without being timing-sensitive to load.
             let mut collected = Vec::new();
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                match recv_timeout(&mut client, 200).await {
-                    Some(Push::Output { bytes, .. }) => {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remaining, client.recv()).await {
+                    Ok(Some(Push::Output { bytes, .. })) => {
                         collected.extend_from_slice(&bytes);
                         if contains(&collected, b"FINAL_MARKER") {
                             break;
                         }
                     }
-                    Some(_) => continue,
-                    // Channel closed after the forwarder terminated: stop waiting.
-                    None if reg.attachment_count() == 0 => break,
-                    None => continue,
+                    Ok(Some(_)) => continue,
+                    // Channel closed: the forwarder drained fully and dropped its sender.
+                    Ok(None) => break,
+                    // Overall deadline hit (a genuine hang, not load jitter).
+                    Err(_) => break,
                 }
             }
 
