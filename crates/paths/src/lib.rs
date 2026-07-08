@@ -92,6 +92,77 @@ pub fn validate_dir(path: &Path) -> Result<PathBuf, PathError> {
     }
 }
 
+/// Validate that `candidate` resolves (after symlink/`.`/`..` resolution) to a path
+/// contained within (or equal to) `root`. Both `root` and `candidate` must already exist.
+/// Returns the canonicalized `candidate`. This is the containment primitive every
+/// file-explorer operation (list/read/rename/move/delete) validates against before
+/// touching the filesystem (spec §4.1).
+///
+/// Fails closed: any canonicalize error (missing path, broken symlink, permission
+/// error, ...) or a candidate whose canonical form is not a descendant of the
+/// canonical root is `Err(PathError::SymlinkEscape)` -- never an optimistic pass.
+pub fn validate_path_within(root: &Path, candidate: &Path) -> Result<PathBuf, PathError> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|source| PathError::Canonicalize {
+        path: root.display().to_string(),
+        source,
+    })?;
+
+    let canonical_candidate = std::fs::canonicalize(candidate).map_err(|_| {
+        PathError::SymlinkEscape(format!(
+            "{} could not be resolved relative to root {}",
+            candidate.display(),
+            root.display()
+        ))
+    })?;
+
+    if canonical_candidate.starts_with(&canonical_root) {
+        Ok(canonical_candidate)
+    } else {
+        Err(PathError::SymlinkEscape(format!(
+            "{} resolves outside root {}",
+            candidate.display(),
+            root.display()
+        )))
+    }
+}
+
+/// Validate a not-yet-existing create/rename destination under `root`. The PARENT of
+/// `target` must already exist and resolve within `root`; the final path component of
+/// `target` must be a single real path segment -- not `.`/`..`, and (defensively) free of
+/// embedded path separators. Returns the canonicalized parent joined with that final
+/// component, i.e. the canonical path `target` would have once created.
+///
+/// Fails closed: an unresolvable/foreign parent, or a final component that is not a
+/// plain path segment, is `Err(PathError::SymlinkEscape)`.
+pub fn validate_parent_within(root: &Path, target: &Path) -> Result<PathBuf, PathError> {
+    let final_component = target.file_name().ok_or_else(|| {
+        PathError::SymlinkEscape(format!(
+            "{} has no valid final path segment (ends in '.', '..', or is empty/root)",
+            target.display()
+        ))
+    })?;
+
+    // Defensive: `file_name()` can never itself contain a separator on a well-formed
+    // `Path` (a separator always starts a new component), but this is the
+    // security-authoritative check, so guard explicitly rather than relying on that.
+    if final_component
+        .to_string_lossy()
+        .contains(std::path::MAIN_SEPARATOR)
+    {
+        return Err(PathError::SymlinkEscape(format!(
+            "{} final component contains a path separator",
+            target.display()
+        )));
+    }
+
+    let parent = target.parent().ok_or_else(|| {
+        PathError::SymlinkEscape(format!("{} has no parent directory", target.display()))
+    })?;
+
+    let canonical_parent = validate_path_within(root, parent)?;
+    Ok(canonical_parent.join(final_component))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +244,149 @@ mod tests {
     fn root_path_is_allowed() {
         let got = validate_dir(Path::new("/")).expect("root is a valid directory");
         assert_eq!(got, fs::canonicalize("/").unwrap());
+    }
+
+    // -- validate_path_within -------------------------------------------------------
+
+    #[test]
+    fn candidate_inside_root_returns_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let sub = root.join("sub");
+        fs::create_dir(&sub).unwrap();
+
+        let got = validate_path_within(&root, &sub).expect("candidate inside root");
+        assert_eq!(got, fs::canonicalize(&sub).unwrap());
+    }
+
+    #[test]
+    fn candidate_equal_to_root_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+
+        let got = validate_path_within(&root, &root).expect("candidate == root");
+        assert_eq!(got, fs::canonicalize(&root).unwrap());
+    }
+
+    #[test]
+    fn dotdot_escape_is_rejected() {
+        // root/../outside canonicalizes to a real, existing sibling dir -> outside root.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+
+        let candidate = root.join("..").join("outside");
+        let err = validate_path_within(&root, &candidate).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
+        assert_eq!(err.code(), "SymlinkEscape");
+    }
+
+    #[test]
+    fn symlink_pointing_outside_root_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let err = validate_path_within(&root, &link).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
+        assert_eq!(err.code(), "SymlinkEscape");
+    }
+
+    #[test]
+    fn candidate_that_does_not_exist_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let gone = root.join("does-not-exist");
+
+        let err = validate_path_within(&root, &gone).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
+    }
+
+    // -- validate_parent_within ------------------------------------------------------
+
+    #[test]
+    fn parent_within_root_with_fresh_filename_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let target = root.join("new-file.txt"); // does not exist yet
+
+        let got = validate_parent_within(&root, &target).expect("fresh filename under root");
+        assert_eq!(got, fs::canonicalize(&root).unwrap().join("new-file.txt"));
+    }
+
+    #[test]
+    fn parent_within_nested_existing_dir_with_fresh_filename_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let nested = root.join("nested");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&nested).unwrap();
+        let target = nested.join("new-file.txt");
+
+        let got = validate_parent_within(&root, &target).expect("fresh filename under nested dir");
+        assert_eq!(got, fs::canonicalize(&nested).unwrap().join("new-file.txt"));
+    }
+
+    #[test]
+    fn parent_within_multi_segment_final_component_is_rejected() {
+        // "a" does not exist yet, so the parent of target ("root/a") cannot canonicalize.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let target = root.join("a").join("b");
+
+        let err = validate_parent_within(&root, &target).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
+        assert_eq!(err.code(), "SymlinkEscape");
+    }
+
+    #[test]
+    fn parent_within_dotdot_final_component_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let target = root.join("..");
+
+        let err = validate_parent_within(&root, &target).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
+        assert_eq!(err.code(), "SymlinkEscape");
+    }
+
+    #[test]
+    fn parent_within_dot_final_component_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let target = root.join(".");
+
+        let err = validate_parent_within(&root, &target).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parent_within_root_but_symlink_escaping_parent_is_rejected() {
+        // root/escape -> ../outside ; target = root/escape/new-file.txt
+        // parent (root/escape) resolves outside root -> rejected.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let escape = root.join("escape");
+        std::os::unix::fs::symlink(&outside, &escape).unwrap();
+        let target = escape.join("new-file.txt");
+
+        let err = validate_parent_within(&root, &target).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
     }
 }
