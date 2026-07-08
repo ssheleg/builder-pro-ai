@@ -32,6 +32,28 @@ fn sample_workspace() -> Workspace {
         id: "ws-1".into(),
         name: "Demo".into(),
         root_path: "/tmp/demo".into(),
+        roots: vec!["/tmp/demo".into()],
+    }
+}
+
+/// A workspace with 2 roots (spec §3.1: `root_path` mirrors `roots[0]`).
+fn sample_workspace_multi_root() -> Workspace {
+    Workspace {
+        id: "ws-2".into(),
+        name: "Multi".into(),
+        root_path: "/tmp/a".into(),
+        roots: vec!["/tmp/a".into(), "/tmp/b".into()],
+    }
+}
+
+fn sample_command_event() -> CommandEvent {
+    CommandEvent {
+        session_id: "sess-1".into(),
+        seq: 42,
+        ts: 1_720_000_000,
+        kind: "started".into(),
+        exit_code: None,
+        origin: "user".into(),
     }
 }
 
@@ -122,18 +144,40 @@ fn all_requests() -> Vec<Request> {
         },
         Request::DaemonShutdown { drain: true },
         Request::DaemonShutdown { drain: false },
+        Request::AddWorkspaceRoot {
+            workspace_id: "ws-1".into(),
+            path: "/tmp/new-root".into(),
+        },
+        Request::RemoveWorkspaceRoot {
+            workspace_id: "ws-1".into(),
+            path: "/tmp/old-root".into(),
+        },
+        Request::GetCommandEvents {
+            session_id: "sess-1".into(),
+            limit: 50,
+        },
     ]
 }
 
 fn all_responses() -> Vec<Response> {
     let mut v = vec![
-        Response::Workspaces(vec![sample_workspace()]),
+        Response::Workspaces(vec![sample_workspace(), sample_workspace_multi_root()]),
         Response::Workspace(sample_workspace()),
+        Response::Workspace(sample_workspace_multi_root()),
         Response::Ack,
         Response::Error {
             code: "InvalidWorkspaceRoot".into(),
             message: "gone".into(),
         },
+        Response::CommandEvents(vec![
+            sample_command_event(),
+            CommandEvent {
+                kind: "finished".into(),
+                exit_code: Some(0),
+                ..sample_command_event()
+            },
+        ]),
+        Response::CommandEvents(vec![]),
     ];
     for lc in all_lifecycles() {
         v.push(Response::Sessions(vec![sample_meta(lc.clone())]));
@@ -170,6 +214,7 @@ fn all_pushes() -> Vec<Push> {
         Push::WorkspaceCreated {
             workspace: sample_workspace(),
         },
+        Push::WorkspaceUpdated(sample_workspace_multi_root()),
         Push::Error {
             session_id: Some("sess-1".into()),
             code: "PtySpawn".into(),
@@ -236,6 +281,37 @@ fn every_terminal_event_variant_roundtrips_via_cbor() {
         },
         TerminalEvent::Output {
             bytes: vec![1, 2, 3],
+        },
+    ] {
+        assert_cbor_roundtrip(&ev);
+    }
+}
+
+#[test]
+fn workspace_with_multiple_roots_roundtrips_via_cbor() {
+    let ws = sample_workspace_multi_root();
+    assert_eq!(ws.roots.len(), 2, "sanity: fixture has 2 roots");
+    assert_eq!(
+        ws.root_path, ws.roots[0],
+        "sanity: root_path mirrors roots[0] per spec §3.1"
+    );
+    assert_cbor_roundtrip(&ws);
+}
+
+#[test]
+fn command_event_roundtrips_via_cbor() {
+    for ev in [
+        sample_command_event(),
+        CommandEvent {
+            kind: "finished".into(),
+            exit_code: Some(137),
+            ..sample_command_event()
+        },
+        CommandEvent {
+            kind: "finished".into(),
+            exit_code: None,
+            origin: "system".into(),
+            ..sample_command_event()
         },
     ] {
         assert_cbor_roundtrip(&ev);

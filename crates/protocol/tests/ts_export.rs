@@ -23,6 +23,9 @@ fn export_and_read() -> String {
     SessionLifecycle::export_all_to(types_ts_dir()).expect("export SessionLifecycle");
     SessionMeta::export_all_to(types_ts_dir()).expect("export SessionMeta");
     TerminalEvent::export_all_to(types_ts_dir()).expect("export TerminalEvent");
+    // CommandEvent is not a field/variant dependency of any other exported type, so it
+    // needs its own explicit export call or it never lands in types.ts (spec §3.3).
+    CommandEvent::export_all_to(types_ts_dir()).expect("export CommandEvent");
     fs::read_to_string(types_ts_path()).expect("read generated types.ts")
 }
 
@@ -57,6 +60,57 @@ fn workspace_uses_camelcase_root_path() {
     assert!(
         !ts.contains("root_path"),
         "generated TS must not contain snake_case `root_path`"
+    );
+}
+
+#[test]
+fn workspace_exposes_roots_array() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "roots: Array<string>")
+            || contains_normalized(&ts, "roots: string[]"),
+        "Workspace.roots (Vec<String>) must be a string array; got:\n{ts}"
+    );
+}
+
+#[test]
+fn command_event_is_exported_camelcase_with_number_seq_and_ts() {
+    let ts = export_and_read();
+    assert!(
+        ts.contains("export type CommandEvent"),
+        "CommandEvent must be exported as a top-level TS type; got:\n{ts}"
+    );
+    for field in ["sessionId:", "exitCode:"] {
+        assert!(
+            contains_normalized(&ts, field),
+            "CommandEvent must expose camelCase field `{field}`; got:\n{ts}"
+        );
+    }
+    // seq/ts are i64 overridden to TS `number` (matches SessionMeta.createdAt), not bigint.
+    assert!(
+        contains_normalized(&ts, "seq: number"),
+        "CommandEvent.seq must be overridden to TS `number`, not `bigint`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "ts: number"),
+        "CommandEvent.ts must be overridden to TS `number`, not `bigint`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "kind: string"),
+        "CommandEvent.kind must be a plain string (started|finished literals, spec §3.3); got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "exitCode: number | null")
+            || contains_normalized(&ts, "exitCode: number|null"),
+        "CommandEvent.exitCode (Option<u8>) must be nullable number; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "origin: string"),
+        "CommandEvent.origin must be a plain string; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("session_id") && !ts.contains("exit_code"),
+        "no snake_case leakage in CommandEvent"
     );
 }
 

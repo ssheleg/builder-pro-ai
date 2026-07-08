@@ -41,7 +41,10 @@ pub type WorkspaceId = String; // UUID v4
 pub struct Workspace {
     pub id: WorkspaceId,
     pub name: String,
+    /// Compat mirror, always == roots[0].
     pub root_path: String,
+    /// Ordered, equal roots; canonical absolute paths; len >= 1.
+    pub roots: Vec<String>,
 }
 
 /// Internally tagged on `kind` (tag only, no content) — matches the TS discriminated
@@ -87,6 +90,26 @@ pub struct SessionMeta {
     /// `number` per spec §5 (safe for unix-second timestamps, well under 2^53).
     #[ts(type = "number")]
     pub created_at: i64,
+}
+
+/// Mirrors a `command_events` row (Pv2 §7); ts-rs exported. First consumer is
+/// `Request::GetCommandEvents` (spec §3.3), returned newest-first.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "types.ts")]
+pub struct CommandEvent {
+    pub session_id: SessionId,
+    /// monotonic per-session sequence number. `i64` maps to TS `bigint` by
+    /// default in ts-rs; overridden to `number` (matches `SessionMeta::created_at`).
+    #[ts(type = "number")]
+    pub seq: i64,
+    /// unix seconds. Overridden to TS `number` (see `seq` above).
+    #[ts(type = "number")]
+    pub ts: i64,
+    /// "started" | "finished" — the exact literals the Pv2 writer persists (pty_supervisor.rs)
+    pub kind: String,
+    pub exit_code: Option<u8>,
+    pub origin: String,
 }
 
 /// Hop-A Channel payload (spec §6.2). Adjacently tagged (`event`/`data`).
@@ -163,6 +186,18 @@ pub enum Request {
     DaemonShutdown {
         drain: bool,
     },
+    AddWorkspaceRoot {
+        workspace_id: WorkspaceId,
+        path: String,
+    },
+    RemoveWorkspaceRoot {
+        workspace_id: WorkspaceId,
+        path: String,
+    },
+    GetCommandEvents {
+        session_id: SessionId,
+        limit: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -173,6 +208,7 @@ pub enum Response {
     Session(SessionMeta),
     Ack,
     Error { code: String, message: String },
+    CommandEvents(Vec<CommandEvent>),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -209,6 +245,8 @@ pub enum Push {
         code: String,
         message: String,
     },
+    /// emitted after Add/RemoveWorkspaceRoot
+    WorkspaceUpdated(Workspace),
 }
 
 #[cfg(test)]
