@@ -6,12 +6,15 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bpa_protocol::{SessionId, SessionLifecycle, SessionMeta, Workspace};
+use bpa_protocol::{
+    CommandEvent, SessionId, SessionLifecycle, SessionMeta, Workspace, WorkspaceId,
+};
 use rusqlite::Connection;
 use tracing::{info, warn};
 
 /// Current schema/migration version stored in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 2;
+/// v3 (S2 §3.2) adds `workspace_root` — equal ordered multi-root workspaces.
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -19,6 +22,9 @@ pub enum PersistError {
     Sql(String),
     Migration(String),
     Corrupt(String),
+    /// A `remove_workspace_root` call would leave the workspace with zero roots
+    /// (spec §3.3: `RemoveWorkspaceRoot` rejects removing the LAST root).
+    LastRoot,
 }
 
 impl fmt::Display for PersistError {
@@ -28,11 +34,27 @@ impl fmt::Display for PersistError {
             PersistError::Sql(m) => write!(f, "db sql error: {m}"),
             PersistError::Migration(m) => write!(f, "db migration failed: {m}"),
             PersistError::Corrupt(m) => write!(f, "db corrupt: {m}"),
+            PersistError::LastRoot => write!(f, "cannot remove the last workspace root"),
         }
     }
 }
 
 impl std::error::Error for PersistError {}
+
+impl PersistError {
+    /// Stable wire code for `Response::Error { code, .. }` (spec §3.3), PascalCase
+    /// to match the existing convention (`bpa_paths::PathError::code()`, the ad hoc
+    /// codes in `socket_server.rs` — e.g. `"InvalidWorkspaceRoot"`, `"NoSuchSession"`).
+    pub fn code(&self) -> &'static str {
+        match self {
+            PersistError::Open(_) => "DbOpen",
+            PersistError::Sql(_) => "DbSql",
+            PersistError::Migration(_) => "DbMigration",
+            PersistError::Corrupt(_) => "DbCorrupt",
+            PersistError::LastRoot => "LastRoot",
+        }
+    }
+}
 
 impl From<rusqlite::Error> for PersistError {
     fn from(e: rusqlite::Error) -> Self {
@@ -211,6 +233,21 @@ impl Db {
             )
             .map_err(|e| PersistError::Migration(e.to_string()))?;
         }
+        if from_version < 3 {
+            // S2 §3.2: equal ordered multi-root workspaces. Every pre-existing workspace's
+            // single `root_path` becomes its ord=0 root; `workspace.root_path` stays as a
+            // compat mirror (kept in sync by `upsert_workspace`/`remove_workspace_root`).
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS workspace_root (
+                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
+                   ord          INTEGER NOT NULL,
+                   path         TEXT NOT NULL,
+                   PRIMARY KEY (workspace_id, ord));
+                 INSERT INTO workspace_root (workspace_id, ord, path)
+                   SELECT id, 0, root_path FROM workspace;",
+            )
+            .map_err(|e| PersistError::Migration(e.to_string()))?;
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| PersistError::Migration(e.to_string()))?;
         tx.commit()
@@ -252,31 +289,171 @@ fn decode_lifecycle(
 }
 
 impl Db {
+    /// Write the `workspace` row (`root_path` mirror := `ws.roots[0]`, per D2/spec §3.1) AND
+    /// replace its `workspace_root` rows (delete-then-insert every `(id, ord=i, path=roots[i])`),
+    /// all within one transaction — an update never leaves a torn mix of old and new roots
+    /// (spec §3.2, §11 fail-closed policy). Rejects a `Workspace` with an empty `roots` (every
+    /// workspace must have at least one root — a caller bug, not a transient failure).
     pub fn upsert_workspace(&self, ws: &Workspace) -> Result<(), PersistError> {
-        self.conn.execute(
+        if ws.roots.is_empty() {
+            return Err(PersistError::Sql(format!(
+                "workspace {} has no roots (roots must be non-empty)",
+                ws.id
+            )));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let root_path = &ws.roots[0];
+        tx.execute(
             "INSERT INTO workspace (id, name, root_path) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, root_path = excluded.root_path",
-            rusqlite::params![ws.id, ws.name, ws.root_path],
+            rusqlite::params![ws.id, ws.name, root_path],
         )?;
+        tx.execute(
+            "DELETE FROM workspace_root WHERE workspace_id = ?1",
+            rusqlite::params![ws.id],
+        )?;
+        for (i, root) in ws.roots.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO workspace_root (workspace_id, ord, path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![ws.id, i as i64, root],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
+    /// List every workspace with its ordered `roots` assembled from `workspace_root`
+    /// (spec §3.2: joins + orders by `ord`). Defensive fallback: a workspace row with no
+    /// `workspace_root` rows (shouldn't happen post-migration/`upsert_workspace`) still
+    /// yields `roots = [root_path]` rather than an empty vec.
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>, PersistError> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, name, root_path FROM workspace ORDER BY id")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Workspace {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                root_path: r.get(2)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
+        let base: Vec<(String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+
+        let mut roots_stmt = self
+            .conn
+            .prepare("SELECT path FROM workspace_root WHERE workspace_id = ?1 ORDER BY ord")?;
+        let mut out = Vec::with_capacity(base.len());
+        for (id, name, root_path) in base {
+            let roots: Vec<String> = roots_stmt
+                .query_map(rusqlite::params![id], |r| r.get::<_, String>(0))?
+                .collect::<Result<_, _>>()?;
+            let roots = if roots.is_empty() {
+                vec![root_path.clone()]
+            } else {
+                roots
+            };
+            out.push(Workspace {
+                id,
+                name,
+                root_path,
+                roots,
+            });
         }
         Ok(out)
+    }
+
+    /// Append a new root at `ord = max(ord) + 1` (spec §3.3 `AddWorkspaceRoot`; the caller —
+    /// `socket_server.rs` — validates the path with `bpa_paths::validate_dir` first). Returns
+    /// the updated `Workspace` (assembled via the same path as `list_workspaces`). Adding a
+    /// root never touches `root_path` (it always mirrors `roots[0]`, unaffected by an append).
+    pub fn add_workspace_root(
+        &self,
+        workspace_id: &WorkspaceId,
+        path: &str,
+    ) -> Result<Workspace, PersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let max_ord: Option<i64> = tx.query_row(
+            "SELECT MAX(ord) FROM workspace_root WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+            |r| r.get(0),
+        )?;
+        let next_ord = max_ord.map(|o| o + 1).unwrap_or(0);
+        tx.execute(
+            "INSERT INTO workspace_root (workspace_id, ord, path) VALUES (?1, ?2, ?3)",
+            rusqlite::params![workspace_id, next_ord, path],
+        )?;
+        tx.commit()?;
+        self.list_workspaces()?
+            .into_iter()
+            .find(|w| &w.id == workspace_id)
+            .ok_or_else(|| {
+                PersistError::Sql(format!(
+                    "workspace {workspace_id} not found after add_workspace_root"
+                ))
+            })
+    }
+
+    /// Remove a root (spec §3.3 `RemoveWorkspaceRoot`), rejecting removal of the LAST
+    /// remaining root (`PersistError::LastRoot`) so a workspace can never end up with zero
+    /// roots. After removal, `ord` is re-normalized to be contiguous from 0 (so a later
+    /// `AddWorkspaceRoot` keeps appending at a sane `ord`), and `workspace.root_path` is
+    /// re-pointed at the new `roots[0]` if the removed root WAS the old `roots[0]`. If `path`
+    /// isn't one of the workspace's current roots, this is an idempotent no-op (returns the
+    /// unchanged `Workspace`) rather than an error — matches the honest-degradation policy
+    /// (spec §11: never a silent no-op that looks like success-with-a-side-effect, but also
+    /// never an error for "there was nothing to do").
+    pub fn remove_workspace_root(
+        &self,
+        workspace_id: &WorkspaceId,
+        path: &str,
+    ) -> Result<Workspace, PersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stmt =
+            tx.prepare("SELECT path FROM workspace_root WHERE workspace_id = ?1 ORDER BY ord")?;
+        let existing: Vec<String> = stmt
+            .query_map(rusqlite::params![workspace_id], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+
+        let remaining: Vec<String> = existing
+            .iter()
+            .filter(|p| p.as_str() != path)
+            .cloned()
+            .collect();
+
+        if remaining.len() == existing.len() {
+            // `path` isn't a current root of this workspace: nothing to remove.
+            drop(tx);
+            return self
+                .list_workspaces()?
+                .into_iter()
+                .find(|w| &w.id == workspace_id)
+                .ok_or_else(|| PersistError::Sql(format!("workspace {workspace_id} not found")));
+        }
+        if remaining.is_empty() {
+            return Err(PersistError::LastRoot);
+        }
+
+        tx.execute(
+            "DELETE FROM workspace_root WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+        )?;
+        for (i, p) in remaining.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO workspace_root (workspace_id, ord, path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![workspace_id, i as i64, p],
+            )?;
+        }
+        tx.execute(
+            "UPDATE workspace SET root_path = ?2 WHERE id = ?1",
+            rusqlite::params![workspace_id, remaining[0]],
+        )?;
+        tx.commit()?;
+
+        self.list_workspaces()?
+            .into_iter()
+            .find(|w| &w.id == workspace_id)
+            .ok_or_else(|| {
+                PersistError::Sql(format!(
+                    "workspace {workspace_id} not found after remove_workspace_root"
+                ))
+            })
     }
 
     pub fn upsert_session(&self, meta: &SessionMeta) -> Result<(), PersistError> {
@@ -467,19 +644,32 @@ impl Db {
         }
     }
 
-    /// Read back every command-history row for a session, ordered by `seq` (test-support / future
-    /// history queries).
+    /// Read back the most recent command-history rows for a session, newest-first
+    /// (`ORDER BY seq DESC LIMIT ?`), capped at `limit` — the first consumer of
+    /// `command_events` (spec §3.3 `Request::GetCommandEvents`, closing the "no UI" note
+    /// from Pv2 §7). Returns the wire `bpa_protocol::CommandEvent` (the internal
+    /// `session_id` is injected into every row since the table's own `session_id` column
+    /// isn't otherwise carried by `CommandEventRow`'s narrower predecessor). An unknown
+    /// `session_id` yields an empty `Vec`, never an error — spec §7 "honest, not an error"
+    /// (rehydrated sessions may predate v2 rows).
+    ///
+    /// Note: prior to S2 this method returned ALL rows oldest-first as `Vec<CommandEventRow>`
+    /// (test-support only, no production caller). Reconciled here to the spec §3.2/§3.3
+    /// signature directly (newest-first, `limit`, `CommandEvent`) rather than adding a
+    /// parallel method, since nothing outside this module's own tests ever called the old one.
     pub fn list_command_events(
         &self,
-        session_id: &str,
-    ) -> Result<Vec<CommandEventRow>, PersistError> {
+        session_id: &SessionId,
+        limit: u32,
+    ) -> Result<Vec<CommandEvent>, PersistError> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, ts, kind, exit_code, origin FROM command_events
-             WHERE session_id = ?1 ORDER BY seq",
+             WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map([session_id], |r| {
+        let rows = stmt.query_map(rusqlite::params![session_id, limit as i64], |r| {
             let exit_code: Option<i64> = r.get(3)?;
-            Ok(CommandEventRow {
+            Ok(CommandEvent {
+                session_id: session_id.clone(),
                 seq: r.get(0)?,
                 ts: r.get(1)?,
                 kind: r.get(2)?,
@@ -495,17 +685,6 @@ impl Db {
     }
 }
 
-/// One row of the `command_events` table (schema v2, spec §7 + Pv2 `origin` amendment), as read
-/// back by [`Db::list_command_events`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandEventRow {
-    pub seq: i64,
-    pub ts: i64,
-    pub kind: String,
-    pub exit_code: Option<u8>,
-    pub origin: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +695,18 @@ mod tests {
             id: id.into(),
             name: format!("ws-{id}"),
             root_path: "/tmp".into(),
+            roots: vec!["/tmp".into()],
+        }
+    }
+
+    /// Build a `Workspace` with an explicit ordered multi-root list (`root_path`
+    /// mirrors `roots[0]`, matching what `upsert_workspace` itself would compute).
+    fn ws_multi(id: &str, roots: &[&str]) -> Workspace {
+        Workspace {
+            id: id.into(),
+            name: format!("ws-{id}"),
+            root_path: roots[0].into(),
+            roots: roots.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -824,7 +1015,8 @@ mod tests {
             conn.pragma_update(None, "user_version", 1_i64).unwrap();
         }
 
-        // Open with the v2 daemon: migration must run 1 -> 2 in place.
+        // Open with the current daemon: migration must run all the way 1 -> SCHEMA_VERSION
+        // (currently 3) in place, in one shot.
         let db = Db::open(&path).unwrap();
         let uv: i64 = db
             .conn
@@ -835,7 +1027,7 @@ mod tests {
         // command_events exists and is usable.
         db.append_command_event("s1", 0, 1_700_000_001, "started", None, "gui")
             .unwrap();
-        let events = db.list_command_events("s1").unwrap();
+        let events = db.list_command_events(&"s1".to_string(), 10).unwrap();
         assert_eq!(events.len(), 1);
 
         // The pre-existing v1 session row survived the migration untouched.
@@ -844,10 +1036,18 @@ mod tests {
         assert_eq!(sessions[0].id, "s1");
         assert_eq!(sessions[0].workspace_id, "w1");
         assert_eq!(sessions[0].lifecycle, SessionLifecycle::Running);
+
+        // S2 §3.2: the v1 workspace also picked up an ord=0 workspace_root backfill row on
+        // its way through v2 -> v3.
+        let workspaces = db.list_workspaces().unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].id, "w1");
+        assert_eq!(workspaces[0].root_path, "/tmp");
+        assert_eq!(workspaces[0].roots, vec!["/tmp".to_string()]);
     }
 
     #[test]
-    fn v2_reopen_is_noop() {
+    fn v3_reopen_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bpa.db");
         {
@@ -858,8 +1058,8 @@ mod tests {
             db.append_command_event("s1", 0, 1, "started", None, "gui")
                 .unwrap();
         }
-        // Reopening an already-v2 db must be a no-op migration (from_version == SCHEMA_VERSION)
-        // and must not disturb existing rows.
+        // Reopening an already-current-version db must be a no-op migration
+        // (from_version == SCHEMA_VERSION) and must not disturb existing rows.
         let db2 = Db::open(&path).unwrap();
         let uv: i64 = db2
             .conn
@@ -868,11 +1068,16 @@ mod tests {
         assert_eq!(uv, SCHEMA_VERSION);
         assert_eq!(db2.list_workspaces().unwrap().len(), 1);
         assert_eq!(db2.rehydrate().unwrap().len(), 1);
-        assert_eq!(db2.list_command_events("s1").unwrap().len(), 1);
+        assert_eq!(
+            db2.list_command_events(&"s1".to_string(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
-    fn user_version_3_fails_closed() {
+    fn user_version_ahead_of_schema_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bpa.db");
         {
@@ -889,6 +1094,8 @@ mod tests {
 
     #[test]
     fn append_and_read_command_event_round_trips() {
+        // S2 §3.3: list_command_events is newest-first (ORDER BY seq DESC), unlike the old
+        // (test-only) oldest-first CommandEventRow reader it replaced.
         let db = Db::open_in_memory().unwrap();
         db.upsert_workspace(&ws("w1")).unwrap();
         db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
@@ -899,20 +1106,57 @@ mod tests {
         db.append_command_event("s1", 1, 1_700_000_005, "finished", Some(7), "gui")
             .unwrap();
 
-        let events = db.list_command_events("s1").unwrap();
+        let events = db.list_command_events(&"s1".to_string(), 10).unwrap();
         assert_eq!(events.len(), 2);
 
-        assert_eq!(events[0].seq, 0);
-        assert_eq!(events[0].ts, 1_700_000_000);
-        assert_eq!(events[0].kind, "started");
-        assert_eq!(events[0].exit_code, None);
+        // newest (seq=1) first.
+        assert_eq!(events[0].session_id, "s1");
+        assert_eq!(events[0].seq, 1);
+        assert_eq!(events[0].ts, 1_700_000_005);
+        assert_eq!(events[0].kind, "finished");
+        assert_eq!(events[0].exit_code, Some(7));
         assert_eq!(events[0].origin, "gui");
 
-        assert_eq!(events[1].seq, 1);
-        assert_eq!(events[1].ts, 1_700_000_005);
-        assert_eq!(events[1].kind, "finished");
-        assert_eq!(events[1].exit_code, Some(7));
+        assert_eq!(events[1].session_id, "s1");
+        assert_eq!(events[1].seq, 0);
+        assert_eq!(events[1].ts, 1_700_000_000);
+        assert_eq!(events[1].kind, "started");
+        assert_eq!(events[1].exit_code, None);
         assert_eq!(events[1].origin, "gui");
+    }
+
+    #[test]
+    fn list_command_events_respects_limit_and_unknown_session_is_empty() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws("w1")).unwrap();
+        db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+            .unwrap();
+        for i in 0..5i64 {
+            db.append_command_event("s1", i, 1_700_000_000 + i, "started", None, "gui")
+                .unwrap();
+        }
+
+        let capped = db.list_command_events(&"s1".to_string(), 3).unwrap();
+        assert_eq!(
+            capped.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![4, 3, 2],
+            "limit=3 keeps only the 3 newest, newest-first"
+        );
+
+        let all = db.list_command_events(&"s1".to_string(), 100).unwrap();
+        assert_eq!(
+            all.len(),
+            5,
+            "a limit above the row count returns every row"
+        );
+
+        let empty = db
+            .list_command_events(&"no-such-session".to_string(), 10)
+            .unwrap();
+        assert!(
+            empty.is_empty(),
+            "an unknown session_id is an empty list, not an error (spec §7)"
+        );
     }
 
     // ---- D3: delete_session removes the session row + scrollback + command_events rows in one
@@ -947,7 +1191,9 @@ mod tests {
             "s1's scrollback rows must be gone"
         );
         assert!(
-            db.list_command_events("s1").unwrap().is_empty(),
+            db.list_command_events(&"s1".to_string(), 10)
+                .unwrap()
+                .is_empty(),
             "s1's command_events rows must be gone"
         );
 
@@ -960,7 +1206,10 @@ mod tests {
             .expect("s2 must survive s1's deletion");
         assert_eq!(s2.id, "s2");
         assert_eq!(db.load_scrollback(&"s2".to_string()).unwrap(), b"kept");
-        assert_eq!(db.list_command_events("s2").unwrap().len(), 1);
+        assert_eq!(
+            db.list_command_events(&"s2".to_string(), 10).unwrap().len(),
+            1
+        );
 
         // A restart-equivalent (rehydrate) must not resurrect s1.
         let rehydrated = db.rehydrate().unwrap();
@@ -974,5 +1223,325 @@ mod tests {
             .expect("deleting an already-gone session must be a no-op success, not an error");
         db.delete_session(&"never-existed".to_string())
             .expect("deleting a never-persisted session must be a no-op success");
+    }
+
+    // ---- Task 3 / spec §3.2: schema v3 workspace_root — multi-root persistence (RED first). ----
+
+    #[test]
+    fn fresh_db_is_v3_with_workspace_root_table() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(SCHEMA_VERSION, 3);
+        let uv: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, 3);
+
+        let exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'workspace_root'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "fresh db must have a workspace_root table");
+    }
+
+    #[test]
+    fn v2_db_migrates_to_v3_backfills_ord0_for_every_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        // Build a v2 db by hand: the exact v2 table set (workspace/session/scrollback/
+        // command_events, NO workspace_root yet) + user_version=2, with TWO pre-existing
+        // workspaces — mirrors `v1_db_migrates_to_v2_gains_command_events_keeps_rows` above,
+        // one schema version further along.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workspace (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
+                 CREATE TABLE session (
+                   id TEXT PRIMARY KEY,
+                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
+                   title TEXT NOT NULL, shell TEXT NOT NULL, cwd TEXT NOT NULL,
+                   cols INTEGER NOT NULL, rows INTEGER NOT NULL,
+                   lifecycle TEXT NOT NULL,
+                   exit_code INTEGER, exit_signal TEXT,
+                   created_at INTEGER NOT NULL);
+                 CREATE TABLE scrollback (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq INTEGER NOT NULL, bytes BLOB NOT NULL, ts INTEGER NOT NULL,
+                   PRIMARY KEY (session_id, seq));
+                 CREATE TABLE command_events (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq        INTEGER NOT NULL,
+                   ts         INTEGER NOT NULL,
+                   kind       TEXT NOT NULL,
+                   exit_code  INTEGER,
+                   origin     TEXT NOT NULL DEFAULT 'gui',
+                   PRIMARY KEY (session_id, seq));
+                 INSERT INTO workspace (id, name, root_path) VALUES ('w1', 'ws-w1', '/tmp/one');
+                 INSERT INTO workspace (id, name, root_path) VALUES ('w2', 'ws-w2', '/tmp/two');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2_i64).unwrap();
+        }
+
+        // Open with the v3 daemon: migration must run 2 -> 3 in place.
+        let db = Db::open(&path).unwrap();
+        let uv: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, SCHEMA_VERSION);
+
+        let mut list = db.list_workspaces().unwrap();
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            list.len(),
+            2,
+            "both pre-existing workspaces survived the migration"
+        );
+
+        assert_eq!(list[0].id, "w1");
+        assert_eq!(list[0].root_path, "/tmp/one");
+        assert_eq!(
+            list[0].roots,
+            vec!["/tmp/one".to_string()],
+            "w1 got its ord=0 backfill row"
+        );
+
+        assert_eq!(list[1].id, "w2");
+        assert_eq!(list[1].root_path, "/tmp/two");
+        assert_eq!(
+            list[1].roots,
+            vec!["/tmp/two".to_string()],
+            "w2 got its ord=0 backfill row"
+        );
+    }
+
+    #[test]
+    fn migration_v2_to_v3_fails_closed_on_error_and_leaves_v2_intact() {
+        // Fail-closed / rollback proof (spec §11): pre-create an INCOMPATIBLE workspace_root
+        // table (missing the `path` column the migration's INSERT ... SELECT targets), so the
+        // migration's own INSERT fails mid-transaction. Since the whole migration runs inside
+        // one `unchecked_transaction`, that failure must roll back EVERYTHING — including the
+        // (no-op, since the table already existed) `CREATE TABLE IF NOT EXISTS` — and must
+        // leave `user_version` unchanged at 2, not partially bumped.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workspace (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
+                 CREATE TABLE session (
+                   id TEXT PRIMARY KEY,
+                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
+                   title TEXT NOT NULL, shell TEXT NOT NULL, cwd TEXT NOT NULL,
+                   cols INTEGER NOT NULL, rows INTEGER NOT NULL,
+                   lifecycle TEXT NOT NULL,
+                   exit_code INTEGER, exit_signal TEXT,
+                   created_at INTEGER NOT NULL);
+                 CREATE TABLE scrollback (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq INTEGER NOT NULL, bytes BLOB NOT NULL, ts INTEGER NOT NULL,
+                   PRIMARY KEY (session_id, seq));
+                 CREATE TABLE command_events (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq        INTEGER NOT NULL,
+                   ts         INTEGER NOT NULL,
+                   kind       TEXT NOT NULL,
+                   exit_code  INTEGER,
+                   origin     TEXT NOT NULL DEFAULT 'gui',
+                   PRIMARY KEY (session_id, seq));
+                 CREATE TABLE workspace_root (
+                   workspace_id TEXT NOT NULL, ord INTEGER NOT NULL, bogus_column TEXT);
+                 INSERT INTO workspace (id, name, root_path) VALUES ('w1', 'ws-w1', '/tmp');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2_i64).unwrap();
+        }
+
+        let err = Db::open(&path).unwrap_err();
+        assert!(
+            matches!(err, PersistError::Migration(_)),
+            "expected a Migration error from the incompatible workspace_root table, got {err:?}"
+        );
+
+        // Re-open the raw file directly: the failed migration's transaction must have rolled
+        // back cleanly, so user_version is still 2 (never partially bumped to 3).
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            uv, 2,
+            "a failed migration must roll back and leave user_version untouched (fail-closed)"
+        );
+        // And the pre-existing workspace row is untouched too (not partially migrated).
+        let root_path: String = conn
+            .query_row("SELECT root_path FROM workspace WHERE id = 'w1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(root_path, "/tmp");
+    }
+
+    #[test]
+    fn upsert_workspace_multi_root_then_list_preserves_order_and_root_path_mirror() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("w1", &["/tmp/a", "/tmp/b"]))
+            .unwrap();
+
+        let list = db.list_workspaces().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].roots,
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()]
+        );
+        assert_eq!(list[0].root_path, "/tmp/a", "root_path mirrors roots[0]");
+    }
+
+    #[test]
+    fn upsert_workspace_replaces_roots_on_update_rather_than_accumulating() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("w1", &["/tmp/a", "/tmp/b"]))
+            .unwrap();
+        db.upsert_workspace(&ws_multi("w1", &["/tmp/x"])).unwrap();
+
+        let list = db.list_workspaces().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].roots,
+            vec!["/tmp/x".to_string()],
+            "the old roots (a, b) must be gone, not accumulated alongside the new one"
+        );
+        assert_eq!(list[0].root_path, "/tmp/x");
+    }
+
+    #[test]
+    fn upsert_workspace_rejects_empty_roots() {
+        let db = Db::open_in_memory().unwrap();
+        let w = Workspace {
+            id: "w1".into(),
+            name: "ws-w1".into(),
+            root_path: "/tmp".into(),
+            roots: vec![],
+        };
+        let err = db.upsert_workspace(&w).unwrap_err();
+        assert!(
+            matches!(err, PersistError::Sql(_)),
+            "empty roots must be rejected, got {err:?}"
+        );
+        assert!(
+            db.list_workspaces().unwrap().is_empty(),
+            "a rejected upsert must not leave a partial workspace row"
+        );
+    }
+
+    #[test]
+    fn add_and_remove_workspace_root_ordering_and_renormalization() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("w1", &["/tmp/a"])).unwrap();
+
+        let w2 = db.add_workspace_root(&"w1".to_string(), "/tmp/b").unwrap();
+        assert_eq!(
+            w2.roots,
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+            "appended at ord=1"
+        );
+        assert_eq!(w2.root_path, "/tmp/a", "root_path unaffected by an append");
+
+        let w3 = db.add_workspace_root(&"w1".to_string(), "/tmp/c").unwrap();
+        assert_eq!(
+            w3.roots,
+            vec![
+                "/tmp/a".to_string(),
+                "/tmp/b".to_string(),
+                "/tmp/c".to_string()
+            ],
+            "appended at ord=2"
+        );
+
+        // Remove the MIDDLE root: ord must re-normalize to be contiguous from 0.
+        let w4 = db
+            .remove_workspace_root(&"w1".to_string(), "/tmp/b")
+            .unwrap();
+        assert_eq!(
+            w4.roots,
+            vec!["/tmp/a".to_string(), "/tmp/c".to_string()],
+            "b removed, a/c re-normalized to ord 0/1"
+        );
+        assert_eq!(w4.root_path, "/tmp/a");
+
+        // A subsequent add appends after the re-normalized ord (not colliding with the old ord=2).
+        let w5 = db.add_workspace_root(&"w1".to_string(), "/tmp/d").unwrap();
+        assert_eq!(
+            w5.roots,
+            vec![
+                "/tmp/a".to_string(),
+                "/tmp/c".to_string(),
+                "/tmp/d".to_string()
+            ]
+        );
+
+        // Remove roots[0] itself: root_path mirror must re-point at the new roots[0].
+        let w6 = db
+            .remove_workspace_root(&"w1".to_string(), "/tmp/a")
+            .unwrap();
+        assert_eq!(w6.roots, vec!["/tmp/c".to_string(), "/tmp/d".to_string()]);
+        assert_eq!(
+            w6.root_path, "/tmp/c",
+            "root_path re-pointed at the new roots[0]"
+        );
+    }
+
+    #[test]
+    fn remove_last_workspace_root_is_rejected() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("w1", &["/tmp/only"]))
+            .unwrap();
+
+        let err = db
+            .remove_workspace_root(&"w1".to_string(), "/tmp/only")
+            .unwrap_err();
+        assert!(matches!(err, PersistError::LastRoot));
+        assert_eq!(err.code(), "LastRoot");
+
+        // The rejected removal must not have mutated anything.
+        let list = db.list_workspaces().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].roots, vec!["/tmp/only".to_string()]);
+        assert_eq!(list[0].root_path, "/tmp/only");
+    }
+
+    #[test]
+    fn remove_workspace_root_nonexistent_path_is_an_idempotent_noop() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("w1", &["/tmp/a", "/tmp/b"]))
+            .unwrap();
+
+        let unchanged = db
+            .remove_workspace_root(&"w1".to_string(), "/tmp/does-not-exist")
+            .unwrap();
+        assert_eq!(
+            unchanged.roots,
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+            "a path that isn't a current root is a no-op, not an error"
+        );
+    }
+
+    #[test]
+    fn add_workspace_root_on_unknown_workspace_errors() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .add_workspace_root(&"no-such-workspace".to_string(), "/tmp/x")
+            .unwrap_err();
+        assert!(
+            matches!(err, PersistError::Sql(_)),
+            "adding a root to a nonexistent workspace must fail (FK constraint), got {err:?}"
+        );
     }
 }
