@@ -327,6 +327,16 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().sessions["ghost"]).toBeUndefined();
   });
 
+  it("markExited clears waitingForInput — a finished process is not waiting for input, the honest state for every consumer (stats/StatusDot/HomeView) per review finding F1", () => {
+    useAppStore.getState().upsertSession(meta({ waitingForInput: true }));
+    const p: ExitedPayload = { sessionId: "s1", code: 1, signal: null };
+    useAppStore.getState().markExited(p);
+    const s = useAppStore.getState().sessions["s1"];
+    expect(s.waitingForInput).toBe(false);
+    expect(s.isActive).toBe(false);
+    expect(s.lifecycle).toEqual({ kind: "exited", code: 1, signal: null });
+  });
+
   it("setDaemonConnected toggles the flag", () => {
     useAppStore.getState().setDaemonConnected(true);
     expect(useAppStore.getState().daemonConnected).toBe(true);

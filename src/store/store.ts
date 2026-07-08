@@ -101,8 +101,11 @@ export interface AppState {
    */
   setLifecycle: (p: StateChangedPayload) => void;
   /**
-   * Apply a `session://exited` payload: sets `isActive:false` and an `{kind:"exited"}`
-   * lifecycle carrying the exit code/signal. No-op if the session isn't in the map.
+   * Apply a `session://exited` payload: sets `isActive:false`, clears `waitingForInput` (a
+   * finished process is never waiting for input — the honest state for stats/StatusDot/HomeView;
+   * the live event carries no such field, so a session that exited/crashed while blocked on stdin
+   * must not keep a stale `true` forever), and an `{kind:"exited"}` lifecycle carrying the exit
+   * code/signal. No-op if the session isn't in the map.
    */
   markExited: (p: ExitedPayload) => void;
   setDaemonConnected: (connected: boolean) => void;
@@ -242,6 +245,11 @@ export const useAppStore = create<AppState>((set) => {
             [p.sessionId]: {
               ...existing,
               isActive: false,
+              // A finished process is never waiting for input — the honest state for every
+              // consumer (stats strip, StatusDot, HomeView filters). The live `session://exited`
+              // push carries no `waitingForInput` field, so a session that exited/crashed while
+              // blocked on stdin would otherwise keep a stale `true` forever (review finding F1).
+              waitingForInput: false,
               lifecycle: { kind: "exited", code: p.code, signal: p.signal },
             },
           },

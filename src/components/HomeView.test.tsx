@@ -204,6 +204,61 @@ describe("HomeView", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
+  it("F1: an exited session that still carries a stale waitingForInput:true renders EXACTLY ONCE, in «Завершились недавно» (exited wins), never duplicated into «Нужен ты», and is excluded from the waiting/live stats", () => {
+    useAppStore.setState({
+      workspaces: { w1: wsA },
+      sessions: {
+        s1: meta({
+          id: "s1",
+          workspaceId: "w1",
+          waitingForInput: true,
+          isActive: false,
+          lifecycle: { kind: "exited", code: 1, signal: null },
+        }),
+      },
+    });
+    render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
+
+    // exactly one row for this session, anywhere in the DOM
+    expect(screen.getAllByTestId("home-row-s1")).toHaveLength(1);
+
+    // it lives in "Завершились недавно", not "Нужен ты"
+    expect(screen.queryByText("Нужен ты")).toBeNull();
+    const row = screen.getByTestId("home-row-s1");
+    expect(row.textContent).toContain("✗");
+    expect(row.textContent).not.toContain("ждёт ввода");
+
+    // the whole-store stats strip must not count a dead session as waiting or live
+    expect(screen.getByTestId("home-stats").textContent).toBe("1 workspaces · 0 live · 0 waiting");
+  });
+
+  it("F2: an exited row's ✓/✗ glyph exposes an accessible name distinguishing success from failure", () => {
+    useAppStore.setState({
+      workspaces: { w1: wsA },
+      sessions: {
+        ok: meta({
+          id: "ok",
+          workspaceId: "w1",
+          isActive: false,
+          waitingForInput: false,
+          lifecycle: { kind: "exited", code: 0, signal: null },
+        }),
+        bad: meta({
+          id: "bad",
+          workspaceId: "w1",
+          title: "bad-one",
+          isActive: false,
+          waitingForInput: false,
+          lifecycle: { kind: "exited", code: 1, signal: null },
+        }),
+      },
+    });
+    render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
+
+    expect(screen.getByRole("button", { name: /успешно/i })).toBe(screen.getByTestId("home-row-ok"));
+    expect(screen.getByRole("button", { name: /с ошибкой/i })).toBe(screen.getByTestId("home-row-bad"));
+  });
+
   it("a section is omitted entirely when it has no sessions", () => {
     useAppStore.setState({
       workspaces: { w1: wsA },

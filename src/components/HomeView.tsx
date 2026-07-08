@@ -178,7 +178,11 @@ export function HomeView(props: {
   }
 
   const all = Object.values(sessions);
-  const waiting = all.filter((m) => m.waitingForInput);
+  // Exited always wins (mirrors StatusDot.dotStateOf, spec §5/§10.4): belt-and-suspenders against
+  // a stale `waitingForInput:true` on a session whose process has already finished — `markExited`
+  // is the root fix (clears the flag), this guard is defense-in-depth so no other path can ever
+  // surface a dead session in the amber "Нужен ты" section (review finding F1).
+  const waiting = all.filter((m) => m.waitingForInput && m.lifecycle.kind !== "exited");
   const running = all.filter((m) => m.isActive && !m.waitingForInput);
   const exited = all.filter((m) => !m.isActive && m.lifecycle.kind === "exited");
 
@@ -337,7 +341,7 @@ export function HomeView(props: {
                         onClick={() => goTo(meta.workspaceId, meta.id)}
                       >
                         <span
-                          aria-hidden
+                          aria-label={ok ? "успешно" : "с ошибкой"}
                           style={{
                             fontFamily: MONO_FONT,
                             fontSize: 13,
