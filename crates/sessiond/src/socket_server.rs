@@ -698,7 +698,7 @@ async fn handle_client(
             frame = reader.next(&mut rd) => {
                 match frame {
                     Ok(Some(Frame::Request { id, req })) => {
-                        let res = dispatch(&deps, conn_id, &push_sink, req).await;
+                        let res = dispatch(&deps, conn_id, &push_sink, &broadcaster, req).await;
                         // Enqueue the reply without blocking; a full queue means the client stopped
                         // reading ⇒ drop + disconnect it (spec §13).
                         if out_tx.try_send(Frame::Response { id, res }).is_err() {
@@ -866,11 +866,16 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
 
 /// Dispatch one `Request` to the right subsystem and produce the correlated `Response` (spec §7).
 /// `conn_id` identifies the calling connection so attach/detach ownership is connection-scoped
-/// (spec §7: single-attach per session, but teardown per connection).
+/// (spec §7: single-attach per session, but teardown per connection). `broadcaster` is the SAME
+/// registry `serve`'s accept loop uses to fan supervisor callbacks out to every connected client
+/// (spec §7) — the `AddWorkspaceRoot`/`RemoveWorkspaceRoot` arms (spec §3.3) reuse it for
+/// `Push::WorkspaceUpdated` so a workspace-root change is visible to every window/tab, not just the
+/// one that issued the request.
 async fn dispatch(
     deps: &Arc<ServerDeps>,
     conn_id: u64,
     push_sink: &PushSink,
+    broadcaster: &Broadcaster,
     req: Request,
 ) -> Response {
     match req {
@@ -898,7 +903,8 @@ async fn dispatch(
             let w = Workspace {
                 id: uuid::Uuid::new_v4().to_string(),
                 name,
-                root_path: canonical,
+                root_path: canonical.clone(),
+                roots: vec![canonical],
             };
             let db = deps.db.lock().await;
             match db.upsert_workspace(&w) {
@@ -911,6 +917,63 @@ async fn dispatch(
                     Response::Workspace(w)
                 }
                 Err(e) => err("DbError", e),
+            }
+        }
+
+        // spec §3.3: append a new root to an existing workspace. `path` goes through the SAME
+        // §16 `validate_dir` gate as `CreateWorkspace.root_path` (absolute, existing, canonical —
+        // no relaxed rule for a second root) before it ever reaches the DB. Unlike
+        // `Push::WorkspaceCreated` above (emitted on the requester's own `push_sink`, spec §7's
+        // comment there notwithstanding — that sink only reaches THIS connection), `WorkspaceUpdated`
+        // is emitted via `broadcaster.broadcast` so every OTHER connected client (not just the one
+        // that issued the request) learns a workspace's roots changed — the whole point of a
+        // multi-window/multi-tab GUI staying in sync (spec §3.3, §7).
+        Request::AddWorkspaceRoot { workspace_id, path } => {
+            let canonical = match validate_dir(&path) {
+                Ok(p) => p,
+                Err(_) => {
+                    return Response::Error {
+                        code: "InvalidWorkspaceRoot".into(),
+                        message: format!("workspace root is not an existing directory: {path}"),
+                    }
+                }
+            };
+            let db = deps.db.lock().await;
+            match db.add_workspace_root(&workspace_id, &canonical) {
+                Ok(updated) => {
+                    broadcaster.broadcast(Push::WorkspaceUpdated(updated.clone()));
+                    Response::Workspace(updated)
+                }
+                Err(e) => err(e.code(), e),
+            }
+        }
+
+        // spec §3.3: remove a root. No `validate_dir` here — removal doesn't require the path to
+        // still exist on disk (the whole point is often to drop a root that moved/was deleted), and
+        // `Db::remove_workspace_root` matches against whatever string is already stored. Rejects
+        // removing the LAST remaining root (`PersistError::LastRoot` → wire code `"LastRoot"`, spec
+        // §3.3) so a workspace can never end up with zero roots. Same `WorkspaceUpdated` broadcast
+        // as `AddWorkspaceRoot` above on success.
+        Request::RemoveWorkspaceRoot { workspace_id, path } => {
+            let db = deps.db.lock().await;
+            match db.remove_workspace_root(&workspace_id, &path) {
+                Ok(updated) => {
+                    broadcaster.broadcast(Push::WorkspaceUpdated(updated.clone()));
+                    Response::Workspace(updated)
+                }
+                Err(e) => err(e.code(), e),
+            }
+        }
+
+        // spec §3.3: read back a session's command history, newest-first, capped at `limit` — pure
+        // read, no push (nothing else changed). An unknown `session_id` is `Db::list_command_events`'s
+        // honest empty `Vec`, not an error (matches `ListSessions`/`ListWorkspaces`'s style: only a
+        // genuine DB failure is a `Response::Error`).
+        Request::GetCommandEvents { session_id, limit } => {
+            let db = deps.db.lock().await;
+            match db.list_command_events(&session_id, limit) {
+                Ok(events) => Response::CommandEvents(events),
+                Err(e) => err(e.code(), e),
             }
         }
 
@@ -1287,6 +1350,46 @@ mod tests {
         }
     }
 
+    /// Send a `CreateWorkspace` request over `c` with request id `id` and drain BOTH resulting
+    /// frames — the `Response::Workspace` and its accompanying `Push::WorkspaceCreated` — before
+    /// returning the created `Workspace`. Order between the two is NOT guaranteed: the push travels
+    /// through `push_sink`'s own async forwarder task (`make_push_sink`, scheduled independently by
+    /// the runtime), while the response is enqueued directly by `handle_client`'s dispatch loop
+    /// right after `dispatch` returns — so the response can (and, in practice, usually does) win the
+    /// race. Draining exactly 2 frames unconditionally (rather than breaking as soon as the target
+    /// `Response` is seen) is required so this helper never leaves an undrained push frame sitting
+    /// in the socket buffer to desync a later, strictly `id`-keyed read on the same connection.
+    async fn create_workspace(
+        c: &mut UnixStream,
+        id: u64,
+        name: &str,
+        root_path: &str,
+    ) -> Workspace {
+        send_frame(
+            c,
+            &Frame::Request {
+                id,
+                req: Request::CreateWorkspace {
+                    name: name.into(),
+                    root_path: root_path.into(),
+                },
+            },
+        )
+        .await;
+        let mut got: Option<Workspace> = None;
+        for _ in 0..2 {
+            match recv_frame_t(c).await {
+                Frame::Response {
+                    id: rid,
+                    res: Response::Workspace(w),
+                } if rid == id => got = Some(w),
+                Frame::Push(Push::WorkspaceCreated { .. }) => {}
+                other => panic!("unexpected frame while creating workspace: {other:?}"),
+            }
+        }
+        got.expect("expected a Workspace response from create_workspace")
+    }
+
     /// Build [`ServerDeps`] wired to `shutdown_tx` — the SAME sender whose receiver half the caller
     /// drives [`serve`] with — so `Request::DaemonShutdown`'s dispatch arm (which calls
     /// `deps.shutdown_tx.send(true)`) flips the identical watch that stops the server under test.
@@ -1554,6 +1657,376 @@ mod tests {
                 assert_eq!(code, "InvalidWorkspaceRoot");
             }
             other => panic!("expected InvalidWorkspaceRoot error, got {other:?}"),
+        }
+    }
+
+    // ---- S2 §3.3: AddWorkspaceRoot appends a root, persists it, replies with the updated
+    // Workspace, and broadcasts Push::WorkspaceUpdated to EVERY connected client — a second,
+    // otherwise-idle connection must observe it too (spec §7: multi-window/multi-tab GUI stays in
+    // sync). This is why the new arms broadcast via `Broadcaster` rather than reusing the
+    // `push_sink` `Push::WorkspaceCreated` uses above: `push_sink` is this connection's OWN
+    // outbound queue (see `make_push_sink`'s doc comment), so it can never reach a second
+    // connection no matter which push variant is sent through it. ----
+    #[tokio::test]
+    async fn add_workspace_root_persists_and_broadcasts_to_other_clients() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+
+        let mut c1 = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c1).await,
+            DaemonReply::Accepted { .. }
+        ));
+        let workspace_id = create_workspace(&mut c1, 1, "w", "/tmp").await.id;
+
+        // A second, unrelated connection — registered for broadcast BEFORE the request below is
+        // issued, so it can observe the push.
+        let mut c2 = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c2).await,
+            DaemonReply::Accepted { .. }
+        ));
+
+        let second_root = tempfile::tempdir().unwrap();
+        let second_root_path = second_root.path().to_str().unwrap().to_string();
+
+        send_frame(
+            &mut c1,
+            &Frame::Request {
+                id: 2,
+                req: Request::AddWorkspaceRoot {
+                    workspace_id: workspace_id.clone(),
+                    path: second_root_path,
+                },
+            },
+        )
+        .await;
+
+        let mut got_resp: Option<Workspace> = None;
+        let mut got_push_on_c1 = false;
+        for _ in 0..2 {
+            match recv_frame_t(&mut c1).await {
+                Frame::Response {
+                    id: 2,
+                    res: Response::Workspace(w),
+                } => got_resp = Some(w),
+                Frame::Push(Push::WorkspaceUpdated(_)) => got_push_on_c1 = true,
+                other => panic!("unexpected frame on c1: {other:?}"),
+            }
+        }
+        let updated = got_resp.expect("expected a Workspace response on c1");
+        assert_eq!(updated.id, workspace_id);
+        assert_eq!(
+            updated.roots.len(),
+            2,
+            "expected 2 roots after AddWorkspaceRoot"
+        );
+        assert!(
+            got_push_on_c1,
+            "the requester must also observe its own WorkspaceUpdated push (it is registered \
+             with the broadcaster like every other client)"
+        );
+
+        match recv_frame_t(&mut c2).await {
+            Frame::Push(Push::WorkspaceUpdated(w)) => {
+                assert_eq!(w.id, workspace_id);
+                assert_eq!(w.roots.len(), 2);
+            }
+            other => panic!(
+                "expected WorkspaceUpdated push on the second, unrelated connection, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_workspace_root_rejects_missing_dir_and_persists_nothing() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
+        let workspace_id = create_workspace(&mut c, 1, "w", "/tmp").await.id;
+
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 2,
+                req: Request::AddWorkspaceRoot {
+                    workspace_id: workspace_id.clone(),
+                    path: "/nonexistent/path/xyzzy".into(),
+                },
+            },
+        )
+        .await;
+        match recv_frame_t(&mut c).await {
+            Frame::Response {
+                id: 2,
+                res: Response::Error { code, .. },
+            } => {
+                assert_eq!(code, "InvalidWorkspaceRoot");
+            }
+            other => panic!("expected InvalidWorkspaceRoot error, got {other:?}"),
+        }
+
+        // Nothing persisted: the workspace still has exactly its original root.
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 3,
+                req: Request::ListWorkspaces,
+            },
+        )
+        .await;
+        loop {
+            match recv_frame_t(&mut c).await {
+                Frame::Response {
+                    id: 3,
+                    res: Response::Workspaces(v),
+                } => {
+                    let w = v
+                        .iter()
+                        .find(|w| w.id == workspace_id)
+                        .expect("workspace must still be present");
+                    assert_eq!(
+                        w.roots.len(),
+                        1,
+                        "a rejected AddWorkspaceRoot must persist nothing"
+                    );
+                    break;
+                }
+                Frame::Push(_) => continue,
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_root_last_one_is_rejected_with_last_root_code() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
+        let created = create_workspace(&mut c, 1, "w", "/tmp").await;
+        let (workspace_id, root_path) = (created.id, created.root_path);
+
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 2,
+                req: Request::RemoveWorkspaceRoot {
+                    workspace_id,
+                    path: root_path,
+                },
+            },
+        )
+        .await;
+        match recv_frame_t(&mut c).await {
+            Frame::Response {
+                id: 2,
+                res: Response::Error { code, .. },
+            } => {
+                assert_eq!(code, "LastRoot");
+            }
+            other => panic!("expected LastRoot error, got {other:?}"),
+        }
+    }
+
+    // ---- Success path for RemoveWorkspaceRoot (the test above only covers the LastRoot
+    // rejection): removing a NON-last root persists, replies with the shrunk Workspace, and
+    // broadcasts WorkspaceUpdated to a second connection exactly like AddWorkspaceRoot. ----
+    #[tokio::test]
+    async fn remove_workspace_root_non_last_persists_and_broadcasts() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+        let mut c1 = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c1).await,
+            DaemonReply::Accepted { .. }
+        ));
+        let workspace_id = create_workspace(&mut c1, 1, "w", "/tmp").await.id;
+
+        let second_root = tempfile::tempdir().unwrap();
+        let second_root_path = second_root.path().to_str().unwrap().to_string();
+        send_frame(
+            &mut c1,
+            &Frame::Request {
+                id: 2,
+                req: Request::AddWorkspaceRoot {
+                    workspace_id: workspace_id.clone(),
+                    path: second_root_path,
+                },
+            },
+        )
+        .await;
+        // Drain the response + this connection's own broadcast push (order is not guaranteed),
+        // capturing the response so the removal below targets the STORED canonical string —
+        // `remove_workspace_root` does an exact string match with no re-canonicalization (see its
+        // doc comment), and `tempfile::tempdir()`'s own path is not necessarily already canonical
+        // (e.g. macOS's `/var` → `/private/var` symlink), so reusing our own pre-`validate_dir`
+        // string here would silently no-op instead of removing anything.
+        let mut added: Option<Workspace> = None;
+        for _ in 0..2 {
+            match recv_frame_t(&mut c1).await {
+                Frame::Response {
+                    id: 2,
+                    res: Response::Workspace(w),
+                } => added = Some(w),
+                Frame::Push(Push::WorkspaceUpdated(_)) => {}
+                other => panic!("unexpected frame on c1: {other:?}"),
+            }
+        }
+        let added = added.expect("expected a Workspace response for AddWorkspaceRoot");
+        assert_eq!(added.roots.len(), 2);
+        let original_root_path = added.root_path.clone();
+        let canonical_second_root = added
+            .roots
+            .into_iter()
+            .find(|r| *r != original_root_path)
+            .expect("expected a second root distinct from root_path");
+
+        // A second, unrelated connection observes the REMOVE's broadcast.
+        let mut c2 = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c2).await,
+            DaemonReply::Accepted { .. }
+        ));
+
+        send_frame(
+            &mut c1,
+            &Frame::Request {
+                id: 3,
+                req: Request::RemoveWorkspaceRoot {
+                    workspace_id: workspace_id.clone(),
+                    path: canonical_second_root,
+                },
+            },
+        )
+        .await;
+
+        let mut got_resp: Option<Workspace> = None;
+        for _ in 0..2 {
+            match recv_frame_t(&mut c1).await {
+                Frame::Response {
+                    id: 3,
+                    res: Response::Workspace(w),
+                } => got_resp = Some(w),
+                Frame::Push(Push::WorkspaceUpdated(_)) => {}
+                other => panic!("unexpected frame on c1: {other:?}"),
+            }
+        }
+        let updated = got_resp.expect("expected a Workspace response");
+        assert_eq!(updated.roots.len(), 1, "back down to 1 root after remove");
+
+        match recv_frame_t(&mut c2).await {
+            Frame::Push(Push::WorkspaceUpdated(w)) => {
+                assert_eq!(w.id, workspace_id);
+                assert_eq!(w.roots.len(), 1);
+            }
+            other => panic!("expected WorkspaceUpdated push on c2, got {other:?}"),
+        }
+    }
+
+    // ---- S2 §3.3: GetCommandEvents reads a session's command_events rows back via the real
+    // dispatch arm over the wire, newest-first, capped at `limit`. Seeded directly via `Db` (same
+    // `deps` handle the test keeps, mirroring
+    // `kill_session_on_rehydrated_inactive_session_is_an_honest_close`'s inline
+    // listener+deps+serve pattern) rather than driving a real PTY through OSC-133 end to end —
+    // deterministic and immune to shell/timing flakiness while still exercising the exact
+    // `list_command_events` call the production arm makes. ----
+    #[tokio::test]
+    async fn get_command_events_returns_newest_first_and_respects_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let (deps, _runtime) = test_deps_with_shutdown(tx.clone());
+        let _jh = tokio::spawn({
+            let deps = deps.clone();
+            async move {
+                let _ = serve(listener, deps, rx).await;
+            }
+        });
+
+        let session_id = "s-command-events".to_string();
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
+            })
+            .unwrap();
+            db.upsert_session(&SessionMeta {
+                id: session_id.clone(),
+                workspace_id: "ws".into(),
+                title: "t".into(),
+                shell: "/bin/sh".into(),
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                lifecycle: bpa_protocol::SessionLifecycle::Exited {
+                    code: Some(0),
+                    signal: None,
+                },
+                waiting_for_input: false,
+                is_active: false,
+                created_at: 1_700_000_000,
+            })
+            .unwrap();
+            // 3 started/finished pairs, ascending seq/ts — seq 0..=5.
+            for i in 0..3i64 {
+                db.append_command_event(
+                    &session_id,
+                    i * 2,
+                    1_700_000_000 + i,
+                    "started",
+                    None,
+                    "gui",
+                )
+                .unwrap();
+                db.append_command_event(
+                    &session_id,
+                    i * 2 + 1,
+                    1_700_000_000 + i,
+                    "finished",
+                    Some(i as u8),
+                    "gui",
+                )
+                .unwrap();
+            }
+        }
+
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 1,
+                req: Request::GetCommandEvents {
+                    session_id: session_id.clone(),
+                    limit: 4,
+                },
+            },
+        )
+        .await;
+        match recv_frame_t(&mut c).await {
+            Frame::Response {
+                id: 1,
+                res: Response::CommandEvents(events),
+            } => {
+                assert_eq!(events.len(), 4, "limit must be respected");
+                let seqs: Vec<i64> = events.iter().map(|e| e.seq).collect();
+                assert_eq!(seqs, vec![5, 4, 3, 2], "must be newest-first (seq DESC)");
+                assert_eq!(events[0].kind, "finished");
+                assert_eq!(events[0].exit_code, Some(2));
+                assert!(events.iter().all(|e| e.session_id == session_id));
+            }
+            other => panic!("expected CommandEvents, got {other:?}"),
         }
     }
 
@@ -2575,6 +3048,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
             db.upsert_session(&dead_meta).unwrap();
@@ -2687,6 +3161,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -2745,6 +3220,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -2851,6 +3327,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -2909,6 +3386,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -2958,6 +3436,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -3022,6 +3501,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -3076,6 +3556,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -3150,6 +3631,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
         }
@@ -3394,6 +3876,7 @@ mod tests {
                 id: "ws".into(),
                 name: "ws".into(),
                 root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
             })
             .unwrap();
             db.upsert_session(&dead_meta).unwrap();
