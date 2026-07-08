@@ -443,7 +443,7 @@ describe("App", () => {
   });
 
   it("hydrate restores an active workspace so + New terminal is enabled without a sidebar click", async () => {
-    listWorkspacesMock.mockResolvedValue([{ id: "w1", name: "proj", rootPath: "/p" }]);
+    listWorkspacesMock.mockResolvedValue([{ id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] }]);
     listSessionsMock.mockResolvedValue([]);
     await act(async () => {
       render(<App manager={fakeManager} />);
@@ -459,7 +459,7 @@ describe("App", () => {
   it("clicking a workspace in the sidebar sets it as the active workspace for new-terminal", async () => {
     useAppStore.setState({
       sessions: {},
-      workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p" } },
+      workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } },
       activeSessionId: null,
       daemonConnected: true,
     });

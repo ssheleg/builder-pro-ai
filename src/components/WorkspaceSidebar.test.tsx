@@ -13,14 +13,14 @@ import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { useAppStore } from "../store/store";
 import type { Workspace } from "../ipc/types";
 
-const wsA: Workspace = { id: "w1", name: "alpha", rootPath: "/p/alpha" };
-const wsB: Workspace = { id: "w2", name: "beta", rootPath: "/p/beta" };
+const wsA: Workspace = { id: "w1", name: "alpha", rootPath: "/p/alpha", roots: ["/p/alpha"] };
+const wsB: Workspace = { id: "w2", name: "beta", rootPath: "/p/beta", roots: ["/p/beta"] };
 
 afterEach(cleanup);
 beforeEach(() => {
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
-  createWorkspaceMock.mockResolvedValue({ id: "w3", name: "gamma", rootPath: "/p/gamma" });
+  createWorkspaceMock.mockResolvedValue({ id: "w3", name: "gamma", rootPath: "/p/gamma", roots: ["/p/gamma"] });
   useAppStore.setState(
     { sessions: {}, workspaces: { w1: wsA, w2: wsB }, activeSessionId: null, daemonConnected: true },
     false,

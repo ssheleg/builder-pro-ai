@@ -43,7 +43,7 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   createdAt: 1,
   ...over,
 });
-const ws: Workspace = { id: "w1", name: "proj", rootPath: "/p" };
+const ws: Workspace = { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] };
 
 afterEach(cleanup);
 beforeEach(() => {
