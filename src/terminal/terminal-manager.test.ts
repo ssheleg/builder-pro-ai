@@ -26,6 +26,20 @@ vi.mock("../ipc/channel", () => ({
 
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
+const openUrlMock = vi.fn();
+vi.mock("@tauri-apps/plugin-shell", () => ({
+  open: (...a: unknown[]) => openUrlMock(...a),
+}));
+
+/** Minimal `ILinkProvider`-shaped surface the fake accepts from `registerLinkProvider` — just
+ * enough for the file-links tests below to drive `provideLinks` directly. */
+interface FakeLinkProvider {
+  provideLinks(
+    y: number,
+    callback: (links: Array<{ text: string; activate: () => void }> | undefined) => void,
+  ): void;
+}
+
 class FakeTerminal {
   options: Record<string, unknown>;
   disposed = false;
@@ -33,8 +47,24 @@ class FakeTerminal {
   onResizeCb: ((s: { cols: number; rows: number }) => void) | undefined;
   cols = 80;
   rows = 24;
-  /** Concatenated bytes ever handed to `write()` since the last `reset()` (BL-14 harness). */
-  buffer: number[] = [];
+  /** Concatenated bytes ever handed to `write()` since the last `reset()` (BL-14 harness).
+   * Deliberately NOT named `buffer` — that name is reserved below for the xterm-shaped
+   * `IBufferNamespace` fake the file-links provider reads (`term.buffer.active.getLine`). */
+  writtenBytes: number[] = [];
+  /** Test-only backdoor: lines the file-links provider's `getLine(y).translateToString()` sees,
+   * keyed by 0-based buffer line index. Real xterm's buffer is far richer; this fake only needs
+   * to satisfy the one method `wireFileLinks` calls. */
+  bufferLines = new Map<number, string>();
+  buffer = {
+    active: {
+      getLine: (y: number): { translateToString: () => string } | undefined => {
+        const text = this.bufferLines.get(y);
+        return text === undefined ? undefined : { translateToString: () => text };
+      },
+    },
+  };
+  /** Every provider handed to `registerLinkProvider`, in registration order (spec §6.5). */
+  registeredLinkProviders: FakeLinkProvider[] = [];
   constructor(opts: Record<string, unknown>) {
     this.options = opts;
   }
@@ -42,7 +72,7 @@ class FakeTerminal {
   open = vi.fn(() => calls.push("open"));
   write = vi.fn((d: unknown, cb?: () => void) => {
     calls.push("write");
-    if (d instanceof Uint8Array) this.buffer.push(...d);
+    if (d instanceof Uint8Array) this.writtenBytes.push(...d);
     cb?.();
   });
   resize = vi.fn((c: number, r: number) => {
@@ -52,7 +82,7 @@ class FakeTerminal {
   });
   /** Mirrors xterm's `Terminal.reset()`: clears the buffer/scrollback (BL-14). */
   reset = vi.fn(() => {
-    this.buffer = [];
+    this.writtenBytes = [];
     calls.push("reset");
   });
   onData = vi.fn((cb: (d: string) => void) => {
@@ -68,6 +98,13 @@ class FakeTerminal {
     calls.push("dispose");
   });
   focus = vi.fn(() => calls.push("focus"));
+  registerLinkProvider = vi.fn((provider: FakeLinkProvider) => {
+    this.registeredLinkProviders.push(provider);
+    calls.push("registerLinkProvider");
+    return {
+      dispose: vi.fn(() => calls.push("linkProviderDispose")),
+    };
+  });
 }
 const terminals: FakeTerminal[] = [];
 vi.mock("@xterm/xterm", () => ({
@@ -95,7 +132,8 @@ vi.mock("@xterm/addon-webgl", () => ({
 }));
 
 import { TerminalManager } from "./terminal-manager";
-import type { TerminalEvent } from "../ipc/types";
+import type { TerminalEvent, SessionMeta, Workspace } from "../ipc/types";
+import { useAppStore } from "../store/store";
 
 function makeContainer(): HTMLElement {
   const el = document.createElement("div");
@@ -119,6 +157,14 @@ beforeEach(() => {
   newTerminalChannelMock.mockClear();
   fitMock.mockReset();
   webglDispose.mockReset();
+  openUrlMock.mockReset().mockResolvedValue(undefined);
+  useAppStore.setState({
+    sessions: {},
+    workspaces: {},
+    selectedFile: null,
+    filesRailOpen: false,
+    toast: null,
+  });
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
     constructor(cb: () => void) {
       resizeObserverCb = cb;
@@ -177,7 +223,7 @@ describe("TerminalManager", () => {
       event: "replay",
       data: { cols: 80, rows: 24, content: Array.from(firstMarker) },
     } as TerminalEvent);
-    expect(terminals[0].buffer).toEqual([1, 2, 3]);
+    expect(terminals[0].writtenBytes).toEqual([1, 2, 3]);
 
     // Re-attach (reconnect, or Home hide/re-show -> fresh attach_session -> fresh full Replay).
     m.resetAttachment("s1");
@@ -199,8 +245,8 @@ describe("TerminalManager", () => {
     expect(resetIdx).toBeGreaterThanOrEqual(0);
     expect(writeIdxAfterReset).toBeGreaterThan(resetIdx);
     expect(terminals[0].reset).toHaveBeenCalledTimes(2);
-    expect(terminals[0].buffer).toEqual([9, 9, 9]);
-    expect(terminals[0].buffer).not.toEqual([1, 2, 3, 9, 9, 9]);
+    expect(terminals[0].writtenBytes).toEqual([9, 9, 9]);
+    expect(terminals[0].writtenBytes).not.toEqual([1, 2, 3, 9, 9, 9]);
   });
 
   it("attach() wires the Channel and applies Replay before Output, never touching the store", () => {
@@ -629,5 +675,180 @@ describe("TerminalManager", () => {
 
     expect(m.isAttached("s1")).toBe(false);
     expect(m.has("s1")).toBe(false);
+  });
+});
+
+/** Fixture matching the store's `SessionMeta` shape (mirrors other test files' `meta` helpers,
+ * e.g. `CommandStrip.test.tsx`). */
+function meta(over: Partial<SessionMeta> = {}): SessionMeta {
+  return {
+    id: "s1",
+    workspaceId: "w1",
+    title: "zsh",
+    shell: "/bin/zsh",
+    cwd: "/repo",
+    cols: 80,
+    rows: 24,
+    lifecycle: { kind: "atPrompt" },
+    waitingForInput: false,
+    isActive: true,
+    createdAt: 1,
+    ...over,
+  };
+}
+
+function workspace(over: Partial<Workspace> = {}): Workspace {
+  return {
+    id: "w1",
+    name: "repo",
+    rootPath: "/repo",
+    roots: ["/repo"],
+    ...over,
+  };
+}
+
+describe("TerminalManager — file links (spec §6.5/D9)", () => {
+  it("ensure() registers exactly one link provider and sets an OSC-8 linkHandler with allowNonHttpProtocols", () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    expect(terminals[0].registerLinkProvider).toHaveBeenCalledTimes(1);
+    expect(calls).toContain("registerLinkProvider");
+
+    const handler = terminals[0].options.linkHandler as
+      | { allowNonHttpProtocols?: boolean; activate?: unknown }
+      | undefined;
+    expect(handler?.allowNonHttpProtocols).toBe(true);
+    expect(typeof handler?.activate).toBe("function");
+  });
+
+  it("dispose() releases the link provider's disposable (no leak)", () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    m.dispose("s1");
+    expect(calls).toContain("linkProviderDispose");
+  });
+
+  it("provideLinks resolves a file token against the session's cwd/roots and activate() opens it in the rail", () => {
+    useAppStore.setState({
+      sessions: { s1: meta({ cwd: "/repo" }) },
+      workspaces: { w1: workspace({ roots: ["/repo"] }) },
+    });
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const term = terminals[0];
+    term.bufferLines.set(0, "wrote src/app.ts successfully");
+
+    const provider = term.registeredLinkProviders[0];
+    let received: Array<{ text: string; activate: () => void }> | undefined;
+    provider.provideLinks(1, (links) => {
+      received = links;
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received![0].text).toBe("src/app.ts");
+
+    received![0].activate();
+    const s = useAppStore.getState();
+    expect(s.selectedFile).toEqual({ root: "/repo", rel: "src/app.ts" });
+    expect(s.filesRailOpen).toBe(true);
+  });
+
+  it("provideLinks reports no links for a line with none, and for an unknown buffer line", () => {
+    useAppStore.setState({
+      sessions: { s1: meta({ cwd: "/repo" }) },
+      workspaces: { w1: workspace({ roots: ["/repo"] }) },
+    });
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const term = terminals[0];
+    term.bufferLines.set(0, "no paths on this line");
+
+    let received: unknown;
+    term.registeredLinkProviders[0].provideLinks(1, (links) => {
+      received = links;
+    });
+    expect(received).toBeUndefined();
+
+    let receivedMissingLine: unknown = "not yet set";
+    term.registeredLinkProviders[0].provideLinks(99, (links) => {
+      receivedMissingLine = links;
+    });
+    expect(receivedMissingLine).toBeUndefined();
+  });
+
+  it("provideLinks is a harmless no-op when the session or its workspace is missing from the store", () => {
+    const m = new TerminalManager();
+    m.ensure("s1"); // store has no "s1" session at all
+    const term = terminals[0];
+    term.bufferLines.set(0, "wrote src/app.ts successfully");
+
+    let received: unknown = "not yet set";
+    term.registeredLinkProviders[0].provideLinks(1, (links) => {
+      received = links;
+    });
+    expect(received).toBeUndefined();
+  });
+
+  it("OSC-8 linkHandler opens an http(s) URL via the shell opener", () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const handler = terminals[0].options.linkHandler as {
+      activate: (event: MouseEvent, text: string, range: unknown) => void;
+    };
+    handler.activate({} as MouseEvent, "https://example.com/x", {});
+    expect(openUrlMock).toHaveBeenCalledWith("https://example.com/x");
+  });
+
+  it("OSC-8 linkHandler resolves a file:// URL under a root and opens it in the rail", () => {
+    useAppStore.setState({
+      sessions: { s1: meta({ cwd: "/repo" }) },
+      workspaces: { w1: workspace({ roots: ["/repo"] }) },
+    });
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const handler = terminals[0].options.linkHandler as {
+      activate: (event: MouseEvent, text: string, range: unknown) => void;
+    };
+    handler.activate({} as MouseEvent, "file:///repo/x/y.ts", {});
+
+    const s = useAppStore.getState();
+    expect(s.selectedFile).toEqual({ root: "/repo", rel: "x/y.ts" });
+    expect(s.filesRailOpen).toBe(true);
+    expect(openUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("OSC-8 linkHandler shows a quiet toast for a file:// URL outside every root", () => {
+    useAppStore.setState({
+      sessions: { s1: meta({ cwd: "/repo" }) },
+      workspaces: { w1: workspace({ roots: ["/repo"] }) },
+    });
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const handler = terminals[0].options.linkHandler as {
+      activate: (event: MouseEvent, text: string, range: unknown) => void;
+    };
+    handler.activate({} as MouseEvent, "file:///etc/passwd", {});
+
+    const s = useAppStore.getState();
+    expect(s.selectedFile).toBeNull();
+    expect(s.toast).toBe("файл вне workspace или не найден");
+  });
+
+  it("OSC-8 linkHandler ignores a non-file, non-http(s) scheme", () => {
+    useAppStore.setState({
+      sessions: { s1: meta({ cwd: "/repo" }) },
+      workspaces: { w1: workspace({ roots: ["/repo"] }) },
+    });
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const handler = terminals[0].options.linkHandler as {
+      activate: (event: MouseEvent, text: string, range: unknown) => void;
+    };
+    handler.activate({} as MouseEvent, "mailto:someone@example.com", {});
+
+    expect(openUrlMock).not.toHaveBeenCalled();
+    const s = useAppStore.getState();
+    expect(s.selectedFile).toBeNull();
+    expect(s.toast).toBeNull();
   });
 });

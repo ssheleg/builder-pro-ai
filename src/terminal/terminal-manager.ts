@@ -1,11 +1,20 @@
 import "@xterm/xterm/css/xterm.css";
-import { Terminal, type ITerminalOptions } from "@xterm/xterm";
+import {
+  Terminal,
+  type ITerminalOptions,
+  type IDisposable,
+  type ILink,
+  type ILinkProvider,
+} from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type { TerminalEvent } from "../ipc/types";
 import type { SessionId } from "../ipc/commands";
 import { writeStdin, resize, attachSession } from "../ipc/commands";
 import { newTerminalChannel } from "../ipc/channel";
+import { useAppStore } from "../store/store";
+import { findFileLinks, matchWorkspaceRoot } from "./link-provider";
 
 /** Debounce window for the container `ResizeObserver` -> `fitAddon.fit()` (spec §12). */
 const RESIZE_DEBOUNCE_MS = 100;
@@ -19,6 +28,19 @@ const RESIZE_DEBOUNCE_MS = 100;
  */
 const WATERMARK_HIGH_BYTES = 100 * 1024;
 const WATERMARK_LOW_BYTES = 10 * 1024;
+
+/**
+ * Decode a `file://` URL to a filesystem path (spec §6.5 OSC-8 handling). Returns `""` (which
+ * `matchWorkspaceRoot` will never resolve under any root) on a malformed URL rather than
+ * throwing -- OSC-8 payloads originate from arbitrary shell output the terminal does not trust.
+ */
+function fileUrlToPath(url: string): string {
+  try {
+    return decodeURIComponent(new URL(url).pathname);
+  } catch {
+    return "";
+  }
+}
 
 const TERMINAL_OPTIONS: ITerminalOptions = {
   convertEol: false, // real PTY (termios) handles \n -> \r\n; do not double it up
@@ -79,6 +101,12 @@ interface TerminalEntry {
   pendingBytes: number;
   /** Latched true once pendingBytes crosses HIGH, cleared once it drops back below LOW. */
   overWatermark: boolean;
+  /**
+   * Disposable returned by `term.registerLinkProvider` (spec §6.5/D9 — terminal file links).
+   * Registered once in `ensure()` alongside `term.options.linkHandler`, released in `dispose()`
+   * so an unregistered provider callback is never retained by a torn-down Terminal (no leak).
+   */
+  linkProviderDisposable: IDisposable;
 }
 
 /**
@@ -107,6 +135,11 @@ export class TerminalManager {
     const fit = new FitAddon();
     term.loadAddon(fit);
 
+    // Terminal file links (spec §6.5/D9) -- register right after construction, once per session
+    // (NOT in `open()`, which re-runs on every re-show/keep-alive cycle and would re-register a
+    // duplicate provider each time).
+    const linkProviderDisposable = this.wireFileLinks(sessionId, term);
+
     if (typeof cols === "number" && typeof rows === "number") {
       term.resize(cols, rows);
     }
@@ -130,8 +163,104 @@ export class TerminalManager {
       attachGeneration: 0,
       pendingBytes: 0,
       overWatermark: false,
+      linkProviderDisposable,
     });
     return term;
+  }
+
+  /**
+   * Register the file-link provider + OSC-8 `linkHandler` for one terminal (spec §6.5/D9). Two
+   * independent surfaces, both resolving against THIS session's live cwd/roots (re-read fresh
+   * from the store on every call, so a cwd change picked up by `setLifecycle`/OSC-7 or a
+   * `workspace://updated` root change apply on the very next repaint/click with no extra wiring):
+   *
+   *  - `registerLinkProvider`: xterm calls `provideLinks(y, cb)` per visible buffer line. Reads
+   *    that line as a string, runs the pure `findFileLinks` resolver (session `cwd` + the
+   *    session's workspace `roots`), and maps each `ResolvedFileLink` to an `ILink` whose
+   *    `activate` opens the file in the right-rail preview.
+   *  - `options.linkHandler` (`allowNonHttpProtocols: true`): xterm's OWN OSC-8 hyperlink
+   *    machinery (real `ESC]8;;URL BEL` escapes some shell tools emit, e.g. `ls --hyperlink`)
+   *    hands the whole URL string to `activate`. A `file://` URL goes through the SAME
+   *    validate-then-preview path via `matchWorkspaceRoot` (no cwd involved -- the URL is already
+   *    absolute); `http(s)://` opens via the OS default handler (`@tauri-apps/plugin-shell`'s
+   *    `open`, already covered by the `shell:default` capability's bundled `allow-open` scope --
+   *    no Rust/capability change needed for this task); any other scheme is ignored (spec §6.5
+   *    only names these two).
+   *
+   * Neither surface duplicates the authoritative outside-root/not-found check: `openFileLink`
+   * below only sets `selectedFile` + opens the rail -- `FilePreview` (mounted by
+   * `setFilesRailOpen(true)`) owns the real `readFilePreview` round-trip and already shows the
+   * honest toast on a rejected `FsError` (see that component's doc comment). The ONE place this
+   * method shows its OWN toast is the OSC-8 `file://` branch, whose `matchWorkspaceRoot` check
+   * can reject a link BEFORE `openFileLink` is ever called (spec §6.5: "Paths outside roots ...
+   * a failed click shows a quiet toast").
+   *
+   * Returns the `IDisposable` from `registerLinkProvider` so `dispose()` can release it.
+   */
+  private wireFileLinks(sessionId: SessionId, term: Terminal): IDisposable {
+    const openFileLink = (root: string, rel: string): void => {
+      const s = useAppStore.getState();
+      s.setSelectedFile({ root, rel });
+      s.setFilesRailOpen(true);
+    };
+
+    const provider: ILinkProvider = {
+      provideLinks: (bufferLineNumber, callback) => {
+        const bufferLine = term.buffer.active.getLine(bufferLineNumber - 1);
+        if (!bufferLine) {
+          callback(undefined);
+          return;
+        }
+        const state = useAppStore.getState();
+        const session = state.sessions[sessionId];
+        const roots = session ? state.workspaces[session.workspaceId]?.roots : undefined;
+        if (!session || !roots || roots.length === 0) {
+          callback(undefined);
+          return;
+        }
+        const lineText = bufferLine.translateToString(true);
+        const resolved = findFileLinks(lineText, session.cwd, roots);
+        if (resolved.length === 0) {
+          callback(undefined);
+          return;
+        }
+        const links: ILink[] = resolved.map((link) => ({
+          range: {
+            start: { x: link.startCol, y: bufferLineNumber },
+            end: { x: link.endCol, y: bufferLineNumber },
+          },
+          text: lineText.slice(link.startCol - 1, link.endCol - 1),
+          activate: () => openFileLink(link.root, link.rel),
+        }));
+        callback(links);
+      },
+    };
+
+    term.options.linkHandler = {
+      allowNonHttpProtocols: true,
+      activate: (_event, text) => {
+        if (/^https?:\/\//i.test(text)) {
+          void openUrl(text);
+          return;
+        }
+        if (text.startsWith("file://")) {
+          const state = useAppStore.getState();
+          const session = state.sessions[sessionId];
+          const roots = session ? state.workspaces[session.workspaceId]?.roots : undefined;
+          const path = fileUrlToPath(text);
+          const match = path && roots ? matchWorkspaceRoot(path, roots) : null;
+          if (match) {
+            openFileLink(match.root, match.rel);
+          } else {
+            useAppStore.getState().showToast("файл вне workspace или не найден");
+          }
+          return;
+        }
+        // non-file, non-http(s) scheme -> ignore (spec §6.5 only handles these two).
+      },
+    };
+
+    return term.registerLinkProvider(provider);
   }
 
   has(sessionId: SessionId): boolean {
@@ -443,6 +572,7 @@ export class TerminalManager {
     this.invalidateAttach(entry);
     this.teardownContainer(entry);
     entry.webgl = undefined; // disposed transitively by term.dispose()
+    entry.linkProviderDisposable.dispose();
     entry.term.dispose();
     this.entries.delete(sessionId);
   }
