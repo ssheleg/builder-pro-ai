@@ -42,6 +42,7 @@
 pub mod broker;
 pub mod commands;
 pub mod fs_explorer;
+pub mod fs_watcher;
 pub mod launchd;
 pub mod paths;
 pub mod socket_client;
@@ -396,6 +397,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        // fs_watcher's `WatchSlot` never depends on daemon connectivity (spec §5: core-local,
+        // GUI-lifetime), so it's `manage`d immediately here — unlike `AppState`, which is only
+        // `manage`d once `bring_up_daemon` resolves (see that function's docs) — so
+        // `start_workspace_watch`/`stop_workspace_watch` are callable from the very first frame.
+        .manage(fs_watcher::new_watch_slot())
         .invoke_handler(tauri::generate_handler![
             ping,
             commands::create_session,
@@ -423,6 +429,8 @@ pub fn run() {
             fs_explorer::delete_entry,
             fs_explorer::reveal_in_finder,
             fs_explorer::open_external,
+            fs_watcher::start_workspace_watch,
+            fs_watcher::stop_workspace_watch,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
