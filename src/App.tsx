@@ -1,4 +1,4 @@
-import { useEffect, useState, type JSX } from "react";
+import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "./store/store";
 import {
   onSessionCreated,
@@ -14,11 +14,13 @@ import {
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
+import type { SessionMeta, Workspace } from "./ipc/types";
 import { startWorkspaceWatch, stopWorkspaceWatch } from "./ipc/fs";
 import { TerminalManager } from "./terminal/terminal-manager";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { TerminalTabs } from "./components/TerminalTabs";
 import { TerminalPane } from "./components/TerminalPane";
+import { CommandStrip } from "./components/CommandStrip";
 import { DaemonBanner } from "./components/DaemonBanner";
 import { UpgradeDialog } from "./components/UpgradeDialog";
 import { FilesRail } from "./components/FilesRail";
@@ -203,6 +205,11 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   // while no workspace is selected makes it render nothing. Also gated on `view === "workspace"`
   // below (spec §6.1 "hidden on Home") — it never renders while the owner is on the Home screen.
   const activeWorkspace = activeWorkspaceId ? workspaces[activeWorkspaceId] : undefined;
+  // Feeds `WorkspaceStatsChips` (spec §6.3): this workspace's own sessions only, not the whole
+  // store (HomeView's stats strip is the whole-store equivalent — this one is scoped).
+  const workspaceSessions = activeWorkspaceId
+    ? Object.values(sessions).filter((m) => m.workspaceId === activeWorkspaceId)
+    : [];
 
   /**
    * Live file-watch lifecycle (spec §5 "start on workspace activation, stop on switch/unmount;
@@ -254,6 +261,13 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         ) : (
           <>
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
+              {/* Stat chips row (spec §6.1/§6.3): "Workspace: чипы + terminal tabs + command
+                  strip" — sits above the tab strip. Renders nothing while no workspace is
+                  active (mirrors FilesRail's own `!workspace` guard). */}
+              <WorkspaceStatsChips
+                workspace={activeWorkspace}
+                sessions={workspaceSessions}
+              />
               <TerminalTabs manager={manager} activeWorkspaceId={activeWorkspaceId} />
               <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
                 {activeSession ? (
@@ -277,12 +291,106 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
                   </div>
                 )}
               </div>
+              {/* Per-session OSC-133 command strip (spec §6.3): "strip under active terminal" —
+                  only rendered once a session is active (mirrors TerminalPane's own gating). */}
+              {activeSession && <CommandStrip sessionId={activeSession.id} />}
             </div>
             {/* Right rail: hidden on Home (spec §6.1) — only rendered in the workspace view. */}
             <FilesRail workspace={activeWorkspace} />
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+
+type StatKey = "live" | "waiting" | "exited" | "roots";
+
+const statChipStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "2px 8px",
+  borderRadius: 999,
+  border: `1px solid ${theme.colors.border}`,
+  background: theme.colors.bg,
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  fontVariantNumeric: "tabular-nums",
+  color: theme.colors.textDim,
+  cursor: "pointer",
+};
+
+/**
+ * Stat chips row for the workspace view (spec §6.3): `N live · K waiting · M exited · R roots`
+ * for the ACTIVE workspace's sessions. Mirrors HomeView's three-way session split — waiting
+ * (`waitingForInput`, exited always wins over a stale flag), live (`isActive` and not waiting,
+ * i.e. actually running), exited (`!isActive` with an `exited` lifecycle) — scoped to ONE
+ * workspace's sessions instead of the whole store, plus the workspace's roots count (multi-root,
+ * spec §3.3). Clicking a chip toggles a minimal inline detail list (session titles, or root
+ * paths for the roots chip); only one chip's detail is open at a time (design-system.md §1
+ * "detail is one drill-down away, never on the first screen").
+ */
+function WorkspaceStatsChips(props: {
+  workspace: Workspace | undefined;
+  sessions: SessionMeta[];
+}): JSX.Element | null {
+  const { workspace, sessions } = props;
+  const [open, setOpen] = useState<StatKey | null>(null);
+
+  if (!workspace) return null;
+
+  const waiting = sessions.filter((m) => m.waitingForInput && m.lifecycle.kind !== "exited");
+  const live = sessions.filter((m) => m.isActive && !m.waitingForInput);
+  const exited = sessions.filter((m) => !m.isActive && m.lifecycle.kind === "exited");
+
+  const chips: { key: StatKey; label: string; items: string[] }[] = [
+    { key: "live", label: `${live.length} live`, items: live.map((m) => m.title) },
+    { key: "waiting", label: `${waiting.length} waiting`, items: waiting.map((m) => m.title) },
+    { key: "exited", label: `${exited.length} exited`, items: exited.map((m) => m.title) },
+    { key: "roots", label: `${workspace.roots.length} roots`, items: workspace.roots },
+  ];
+  const openChip = chips.find((c) => c.key === open);
+
+  return (
+    <div
+      data-testid="workspace-stats"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        padding: "6px 12px",
+        borderBottom: `1px solid ${theme.colors.border}`,
+        background: theme.colors.bgElevated,
+      }}
+    >
+      <div style={{ display: "flex", gap: 6 }}>
+        {chips.map((chip) => (
+          <button
+            key={chip.key}
+            type="button"
+            data-testid={`workspace-stat-${chip.key}`}
+            aria-pressed={open === chip.key}
+            onClick={() => setOpen((cur) => (cur === chip.key ? null : chip.key))}
+            style={{
+              ...statChipStyle,
+              borderColor: open === chip.key ? theme.colors.accent : theme.colors.border,
+              color: open === chip.key ? theme.colors.text : theme.colors.textDim,
+            }}
+          >
+            {chip.label}
+          </button>
+        ))}
+      </div>
+      {openChip && (
+        <div
+          data-testid="workspace-stat-detail"
+          style={{ fontSize: 11, fontFamily: MONO_FONT, color: theme.colors.textDim }}
+        >
+          {openChip.items.length === 0 ? "—" : openChip.items.join(" · ")}
+        </div>
+      )}
     </div>
   );
 }

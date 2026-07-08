@@ -57,6 +57,7 @@ beforeEach(() => {
       workspaces: { w1: ws },
       activeSessionId: "s1",
       daemonConnected: true,
+      selectedFile: null,
     },
     false,
   );
@@ -84,19 +85,58 @@ describe("TerminalTabs", () => {
     expect(disposeMock).not.toHaveBeenCalled();
   });
 
-  it("new-terminal button calls createSession with the active workspace id", async () => {
+  it("new-terminal button calls createSession with the active workspace id and its roots[0] as cwd (no file selected)", async () => {
     render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /new terminal/i }));
     });
     expect(createSessionMock).toHaveBeenCalledTimes(1);
-    expect(createSessionMock).toHaveBeenCalledWith("w1", { cols: 80, rows: 24 });
+    expect(createSessionMock).toHaveBeenCalledWith("w1", { cwd: "/p", cols: 80, rows: 24 });
   });
 
   it("new-terminal button is disabled when there is no active workspace", () => {
     render(<TerminalTabs manager={fakeManager} activeWorkspaceId={null} />);
     const button = screen.getByRole("button", { name: /new terminal/i }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
+  });
+
+  it("new-terminal cwd = the tree-selected node's root when it differs from roots[0] (multi-root workspace)", async () => {
+    useAppStore.setState(
+      {
+        workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p", "/p2"] } },
+        selectedFile: { root: "/p2", rel: "src/x.ts" },
+      },
+      false,
+    );
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /new terminal/i }));
+    });
+    expect(createSessionMock).toHaveBeenCalledWith("w1", { cwd: "/p2", cols: 80, rows: 24 });
+  });
+
+  it("new-terminal cwd falls back to roots[0] when the selected file belongs to a DIFFERENT workspace", async () => {
+    useAppStore.setState(
+      {
+        workspaces: { w1: ws },
+        selectedFile: { root: "/some/other/workspace/root", rel: "a.ts" },
+      },
+      false,
+    );
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /new terminal/i }));
+    });
+    expect(createSessionMock).toHaveBeenCalledWith("w1", { cwd: "/p", cols: 80, rows: 24 });
+  });
+
+  it("new-terminal omits cwd entirely when the active workspace isn't found in the store", async () => {
+    useAppStore.setState({ workspaces: {}, selectedFile: null }, false);
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /new terminal/i }));
+    });
+    expect(createSessionMock).toHaveBeenCalledWith("w1", { cols: 80, rows: 24 });
   });
 
   it("closing a tab kills the session and disposes its terminal", async () => {

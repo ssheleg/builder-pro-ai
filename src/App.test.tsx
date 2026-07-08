@@ -55,6 +55,7 @@ const killSessionMock = vi.fn().mockResolvedValue(undefined);
 const createWorkspaceMock = vi.fn().mockResolvedValue(undefined);
 const pickFolderMock = vi.fn().mockResolvedValue(null);
 const daemonStatusMock = vi.fn().mockResolvedValue({ kind: "disconnected" });
+const getCommandEventsMock = vi.fn().mockResolvedValue([]);
 vi.mock("./ipc/commands", () => ({
   listSessions: (...a: unknown[]) => listSessionsMock(...a),
   listWorkspaces: (...a: unknown[]) => listWorkspacesMock(...a),
@@ -63,6 +64,7 @@ vi.mock("./ipc/commands", () => ({
   createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
   pickFolder: (...a: unknown[]) => pickFolderMock(...a),
   daemonStatus: (...a: unknown[]) => daemonStatusMock(...a),
+  getCommandEvents: (...a: unknown[]) => getCommandEventsMock(...a),
 }));
 
 // Only override the two watch-lifecycle functions App wires up directly — every OTHER export
@@ -146,6 +148,7 @@ beforeEach(() => {
   createWorkspaceMock.mockClear();
   pickFolderMock.mockClear();
   daemonStatusMock.mockReset().mockResolvedValue({ kind: "disconnected" });
+  getCommandEventsMock.mockReset().mockResolvedValue([]);
   startWorkspaceWatchMock.mockReset().mockResolvedValue(undefined);
   stopWorkspaceWatchMock.mockReset().mockResolvedValue(undefined);
   useAppStore.setState(
@@ -497,7 +500,8 @@ describe("App", () => {
     await act(async () => {
       newTerminalBtn.click();
     });
-    expect(createSessionMock).toHaveBeenCalledWith("w1", { cols: 80, rows: 24 });
+    // Root-aware cwd (spec §6.3): no file selected -> falls back to the workspace's roots[0].
+    expect(createSessionMock).toHaveBeenCalledWith("w1", { cwd: "/p", cols: 80, rows: 24 });
   });
 
   it("clicking a workspace in the sidebar sets it as the active workspace for new-terminal", async () => {
@@ -516,7 +520,7 @@ describe("App", () => {
     await act(async () => {
       screen.getByRole("button", { name: /new terminal/i }).click();
     });
-    expect(createSessionMock).toHaveBeenCalledWith("w1", { cols: 80, rows: 24 });
+    expect(createSessionMock).toHaveBeenCalledWith("w1", { cwd: "/p", cols: 80, rows: 24 });
   });
 });
 
@@ -690,5 +694,105 @@ describe("T11: attention-first Home, view switch, watch + fs/workspace event wir
     });
     const alerts = screen.getAllByRole("alert");
     expect(alerts.some((el) => el.textContent?.includes("что-то пошло не так"))).toBe(true);
+  });
+});
+
+describe("T12: workspace view — stat chips + command strip + root-aware cwd", () => {
+  it("stat chips show correct live/waiting/exited/roots counts, scoped to the active workspace only", async () => {
+    useAppStore.setState(
+      {
+        sessions: {
+          // w1: 1 waiting, 1 live, 1 exited
+          s1: meta({ id: "s1", workspaceId: "w1", waitingForInput: true, lifecycle: { kind: "running" } }),
+          s2: meta({ id: "s2", workspaceId: "w1", isActive: true, waitingForInput: false, lifecycle: { kind: "running" } }),
+          s3: meta({
+            id: "s3",
+            workspaceId: "w1",
+            isActive: false,
+            waitingForInput: false,
+            lifecycle: { kind: "exited", code: 1, signal: null },
+          }),
+          // w2: must NOT be counted into w1's chips
+          s4: meta({ id: "s4", workspaceId: "w2", isActive: true, waitingForInput: false, lifecycle: { kind: "running" } }),
+        },
+        workspaces: {
+          w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p", "/p2"] },
+          w2: { id: "w2", name: "other", rootPath: "/o", roots: ["/o"] },
+        },
+        activeSessionId: null,
+        daemonConnected: true,
+      },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click(); // selects w1 as the active workspace
+    });
+    expect(screen.getByTestId("workspace-stats")).toBeTruthy();
+    expect(screen.getByTestId("workspace-stat-live").textContent).toBe("1 live");
+    expect(screen.getByTestId("workspace-stat-waiting").textContent).toBe("1 waiting");
+    expect(screen.getByTestId("workspace-stat-exited").textContent).toBe("1 exited");
+    expect(screen.getByTestId("workspace-stat-roots").textContent).toBe("2 roots");
+  });
+
+  it("clicking a stat chip toggles an inline detail list; clicking it again closes it", async () => {
+    useAppStore.setState(
+      {
+        sessions: {
+          s1: meta({ id: "s1", workspaceId: "w1", title: "waiting-one", waitingForInput: true, lifecycle: { kind: "running" } }),
+        },
+        workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } },
+        activeSessionId: null,
+        daemonConnected: true,
+      },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click();
+    });
+    expect(screen.queryByTestId("workspace-stat-detail")).toBeNull();
+
+    await act(async () => {
+      screen.getByTestId("workspace-stat-waiting").click();
+    });
+    expect(screen.getByTestId("workspace-stat-detail").textContent).toContain("waiting-one");
+
+    await act(async () => {
+      screen.getByTestId("workspace-stat-waiting").click();
+    });
+    expect(screen.queryByTestId("workspace-stat-detail")).toBeNull();
+  });
+
+  it("stat chips render nothing while no workspace is active", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(screen.queryByTestId("workspace-stats")).toBeNull();
+  });
+
+  it("renders the CommandStrip for the active session once one exists, fetching its command history", async () => {
+    getCommandEventsMock.mockResolvedValue([]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.created(meta()); // s1 becomes active
+    });
+    expect(getCommandEventsMock).toHaveBeenCalledWith("s1", 10);
+    expect(screen.getByTestId("command-strip-empty")).toBeTruthy();
+  });
+
+  it("no CommandStrip is rendered while there is no active session", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(getCommandEventsMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("command-strip")).toBeNull();
+    expect(screen.queryByTestId("command-strip-empty")).toBeNull();
   });
 });
