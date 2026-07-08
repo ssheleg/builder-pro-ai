@@ -48,6 +48,10 @@ pub struct Workspace {
 }
 ```
 ts-rs regenerates `types.ts` (parity gate). All existing `root_path` consumers keep working.
+Naming note: this supersedes the overview §"Workspace evolution (A14)" sketch
+(`workspace_roots: Vec<PathBuf>`) — `roots: Vec<String>` is the wire truth (`PathBuf` has no
+portable TS mapping; the `workspace_` prefix is redundant on the Workspace struct). The overview
+gets amended in this cycle's docs task.
 
 ### 3.2 Persistence — schema v3
 New table:
