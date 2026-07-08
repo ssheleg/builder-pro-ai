@@ -17,6 +17,7 @@ import { TerminalTabs } from "./components/TerminalTabs";
 import { TerminalPane } from "./components/TerminalPane";
 import { DaemonBanner } from "./components/DaemonBanner";
 import { UpgradeDialog } from "./components/UpgradeDialog";
+import { FilesRail } from "./components/FilesRail";
 import { theme } from "./theme";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -40,6 +41,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const workspaces = useAppStore((s) => s.workspaces);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<WorkspaceId | null>(null);
 
   useEffect(() => {
@@ -179,6 +181,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   }, []);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+  // `FilesRail` needs a real `Workspace` (its `roots`) to have anything to show; `undefined`
+  // while no workspace is selected makes it render nothing (spec §6.4 — T11 will later also gate
+  // it on `view === "workspace"` to hide it on Home; for now it tracks the active workspace only).
+  const activeWorkspace = activeWorkspaceId ? workspaces[activeWorkspaceId] : undefined;
 
   return (
     <div
@@ -223,6 +229,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
             )}
           </div>
         </div>
+        <FilesRail workspace={activeWorkspace} />
       </div>
     </div>
   );
