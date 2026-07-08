@@ -1,0 +1,19 @@
+/* App-wide accessible focus ring (BL-29; design-system.md §5 "Dialog / modal overlay" atom
+   already promises it, §6.8 "Focus visible" UX law: 2px accent outline offset 2px on every
+   interactive element). Until now there was no global stylesheet at all — every component
+   relied on the browser's default focus outline instead. Keep this file minimal: the
+   focus-visible rules only, no resets/normalize — inline styling via theme.ts remains the
+   source of truth for everything else. */
+
+:focus-visible {
+  outline: 2px solid #2f81f7; /* theme.colors.accent */
+  outline-offset: 2px;
+}
+
+/* :focus-visible only matches keyboard/programmatic focus; a plain :focus (e.g. a mouse click)
+   would otherwise still draw the browser's default ring on elements the :focus-visible
+   heuristic doesn't cover — suppress it so a click never shows a ring, only Tab/keyboard nav
+   does. Standard :focus-visible companion pattern. */
+:focus:not(:focus-visible) {
+  outline: none;
+}

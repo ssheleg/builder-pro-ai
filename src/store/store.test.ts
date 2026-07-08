@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useAppStore } from "./store";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
@@ -40,6 +40,7 @@ describe("useAppStore", () => {
         showIgnored: false,
         filesRailOpen: false,
         watchPaused: false,
+        toast: null,
       },
       false,
     );
@@ -385,5 +386,74 @@ describe("useAppStore", () => {
         "workspaceId",
       ].sort(),
     );
+  });
+
+  // ---- Toast atom (S2 T9, spec §7 honest error surface) ----
+
+  it("has toast=null by default and exposes showToast/dismissToast", () => {
+    const s = useAppStore.getState();
+    expect(s.toast).toBeNull();
+    expect(typeof initial.showToast).toBe("function");
+    expect(typeof initial.dismissToast).toBe("function");
+  });
+
+  it("showToast sets the current toast message", () => {
+    useAppStore.getState().showToast("Не удалось подключиться к демону");
+    expect(useAppStore.getState().toast).toBe("Не удалось подключиться к демону");
+  });
+
+  it("dismissToast clears the toast", () => {
+    useAppStore.getState().showToast("boom");
+    useAppStore.getState().dismissToast();
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
+  it("showToast replaces the message when called again (queue-of-one — no queueing)", () => {
+    useAppStore.getState().showToast("first");
+    expect(useAppStore.getState().toast).toBe("first");
+    useAppStore.getState().showToast("second");
+    expect(useAppStore.getState().toast).toBe("second");
+  });
+
+  it("auto-dismisses ~4s after showToast (fake timers)", () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.getState().showToast("will vanish");
+      expect(useAppStore.getState().toast).toBe("will vanish");
+      vi.advanceTimersByTime(3999);
+      expect(useAppStore.getState().toast).toBe("will vanish");
+      vi.advanceTimersByTime(1);
+      expect(useAppStore.getState().toast).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a later showToast's auto-dismiss timer does not clear an even-later toast (stale-timer guard)", () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.getState().showToast("first");
+      vi.advanceTimersByTime(2000); // first is at 2s of its 4s life, not yet dismissed
+      useAppStore.getState().showToast("second"); // restarts the window
+      vi.advanceTimersByTime(2000); // first's original 4s deadline passes; second is at 2s
+      expect(useAppStore.getState().toast).toBe("second"); // must NOT have been cleared
+      vi.advanceTimersByTime(2000); // second's own 4s deadline passes
+      expect(useAppStore.getState().toast).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dismissToast before the auto-dismiss timer fires prevents a later stray clear", () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.getState().showToast("first");
+      useAppStore.getState().dismissToast();
+      useAppStore.getState().showToast("second");
+      vi.advanceTimersByTime(4000); // only "second"'s own timer should fire
+      expect(useAppStore.getState().toast).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

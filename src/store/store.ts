@@ -81,6 +81,15 @@ export interface AppState {
    * a "live updates paused — refresh" affordance. Cleared on reactivation. */
   watchPaused: boolean;
 
+  /**
+   * Queue-of-ONE toast message (design-system.md Toast atom, spec §7 "honest error surface" —
+   * every async failure is a toast with the mapped human message, never console-only). `null`
+   * means no toast is showing. `showToast` REPLACES whatever is currently shown — there is no
+   * queue behind it, matching the design-system's "one inbox" spirit applied to transient
+   * notices: at most one thing asks for the owner's attention via a toast at a time.
+   */
+  toast: string | null;
+
   /** Insert or replace a session by `meta.id`. Idempotent. */
   upsertSession: (meta: SessionMeta) => void;
   /** Delete a session; clears `activeSessionId` if it pointed at the removed session. */
@@ -134,6 +143,16 @@ export interface AppState {
   setFilesRailOpen: (b: boolean) => void;
   /** Set `watchPaused`. See its doc above. */
   setWatchPaused: (b: boolean) => void;
+
+  /**
+   * Show a toast (replacing any current one) and auto-dismiss it after `TOAST_AUTO_DISMISS_MS`.
+   * See `toast`'s doc above. `<Toast/>` (`src/components/Toast.tsx`) is a pure reader of `toast`
+   * — it never owns this timer itself, so the auto-dismiss fires even across a remount.
+   */
+  showToast: (message: string) => void;
+  /** Clear the current toast immediately (e.g. a manual dismiss action) and cancel its pending
+   * auto-dismiss timer so it cannot later clear a DIFFERENT toast shown after this one. */
+  dismissToast: () => void;
 }
 
 /** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
@@ -141,127 +160,168 @@ function fsKey(root: string, rel: string): string {
   return `${root}\t${rel}`;
 }
 
-export const useAppStore = create<AppState>((set) => ({
-  sessions: {},
-  workspaces: {},
-  activeSessionId: null,
-  daemonConnected: false,
-  daemonIncompatible: false,
-  upgradeDialogOpen: false,
-  upgradeError: null,
-  hydrated: false,
-  view: "home",
-  expanded: {},
-  treeCache: {},
-  selectedFile: null,
-  showIgnored: false,
-  filesRailOpen: false,
-  watchPaused: false,
+/** How long a toast stays up before auto-dismissing (Toast atom, spec §7). */
+const TOAST_AUTO_DISMISS_MS = 4000;
 
-  upsertSession: (meta) =>
-    set((s) => ({ sessions: { ...s.sessions, [meta.id]: meta } })),
+export const useAppStore = create<AppState>((set) => {
+  // Toast auto-dismiss bookkeeping (closure state, not store state — it's write-only plumbing,
+  // like terminal-manager's attachGeneration guard). `token` is bumped by every showToast/
+  // dismissToast call; a pending timeout only clears the toast if its OWN token still matches the
+  // current one, so an earlier toast's timer can never clear a later, different toast (it always
+  // can't anyway, since we clearTimeout the previous timer below — the token is defense in depth
+  // matching the rest of this codebase's race-guard style).
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let toastToken = 0;
 
-  removeSession: (id) =>
-    set((s) => {
-      if (!(id in s.sessions)) return {};
-      const { [id]: _removed, ...rest } = s.sessions;
-      return {
-        sessions: rest,
-        activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-      };
-    }),
+  const clearToastTimer = (): void => {
+    if (toastTimer !== undefined) {
+      clearTimeout(toastTimer);
+      toastTimer = undefined;
+    }
+  };
 
-  setLifecycle: (p) =>
-    set((s) => {
-      const existing = s.sessions[p.sessionId];
-      if (!existing) return {};
-      return {
-        sessions: {
-          ...s.sessions,
-          [p.sessionId]: {
-            ...existing,
-            lifecycle: p.lifecycle,
-            waitingForInput: p.waitingForInput,
-            cwd: p.cwd,
+  return {
+    sessions: {},
+    workspaces: {},
+    activeSessionId: null,
+    daemonConnected: false,
+    daemonIncompatible: false,
+    upgradeDialogOpen: false,
+    upgradeError: null,
+    hydrated: false,
+    view: "home",
+    expanded: {},
+    treeCache: {},
+    selectedFile: null,
+    showIgnored: false,
+    filesRailOpen: false,
+    watchPaused: false,
+    toast: null,
+
+    upsertSession: (meta) =>
+      set((s) => ({ sessions: { ...s.sessions, [meta.id]: meta } })),
+
+    removeSession: (id) =>
+      set((s) => {
+        if (!(id in s.sessions)) return {};
+        const { [id]: _removed, ...rest } = s.sessions;
+        return {
+          sessions: rest,
+          activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+        };
+      }),
+
+    setLifecycle: (p) =>
+      set((s) => {
+        const existing = s.sessions[p.sessionId];
+        if (!existing) return {};
+        return {
+          sessions: {
+            ...s.sessions,
+            [p.sessionId]: {
+              ...existing,
+              lifecycle: p.lifecycle,
+              waitingForInput: p.waitingForInput,
+              cwd: p.cwd,
+            },
           },
-        },
-      };
-    }),
+        };
+      }),
 
-  markExited: (p) =>
-    set((s) => {
-      const existing = s.sessions[p.sessionId];
-      if (!existing) return {};
-      return {
-        sessions: {
-          ...s.sessions,
-          [p.sessionId]: {
-            ...existing,
-            isActive: false,
-            lifecycle: { kind: "exited", code: p.code, signal: p.signal },
+    markExited: (p) =>
+      set((s) => {
+        const existing = s.sessions[p.sessionId];
+        if (!existing) return {};
+        return {
+          sessions: {
+            ...s.sessions,
+            [p.sessionId]: {
+              ...existing,
+              isActive: false,
+              lifecycle: { kind: "exited", code: p.code, signal: p.signal },
+            },
           },
-        },
-      };
-    }),
+        };
+      }),
 
-  setDaemonConnected: (connected) => set({ daemonConnected: connected }),
-  setDaemonIncompatible: (v) => set({ daemonIncompatible: v }),
-  // Opening the dialog fresh (v=true) clears any stale upgradeError from a previous attempt
-  // (finding [13]): every reopen path (daemon://incompatible, DaemonBanner's "Обновить" action)
-  // goes through this setter, so this is the single place that guarantees a fresh open never
-  // shows a leftover error from an earlier session/attempt. Closing (v=false) leaves the error
-  // untouched — Cancel doesn't need to erase it, only a fresh open does.
-  setUpgradeDialogOpen: (v) => set(v ? { upgradeDialogOpen: v, upgradeError: null } : { upgradeDialogOpen: v }),
-  setUpgradeError: (v) => set({ upgradeError: v }),
-  setHydrated: (v) => set({ hydrated: v }),
+    setDaemonConnected: (connected) => set({ daemonConnected: connected }),
+    setDaemonIncompatible: (v) => set({ daemonIncompatible: v }),
+    // Opening the dialog fresh (v=true) clears any stale upgradeError from a previous attempt
+    // (finding [13]): every reopen path (daemon://incompatible, DaemonBanner's "Обновить" action)
+    // goes through this setter, so this is the single place that guarantees a fresh open never
+    // shows a leftover error from an earlier session/attempt. Closing (v=false) leaves the error
+    // untouched — Cancel doesn't need to erase it, only a fresh open does.
+    setUpgradeDialogOpen: (v) => set(v ? { upgradeDialogOpen: v, upgradeError: null } : { upgradeDialogOpen: v }),
+    setUpgradeError: (v) => set({ upgradeError: v }),
+    setHydrated: (v) => set({ hydrated: v }),
 
-  upsertWorkspace: (ws) =>
-    set((s) => ({ workspaces: { ...s.workspaces, [ws.id]: ws } })),
+    upsertWorkspace: (ws) =>
+      set((s) => ({ workspaces: { ...s.workspaces, [ws.id]: ws } })),
 
-  setActiveSession: (id) => set({ activeSessionId: id }),
+    setActiveSession: (id) => set({ activeSessionId: id }),
 
-  setView: (v) => set({ view: v }),
+    setView: (v) => set({ view: v }),
 
-  setExpanded: (root, rel, open) =>
-    set((s) => {
-      const key = fsKey(root, rel);
-      if (open) {
-        return { expanded: { ...s.expanded, [key]: true } };
-      }
-      if (!(key in s.expanded)) return {};
-      const rest = { ...s.expanded };
-      delete rest[key];
-      return { expanded: rest };
-    }),
-
-  cacheDir: (root, rel, entries) =>
-    set((s) => ({ treeCache: { ...s.treeCache, [fsKey(root, rel)]: entries } })),
-
-  invalidateDirs: (root, rels) =>
-    set((s) => {
-      const prefix = `${root}\t`;
-      const dropAll = rels.includes("*");
-      const dropKeys = dropAll ? null : new Set(rels.map((rel) => fsKey(root, rel)));
-
-      const drop = (key: string): boolean =>
-        key.startsWith(prefix) && (dropAll || dropKeys!.has(key));
-
-      const filtered = <V,>(map: Record<string, V>): Record<string, V> => {
-        const out: Record<string, V> = {};
-        for (const key of Object.keys(map)) {
-          if (!drop(key)) out[key] = map[key];
+    setExpanded: (root, rel, open) =>
+      set((s) => {
+        const key = fsKey(root, rel);
+        if (open) {
+          return { expanded: { ...s.expanded, [key]: true } };
         }
-        return out;
-      };
+        if (!(key in s.expanded)) return {};
+        const rest = { ...s.expanded };
+        delete rest[key];
+        return { expanded: rest };
+      }),
 
-      return { treeCache: filtered(s.treeCache), expanded: filtered(s.expanded) };
-    }),
+    cacheDir: (root, rel, entries) =>
+      set((s) => ({ treeCache: { ...s.treeCache, [fsKey(root, rel)]: entries } })),
 
-  setSelectedFile: (sel) => set({ selectedFile: sel }),
+    invalidateDirs: (root, rels) =>
+      set((s) => {
+        const prefix = `${root}\t`;
+        const dropAll = rels.includes("*");
+        const dropKeys = dropAll ? null : new Set(rels.map((rel) => fsKey(root, rel)));
 
-  toggleShowIgnored: () => set((s) => ({ showIgnored: !s.showIgnored })),
+        const drop = (key: string): boolean =>
+          key.startsWith(prefix) && (dropAll || dropKeys!.has(key));
 
-  setFilesRailOpen: (b) => set({ filesRailOpen: b }),
+        const filtered = <V,>(map: Record<string, V>): Record<string, V> => {
+          const out: Record<string, V> = {};
+          for (const key of Object.keys(map)) {
+            if (!drop(key)) out[key] = map[key];
+          }
+          return out;
+        };
 
-  setWatchPaused: (b) => set({ watchPaused: b }),
-}));
+        return { treeCache: filtered(s.treeCache), expanded: filtered(s.expanded) };
+      }),
+
+    setSelectedFile: (sel) => set({ selectedFile: sel }),
+
+    toggleShowIgnored: () => set((s) => ({ showIgnored: !s.showIgnored })),
+
+    setFilesRailOpen: (b) => set({ filesRailOpen: b }),
+
+    setWatchPaused: (b) => set({ watchPaused: b }),
+
+    showToast: (message) => {
+      clearToastTimer();
+      const token = ++toastToken;
+      set({ toast: message });
+      toastTimer = setTimeout(() => {
+        // Only this call's own token still being current proves no later showToast/dismissToast
+        // has superseded it — otherwise this stale timer must not touch whatever toast is showing
+        // now (see the doc comment above `toastTimer`).
+        if (token === toastToken) set({ toast: null });
+        toastTimer = undefined;
+      }, TOAST_AUTO_DISMISS_MS);
+    },
+
+    dismissToast: () => {
+      clearToastTimer();
+      toastToken += 1;
+      set({ toast: null });
+    },
+  };
+});

@@ -33,19 +33,27 @@ class FakeTerminal {
   onResizeCb: ((s: { cols: number; rows: number }) => void) | undefined;
   cols = 80;
   rows = 24;
+  /** Concatenated bytes ever handed to `write()` since the last `reset()` (BL-14 harness). */
+  buffer: number[] = [];
   constructor(opts: Record<string, unknown>) {
     this.options = opts;
   }
   loadAddon = vi.fn();
   open = vi.fn(() => calls.push("open"));
-  write = vi.fn((_d: unknown, cb?: () => void) => {
+  write = vi.fn((d: unknown, cb?: () => void) => {
     calls.push("write");
+    if (d instanceof Uint8Array) this.buffer.push(...d);
     cb?.();
   });
   resize = vi.fn((c: number, r: number) => {
     this.cols = c;
     this.rows = r;
     calls.push("resize");
+  });
+  /** Mirrors xterm's `Terminal.reset()`: clears the buffer/scrollback (BL-14). */
+  reset = vi.fn(() => {
+    this.buffer = [];
+    calls.push("reset");
   });
   onData = vi.fn((cb: (d: string) => void) => {
     this.onDataCb = cb;
@@ -155,6 +163,43 @@ describe("TerminalManager", () => {
     expect(firstWrite).toBeLessThan(firstOpen);
     // replay resized to snapshot dims before writing
     expect(terminals[0].resize).toHaveBeenCalledWith(100, 40);
+  });
+
+  it("applyReplay resets the terminal BEFORE writing (BL-14: re-attach REPLACES scrollback, never appends)", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+
+    // First attach + Replay (e.g. the initial mount).
+    await m.attach("s1");
+    const firstMarker = new Uint8Array([1, 2, 3]);
+    lastChannelHandler!({
+      event: "replay",
+      data: { cols: 80, rows: 24, content: Array.from(firstMarker) },
+    } as TerminalEvent);
+    expect(terminals[0].buffer).toEqual([1, 2, 3]);
+
+    // Re-attach (reconnect, or Home hide/re-show -> fresh attach_session -> fresh full Replay).
+    m.resetAttachment("s1");
+    await m.attach("s1");
+    expect(attachSessionMock).toHaveBeenCalledTimes(2);
+
+    const secondMarker = new Uint8Array([9, 9, 9]);
+    lastChannelHandler!({
+      event: "replay",
+      data: { cols: 80, rows: 24, content: Array.from(secondMarker) },
+    } as TerminalEvent);
+
+    // reset() happened before the SECOND write (order), and the buffer holds ONLY the second
+    // Replay's bytes — the first Replay's content was cleared, not appended-to. reset() fires on
+    // EVERY Replay (including the first, harmlessly — the buffer is already empty then), so by
+    // the second Replay it has run twice: once per applyReplay call.
+    const resetIdx = calls.lastIndexOf("reset");
+    const writeIdxAfterReset = calls.indexOf("write", resetIdx);
+    expect(resetIdx).toBeGreaterThanOrEqual(0);
+    expect(writeIdxAfterReset).toBeGreaterThan(resetIdx);
+    expect(terminals[0].reset).toHaveBeenCalledTimes(2);
+    expect(terminals[0].buffer).toEqual([9, 9, 9]);
+    expect(terminals[0].buffer).not.toEqual([1, 2, 3, 9, 9, 9]);
   });
 
   it("attach() wires the Channel and applies Replay before Output, never touching the store", () => {

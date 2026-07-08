@@ -284,10 +284,23 @@ export class TerminalManager {
   }
 
   /**
-   * Replay = sanitized scrollback ring (spec §11): resize to the snapshot dims, then write
-   * the bytes. `term.write()` before `term.open()` is buffered by xterm and rendered on
-   * open, so calling this before the container mounts satisfies "replay before open"
-   * naturally — the Replay's cols/rows size the terminal before its bytes are written.
+   * Replay = sanitized scrollback ring (spec §11): reset the terminal, resize to the snapshot
+   * dims, then write the bytes. `term.write()` before `term.open()` is buffered by xterm and
+   * rendered on open, so calling this before the container mounts satisfies "replay before
+   * open" naturally — the Replay's cols/rows size the terminal before its bytes are written.
+   *
+   * `term.reset()` FIRST (BL-14): every `attach()` — the initial mount AND any re-attach
+   * (reconnect's `resetAllAttachments()`, or the Home "Пройти" hide/re-show -> fresh
+   * `attach_session`) — receives a fresh FULL-scrollback Replay from the daemon, not a delta.
+   * Without a reset, that fresh Replay lands on an xterm buffer that may already hold the
+   * previous attach's content and is simply APPENDED, so the pane shows the scrollback twice
+   * (BL-14; A1 verification, chip task_ada4835d). `reset()` clears the buffer + scrollback so
+   * the incoming Replay REPLACES rather than appends. It runs before `trackedWrite` (the
+   * pending-bytes/watermark gauge below), so the flow-control accounting for THIS write is
+   * untouched — `reset()` is synchronous and does not itself go through `trackedWrite`, and any
+   * earlier write's flush callback (already in flight before this reset) still fires on its own
+   * schedule and decrements `pendingBytes` as normal; it is a best-effort telemetry gauge, not a
+   * correctness-critical count, so a reset racing a slow-to-flush prior chunk is harmless.
    */
   applyReplay(
     sessionId: SessionId,
@@ -297,6 +310,7 @@ export class TerminalManager {
   ): void {
     const entry = this.entries.get(sessionId);
     if (!entry) return;
+    entry.term.reset();
     entry.term.resize(cols, rows);
     this.trackedWrite(entry, content);
   }
