@@ -116,7 +116,7 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().treeCache["/root\tsub"]).toEqual(replaced);
   });
 
-  it("invalidateDirs(root, [rel]) drops only that dir's cache+expanded entry, leaves siblings", () => {
+  it("invalidateDirs(root, [rel]) drops only that dir's CACHE entry but leaves `expanded` (a point refresh keeps dirs open, spec §5/§6.4)", () => {
     const entriesA: FsEntry[] = [
       { name: "x", relPath: "a/x", isDir: false, size: 1, isIgnored: false },
     ];
@@ -132,11 +132,13 @@ describe("useAppStore", () => {
 
     expect(useAppStore.getState().treeCache["/root\ta"]).toBeUndefined();
     expect(useAppStore.getState().treeCache["/root\tb"]).toEqual(entriesB);
-    expect(useAppStore.getState().expanded["/root\ta"]).toBeUndefined();
+    // `expanded` is untouched by invalidation — a dir the owner had open stays open, and
+    // FileTree's own auto-refetch effect (spec §6.4) re-fetches it since it's now uncached.
+    expect(useAppStore.getState().expanded["/root\ta"]).toBe(true);
     expect(useAppStore.getState().expanded["/root\tb"]).toBe(true);
   });
 
-  it('invalidateDirs(root, ["*"]) drops ALL cache+expanded entries for that root but leaves other roots intact', () => {
+  it('invalidateDirs(root, ["*"]) drops ALL cache entries for that root but leaves `expanded` (every root) untouched', () => {
     const entries: FsEntry[] = [
       { name: "x", relPath: "a/x", isDir: false, size: 1, isIgnored: false },
     ];
@@ -150,9 +152,10 @@ describe("useAppStore", () => {
 
     expect(useAppStore.getState().treeCache["/root-a\t"]).toBeUndefined();
     expect(useAppStore.getState().treeCache["/root-a\tsub"]).toBeUndefined();
-    expect(useAppStore.getState().expanded["/root-a\tsub"]).toBeUndefined();
-    // other root untouched
+    // other root's cache untouched
     expect(useAppStore.getState().treeCache["/root-b\t"]).toEqual(entries);
+    // `expanded` is untouched for BOTH the invalidated root and every other root
+    expect(useAppStore.getState().expanded["/root-a\tsub"]).toBe(true);
     expect(useAppStore.getState().expanded["/root-b\tsub"]).toBe(true);
   });
 

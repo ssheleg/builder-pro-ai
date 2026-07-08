@@ -130,6 +130,34 @@ describe("FileTree", () => {
     expect(screen.getByText("b.txt")).toBeTruthy();
   });
 
+  it("(b2) invalidateDirs on an expanded dir keeps it expanded and triggers a live refetch (not a collapse)", async () => {
+    const firstEntries: FsEntry[] = [
+      { name: "a.txt", relPath: "a.txt", isDir: false, size: 3, isIgnored: false },
+    ];
+    const secondEntries: FsEntry[] = [
+      { name: "b.txt", relPath: "b.txt", isDir: false, size: 5, isIgnored: false },
+    ];
+    listDirMock.mockResolvedValueOnce(firstEntries).mockResolvedValueOnce(secondEntries);
+    render(<FileTree workspace={ws} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("proj"));
+    });
+    expect(listDirMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("a.txt")).toBeTruthy();
+    expect(useAppStore.getState().expanded["/proj\t"]).toBe(true);
+
+    // The real store action (spec §5, wired to `fs://changed` by a later task) — must keep the
+    // dir expanded (point refresh), not collapse the tree.
+    await act(async () => {
+      useAppStore.getState().invalidateDirs("/proj", ["*"]);
+    });
+
+    expect(useAppStore.getState().expanded["/proj\t"]).toBe(true);
+    expect(listDirMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("b.txt")).toBeTruthy();
+  });
+
   it("(c) a 10k-entry flattened list renders only a windowed subset (<500 DOM rows)", () => {
     const entries: FsEntry[] = Array.from({ length: 10_000 }, (_, i) => ({
       name: `file-${String(i).padStart(5, "0")}.txt`,
@@ -387,6 +415,18 @@ describe("FileTree", () => {
     });
     expect(pickFolderMock).toHaveBeenCalledTimes(1);
     expect(addWorkspaceRootMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
+  it("(f2) a rejected pickFolder() fires a toast instead of an unhandled rejection", async () => {
+    pickFolderMock.mockRejectedValue({ kind: "internal", message: "picker unavailable" });
+    render(<FileTree workspace={ws} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add root/i }));
+    });
+    expect(pickFolderMock).toHaveBeenCalledTimes(1);
+    expect(addWorkspaceRootMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().toast).toMatch(/picker unavailable/);
   });
 
   it("(h) an FsError from listDir on expand fires a toast", async () => {

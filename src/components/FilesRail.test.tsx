@@ -82,7 +82,7 @@ describe("FilesRail", () => {
     expect(useAppStore.getState().filesRailOpen).toBe(false);
   });
 
-  it("the show-ignored toggle flips store state and invalidates cached dirs", async () => {
+  it("the show-ignored toggle flips store state and invalidates cached dirs, which the still-expanded FileTree immediately refetches", async () => {
     useAppStore.setState(
       {
         filesRailOpen: true,
@@ -96,7 +96,11 @@ describe("FilesRail", () => {
       fireEvent.click(screen.getByRole("checkbox"));
     });
     expect(useAppStore.getState().showIgnored).toBe(true);
-    expect(useAppStore.getState().treeCache["/proj\t"]).toBeUndefined();
+    // The dir stays expanded — invalidation is a refetch-in-place, not a collapse — so the
+    // mounted FileTree's own effect immediately re-fetches it with the NEW showIgnored value
+    // rather than leaving the cache empty until some later user action.
+    expect(useAppStore.getState().expanded["/proj\t"]).toBe(true);
+    expect(listDirMock).toHaveBeenCalledWith("/proj", "", true);
   });
 
   it("shows the watch-paused affordance only when watchPaused is true", () => {
@@ -109,7 +113,7 @@ describe("FilesRail", () => {
     expect(screen.getByText(/live-обновления на паузе/i)).toBeTruthy();
   });
 
-  it("clicking the watch-paused affordance restarts the watch and clears watchPaused", async () => {
+  it("clicking the watch-paused affordance restarts the watch, clears watchPaused, and the still-expanded FileTree refetches", async () => {
     useAppStore.setState(
       {
         filesRailOpen: true,
@@ -125,6 +129,9 @@ describe("FilesRail", () => {
     });
     expect(startWorkspaceWatchMock).toHaveBeenCalledWith(["/proj"], false);
     expect(useAppStore.getState().watchPaused).toBe(false);
-    expect(useAppStore.getState().treeCache["/proj\t"]).toBeUndefined();
+    // The dir stays expanded — invalidation is a refetch-in-place, not a collapse — so the
+    // mounted FileTree's own effect immediately re-fetches it rather than leaving a dead cache.
+    expect(useAppStore.getState().expanded["/proj\t"]).toBe(true);
+    expect(listDirMock).toHaveBeenCalledWith("/proj", "", false);
   });
 });

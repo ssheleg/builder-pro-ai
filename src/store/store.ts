@@ -125,14 +125,18 @@ export interface AppState {
   /** Insert or replace one directory's cached listing. */
   cacheDir: (root: string, rel: string, entries: FsEntry[]) => void;
   /**
-   * Apply an `fs://changed` batch (spec §5) to `treeCache`/`expanded` for `root`. `rels` is the
-   * event's `changedRelPaths`, treated as literal directory keys to drop (the caller is
+   * Apply an `fs://changed` batch (spec §5) to `treeCache` for `root` — a POINT REFRESH, never a
+   * collapse: `expanded` is deliberately left UNTOUCHED, so a directory the owner had open stays
+   * open and `FileTree`'s own effect (spec §6.4) re-fetches it since it's now uncached, with no
+   * explicit re-expand click needed. Clearing `expanded` here would collapse the whole tree on
+   * every file an agent writes, which is the opposite of the intended live-refresh UX. `rels` is
+   * the event's `changedRelPaths`, treated as literal directory keys to drop (the caller is
    * responsible for mapping a changed FILE path to its containing directory's `rel` first — this
    * action itself does no path arithmetic). `rels === ["*"]` (the watcher's overflow sentinel,
-   * spec §5: >500 distinct paths in one debounced batch) drops EVERY `treeCache`/`expanded` entry
-   * under `root` — i.e. "refresh everything expanded under this root" — while entries for every
-   * OTHER root are left untouched. Otherwise, only the exact `` `${root}\t${rel}` `` keys named in
-   * `rels` are dropped from both maps.
+   * spec §5: >500 distinct paths in one debounced batch) drops EVERY `treeCache` entry under
+   * `root` — i.e. "refresh everything expanded under this root" — while entries for every OTHER
+   * root are left untouched. Otherwise, only the exact `` `${root}\t${rel}` `` keys named in
+   * `rels` are dropped.
    */
   invalidateDirs: (root: string, rels: string[]) => void;
   /** Set (or clear, with `null`) the file shown in the preview pane. */
@@ -286,15 +290,14 @@ export const useAppStore = create<AppState>((set) => {
         const drop = (key: string): boolean =>
           key.startsWith(prefix) && (dropAll || dropKeys!.has(key));
 
-        const filtered = <V,>(map: Record<string, V>): Record<string, V> => {
-          const out: Record<string, V> = {};
-          for (const key of Object.keys(map)) {
-            if (!drop(key)) out[key] = map[key];
-          }
-          return out;
-        };
+        // `expanded` is deliberately NOT filtered here — see the doc comment on `invalidateDirs`
+        // above: this is a point refresh, not a collapse.
+        const out: Record<string, FsEntry[]> = {};
+        for (const key of Object.keys(s.treeCache)) {
+          if (!drop(key)) out[key] = s.treeCache[key];
+        }
 
-        return { treeCache: filtered(s.treeCache), expanded: filtered(s.expanded) };
+        return { treeCache: out };
       }),
 
     setSelectedFile: (sel) => set({ selectedFile: sel }),
