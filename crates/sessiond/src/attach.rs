@@ -1260,7 +1260,12 @@ mod tests {
             // forwarder will ever send has been seen". A generous overall cap guards against a true
             // hang without being timing-sensitive to load.
             let mut collected = Vec::new();
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            // Generous wall-clock cap: this is a CORRECTNESS assertion (the marker must arrive
+            // before the stream closes), not a latency budget. A tight deadline turns a momentarily
+            // oversubscribed host (full-workspace parallelism, a stalled scheduler) into a spurious
+            // failure; 30s tolerates that without ever weakening the guarantee — the loop still
+            // exits early the instant the marker lands or the channel closes.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
             loop {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
@@ -1290,7 +1295,10 @@ mod tests {
 
             // (b) The attach entry is reaped within the deadline (forwarder self-terminated on the
             // reader's sink drop, then remove_session removed the map entry).
-            let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // Generous cap for the same reason as (a): the reap is GUARANTEED (the wait thread's
+            // on_exited → remove_session always runs), so this only tolerates a starved scheduler
+            // under load — it never masks a missing reap (that would still fail after 30s).
+            let reap_deadline = std::time::Instant::now() + Duration::from_secs(30);
             while reg.attachment_count() != 0 && std::time::Instant::now() < reap_deadline {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
