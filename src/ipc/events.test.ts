@@ -19,9 +19,17 @@ import {
   onWorkspaceCreated,
   onDaemonDisconnected,
   onDaemonReconnected,
+  onFsChanged,
+  onFsWatchError,
+  onWorkspaceUpdated,
 } from "./events";
 import type { SessionMeta, Workspace } from "./types";
-import type { StateChangedPayload, ExitedPayload } from "./events";
+import type {
+  StateChangedPayload,
+  ExitedPayload,
+  FsChangedPayload,
+  FsWatchErrorPayload,
+} from "./events";
 
 describe("ipc/events", () => {
   beforeEach(() => {
@@ -79,7 +87,7 @@ describe("ipc/events", () => {
     const cb = vi.fn();
     await onWorkspaceCreated(cb);
     expect(listenMock).toHaveBeenCalledWith("workspace://created", expect.any(Function));
-    const w: Workspace = { id: "w1", name: "p", rootPath: "/p" };
+    const w: Workspace = { id: "w1", name: "p", rootPath: "/p", roots: ["/p"] };
     registered.get("workspace://created")!({ payload: w });
     expect(cb).toHaveBeenCalledWith(w);
   });
@@ -98,5 +106,41 @@ describe("ipc/events", () => {
     expect(listenMock).toHaveBeenCalledWith("daemon://reconnected", expect.any(Function));
     registered.get("daemon://reconnected")!({ payload: null });
     expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("onFsChanged subscribes to fs://changed and unwraps {root, changedRelPaths}", async () => {
+    const cb = vi.fn();
+    const un = await onFsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("fs://changed", expect.any(Function));
+    const p: FsChangedPayload = { root: "/root", changedRelPaths: ["a.txt", "sub/b.txt"] };
+    registered.get("fs://changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+    expect(un).toBe(unlisten);
+  });
+
+  it("onFsChanged carries the [\"*\"] refresh-everything sentinel through untouched", async () => {
+    const cb = vi.fn();
+    await onFsChanged(cb);
+    const p: FsChangedPayload = { root: "/root", changedRelPaths: ["*"] };
+    registered.get("fs://changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onFsWatchError subscribes to fs://watch-error and unwraps {root, reason}", async () => {
+    const cb = vi.fn();
+    await onFsWatchError(cb);
+    expect(listenMock).toHaveBeenCalledWith("fs://watch-error", expect.any(Function));
+    const p: FsWatchErrorPayload = { root: "/root", reason: "backend died" };
+    registered.get("fs://watch-error")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onWorkspaceUpdated subscribes to workspace://updated and unwraps the raw Workspace", async () => {
+    const cb = vi.fn();
+    await onWorkspaceUpdated(cb);
+    expect(listenMock).toHaveBeenCalledWith("workspace://updated", expect.any(Function));
+    const w: Workspace = { id: "w1", name: "p", rootPath: "/p", roots: ["/p", "/q"] };
+    registered.get("workspace://updated")!({ payload: w });
+    expect(cb).toHaveBeenCalledWith(w);
   });
 });

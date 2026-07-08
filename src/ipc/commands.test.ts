@@ -21,9 +21,12 @@ import {
   getSessionState,
   pickFolder,
   daemonStatus,
+  addWorkspaceRoot,
+  removeWorkspaceRoot,
+  getCommandEvents,
 } from "./commands";
 import { Channel } from "@tauri-apps/api/core";
-import type { SessionMeta, Workspace, TerminalEvent } from "./types";
+import type { SessionMeta, Workspace, TerminalEvent, CommandEvent } from "./types";
 
 const sampleMeta: SessionMeta = {
   id: "s1",
@@ -96,7 +99,7 @@ describe("ipc/commands", () => {
   });
 
   it("listWorkspaces calls list_workspaces", async () => {
-    const ws: Workspace[] = [{ id: "w1", name: "proj", rootPath: "/p" }];
+    const ws: Workspace[] = [{ id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] }];
     invokeMock.mockResolvedValueOnce(ws);
     const res = await listWorkspaces();
     expect(invokeMock).toHaveBeenCalledWith("list_workspaces");
@@ -104,7 +107,7 @@ describe("ipc/commands", () => {
   });
 
   it("createWorkspace sends name + rootPath", async () => {
-    const w: Workspace = { id: "w1", name: "proj", rootPath: "/p" };
+    const w: Workspace = { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] };
     invokeMock.mockResolvedValueOnce(w);
     const res = await createWorkspace("proj", "/p");
     expect(invokeMock).toHaveBeenCalledWith("create_workspace", { name: "proj", rootPath: "/p" });
@@ -140,5 +143,46 @@ describe("ipc/commands", () => {
   it("daemonStatus resolves the incompatible variant with daemonMin/daemonMax", async () => {
     invokeMock.mockResolvedValueOnce({ kind: "incompatible", daemonMin: 3, daemonMax: 4 });
     expect(await daemonStatus()).toEqual({ kind: "incompatible", daemonMin: 3, daemonMax: 4 });
+  });
+
+  it("addWorkspaceRoot sends workspaceId + path, resolves the updated Workspace", async () => {
+    const w: Workspace = { id: "w1", name: "proj", rootPath: "/p", roots: ["/p", "/q"] };
+    invokeMock.mockResolvedValueOnce(w);
+    const res = await addWorkspaceRoot("w1", "/q");
+    expect(invokeMock).toHaveBeenCalledWith("add_workspace_root", { workspaceId: "w1", path: "/q" });
+    expect(res).toEqual(w);
+  });
+
+  it("removeWorkspaceRoot sends workspaceId + path, resolves the updated Workspace", async () => {
+    const w: Workspace = { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] };
+    invokeMock.mockResolvedValueOnce(w);
+    const res = await removeWorkspaceRoot("w1", "/q");
+    expect(invokeMock).toHaveBeenCalledWith("remove_workspace_root", {
+      workspaceId: "w1",
+      path: "/q",
+    });
+    expect(res).toEqual(w);
+  });
+
+  it("removeWorkspaceRoot propagates a rejected LastRoot CommandError as-is", async () => {
+    const err = { kind: "daemon", code: "LastRoot", message: "cannot remove the last root" };
+    invokeMock.mockRejectedValueOnce(err);
+    await expect(removeWorkspaceRoot("w1", "/p")).rejects.toEqual(err);
+  });
+
+  it("getCommandEvents sends sessionId + limit, resolves CommandEvent[] newest-first", async () => {
+    const events: CommandEvent[] = [
+      { sessionId: "s1", seq: 2, ts: 200, kind: "finished", exitCode: 0, origin: "shell" },
+      { sessionId: "s1", seq: 1, ts: 100, kind: "started", exitCode: null, origin: "shell" },
+    ];
+    invokeMock.mockResolvedValueOnce(events);
+    const res = await getCommandEvents("s1", 10);
+    expect(invokeMock).toHaveBeenCalledWith("get_command_events", { sessionId: "s1", limit: 10 });
+    expect(res).toEqual(events);
+  });
+
+  it("getCommandEvents resolves an empty array for an unknown session (honest, not an error)", async () => {
+    invokeMock.mockResolvedValueOnce([]);
+    expect(await getCommandEvents("ghost", 10)).toEqual([]);
   });
 });

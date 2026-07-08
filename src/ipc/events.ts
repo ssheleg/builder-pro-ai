@@ -49,6 +49,44 @@ export function onWorkspaceCreated(cb: (w: Workspace) => void): Promise<Unlisten
   return listen<Workspace>("workspace://created", (e) => cb(e.payload));
 }
 
+/**
+ * Payload of `fs://changed` (spec §5), emitted by `src-tauri/src/fs_watcher.rs`'s
+ * `FsEventSink for AppHandle` impl. `changedRelPaths` is already deduped and capped at 500
+ * (`fs_watcher::WATCH_PATH_CAP`): `["*"]` means "refresh everything expanded under this root".
+ */
+export interface FsChangedPayload {
+  root: string;
+  changedRelPaths: string[];
+}
+
+/** Payload of `fs://watch-error` (spec §5): the live watch for `root` failed/died. The frontend
+ * shows a "live updates paused" affordance and re-calls `startWorkspaceWatch` on next activation —
+ * this never panics the app, it is a signal, not a fatal error. */
+export interface FsWatchErrorPayload {
+  root: string;
+  reason: string;
+}
+
+/** Subscribe to `fs://changed` (spec §5) — see `FsChangedPayload`. */
+export function onFsChanged(cb: (p: FsChangedPayload) => void): Promise<UnlistenFn> {
+  return listen<FsChangedPayload>("fs://changed", (e) => cb(e.payload));
+}
+
+/** Subscribe to `fs://watch-error` (spec §5) — see `FsWatchErrorPayload`. */
+export function onFsWatchError(cb: (p: FsWatchErrorPayload) => void): Promise<UnlistenFn> {
+  return listen<FsWatchErrorPayload>("fs://watch-error", (e) => cb(e.payload));
+}
+
+/**
+ * Subscribe to `workspace://updated` (spec §3.3/§6.6), emitted by `src-tauri/src/broker.rs`'s
+ * `EV_WORKSPACE_UPDATED` mapping of `Push::WorkspaceUpdated`. Fires whenever a workspace's roots
+ * change (`addWorkspaceRoot`/`removeWorkspaceRoot`, from ANY connected client) — the payload is
+ * the raw, already-updated `Workspace`, upsertable directly via the store's `upsertWorkspace`.
+ */
+export function onWorkspaceUpdated(cb: (w: Workspace) => void): Promise<UnlistenFn> {
+  return listen<Workspace>("workspace://updated", (e) => cb(e.payload));
+}
+
 /** `daemon://disconnected` carries no payload (the core emits `()`, which decodes as `null`). */
 export function onDaemonDisconnected(cb: () => void): Promise<UnlistenFn> {
   return listen<null>("daemon://disconnected", () => cb());

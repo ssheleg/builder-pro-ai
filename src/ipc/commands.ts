@@ -1,5 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import type { SessionMeta, Workspace, TerminalEvent } from "./types";
+import type { SessionMeta, Workspace, TerminalEvent, CommandEvent } from "./types";
 
 /**
  * `SessionMeta["id"]` / `Workspace["id"]` — mirrors the `bpa_protocol::SessionId` /
@@ -77,6 +77,36 @@ export function createWorkspace(name: string, rootPath: string): Promise<Workspa
 
 export function getSessionState(sessionId: SessionId): Promise<SessionMeta> {
   return invoke<SessionMeta>("get_session_state", { sessionId });
+}
+
+/**
+ * Add an additional root directory to a workspace (spec §3.3/§6.6, multi-root). The daemon
+ * re-validates `path` independently (canonicalizes, rejects duplicates/escapes) — this wrapper is
+ * deliberately thin, same shape as `createWorkspace`. Every connected client (including this one)
+ * also receives the resulting `Workspace` via the `workspace://updated` event (see `./events.ts`);
+ * the value this promise resolves to is this caller's own direct reply, not sourced from that
+ * broadcast.
+ */
+export function addWorkspaceRoot(workspaceId: WorkspaceId, path: string): Promise<Workspace> {
+  return invoke<Workspace>("add_workspace_root", { workspaceId, path });
+}
+
+/**
+ * Remove a root directory from a workspace (spec §3.3/§6.6). The daemon rejects removing a
+ * workspace's LAST remaining root (`CommandError::Daemon { code: "LastRoot", .. }` — a workspace
+ * always has at least one root); that rejection propagates here as-is.
+ */
+export function removeWorkspaceRoot(workspaceId: WorkspaceId, path: string): Promise<Workspace> {
+  return invoke<Workspace>("remove_workspace_root", { workspaceId, path });
+}
+
+/**
+ * Fetch a session's recent command lifecycle events (spec §3.3, Pv2 §7 `command_events` table),
+ * newest-first, capped at `limit`. An unknown `sessionId` (e.g. a rehydrated session that predates
+ * the v2 `command_events` table) resolves to an empty array — honest, not an error (spec §7).
+ */
+export function getCommandEvents(sessionId: SessionId, limit: number): Promise<CommandEvent[]> {
+  return invoke<CommandEvent[]>("get_command_events", { sessionId, limit });
 }
 
 /**

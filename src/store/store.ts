@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
+import type { FsEntry } from "../ipc/fs";
 
 /**
  * Global app state (spec §12). METADATA ONLY — PTY bytes never enter this store;
@@ -48,6 +49,38 @@ export interface AppState {
    */
   hydrated: boolean;
 
+  /**
+   * Top-level navigation (spec §6.6/§6.2): `"home"` is the attention-first Home view over ALL
+   * terminals across workspaces; `"workspace"` is the existing per-workspace terminal layout.
+   * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
+   */
+  view: "home" | "workspace";
+
+  /**
+   * File-explorer slice (spec §6.6/§6.4). Every keyed map here uses the SAME key format:
+   * `` `${root}\t${rel}` `` (tab-separated — `rel` itself may legitimately contain `/`, so a
+   * tab avoids any ambiguity a `/`-joined key would have between a root boundary and a path
+   * separator). `rel === ""` addresses the root directory itself.
+   */
+  /** Which directories are expanded in the tree, keyed `` `${root}\t${rel}` ``. A `Record` of
+   * `true` (not `boolean`) so "expanded" is exactly "key present" — no stale `false` entries to
+   * prune. */
+  expanded: Record<string, true>;
+  /** Lazily-fetched `listDir` results, keyed `` `${root}\t${rel}` ``. Absence means "not yet
+   * fetched" (or invalidated) — never distinguished from an empty directory by anything other
+   * than key presence. */
+  treeCache: Record<string, FsEntry[]>;
+  /** The file currently shown in the preview pane, or `null` when nothing is selected. */
+  selectedFile: { root: string; rel: string } | null;
+  /** Whether gitignored entries are shown (dimmed) in the tree. Defaults to `false` (spec §4.2:
+   * ignored entries omitted by default). */
+  showIgnored: boolean;
+  /** Right-rail (files) visibility. Defaults to `false` (collapsed). */
+  filesRailOpen: boolean;
+  /** `true` while the live watch is paused after an `fs://watch-error` (spec §5/§7): the UI shows
+   * a "live updates paused — refresh" affordance. Cleared on reactivation. */
+  watchPaused: boolean;
+
   /** Insert or replace a session by `meta.id`. Idempotent. */
   upsertSession: (meta: SessionMeta) => void;
   /** Delete a session; clears `activeSessionId` if it pointed at the removed session. */
@@ -70,9 +103,42 @@ export interface AppState {
   setUpgradeError: (v: string | null) => void;
   /** Set `true` after the first successful hydrate. See `hydrated` doc above. */
   setHydrated: (v: boolean) => void;
-  /** Insert or replace a workspace by `ws.id`. Idempotent. */
+  /** Insert or replace a workspace by `ws.id`. Idempotent. Also the `workspace://updated`
+   * listener's handler (spec §6.6): that event's payload IS a `Workspace`, so wiring it is
+   * literally `onWorkspaceUpdated(upsertWorkspace)` — no separate action needed. */
   upsertWorkspace: (ws: Workspace) => void;
   setActiveSession: (id: SessionId | null) => void;
+
+  /** Switch the top-level view. See `view`'s doc above. */
+  setView: (v: "home" | "workspace") => void;
+  /** Set (`open=true`) or clear (`open=false`) one directory's expanded flag. */
+  setExpanded: (root: string, rel: string, open: boolean) => void;
+  /** Insert or replace one directory's cached listing. */
+  cacheDir: (root: string, rel: string, entries: FsEntry[]) => void;
+  /**
+   * Apply an `fs://changed` batch (spec §5) to `treeCache`/`expanded` for `root`. `rels` is the
+   * event's `changedRelPaths`, treated as literal directory keys to drop (the caller is
+   * responsible for mapping a changed FILE path to its containing directory's `rel` first — this
+   * action itself does no path arithmetic). `rels === ["*"]` (the watcher's overflow sentinel,
+   * spec §5: >500 distinct paths in one debounced batch) drops EVERY `treeCache`/`expanded` entry
+   * under `root` — i.e. "refresh everything expanded under this root" — while entries for every
+   * OTHER root are left untouched. Otherwise, only the exact `` `${root}\t${rel}` `` keys named in
+   * `rels` are dropped from both maps.
+   */
+  invalidateDirs: (root: string, rels: string[]) => void;
+  /** Set (or clear, with `null`) the file shown in the preview pane. */
+  setSelectedFile: (sel: { root: string; rel: string } | null) => void;
+  /** Flip `showIgnored`. */
+  toggleShowIgnored: () => void;
+  /** Set the files right-rail's open/closed state. */
+  setFilesRailOpen: (b: boolean) => void;
+  /** Set `watchPaused`. See its doc above. */
+  setWatchPaused: (b: boolean) => void;
+}
+
+/** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
+function fsKey(root: string, rel: string): string {
+  return `${root}\t${rel}`;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -84,6 +150,13 @@ export const useAppStore = create<AppState>((set) => ({
   upgradeDialogOpen: false,
   upgradeError: null,
   hydrated: false,
+  view: "home",
+  expanded: {},
+  treeCache: {},
+  selectedFile: null,
+  showIgnored: false,
+  filesRailOpen: false,
+  watchPaused: false,
 
   upsertSession: (meta) =>
     set((s) => ({ sessions: { ...s.sessions, [meta.id]: meta } })),
@@ -146,4 +219,49 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({ workspaces: { ...s.workspaces, [ws.id]: ws } })),
 
   setActiveSession: (id) => set({ activeSessionId: id }),
+
+  setView: (v) => set({ view: v }),
+
+  setExpanded: (root, rel, open) =>
+    set((s) => {
+      const key = fsKey(root, rel);
+      if (open) {
+        return { expanded: { ...s.expanded, [key]: true } };
+      }
+      if (!(key in s.expanded)) return {};
+      const rest = { ...s.expanded };
+      delete rest[key];
+      return { expanded: rest };
+    }),
+
+  cacheDir: (root, rel, entries) =>
+    set((s) => ({ treeCache: { ...s.treeCache, [fsKey(root, rel)]: entries } })),
+
+  invalidateDirs: (root, rels) =>
+    set((s) => {
+      const prefix = `${root}\t`;
+      const dropAll = rels.includes("*");
+      const dropKeys = dropAll ? null : new Set(rels.map((rel) => fsKey(root, rel)));
+
+      const drop = (key: string): boolean =>
+        key.startsWith(prefix) && (dropAll || dropKeys!.has(key));
+
+      const filtered = <V,>(map: Record<string, V>): Record<string, V> => {
+        const out: Record<string, V> = {};
+        for (const key of Object.keys(map)) {
+          if (!drop(key)) out[key] = map[key];
+        }
+        return out;
+      };
+
+      return { treeCache: filtered(s.treeCache), expanded: filtered(s.expanded) };
+    }),
+
+  setSelectedFile: (sel) => set({ selectedFile: sel }),
+
+  toggleShowIgnored: () => set((s) => ({ showIgnored: !s.showIgnored })),
+
+  setFilesRailOpen: (b) => set({ filesRailOpen: b }),
+
+  setWatchPaused: (b) => set({ watchPaused: b }),
 }));

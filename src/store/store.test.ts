@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { useAppStore } from "./store";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
+import type { FsEntry } from "../ipc/fs";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: "s1",
@@ -32,6 +33,13 @@ describe("useAppStore", () => {
         upgradeDialogOpen: false,
         upgradeError: null,
         hydrated: false,
+        view: "home",
+        expanded: {},
+        treeCache: {},
+        selectedFile: null,
+        showIgnored: false,
+        filesRailOpen: false,
+        watchPaused: false,
       },
       false,
     );
@@ -48,6 +56,135 @@ describe("useAppStore", () => {
     expect(s.upgradeError).toBeNull();
     expect(s.hydrated).toBe(false);
     expect(typeof initial.upsertSession).toBe("function");
+  });
+
+  it("has the spec §6.6 navigation + fs-slice initial shape, defaulting view to \"home\"", () => {
+    const s = useAppStore.getState();
+    expect(s.view).toBe("home");
+    expect(s.expanded).toEqual({});
+    expect(s.treeCache).toEqual({});
+    expect(s.selectedFile).toBeNull();
+    expect(s.showIgnored).toBe(false);
+    expect(s.filesRailOpen).toBe(false);
+    expect(s.watchPaused).toBe(false);
+    expect(typeof initial.setView).toBe("function");
+    expect(typeof initial.setExpanded).toBe("function");
+    expect(typeof initial.cacheDir).toBe("function");
+    expect(typeof initial.invalidateDirs).toBe("function");
+    expect(typeof initial.setSelectedFile).toBe("function");
+    expect(typeof initial.toggleShowIgnored).toBe("function");
+    expect(typeof initial.setFilesRailOpen).toBe("function");
+    expect(typeof initial.setWatchPaused).toBe("function");
+  });
+
+  it("setView flips between \"home\" and \"workspace\"", () => {
+    expect(useAppStore.getState().view).toBe("home");
+    useAppStore.getState().setView("workspace");
+    expect(useAppStore.getState().view).toBe("workspace");
+    useAppStore.getState().setView("home");
+    expect(useAppStore.getState().view).toBe("home");
+  });
+
+  it("setExpanded sets a keyed entry to true, then collapses (removes) it", () => {
+    useAppStore.getState().setExpanded("/root", "sub", true);
+    expect(useAppStore.getState().expanded).toEqual({ "/root\tsub": true });
+    useAppStore.getState().setExpanded("/root", "sub", false);
+    expect(useAppStore.getState().expanded).toEqual({});
+  });
+
+  it("setExpanded keys independently by root+rel — same rel under a different root is distinct", () => {
+    useAppStore.getState().setExpanded("/root-a", "sub", true);
+    useAppStore.getState().setExpanded("/root-b", "sub", true);
+    expect(useAppStore.getState().expanded).toEqual({
+      "/root-a\tsub": true,
+      "/root-b\tsub": true,
+    });
+    useAppStore.getState().setExpanded("/root-a", "sub", false);
+    expect(useAppStore.getState().expanded).toEqual({ "/root-b\tsub": true });
+  });
+
+  it("cacheDir stores entries keyed by root+rel, then replaces on a repeat call", () => {
+    const entries: FsEntry[] = [
+      { name: "a.txt", relPath: "sub/a.txt", isDir: false, size: 3, isIgnored: false },
+    ];
+    useAppStore.getState().cacheDir("/root", "sub", entries);
+    expect(useAppStore.getState().treeCache["/root\tsub"]).toEqual(entries);
+
+    const replaced: FsEntry[] = [];
+    useAppStore.getState().cacheDir("/root", "sub", replaced);
+    expect(useAppStore.getState().treeCache["/root\tsub"]).toEqual(replaced);
+  });
+
+  it("invalidateDirs(root, [rel]) drops only that dir's cache+expanded entry, leaves siblings", () => {
+    const entriesA: FsEntry[] = [
+      { name: "x", relPath: "a/x", isDir: false, size: 1, isIgnored: false },
+    ];
+    const entriesB: FsEntry[] = [
+      { name: "y", relPath: "b/y", isDir: false, size: 1, isIgnored: false },
+    ];
+    useAppStore.getState().cacheDir("/root", "a", entriesA);
+    useAppStore.getState().cacheDir("/root", "b", entriesB);
+    useAppStore.getState().setExpanded("/root", "a", true);
+    useAppStore.getState().setExpanded("/root", "b", true);
+
+    useAppStore.getState().invalidateDirs("/root", ["a"]);
+
+    expect(useAppStore.getState().treeCache["/root\ta"]).toBeUndefined();
+    expect(useAppStore.getState().treeCache["/root\tb"]).toEqual(entriesB);
+    expect(useAppStore.getState().expanded["/root\ta"]).toBeUndefined();
+    expect(useAppStore.getState().expanded["/root\tb"]).toBe(true);
+  });
+
+  it('invalidateDirs(root, ["*"]) drops ALL cache+expanded entries for that root but leaves other roots intact', () => {
+    const entries: FsEntry[] = [
+      { name: "x", relPath: "a/x", isDir: false, size: 1, isIgnored: false },
+    ];
+    useAppStore.getState().cacheDir("/root-a", "", entries);
+    useAppStore.getState().cacheDir("/root-a", "sub", entries);
+    useAppStore.getState().cacheDir("/root-b", "", entries);
+    useAppStore.getState().setExpanded("/root-a", "sub", true);
+    useAppStore.getState().setExpanded("/root-b", "sub", true);
+
+    useAppStore.getState().invalidateDirs("/root-a", ["*"]);
+
+    expect(useAppStore.getState().treeCache["/root-a\t"]).toBeUndefined();
+    expect(useAppStore.getState().treeCache["/root-a\tsub"]).toBeUndefined();
+    expect(useAppStore.getState().expanded["/root-a\tsub"]).toBeUndefined();
+    // other root untouched
+    expect(useAppStore.getState().treeCache["/root-b\t"]).toEqual(entries);
+    expect(useAppStore.getState().expanded["/root-b\tsub"]).toBe(true);
+  });
+
+  it("setSelectedFile sets and clears (null) the selection", () => {
+    expect(useAppStore.getState().selectedFile).toBeNull();
+    useAppStore.getState().setSelectedFile({ root: "/root", rel: "a.txt" });
+    expect(useAppStore.getState().selectedFile).toEqual({ root: "/root", rel: "a.txt" });
+    useAppStore.getState().setSelectedFile(null);
+    expect(useAppStore.getState().selectedFile).toBeNull();
+  });
+
+  it("toggleShowIgnored flips the flag from the false default", () => {
+    expect(useAppStore.getState().showIgnored).toBe(false);
+    useAppStore.getState().toggleShowIgnored();
+    expect(useAppStore.getState().showIgnored).toBe(true);
+    useAppStore.getState().toggleShowIgnored();
+    expect(useAppStore.getState().showIgnored).toBe(false);
+  });
+
+  it("setFilesRailOpen sets the rail visibility from the false default", () => {
+    expect(useAppStore.getState().filesRailOpen).toBe(false);
+    useAppStore.getState().setFilesRailOpen(true);
+    expect(useAppStore.getState().filesRailOpen).toBe(true);
+    useAppStore.getState().setFilesRailOpen(false);
+    expect(useAppStore.getState().filesRailOpen).toBe(false);
+  });
+
+  it("setWatchPaused sets the paused flag (fs://watch-error) and clears it on resume", () => {
+    expect(useAppStore.getState().watchPaused).toBe(false);
+    useAppStore.getState().setWatchPaused(true);
+    expect(useAppStore.getState().watchPaused).toBe(true);
+    useAppStore.getState().setWatchPaused(false);
+    expect(useAppStore.getState().watchPaused).toBe(false);
   });
 
   it("setUpgradeError sets and clears the error message (finding [13])", () => {
@@ -194,12 +331,32 @@ describe("useAppStore", () => {
   });
 
   it("upsertWorkspace adds then replaces by id", () => {
-    const w: Workspace = { id: "w1", name: "proj", rootPath: "/p" };
+    const w: Workspace = { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] };
     useAppStore.getState().upsertWorkspace(w);
     expect(useAppStore.getState().workspaces["w1"].name).toBe("proj");
     useAppStore.getState().upsertWorkspace({ ...w, name: "renamed" });
     expect(useAppStore.getState().workspaces["w1"].name).toBe("renamed");
     expect(Object.keys(useAppStore.getState().workspaces)).toHaveLength(1);
+  });
+
+  it("upsertWorkspace applied for a workspace://updated payload (added root) keeps sessions/activeSessionId/other state untouched", () => {
+    const w: Workspace = { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] };
+    useAppStore.getState().upsertWorkspace(w);
+    useAppStore.getState().upsertSession(meta());
+    useAppStore.getState().setActiveSession("s1");
+    useAppStore.getState().setDaemonConnected(true);
+
+    // workspace://updated's payload IS a Workspace (spec §6.6) — the listener just calls
+    // upsertWorkspace with it directly, e.g. after `addWorkspaceRoot("w1", "/q")`.
+    const updated: Workspace = { id: "w1", name: "proj", rootPath: "/p", roots: ["/p", "/q"] };
+    useAppStore.getState().upsertWorkspace(updated);
+
+    expect(useAppStore.getState().workspaces["w1"]).toEqual(updated);
+    expect(Object.keys(useAppStore.getState().workspaces)).toHaveLength(1);
+    // untouched
+    expect(useAppStore.getState().sessions["s1"]).toEqual(meta());
+    expect(useAppStore.getState().activeSessionId).toBe("s1");
+    expect(useAppStore.getState().daemonConnected).toBe(true);
   });
 
   it("setActiveSession sets and clears the active session id", () => {
