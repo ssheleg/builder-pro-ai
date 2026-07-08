@@ -41,6 +41,7 @@
 
 pub mod broker;
 pub mod commands;
+pub mod fs_explorer;
 pub mod launchd;
 pub mod paths;
 pub mod socket_client;
@@ -413,6 +414,15 @@ pub fn run() {
             commands::pick_folder,
             commands::upgrade_daemon,
             commands::daemon_status,
+            fs_explorer::list_dir,
+            fs_explorer::read_file_preview,
+            fs_explorer::create_file,
+            fs_explorer::create_dir,
+            fs_explorer::rename_entry,
+            fs_explorer::move_entry,
+            fs_explorer::delete_entry,
+            fs_explorer::reveal_in_finder,
+            fs_explorer::open_external,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
