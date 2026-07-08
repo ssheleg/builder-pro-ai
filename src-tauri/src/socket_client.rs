@@ -1174,6 +1174,7 @@ mod tests {
                             Response::Workspace(bpa_protocol::Workspace {
                                 id: name.clone(),
                                 name,
+                                roots: vec![root_path.clone()],
                                 root_path,
                             })
                         }
@@ -1372,6 +1373,7 @@ mod tests {
                             id: "w1".into(),
                             name: "w1".into(),
                             root_path: "/".into(),
+                            roots: vec!["/".into()],
                         },
                     }),
                 )

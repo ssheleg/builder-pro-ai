@@ -35,6 +35,10 @@ pub const EV_SESSION_CREATED: &str = "session://created";
 pub const EV_SESSION_STATE_CHANGED: &str = "session://state-changed";
 pub const EV_SESSION_EXITED: &str = "session://exited";
 pub const EV_WORKSPACE_CREATED: &str = "workspace://created";
+/// Emitted after `Request::AddWorkspaceRoot`/`RemoveWorkspaceRoot` succeeds (spec §3.3/§6.6): the
+/// daemon broadcasts `Push::WorkspaceUpdated` to every connected client (same
+/// broadcast-to-all rationale as `EV_WORKSPACE_CREATED`) with the workspace's new `roots`.
+pub const EV_WORKSPACE_UPDATED: &str = "workspace://updated";
 pub const EV_DAEMON_DISCONNECTED: &str = "daemon://disconnected";
 pub const EV_DAEMON_RECONNECTED: &str = "daemon://reconnected";
 /// Emitted (no payload) when the handshake preamble (spec §4.5) finds the daemon's protocol range
@@ -73,6 +77,8 @@ pub enum BrokerAction {
 ///   Promise) — de-duplicating/upserting by id is the frontend store's job, not the broker's.
 /// - `Push::WorkspaceCreated` -> `workspace://created` with the raw `Workspace` payload, same
 ///   broadcast-to-all rationale.
+/// - `Push::WorkspaceUpdated` -> `workspace://updated` with the raw `Workspace` payload (spec
+///   §3.3/§6.6: fired after `Add`/`RemoveWorkspaceRoot`), same broadcast-to-all rationale.
 /// - `Push::Error` -> `Ignore` (logged by the caller; async/un-correlated daemon errors are not
 ///   surfaced as a Hop-A event in S1 — spec §7 broker-mapping table: "log + mark session errored").
 pub fn map_push(push: Push) -> BrokerAction {
@@ -128,6 +134,11 @@ pub fn map_push(push: Push) -> BrokerAction {
             let payload = serde_json::to_value(workspace)
                 .expect("Workspace is a plain-data struct; serialization cannot fail");
             BrokerAction::Emit(EV_WORKSPACE_CREATED, payload)
+        }
+        Push::WorkspaceUpdated(workspace) => {
+            let payload = serde_json::to_value(workspace)
+                .expect("Workspace is a plain-data struct; serialization cannot fail");
+            BrokerAction::Emit(EV_WORKSPACE_UPDATED, payload)
         }
         Push::Error {
             session_id,
@@ -456,6 +467,7 @@ mod tests {
             id: "w1".into(),
             name: "N".into(),
             root_path: "/root".into(),
+            roots: vec!["/root".into()],
         };
         let action = map_push(Push::WorkspaceCreated { workspace: ws });
         match action {
@@ -463,6 +475,26 @@ mod tests {
                 assert_eq!(event, EV_WORKSPACE_CREATED);
                 assert_eq!(payload["id"], "w1");
                 assert_eq!(payload["rootPath"], "/root");
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_updated_maps_to_emit() {
+        let ws = Workspace {
+            id: "w1".into(),
+            name: "N".into(),
+            root_path: "/root".into(),
+            roots: vec!["/root".into(), "/root2".into()],
+        };
+        let action = map_push(Push::WorkspaceUpdated(ws));
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_WORKSPACE_UPDATED);
+                assert_eq!(payload["id"], "w1");
+                assert_eq!(payload["rootPath"], "/root");
+                assert_eq!(payload["roots"], serde_json::json!(["/root", "/root2"]));
             }
             other => panic!("expected Emit, got {other:?}"),
         }

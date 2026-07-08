@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use bpa_protocol::{
-    Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
+    CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -414,6 +414,13 @@ fn expect_workspaces(res: Response) -> Result<Vec<Workspace>, CommandError> {
     }
 }
 
+fn expect_command_events(res: Response) -> Result<Vec<CommandEvent>, CommandError> {
+    match res {
+        Response::CommandEvents(v) => Ok(v),
+        other => Err(err_from_response(other)),
+    }
+}
+
 fn expect_ack(res: Response) -> Result<(), CommandError> {
     match res {
         Response::Ack => Ok(()),
@@ -561,6 +568,59 @@ pub async fn create_workspace(
         state
             .client()?
             .request(Request::CreateWorkspace { name, root_path })
+            .await?,
+    )
+}
+
+/// Add an additional root directory to a workspace (spec §3.3/§6.6, multi-root). The daemon
+/// re-validates `path` (canonicalizes, rejects duplicates/escapes) independently — this wrapper is
+/// deliberately thin, same shape as `create_workspace`/`list_workspaces`. On success the daemon
+/// also broadcasts `Push::WorkspaceUpdated` (see `broker::EV_WORKSPACE_UPDATED`) to every connected
+/// client, including this one; the returned `Workspace` here is this caller's direct reply, not
+/// sourced from that broadcast.
+#[tauri::command]
+pub async fn add_workspace_root(
+    state: State<'_, AppState>,
+    workspace_id: WorkspaceId,
+    path: String,
+) -> Result<Workspace, CommandError> {
+    expect_workspace(
+        state
+            .client()?
+            .request(Request::AddWorkspaceRoot { workspace_id, path })
+            .await?,
+    )
+}
+
+/// Remove a root directory from a workspace (spec §3.3/§6.6). The daemon rejects removing a
+/// workspace's last remaining root (`CommandError::Daemon { code: "LastRoot", .. }` — a workspace
+/// always has at least one root) rather than silently emptying it.
+#[tauri::command]
+pub async fn remove_workspace_root(
+    state: State<'_, AppState>,
+    workspace_id: WorkspaceId,
+    path: String,
+) -> Result<Workspace, CommandError> {
+    expect_workspace(
+        state
+            .client()?
+            .request(Request::RemoveWorkspaceRoot { workspace_id, path })
+            .await?,
+    )
+}
+
+/// Fetch a session's recent command lifecycle events (spec §3.3, Pv2 §7 `command_events` table),
+/// newest-first, capped at `limit`.
+#[tauri::command]
+pub async fn get_command_events(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+    limit: u32,
+) -> Result<Vec<CommandEvent>, CommandError> {
+    expect_command_events(
+        state
+            .client()?
+            .request(Request::GetCommandEvents { session_id, limit })
             .await?,
     )
 }
@@ -965,7 +1025,10 @@ mod tests {
                 | Request::Resize { .. }
                 | Request::KillSession { .. }
                 | Request::GetSessionState { .. }
-                | Request::DaemonShutdown { .. } => false,
+                | Request::DaemonShutdown { .. }
+                | Request::AddWorkspaceRoot { .. }
+                | Request::RemoveWorkspaceRoot { .. }
+                | Request::GetCommandEvents { .. } => false,
             }
         }
         assert!(!is_folder_picking_request(&Request::ListWorkspaces));
@@ -1559,6 +1622,7 @@ pub(crate) mod commands_over_stub_daemon {
                     Response::Workspace(Workspace {
                         id: "w-1".into(),
                         name,
+                        roots: vec![root_path.clone()],
                         root_path,
                     })
                 }
@@ -1579,6 +1643,121 @@ pub(crate) mod commands_over_stub_daemon {
         let ws = expect_workspace(res).unwrap();
         assert_eq!(ws.id, "w-1");
         assert_eq!(ws.root_path, expected_str);
+    }
+
+    // ── workspace-root + command-events wrappers (spec §3.3/§6.6, S2 Task 7) ───────────────────
+    //
+    // Same rationale as `create_workspace_accepts_valid_dir_...` above: the `#[tauri::command]`
+    // fns need a live `State<AppState>` (out of scope for a unit test), but each one's entire body
+    // is `expect_*(client.request(req).await?)` — these drive that exact shape directly against a
+    // real `DaemonClient` + stub daemon.
+
+    #[tokio::test]
+    async fn add_workspace_root_round_trips_through_real_daemon_client() {
+        let (client, _sock) = connect_to_stub(|req| match req {
+            Request::AddWorkspaceRoot { workspace_id, path } => {
+                assert_eq!(workspace_id, "w-1");
+                assert_eq!(path, "/second/root");
+                Response::Workspace(Workspace {
+                    id: "w-1".into(),
+                    name: "N".into(),
+                    root_path: "/first/root".into(),
+                    roots: vec!["/first/root".into(), "/second/root".into()],
+                })
+            }
+            other => panic!("expected AddWorkspaceRoot, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(Request::AddWorkspaceRoot {
+                workspace_id: "w-1".to_string(),
+                path: "/second/root".to_string(),
+            })
+            .await
+            .unwrap();
+        let ws = expect_workspace(res).unwrap();
+        assert_eq!(ws.id, "w-1");
+        assert_eq!(
+            ws.roots,
+            vec!["/first/root".to_string(), "/second/root".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_root_last_root_error_maps_to_command_error_daemon() {
+        let (client, _sock) = connect_to_stub(|req| match req {
+            Request::RemoveWorkspaceRoot { workspace_id, path } => {
+                assert_eq!(workspace_id, "w-1");
+                assert_eq!(path, "/only/root");
+                Response::Error {
+                    code: "LastRoot".into(),
+                    message: "a workspace must keep at least one root".into(),
+                }
+            }
+            other => panic!("expected RemoveWorkspaceRoot, got {other:?}"),
+        })
+        .await;
+
+        // `Response::Error` is raised directly as `Err(ClientError::Daemon)` by
+        // `DaemonClient::request` (spec §7 correlation), same as
+        // `daemon_error_response_becomes_command_error_daemon_end_to_end` above — it never reaches
+        // `expect_workspace` as an `Ok(Response::Error)`.
+        let res = client
+            .request(Request::RemoveWorkspaceRoot {
+                workspace_id: "w-1".to_string(),
+                path: "/only/root".to_string(),
+            })
+            .await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "LastRoot"),
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_command_events_round_trips_through_real_daemon_client() {
+        let (client, _sock) = connect_to_stub(|req| match req {
+            Request::GetCommandEvents { session_id, limit } => {
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(limit, 50);
+                Response::CommandEvents(vec![
+                    CommandEvent {
+                        session_id: "sess-1".into(),
+                        seq: 2,
+                        ts: 200,
+                        kind: "finished".into(),
+                        exit_code: Some(0),
+                        origin: "osc133".into(),
+                    },
+                    CommandEvent {
+                        session_id: "sess-1".into(),
+                        seq: 1,
+                        ts: 100,
+                        kind: "started".into(),
+                        exit_code: None,
+                        origin: "osc133".into(),
+                    },
+                ])
+            }
+            other => panic!("expected GetCommandEvents, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(Request::GetCommandEvents {
+                session_id: "sess-1".to_string(),
+                limit: 50,
+            })
+            .await
+            .unwrap();
+        let events = expect_command_events(res).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].seq, 2);
+        assert_eq!(events[0].kind, "finished");
+        assert_eq!(events[1].seq, 1);
+        assert_eq!(events[1].kind, "started");
     }
 
     // ── write_stdin chunking end-to-end (finding [2], spec's item C4) ──────────────────────────
