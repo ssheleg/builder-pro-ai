@@ -67,6 +67,7 @@ class FakeTerminal {
     this.disposed = true;
     calls.push("dispose");
   });
+  focus = vi.fn(() => calls.push("focus"));
 }
 const terminals: FakeTerminal[] = [];
 vi.mock("@xterm/xterm", () => ({
@@ -238,6 +239,18 @@ describe("TerminalManager", () => {
     expect(m.isOpened("s1")).toBe(true);
     m.hide("s1");
     expect(m.isOpened("s1")).toBe(true);
+  });
+
+  it("focus() calls term.focus() only when the session has been open()ed; unknown/not-yet-opened sessions are a harmless no-op", () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    m.focus("s1"); // not opened yet -> no-op
+    expect(terminals[0].focus).not.toHaveBeenCalled();
+    m.focus("unknown"); // never ensured -> no-op, no throw
+
+    m.open("s1", makeContainer());
+    m.focus("s1");
+    expect(terminals[0].focus).toHaveBeenCalledTimes(1);
   });
 
   it("keep-alive: nothing is disposed when a panel merely unmounts (no dispose call)", () => {

@@ -8,9 +8,13 @@ import {
   onDaemonDisconnected,
   onDaemonReconnected,
   onDaemonIncompatible,
+  onFsChanged,
+  onFsWatchError,
+  onWorkspaceUpdated,
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
+import { startWorkspaceWatch, stopWorkspaceWatch } from "./ipc/fs";
 import { TerminalManager } from "./terminal/terminal-manager";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { TerminalTabs } from "./components/TerminalTabs";
@@ -18,6 +22,8 @@ import { TerminalPane } from "./components/TerminalPane";
 import { DaemonBanner } from "./components/DaemonBanner";
 import { UpgradeDialog } from "./components/UpgradeDialog";
 import { FilesRail } from "./components/FilesRail";
+import { HomeView } from "./components/HomeView";
+import { Toast } from "./components/Toast";
 import { theme } from "./theme";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -42,6 +48,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const workspaces = useAppStore((s) => s.workspaces);
+  const view = useAppStore((s) => s.view);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<WorkspaceId | null>(null);
 
   useEffect(() => {
@@ -66,6 +73,17 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     track(onSessionStateChanged((p) => useAppStore.getState().setLifecycle(p)));
     track(onSessionExited((p) => useAppStore.getState().markExited(p)));
     track(onWorkspaceCreated((w) => useAppStore.getState().upsertWorkspace(w)));
+    // `workspace://updated` (spec §3.3/§6.6) fires whenever a workspace's roots change
+    // (add/removeWorkspaceRoot, from ANY client, including this one) — its payload IS a
+    // Workspace, so upserting it is a direct passthrough.
+    track(onWorkspaceUpdated((w) => useAppStore.getState().upsertWorkspace(w)));
+    // Live file-watch signals (spec §5): a debounced batch of changed dirs is a POINT REFRESH
+    // (`invalidateDirs` never touches `expanded` — a still-open directory just re-fetches), and
+    // a dead watcher pauses live updates honestly rather than failing silently (spec §7).
+    track(
+      onFsChanged((p) => useAppStore.getState().invalidateDirs(p.root, p.changedRelPaths)),
+    );
+    track(onFsWatchError(() => useAppStore.getState().setWatchPaused(true)));
     track(onDaemonDisconnected(() => useAppStore.getState().setDaemonConnected(false)));
     track(
       onDaemonReconnected(() => {
@@ -182,9 +200,32 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   // `FilesRail` needs a real `Workspace` (its `roots`) to have anything to show; `undefined`
-  // while no workspace is selected makes it render nothing (spec §6.4 — T11 will later also gate
-  // it on `view === "workspace"` to hide it on Home; for now it tracks the active workspace only).
+  // while no workspace is selected makes it render nothing. Also gated on `view === "workspace"`
+  // below (spec §6.1 "hidden on Home") — it never renders while the owner is on the Home screen.
   const activeWorkspace = activeWorkspaceId ? workspaces[activeWorkspaceId] : undefined;
+
+  /**
+   * Live file-watch lifecycle (spec §5 "start on workspace activation, stop on switch/unmount;
+   * nothing watched while the app is closed"). Only ever watches the CURRENTLY active workspace's
+   * roots, and only while the owner is actually looking at a workspace (`view === "workspace"`) —
+   * Home never triggers a watch, matching D4/D6 (no polling, no background work the owner cannot
+   * see the point of). Depends on the `activeWorkspace` OBJECT (not just its id): `upsertWorkspace`
+   * replaces the whole entry, so a `workspace://updated` push for the ACTIVE workspace (e.g. a
+   * root added via `addWorkspaceRoot`) produces a new reference here too — the watch restarts
+   * with the fresh `roots` list rather than silently missing the new root (spec §5 "starting
+   * again replaces the previous"). `showIgnored` is read via `getState()` rather than as a
+   * reactive dependency: a live toggle mid-watch does not itself restart the watch (FilesRail's
+   * own toggle handler only invalidates the cache, matching its existing T10 behavior) — this
+   * effect only needs the CURRENT value at the moment a new watch actually starts.
+   */
+  useEffect(() => {
+    if (view !== "workspace" || !activeWorkspace) return;
+    const showIgnored = useAppStore.getState().showIgnored;
+    void startWorkspaceWatch(activeWorkspace.roots, showIgnored);
+    return () => {
+      void stopWorkspaceWatch();
+    };
+  }, [view, activeWorkspace]);
 
   return (
     <div
@@ -199,37 +240,48 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     >
       <DaemonBanner />
       <UpgradeDialog />
+      <Toast />
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <WorkspaceSidebar
           activeWorkspaceId={activeWorkspaceId}
           onSelectWorkspace={setActiveWorkspaceId}
         />
-        <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
-          <TerminalTabs manager={manager} activeWorkspaceId={activeWorkspaceId} />
-          <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-            {activeSession ? (
-              // Only the ACTIVE session's pane is mounted; TerminalPane's unmount effect
-              // calls manager.hide() (keep-alive) when a different tab becomes active.
-              <TerminalPane sessionId={activeSession.id} manager={manager} />
-            ) : (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  height: "100%",
-                  color: theme.colors.textDim,
-                  fontSize: 13,
-                }}
-              >
-                {Object.keys(sessions).length === 0
-                  ? "No terminals yet — pick a workspace and press + New terminal."
-                  : "Select a terminal tab."}
+        {view === "home" ? (
+          // Attention-first Home (spec §6.2): sessions across ALL workspaces, "Пройти" jumps
+          // straight into a waiting terminal. `setActiveWorkspaceId` is threaded down so that
+          // jump can select the target workspace the same way the sidebar does.
+          <HomeView manager={manager} setActiveWorkspaceId={setActiveWorkspaceId} />
+        ) : (
+          <>
+            <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
+              <TerminalTabs manager={manager} activeWorkspaceId={activeWorkspaceId} />
+              <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+                {activeSession ? (
+                  // Only the ACTIVE session's pane is mounted; TerminalPane's unmount effect
+                  // calls manager.hide() (keep-alive) when a different tab becomes active.
+                  <TerminalPane sessionId={activeSession.id} manager={manager} />
+                ) : (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      height: "100%",
+                      color: theme.colors.textDim,
+                      fontSize: 13,
+                    }}
+                  >
+                    {Object.keys(sessions).length === 0
+                      ? "No terminals yet — pick a workspace and press + New terminal."
+                      : "Select a terminal tab."}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        </div>
-        <FilesRail workspace={activeWorkspace} />
+            </div>
+            {/* Right rail: hidden on Home (spec §6.1) — only rendered in the workspace view. */}
+            <FilesRail workspace={activeWorkspace} />
+          </>
+        )}
       </div>
     </div>
   );

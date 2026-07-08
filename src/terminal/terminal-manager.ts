@@ -148,6 +148,21 @@ export class TerminalManager {
   }
 
   /**
+   * Focus this session's Terminal (spec §6.2 "Пройти" — one-click jump into a waiting
+   * terminal, ready to type). No-op for an unknown session or one that has never been
+   * `open()`ed: xterm's own `focus()` needs a live DOM container, and a fresh Home "Пройти"
+   * jump is often called BEFORE the newly-active pane's mount effect has run `open()` (React
+   * batches the store updates that drive that render). This is best-effort — the pane's own
+   * mount + attach() is what guarantees a correct, freshly-replayed terminal either way (BL-14
+   * reset-before-replay); `focus()` merely saves a click for a session whose pane was already
+   * open (e.g. jumping back into a workspace visited earlier in this session).
+   */
+  focus(sessionId: SessionId): void {
+    const entry = this.entries.get(sessionId);
+    if (entry?.opened) entry.term.focus();
+  }
+
+  /**
    * Has this session's daemon firehose been wired via a SUCCESSFUL `attach()`? (A1)
    * Per-session, manager-owned attach state — the source of truth panes and the reconnect
    * flow both consult. Only the settled `attached` state counts: an `attaching` (in-flight)

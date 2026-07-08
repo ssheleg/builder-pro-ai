@@ -34,6 +34,18 @@ vi.mock("./ipc/events", () => ({
     cbs.incompatible = cb;
     return Promise.resolve(unlisten);
   },
+  onWorkspaceUpdated: (cb: (p: unknown) => void) => {
+    cbs.wsUpdated = cb;
+    return Promise.resolve(unlisten);
+  },
+  onFsChanged: (cb: (p: unknown) => void) => {
+    cbs.fsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onFsWatchError: (cb: (p: unknown) => void) => {
+    cbs.fsWatchError = cb;
+    return Promise.resolve(unlisten);
+  },
 }));
 
 const listSessionsMock = vi.fn().mockResolvedValue([]);
@@ -53,9 +65,27 @@ vi.mock("./ipc/commands", () => ({
   daemonStatus: (...a: unknown[]) => daemonStatusMock(...a),
 }));
 
+// Only override the two watch-lifecycle functions App wires up directly — every OTHER export
+// (`listDir`, `readFilePreview`, ...) stays the REAL implementation, since FileTree/FilePreview
+// (rendered transitively via FilesRail once a workspace is active) import from this same module
+// and must keep working exactly as they do in their own, unmocked test suites (a real `invoke()`
+// call rejects harmlessly in jsdom — no Tauri runtime — which those components already treat as
+// an honest error, spec §7; nothing here needs to change that).
+const startWorkspaceWatchMock = vi.fn().mockResolvedValue(undefined);
+const stopWorkspaceWatchMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("./ipc/fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ipc/fs")>();
+  return {
+    ...actual,
+    startWorkspaceWatch: (...a: unknown[]) => startWorkspaceWatchMock(...a),
+    stopWorkspaceWatch: (...a: unknown[]) => stopWorkspaceWatchMock(...a),
+  };
+});
+
 const disposeMock = vi.fn();
 const openMock = vi.fn();
 const hideMock = vi.fn();
+const focusMock = vi.fn();
 const resetAllAttachmentsMock = vi.fn();
 const resetAttachmentMock = vi.fn();
 const fakeManager = {
@@ -72,6 +102,7 @@ const fakeManager = {
   writeOutput: vi.fn(),
   open: openMock,
   hide: hideMock,
+  focus: focusMock,
   dispose: disposeMock,
   disposeAll: vi.fn(),
 } as unknown as import("./terminal/terminal-manager").TerminalManager;
@@ -102,6 +133,7 @@ beforeEach(() => {
   disposeMock.mockReset();
   openMock.mockReset();
   hideMock.mockReset();
+  focusMock.mockReset();
   resetAllAttachmentsMock.mockReset();
   resetAttachmentMock.mockReset();
   (fakeManager.attach as unknown as ReturnType<typeof vi.fn>)
@@ -114,6 +146,8 @@ beforeEach(() => {
   createWorkspaceMock.mockClear();
   pickFolderMock.mockClear();
   daemonStatusMock.mockReset().mockResolvedValue({ kind: "disconnected" });
+  startWorkspaceWatchMock.mockReset().mockResolvedValue(undefined);
+  stopWorkspaceWatchMock.mockReset().mockResolvedValue(undefined);
   useAppStore.setState(
     {
       sessions: {},
@@ -124,13 +158,20 @@ beforeEach(() => {
       upgradeDialogOpen: false,
       upgradeError: null,
       hydrated: false,
+      // Most tests below exercise session/terminal behavior that predates the Home screen (T11)
+      // and assume the workspace layout (TerminalTabs/TerminalPane) is on screen; Home-specific
+      // behavior gets its own `describe` block below that sets `view: "home"` explicitly.
+      view: "workspace",
+      treeCache: {},
+      watchPaused: false,
+      showIgnored: false,
     },
     false,
   );
 });
 
 describe("App", () => {
-  it("registers all seven IPC subscriptions on mount", async () => {
+  it("registers all ten IPC subscriptions on mount", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -139,6 +180,9 @@ describe("App", () => {
       "state",
       "exited",
       "wsCreated",
+      "wsUpdated",
+      "fsChanged",
+      "fsWatchError",
       "disc",
       "recon",
       "incompatible",
@@ -473,5 +517,178 @@ describe("App", () => {
       screen.getByRole("button", { name: /new terminal/i }).click();
     });
     expect(createSessionMock).toHaveBeenCalledWith("w1", { cols: 80, rows: 24 });
+  });
+});
+
+describe("T11: attention-first Home, view switch, watch + fs/workspace event wiring", () => {
+  it("view='home' renders HomeView instead of the terminal layout, and hides FilesRail even with an active workspace", async () => {
+    listWorkspacesMock.mockResolvedValue([{ id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] }]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    // hydrate() auto-selects "w1" as the active workspace regardless of `view`.
+    await act(async () => {
+      useAppStore.getState().setView("home");
+    });
+    expect(screen.getByTestId("home-stats")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByLabelText("Files")).toBeNull();
+  });
+
+  it("view='workspace' (default) renders the terminal tab strip, not HomeView", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(screen.getByRole("tablist")).toBeTruthy();
+    expect(screen.queryByTestId("home-stats")).toBeNull();
+  });
+
+  it("clicking ⌂ Home in the sidebar switches away from the terminal layout to HomeView", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(screen.getByRole("tablist")).toBeTruthy();
+    await act(async () => {
+      screen.getByRole("button", { name: "Home" }).click();
+    });
+    expect(screen.getByTestId("home-stats")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+  });
+
+  it("end-to-end: Пройти from Home switches to the workspace view with that session active and focuses its terminal", async () => {
+    listWorkspacesMock.mockResolvedValue([{ id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] }]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.created(
+        meta({ id: "s1", workspaceId: "w1", waitingForInput: true, lifecycle: { kind: "running" } }),
+      );
+    });
+    await act(async () => {
+      useAppStore.getState().setView("home");
+    });
+    expect(screen.getByTestId("home-stats")).toBeTruthy();
+
+    await act(async () => {
+      screen.getByRole("button", { name: /пройти/i }).click();
+    });
+
+    expect(useAppStore.getState().view).toBe("workspace");
+    expect(useAppStore.getState().activeSessionId).toBe("s1");
+    expect(focusMock).toHaveBeenCalledWith("s1");
+    expect(screen.getByTestId("terminal-pane-s1")).toBeTruthy();
+  });
+
+  it("starts the live watch for the active workspace's roots once view='workspace'; stops it on unmount", async () => {
+    useAppStore.setState({
+      sessions: {},
+      workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p", "/p/sub"] } },
+      activeSessionId: null,
+      daemonConnected: true,
+    });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click(); // selects the workspace (App-local) -> watch effect fires
+    });
+    expect(startWorkspaceWatchMock).toHaveBeenCalledWith(["/p", "/p/sub"], false);
+    utils.unmount();
+    expect(stopWorkspaceWatchMock).toHaveBeenCalled();
+  });
+
+  it("never starts the watch on Home; switching to Home stops an active watch", async () => {
+    useAppStore.setState({
+      sessions: {},
+      workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } },
+      activeSessionId: null,
+      daemonConnected: true,
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click();
+    });
+    expect(startWorkspaceWatchMock).toHaveBeenCalledTimes(1);
+    startWorkspaceWatchMock.mockClear();
+    stopWorkspaceWatchMock.mockClear();
+
+    await act(async () => {
+      useAppStore.getState().setView("home");
+    });
+    expect(stopWorkspaceWatchMock).toHaveBeenCalled();
+    expect(startWorkspaceWatchMock).not.toHaveBeenCalled();
+  });
+
+  it("a workspace://updated push for the ACTIVE workspace restarts the watch with the fresh roots", async () => {
+    useAppStore.setState({
+      sessions: {},
+      workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } },
+      activeSessionId: null,
+      daemonConnected: true,
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click();
+    });
+    expect(startWorkspaceWatchMock).toHaveBeenLastCalledWith(["/p"], false);
+    startWorkspaceWatchMock.mockClear();
+
+    await act(async () => {
+      cbs.wsUpdated({ id: "w1", name: "proj", rootPath: "/p", roots: ["/p", "/p2"] });
+    });
+    expect(startWorkspaceWatchMock).toHaveBeenLastCalledWith(["/p", "/p2"], false);
+  });
+
+  it("onFsChanged (spec §5) invalidates the affected tree-cache entries", async () => {
+    useAppStore.setState({ treeCache: { "/p\tsrc": [{ name: "a", relPath: "a", isDir: false, size: 1, isIgnored: false }] } }, false);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.fsChanged({ root: "/p", changedRelPaths: ["src"] });
+    });
+    expect(useAppStore.getState().treeCache["/p\tsrc"]).toBeUndefined();
+  });
+
+  it("onFsWatchError (spec §5/§7) pauses the watch honestly", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(useAppStore.getState().watchPaused).toBe(false);
+    await act(async () => {
+      cbs.fsWatchError({ root: "/p", reason: "watcher died" });
+    });
+    expect(useAppStore.getState().watchPaused).toBe(true);
+  });
+
+  it("onWorkspaceUpdated (spec §3.3/§6.6) upserts the workspace", async () => {
+    useAppStore.setState(
+      { workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } } },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.wsUpdated({ id: "w1", name: "proj", rootPath: "/p", roots: ["/p", "/p2"] });
+    });
+    expect(useAppStore.getState().workspaces["w1"].roots).toEqual(["/p", "/p2"]);
+  });
+
+  it("renders <Toast/> near the root: a store toast message becomes visible as role=alert", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      useAppStore.getState().showToast("что-то пошло не так");
+    });
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts.some((el) => el.textContent?.includes("что-то пошло не так"))).toBe(true);
   });
 });
