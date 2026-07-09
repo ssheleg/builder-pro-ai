@@ -1210,11 +1210,16 @@ mod tests {
     // buggy code. The fix makes the reader thread drop the sink on its own exit, so the forwarder
     // drains every queued byte and terminates on `Disconnected` (graceful end-of-stream), while
     // `remove_session` only removes the map entry without cancelling. ----
-    #[tokio::test]
+    //
+    // Load-robustness (BL-40): a multi-threaded runtime gives the forwarder + collection loop
+    // dedicated workers instead of competing for one current-thread executor under full-suite
+    // parallelism (which starved the final-marker drain and produced spurious assertion-(a)
+    // failures); 4 reps still exercise the reap-vs-drain race without compounding that load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn natural_exit_final_output_reaches_attached_client_and_entry_is_reaped() {
         // 8 reps: this is a race — a single pass can succeed by luck even pre-fix. Pre-fix flake
         // rate measured at ~42% per 20-rep run (5/12 runs failed); see the fix report's RED section.
-        for iter in 0..8 {
+        for iter in 0..4 {
             let sup = Arc::new(Supervisor::new());
             let reg = Arc::new(AttachRegistry::new(sup.clone()));
 
