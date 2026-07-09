@@ -13,7 +13,8 @@ const COMMAND_STRIP_LIMIT = 10;
 
 type StripItem =
   | { key: string; kind: "outcome"; ok: boolean; exitCode: number | null }
-  | { key: string; kind: "running" };
+  | { key: string; kind: "running" }
+  | { key: string; kind: "interrupted" };
 
 /**
  * Pair NEWEST-FIRST `CommandEvent`s (Pv2 §7 `command_events`, OSC-133 lifecycle) into strip items
@@ -30,12 +31,18 @@ type StripItem =
  *     together (the `started` carries no extra information once the outcome is known, so it does
  *     not render its own chip);
  *   - a `started` event that does NOT immediately follow its own `finished` has no known outcome
- *     yet — this only happens for the newest entry (the command currently in flight) — and
- *     becomes a running-dot item instead (spec: "a trailing lone started renders as running-dot").
+ *     yet — this only happens for the newest entry (the command currently in flight). Whether that
+ *     renders as "running" depends on `isLive` (the session's own `isActive`, honest-state rule —
+ *     see `StatusDot.tsx`'s "exited always wins"): while the session is live, this genuinely is the
+ *     command currently in flight (spec: "a trailing lone started renders as running-dot"); once
+ *     the session is no longer live, the OSC-133 `finished` mark for it will NEVER arrive (a
+ *     `kill -9`, a machine sleep, or a daemon crash all skip the shell's own exit trap), so a live
+ *     "running" dot would lie about a dead process — it becomes an honest "interrupted" marker
+ *     instead.
  * A `finished` with no adjacent `started` (e.g. its `started` fell off the `limit` page boundary)
  * still renders correctly on its own — only the cosmetic grouping is lost, never the outcome.
  */
-function pairCommandEvents(events: CommandEvent[]): StripItem[] {
+function pairCommandEvents(events: CommandEvent[], isLive: boolean): StripItem[] {
   const items: StripItem[] = [];
   let i = 0;
   while (i < events.length) {
@@ -49,7 +56,11 @@ function pairCommandEvents(events: CommandEvent[]): StripItem[] {
       });
       i += events[i + 1]?.kind === "started" ? 2 : 1;
     } else if (ev.kind === "started") {
-      items.push({ key: `s${ev.seq}`, kind: "running" });
+      items.push(
+        isLive
+          ? { key: `s${ev.seq}`, kind: "running" }
+          : { key: `s${ev.seq}`, kind: "interrupted" },
+      );
       i += 1;
     } else {
       // Defensive: an unrecognized `kind` (the Pv2 writer only ever persists "started"/"finished")
@@ -148,7 +159,13 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element | nul
   // An error already told the owner via the toast — no redundant inline error surface.
   if (failed) return null;
 
-  const items = pairCommandEvents(events);
+  // Honest-state input for pairing (see `pairCommandEvents` above): a lone `started` on a session
+  // that is no longer live must never render as a live "running" dot. `sessionMeta` can be
+  // momentarily undefined (e.g. the very first render before the store hydrates); default to
+  // `true` (live) rather than `false` — the fallback is the pre-existing "running" behavior, so an
+  // unresolved session never gets mis-flagged as interrupted.
+  const isLive = sessionMeta?.isActive ?? true;
+  const items = pairCommandEvents(events, isLive);
 
   if (items.length === 0) {
     return <div data-testid="command-strip-empty" style={emptyStyle}>Пока нет команд</div>;
@@ -171,6 +188,25 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element | nul
           >
             <StatusDot lifecycle={{ kind: "running" }} waitingForInput={false} />
             running
+          </span>
+        ) : item.kind === "interrupted" ? (
+          // Honest terminal marker (not a live "running" dot) for a lone `started` on a session
+          // that is no longer live — the OSC-133 `finished` mark for it will never arrive, so this
+          // is rendered as a distinct, exited-styled outcome rather than a claim the command is
+          // still in flight. Accessible label carries the "прервано" (interrupted) semantics.
+          <span
+            key={item.key}
+            role="listitem"
+            aria-label="прервано"
+            data-testid="command-chip-interrupted"
+            title="Прервано — сессия завершилась до конца команды"
+            style={{ ...chipBaseStyle, color: theme.colors.statusExited }}
+          >
+            <StatusDot
+              lifecycle={{ kind: "exited", code: null, signal: null }}
+              waitingForInput={false}
+            />
+            прервано
           </span>
         ) : (
           <span

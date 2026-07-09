@@ -166,4 +166,58 @@ describe("CommandStrip", () => {
     });
     expect(getCommandEventsMock).toHaveBeenCalledWith("s1", 10);
   });
+
+  it("a lone unmatched started on a DEAD session (isActive:false) is NOT a running dot — it's an honest interrupted marker", async () => {
+    useAppStore.setState(
+      {
+        sessions: {
+          s1: meta({ isActive: false, lifecycle: { kind: "exited", code: 0, signal: null } }),
+        },
+        toast: null,
+      },
+      false,
+    );
+    getCommandEventsMock.mockResolvedValue([ev({ seq: 5, kind: "started" })]);
+    await act(async () => {
+      render(<CommandStrip sessionId="s1" />);
+    });
+    // No live "running" chip — the process is dead, not in flight.
+    expect(screen.queryByTestId("command-chip-running")).toBeNull();
+    expect(screen.queryByRole("img", { name: /running/i })).toBeNull();
+    // An honest terminal marker instead, with an accessible label.
+    expect(screen.getByTestId("command-chip-interrupted")).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: /прерв/i })).toBeTruthy();
+  });
+
+  it("a lone unmatched started on a LIVE session (isActive:true) is still a running dot (unchanged)", async () => {
+    getCommandEventsMock.mockResolvedValue([ev({ seq: 3, kind: "started" })]);
+    await act(async () => {
+      render(<CommandStrip sessionId="s1" />);
+    });
+    expect(screen.getByTestId("command-chip-running")).toBeTruthy();
+    expect(screen.getByRole("img", { name: /running/i })).toBeTruthy();
+    expect(screen.queryByTestId("command-chip-interrupted")).toBeNull();
+  });
+
+  it("a finished/started pair renders ✓ regardless of session liveness (unchanged, dead session)", async () => {
+    useAppStore.setState(
+      {
+        sessions: {
+          s1: meta({ isActive: false, lifecycle: { kind: "exited", code: 0, signal: null } }),
+        },
+        toast: null,
+      },
+      false,
+    );
+    getCommandEventsMock.mockResolvedValue([
+      ev({ seq: 2, kind: "finished", exitCode: 0 }),
+      ev({ seq: 1, kind: "started" }),
+    ]);
+    await act(async () => {
+      render(<CommandStrip sessionId="s1" />);
+    });
+    expect(screen.getByTestId("command-chip-ok").textContent).toBe("✓");
+    expect(screen.queryByTestId("command-chip-running")).toBeNull();
+    expect(screen.queryByTestId("command-chip-interrupted")).toBeNull();
+  });
 });
