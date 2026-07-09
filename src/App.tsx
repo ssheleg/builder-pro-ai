@@ -35,6 +35,44 @@ export const terminalManager = new TerminalManager();
 /** Bounded backoff for the initial-hydrate retry loop (spec §13 "no fake connected state"). */
 const HYDRATE_RETRY_MS = [500, 1000, 2000, 5000];
 
+/** Posix dirname (forward-slash only — matches `fs_explorer::FsEntry::rel_path`'s wire convention,
+ * see `FileTree.tsx`'s identical helper). `""` (no `/`) means "the root directory itself". */
+function dirnameOf(rel: string): string {
+  const idx = rel.lastIndexOf("/");
+  return idx === -1 ? "" : rel.slice(0, idx);
+}
+
+/**
+ * Map each `fs://changed` entry's own rel-path (spec §5: the watcher emits the CHANGED ENTRY's
+ * own path, e.g. `"src/new.ts"` for a file created inside `src`) to its CONTAINING DIRECTORY's
+ * rel-path — `treeCache`/`invalidateDirs` are keyed by the directory a *listing* covers (see
+ * `store.ts`'s `invalidateDirs` doc: it drops exact key matches only, no path arithmetic of its
+ * own), never by the changed entry's own path. Without this mapping, `invalidateDirs` is handed a
+ * FILE key that was never cached (`treeCache` only ever holds directory listings), so the
+ * containing directory's listing is never dropped and the new/deleted/renamed entry never appears
+ * until an unrelated manual collapse/expand — the whole live-watch DoD silently regressing to a
+ * no-op for anything short of the `["*"]` overflow sentinel.
+ *
+ * `"src/new.ts"` -> `"src"`; a top-level `"top.txt"` -> `""` (the root listing itself, since a
+ * top-level entry appearing/disappearing changes what the ROOT's own listing shows). The `"*"`
+ * overflow sentinel (spec §5: >500 distinct paths in one debounced batch) passes through
+ * UNCHANGED — it already means "everything under this root", not a real path to take a parent of.
+ * Deduped so a batch with many siblings changing in the same directory invalidates that directory
+ * exactly once.
+ */
+export function changedPathsToParentDirs(changedRelPaths: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const rel of changedRelPaths) {
+    const parent = rel === "*" ? "*" : dirnameOf(rel);
+    if (!seen.has(parent)) {
+      seen.add(parent);
+      out.push(parent);
+    }
+  }
+  return out;
+}
+
 /**
  * App shell (spec §2 UI, §12 frontend contract). Wires:
  * - IPC subscriptions (`session://*`, `workspace://*`, `daemon://*`) into the store,
@@ -82,8 +120,16 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // Live file-watch signals (spec §5): a debounced batch of changed dirs is a POINT REFRESH
     // (`invalidateDirs` never touches `expanded` — a still-open directory just re-fetches), and
     // a dead watcher pauses live updates honestly rather than failing silently (spec §7).
+    // `changedRelPaths` are the CHANGED ENTRIES' own paths (files or dirs); `invalidateDirs`
+    // drops directory-listing cache keys, so every path must be mapped to its containing
+    // directory first — see `changedPathsToParentDirs`'s doc for why (S2 final review A2: without
+    // this mapping the fix was a silent no-op for anything short of the `["*"]` overflow case).
     track(
-      onFsChanged((p) => useAppStore.getState().invalidateDirs(p.root, p.changedRelPaths)),
+      onFsChanged((p) =>
+        useAppStore
+          .getState()
+          .invalidateDirs(p.root, changedPathsToParentDirs(p.changedRelPaths)),
+      ),
     );
     track(onFsWatchError(() => useAppStore.getState().setWatchPaused(true)));
     track(onDaemonDisconnected(() => useAppStore.getState().setDaemonConnected(false)));
@@ -224,12 +270,24 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
    * reactive dependency: a live toggle mid-watch does not itself restart the watch (FilesRail's
    * own toggle handler only invalidates the cache, matching its existing T10 behavior) — this
    * effect only needs the CURRENT value at the moment a new watch actually starts.
+   *
+   * S2 final review A4: a successful (re)start clears a stale `watchPaused` — a PRIOR workspace's
+   * (or this same workspace's earlier) watch dying sets `watchPaused` true (the `onFsWatchError`
+   * handler above), and without this, switching to a healthy workspace kept showing the amber
+   * "live updates paused" banner forever, even though the NEW watch is fine. `cancelled` guards
+   * against a fast unmount/root-swap: if this effect's cleanup already ran before the promise
+   * settles, a DIFFERENT (newer) watch attempt owns `watchPaused` now and this stale resolution
+   * must not clear it out from under that newer attempt.
    */
   useEffect(() => {
     if (view !== "workspace" || !activeWorkspace) return;
+    let cancelled = false;
     const showIgnored = useAppStore.getState().showIgnored;
-    void startWorkspaceWatch(activeWorkspace.roots, showIgnored);
+    void startWorkspaceWatch(activeWorkspace.roots, showIgnored).then(() => {
+      if (!cancelled) useAppStore.getState().setWatchPaused(false);
+    });
     return () => {
+      cancelled = true;
       void stopWorkspaceWatch();
     };
   }, [view, activeWorkspace]);

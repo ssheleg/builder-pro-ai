@@ -26,6 +26,7 @@
 //!
 //! File CONTENTS are never logged (paths only, at debug) — spec §7.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -86,6 +87,13 @@ pub enum FsError {
     /// Every path-validator failure (escape, missing target, unresolvable symlink) collapses here
     /// — see the module doc's "Security boundary" section for why that collapsing is intentional.
     OutsideRoot,
+    /// `rename_entry`/`move_entry`'s destination already exists (any filesystem entry — file, dir,
+    /// or even a broken symlink, see [`target_exists`]). Returned INSTEAD of ever calling
+    /// `std::fs::rename`: on Unix, `rename(2)` atomically REPLACES an existing regular-file
+    /// target, silently destroying its contents with no Trash and no confirmation (spec D8: delete
+    /// is reversible / no silent data loss) — this variant is what stands between a same-name
+    /// rename/move and that outcome.
+    AlreadyExists,
     /// Reserved for parity with the locked wire shape (spec §4.2); no command in this module
     /// currently constructs it — an oversized file is instead an *honest success*
     /// ([`FilePreview::TooLarge`]), not an error.
@@ -101,6 +109,7 @@ impl std::fmt::Display for FsError {
             FsError::NotFound => write!(f, "not found"),
             FsError::PermissionDenied => write!(f, "permission denied"),
             FsError::OutsideRoot => write!(f, "path escapes the workspace root"),
+            FsError::AlreadyExists => write!(f, "destination already exists"),
             FsError::TooLarge => write!(f, "too large"),
             FsError::Io { message } => write!(f, "I/O error: {message}"),
         }
@@ -145,6 +154,18 @@ fn validated_new(root: &Path, rel_dir: &str, name: &str) -> Result<PathBuf, FsEr
     let dir = join_rel(root, rel_dir);
     let target = dir.join(name);
     bpa_paths::validate_parent_within(root, &target).map_err(|_| FsError::OutsideRoot)
+}
+
+/// Whether ANY filesystem entry already occupies `target` — used to guard `rename_entry_inner`/
+/// `move_entry_inner` against `std::fs::rename`'s silent atomic-replace-on-Unix behavior (see
+/// [`FsError::AlreadyExists`]'s doc for why that guard exists at all). `symlink_metadata` (never
+/// `try_exists`/`metadata`, both of which FOLLOW symlinks) so a `target` that is itself a BROKEN
+/// symlink still counts as "already exists": `try_exists` would report `false` for a dangling
+/// symlink (its resolved destination doesn't exist), which would let `std::fs::rename` silently
+/// clobber that dangling symlink *entry* anyway — the check must be about what currently occupies
+/// the path, not about what it resolves to.
+fn target_exists(target: &Path) -> bool {
+    target.symlink_metadata().is_ok()
 }
 
 /// Map a post-validation `std::io::Error` to the honest `FsError` variant (spec §4.2's error
@@ -290,8 +311,33 @@ fn build_preview(size: u64, bytes: &[u8]) -> FilePreview {
     }
 }
 
+/// Classify the outcome of a CAPPED read: at most `PREVIEW_CAP + 1` bytes were ever actually read
+/// off disk (see [`read_file_preview_inner`]'s use of `.take(PREVIEW_CAP + 1)`), never the whole
+/// file regardless of its true size. If the capped read filled all the way up to
+/// `PREVIEW_CAP + 1` bytes, the file had already grown past the cap by read time — a live-appended
+/// log growing between the initial `stat` and this read (spec §4.2's cap is a HARD ceiling on
+/// bytes actually read, not just on the stale stat) — so this is an honest [`FilePreview::TooLarge`]
+/// rather than continuing to read further. Otherwise (`bytes.len() <= PREVIEW_CAP`) delegates to
+/// [`build_preview`] exactly as before. Pulled out as a pure function over `(stat_size,
+/// capped_bytes)` so the grew-past-the-cap path is deterministically unit-testable with a stubbed
+/// byte slice, without needing to reproduce a real append race — mirrors `build_preview`'s own
+/// pure TOCTOU-shrink test above.
+fn build_preview_capped(stat_size: u64, bytes: &[u8]) -> FilePreview {
+    if bytes.len() as u64 > PREVIEW_CAP {
+        return FilePreview::TooLarge {
+            size: bytes.len() as u64,
+        };
+    }
+    build_preview(stat_size, bytes)
+}
+
 /// Read `root.join(rel)` capped at [`PREVIEW_CAP`] (spec §4.2). A file whose STATTED size exceeds
-/// the cap is never read at all — see [`FilePreview::TooLarge`].
+/// the cap is never read at all — see [`FilePreview::TooLarge`]. Otherwise the read itself is ALSO
+/// capped, at `PREVIEW_CAP + 1` bytes via `Read::take` — never `std::fs::read`/`read_to_end` on
+/// the raw file, which would read all the way to EOF regardless of the stat: a file being actively
+/// appended to (a live log, e.g.) could grow past the cap in the gap between the `stat` above and
+/// the read, and an uncapped read would then allocate unboundedly. See [`build_preview_capped`]
+/// for how the capped byte count is classified.
 pub(crate) fn read_file_preview_inner(root: &Path, rel: &str) -> Result<FilePreview, FsError> {
     let path = validated_existing(root, rel)?;
     let metadata = std::fs::metadata(&path).map_err(map_io_error)?;
@@ -304,8 +350,12 @@ pub(crate) fn read_file_preview_inner(root: &Path, rel: &str) -> Result<FilePrev
     if size > PREVIEW_CAP {
         return Ok(FilePreview::TooLarge { size });
     }
-    let bytes = std::fs::read(&path).map_err(map_io_error)?;
-    Ok(build_preview(size, &bytes))
+    let file = std::fs::File::open(&path).map_err(map_io_error)?;
+    let mut bytes = Vec::new();
+    file.take(PREVIEW_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(map_io_error)?;
+    Ok(build_preview_capped(size, &bytes))
 }
 
 // ── create / rename / move / delete ─────────────────────────────────────────────────────────
@@ -330,7 +380,10 @@ pub(crate) fn create_dir_inner(root: &Path, rel_dir: &str, name: &str) -> Result
     Ok(())
 }
 
-/// Rename `root.join(rel)` to `new_name`, keeping it in the same parent directory.
+/// Rename `root.join(rel)` to `new_name`, keeping it in the same parent directory. Rejects with
+/// [`FsError::AlreadyExists`] — WITHOUT ever calling `std::fs::rename` — if `new_name` already
+/// names an entry in that directory: see the variant's doc for why (silent Unix rename-replace
+/// data loss, spec D8).
 pub(crate) fn rename_entry_inner(root: &Path, rel: &str, new_name: &str) -> Result<(), FsError> {
     let source = validated_existing(root, rel)?;
     let rel_dir = Path::new(rel)
@@ -338,11 +391,17 @@ pub(crate) fn rename_entry_inner(root: &Path, rel: &str, new_name: &str) -> Resu
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     let target = validated_new(root, &rel_dir, new_name)?;
+    if target_exists(&target) {
+        return Err(FsError::AlreadyExists);
+    }
     std::fs::rename(&source, &target).map_err(map_io_error)?;
     Ok(())
 }
 
-/// Move `root.join(rel_from)` into `root.join(rel_dir_to)`, keeping its own filename.
+/// Move `root.join(rel_from)` into `root.join(rel_dir_to)`, keeping its own filename. Rejects with
+/// [`FsError::AlreadyExists`] — WITHOUT ever calling `std::fs::rename` — if the destination
+/// directory already has an entry with that same basename: see the variant's doc for why (silent
+/// Unix rename-replace data loss, spec D8).
 pub(crate) fn move_entry_inner(
     root: &Path,
     rel_from: &str,
@@ -355,6 +414,9 @@ pub(crate) fn move_entry_inner(
         .to_string_lossy()
         .into_owned();
     let target = validated_new(root, rel_dir_to, &name)?;
+    if target_exists(&target) {
+        return Err(FsError::AlreadyExists);
+    }
     std::fs::rename(&source, &target).map_err(map_io_error)?;
     Ok(())
 }
@@ -667,6 +729,69 @@ mod tests {
         );
     }
 
+    // ── build_preview_capped (S2 final review A3: bounded preview read) ────────────────────────
+
+    #[test]
+    fn build_preview_capped_within_cap_delegates_to_build_preview() {
+        let bytes = b"hello world";
+        let preview = build_preview_capped(bytes.len() as u64, bytes);
+        assert_eq!(
+            preview,
+            FilePreview::Text {
+                content: "hello world".to_string(),
+                truncated: false,
+                size: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn build_preview_capped_exactly_at_cap_is_still_text() {
+        let bytes = vec![b'x'; PREVIEW_CAP as usize];
+        let preview = build_preview_capped(PREVIEW_CAP, &bytes);
+        assert!(
+            matches!(preview, FilePreview::Text { .. }),
+            "got {preview:?}"
+        );
+    }
+
+    #[test]
+    fn build_preview_capped_over_cap_is_too_large_without_reading_further() {
+        // Simulates the TOCTOU-grow case (the file grew past PREVIEW_CAP between the initial stat
+        // and the capped `.take(PREVIEW_CAP + 1)` read in `read_file_preview_inner`)
+        // deterministically, without needing a real append race -- mirrors `build_preview`'s own
+        // pure TOCTOU-shrink test above. `bytes` here is EXACTLY what `.take(PREVIEW_CAP + 1)`
+        // would ever hand this function -- never the whole (potentially much larger) file -- so
+        // this also proves the capped-read path can never be asked to classify more than
+        // `PREVIEW_CAP + 1` bytes, i.e. the read itself never allocates the whole file.
+        let stubbed_capped_read = vec![b'x'; PREVIEW_CAP as usize + 1];
+        let preview = build_preview_capped(
+            500, /* stale stat, now behind reality */
+            &stubbed_capped_read,
+        );
+        assert_eq!(
+            preview,
+            FilePreview::TooLarge {
+                size: PREVIEW_CAP + 1
+            }
+        );
+    }
+
+    #[test]
+    fn build_preview_capped_over_cap_binary_bytes_are_still_too_large_not_binary() {
+        // TooLarge must win over binary/text classification once the capped read itself overflows
+        // -- the bytes are never even probed for NUL/UTF-8 validity in that case.
+        let mut stubbed_capped_read = vec![0u8; PREVIEW_CAP as usize + 1];
+        stubbed_capped_read[0] = 0xFFu8;
+        let preview = build_preview_capped(500, &stubbed_capped_read);
+        assert_eq!(
+            preview,
+            FilePreview::TooLarge {
+                size: PREVIEW_CAP + 1
+            }
+        );
+    }
+
     #[test]
     fn read_file_preview_text_happy_path() {
         let (_tmp, root) = plain_root();
@@ -826,6 +951,44 @@ mod tests {
         assert!(!root.join("sub").join("evil.txt").exists());
     }
 
+    /// CRITICAL (S2 final review A1): `std::fs::rename` atomically REPLACES an existing regular
+    /// file on Unix with no Trash and no confirmation. A rename onto an already-occupied name must
+    /// be rejected with `AlreadyExists` BEFORE ever calling `std::fs::rename` — the destination's
+    /// original content must survive completely untouched, and the source must still exist too
+    /// (nothing was moved).
+    #[test]
+    fn rename_entry_onto_existing_target_is_rejected_without_overwriting() {
+        let (_tmp, root) = plain_root();
+        fs::write(root.join("a.txt"), b"source-content").unwrap();
+        fs::write(root.join("b.txt"), b"precious-destination-content").unwrap();
+
+        let err = rename_entry_inner(&root, "a.txt", "b.txt").unwrap_err();
+
+        assert_eq!(err, FsError::AlreadyExists);
+        assert_eq!(
+            fs::read(root.join("b.txt")).unwrap(),
+            b"precious-destination-content",
+            "the existing destination's content must be completely untouched"
+        );
+        assert_eq!(
+            fs::read(root.join("a.txt")).unwrap(),
+            b"source-content",
+            "the source must still exist — nothing was moved"
+        );
+    }
+
+    /// A rename onto a FREE (not-yet-existing) name must still succeed — the `AlreadyExists` guard
+    /// must not false-positive on an ordinary rename (companion to the overwrite-rejection test
+    /// above; `rename_entry_happy_path` already covers this, this test names the guard explicitly).
+    #[test]
+    fn rename_entry_onto_a_free_name_still_succeeds() {
+        let (_tmp, root) = plain_root();
+        fs::write(root.join("a.txt"), b"content").unwrap();
+        rename_entry_inner(&root, "a.txt", "free-name.txt").unwrap();
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(fs::read(root.join("free-name.txt")).unwrap(), b"content");
+    }
+
     // ── move_entry ───────────────────────────────────────────────────────────────────────────
 
     #[test]
@@ -861,6 +1024,52 @@ mod tests {
         fs::create_dir(root.join("dest")).unwrap();
         let err = move_entry_inner(&root, "../outside.txt", "dest").unwrap_err();
         assert_eq!(err, FsError::OutsideRoot);
+    }
+
+    /// CRITICAL (S2 final review A1): moving into a directory that already has an entry with the
+    /// same basename must be rejected with `AlreadyExists` BEFORE `std::fs::rename` ever runs —
+    /// same silent-replace hazard as the rename case above, just via the destination-directory
+    /// path instead of `new_name`.
+    #[test]
+    fn move_entry_onto_colliding_basename_is_rejected_without_overwriting() {
+        let (_tmp, root) = plain_root();
+        fs::create_dir(root.join("dest")).unwrap();
+        fs::write(
+            root.join("dest").join("movable.txt"),
+            b"precious-dest-content",
+        )
+        .unwrap();
+        fs::write(root.join("movable.txt"), b"source-content").unwrap();
+
+        let err = move_entry_inner(&root, "movable.txt", "dest").unwrap_err();
+
+        assert_eq!(err, FsError::AlreadyExists);
+        assert_eq!(
+            fs::read(root.join("dest").join("movable.txt")).unwrap(),
+            b"precious-dest-content",
+            "the existing destination's content must be completely untouched"
+        );
+        assert_eq!(
+            fs::read(root.join("movable.txt")).unwrap(),
+            b"source-content",
+            "the source must still exist — nothing was moved"
+        );
+    }
+
+    /// A move onto a FREE (not-yet-colliding) basename must still succeed — companion to the
+    /// rejection test above; `move_entry_happy_path` already covers this, this test names the
+    /// guard explicitly.
+    #[test]
+    fn move_entry_onto_a_free_basename_still_succeeds() {
+        let (_tmp, root) = plain_root();
+        fs::create_dir(root.join("dest")).unwrap();
+        fs::write(root.join("movable.txt"), b"payload").unwrap();
+        move_entry_inner(&root, "movable.txt", "dest").unwrap();
+        assert!(!root.join("movable.txt").exists());
+        assert_eq!(
+            fs::read(root.join("dest").join("movable.txt")).unwrap(),
+            b"payload"
+        );
     }
 
     // ── delete_entry (Trash, spec D8) ────────────────────────────────────────────────────────
@@ -932,6 +1141,9 @@ mod tests {
 
         let v3 = serde_json::to_value(FsError::OutsideRoot).unwrap();
         assert_eq!(v3["kind"], "outsideRoot");
+
+        let v3b = serde_json::to_value(FsError::AlreadyExists).unwrap();
+        assert_eq!(v3b["kind"], "alreadyExists");
 
         let v4 = serde_json::to_value(FsError::TooLarge).unwrap();
         assert_eq!(v4["kind"], "tooLarge");

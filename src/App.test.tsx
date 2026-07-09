@@ -109,7 +109,7 @@ const fakeManager = {
   disposeAll: vi.fn(),
 } as unknown as import("./terminal/terminal-manager").TerminalManager;
 
-import { App } from "./App";
+import { App, changedPathsToParentDirs } from "./App";
 import { useAppStore } from "./store/store";
 import type { SessionMeta } from "./ipc/types";
 
@@ -524,6 +524,28 @@ describe("App", () => {
   });
 });
 
+describe("S2 final review A2: changedPathsToParentDirs (pure helper)", () => {
+  it("maps each changed rel-path to its parent directory, deduped", () => {
+    expect(changedPathsToParentDirs(["src/new.ts", "top.txt"])).toEqual(["src", ""]);
+  });
+
+  it("dedups multiple changed files sharing the same parent directory", () => {
+    expect(changedPathsToParentDirs(["src/a.ts", "src/b.ts", "src/c.ts"])).toEqual(["src"]);
+  });
+
+  it("maps a nested path to its immediate parent only, not the root", () => {
+    expect(changedPathsToParentDirs(["a/b/c.ts"])).toEqual(["a/b"]);
+  });
+
+  it("passes the \"*\" overflow sentinel through unchanged", () => {
+    expect(changedPathsToParentDirs(["*"])).toEqual(["*"]);
+  });
+
+  it("returns an empty array for an empty input", () => {
+    expect(changedPathsToParentDirs([])).toEqual([]);
+  });
+});
+
 describe("T11: attention-first Home, view switch, watch + fs/workspace event wiring", () => {
   it("view='home' renders HomeView instead of the terminal layout, and hides FilesRail even with an active workspace", async () => {
     listWorkspacesMock.mockResolvedValue([{ id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] }]);
@@ -649,15 +671,55 @@ describe("T11: attention-first Home, view switch, watch + fs/workspace event wir
     expect(startWorkspaceWatchMock).toHaveBeenLastCalledWith(["/p", "/p2"], false);
   });
 
-  it("onFsChanged (spec §5) invalidates the affected tree-cache entries", async () => {
+  // S2 final review A2: `fs://changed`'s `changedRelPaths` are the CHANGED ENTRIES' own paths
+  // (e.g. `"src/new.ts"` for a file created inside `src`) — `treeCache` is keyed by the
+  // CONTAINING DIRECTORY's listing, so handing the entry's own path straight to `invalidateDirs`
+  // was a silent no-op (a file key that was never cached) for anything short of the `["*"]`
+  // overflow sentinel. `onFsChanged` must map each path to its parent directory first.
+  it("onFsChanged (spec §5, A2) invalidates the CONTAINING directory of a changed file, not the file's own key", async () => {
     useAppStore.setState({ treeCache: { "/p\tsrc": [{ name: "a", relPath: "a", isDir: false, size: 1, isIgnored: false }] } }, false);
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
     await act(async () => {
-      cbs.fsChanged({ root: "/p", changedRelPaths: ["src"] });
+      cbs.fsChanged({ root: "/p", changedRelPaths: ["src/new.ts"] });
     });
     expect(useAppStore.getState().treeCache["/p\tsrc"]).toBeUndefined();
+  });
+
+  it("onFsChanged (A2) maps a top-level changed file to the ROOT listing's cache key (\"\")", async () => {
+    useAppStore.setState({ treeCache: { "/p\t": [{ name: "a", relPath: "a", isDir: false, size: 1, isIgnored: false }] } }, false);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.fsChanged({ root: "/p", changedRelPaths: ["top.txt"] });
+    });
+    expect(useAppStore.getState().treeCache["/p\t"]).toBeUndefined();
+  });
+
+  it("onFsChanged (A2) passes the \"*\" overflow sentinel through unchanged (drops every cached dir under the root)", async () => {
+    useAppStore.setState(
+      {
+        treeCache: {
+          "/p\t": [],
+          "/p\tsrc": [],
+          "/p2\tsrc": [{ name: "x", relPath: "x", isDir: false, size: 1, isIgnored: false }],
+        },
+      },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.fsChanged({ root: "/p", changedRelPaths: ["*"] });
+    });
+    const cache = useAppStore.getState().treeCache;
+    expect(cache["/p\t"]).toBeUndefined();
+    expect(cache["/p\tsrc"]).toBeUndefined();
+    // A different root's cache entries must be left untouched.
+    expect(cache["/p2\tsrc"]).toBeDefined();
   });
 
   it("onFsWatchError (spec §5/§7) pauses the watch honestly", async () => {
@@ -669,6 +731,34 @@ describe("T11: attention-first Home, view switch, watch + fs/workspace event wir
       cbs.fsWatchError({ root: "/p", reason: "watcher died" });
     });
     expect(useAppStore.getState().watchPaused).toBe(true);
+  });
+
+  // S2 final review A4: workspace A's watch dying sets `watchPaused` true; switching to a
+  // DIFFERENT, healthy workspace B must clear that stale banner rather than leaving B falsely
+  // showing "live updates paused" forever.
+  it("a successful (re)start of the workspace watch clears a stale watchPaused (A4)", async () => {
+    useAppStore.setState({
+      sessions: {},
+      workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } },
+      activeSessionId: null,
+      daemonConnected: true,
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      useAppStore.getState().setWatchPaused(true);
+    });
+    expect(useAppStore.getState().watchPaused).toBe(true);
+
+    await act(async () => {
+      screen.getByText("proj").click(); // selects the workspace -> watch (re)start effect fires
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(startWorkspaceWatchMock).toHaveBeenCalled();
+    expect(useAppStore.getState().watchPaused).toBe(false);
   });
 
   it("onWorkspaceUpdated (spec §3.3/§6.6) upserts the workspace", async () => {
