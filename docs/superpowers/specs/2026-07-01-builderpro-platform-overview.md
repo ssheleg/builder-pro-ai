@@ -148,8 +148,15 @@ improvisation:
   added during Pv2 implementation, not part of the original plan.)*
 - **Release channel:** manual notarized DMG for v0.x; Tauri auto-updater is a named roadmap item
   (BL-19, `docs/backlog.md`).
-- **Workspace evolution (A14):** multi-root workspaces arrive as an additive
-  `workspace_roots: Vec<PathBuf>` alongside the existing `root_path` (compat preserved), slice S2.
+- **Workspace evolution (A14, SHIPPED 2026-07-09 — S2, `[0.3.0]`):** multi-root workspaces shipped
+  as an additive `Workspace.roots: Vec<String>` field alongside the existing `root_path` (compat
+  mirror, always `== roots[0]`) — daemon schema v3 adds a `workspace_root(workspace_id, ord, path)`
+  table; `AddWorkspaceRoot`/`RemoveWorkspaceRoot` wire requests; `Push::WorkspaceUpdated` →
+  `workspace://updated`. *(Historical: this row originally sketched `workspace_roots:
+  Vec<PathBuf>` — the shipped wire truth is `roots: Vec<String>` on the `Workspace` struct itself,
+  not a separately-prefixed field; `PathBuf` has no portable TS mapping and the `workspace_`
+  prefix was redundant on a field already living on `Workspace`. See the S2 design spec §3.1
+  naming note, `docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md`.)*
 
 ---
 
@@ -162,7 +169,7 @@ Build spine-first. Each row is an independent spec/plan/build unit.
 | **S0** | App shell + foundation (window, theme, settings) | — | Skeleton everything plugs into. *(Amended: durable storage is DAEMON-owned SQLite, built in S1 — see Data-layer charter.)* **DONE.** |
 | **S1** | **Terminal engine** — real PTYs, multi-terminal, lifecycle states, survive-restart, reattach | S0 | Highest technical risk; heart of the product. **DONE** (merged @ 285cb2e). |
 | **Pv2** | **Protocol v2** — codec migration (tagged-enum-safe), version-range negotiation, wire-level **multi-subscriber attach** (D5), real `DaemonShutdown{drain}`, `bpa.db` schema-migration policy + `command_events` | S1 | One planned wire break before the protocol grows. DoD: old GUI vs new daemon shows the remediation dialog (never misparses); two subscribers stream one session; cross-version decode tests green. Metric: zero silent protocol failures. **SHIPPED/DONE this branch (`[0.2.0]`).** Two execution deltas vs. the DoD as originally scoped: (1) the upgrade choreography is consent dialog → best-effort drain → `launchctl kickstart -k` → `app.restart()` (a full app relaunch, not an in-place socket reconnect — simpler and more honest about the codec/version jump); (2) cold-rehydrate + attach-inactive shipped as part of this cycle (Task 12r) rather than later — the daemon-restart e2e (closes BL-7) forced the honest "scrollback появится снова как неактивная сессия" path to actually exist, not just be documented. |
-| **S2** | Workspace + file explorer (multi-root repos, open/create files & folders, live file-watch) | S0 | React to files agents create; additive `workspace_roots`. DoD: create/open a multi-repo workspace ≤3 clicks; file tree reflects an external `touch` <1 s; explorer stays responsive at 10k files. Metric: time-to-first-terminal in a fresh workspace. |
+| **S2** | Workspace + file explorer (multi-root repos, open/create files & folders, live file-watch) | S0 | React to files agents create; additive `roots: Vec<String>`. DoD: create/open a multi-repo workspace ≤3 clicks; file tree reflects an external `touch` <1 s; explorer stays responsive at 10k files. Metric: time-to-first-terminal in a fresh workspace. **SHIPPED/DONE this branch (`[0.3.0]`).** Deltas vs. the DoD as originally scoped: (1) attention-first Home (originally SH's job) was pulled forward into this cycle — the owner decision (spec D6) judged the daily "where do I need to look" loop couldn't wait for the SH capstone, so `HomeView`'s amber/running/exited queue + one-click «Пройти» jump ships now, SH inherits it rather than building it fresh; (2) the OSC-133 command strip (spec §6.3) is the first real UI consumer of `command_events` (persisted since Pv2 but unconsumed until now — closes the "no UI" note on BL-31); (3) file I/O + live watch live in the Tauri core, not the daemon (owner decision D4, "Approach A") — `bpa-sessiond` keeps owning the Workspace *data model* only, `fs_explorer`/`fs_watcher` are core-local (GUI-lifetime) modules guarded by the shared `bpa_paths::validate_path_within`, never a Hop-B request. |
 | **S3** | **Projects + Goal hierarchy + Ideas + Tasks/Subtasks + RuleSet** data model | S0, ADR-HOST (orchd store) | The app-domain foundation. Adds: Goal hierarchy (1 strategic + N additional, owner-editable); Idea (nullable project_id — «spawn project from idea»); Insight; unified Task/Subtask (kanban is a VIEW); RuleSet (global + per-project). DoD: goals + ideas + tasks CRUD survive restart; Project⇄Workspace enforced; export/import round-trips. Metric: ideas reaching «specced». Open decision — default: RuleSet has BOTH a markdown layer (agent-read, Claude-Code-style global + per-project) AND a typed policy layer (gate-enforced: spend caps, approval classes, path allowlists) (Q13). |
 | **S4** | Knowledge graph (per-project + cross-project links, viz) | S3 | `@xyflow/react`; storage + UUID node identity + **agent retrieval API** are S4-spec decisions. **Hard-blocks S6 (owner decision D6).** DoD: cross-project link survives both projects' restarts; retrieval API returns a goal's subgraph <100 ms; graph editable in UI. Metric: graph nodes retrieved per CEO decision. |
 | **S-EXT** | **Extensions: MCP client + connectors + skills/plugins** (the Claude Code format) — MCP server registry (add/enable/disable, global + per-project), auth (API key / OAuth 2.1, Keychain), stdio + Streamable HTTP transports, tool discovery + list-changed notifications, typed invoke with retries/timeouts/honest degradation, per-call cost/latency capture, connector accounts (e.g. social networks), skills, management UI | S3 (registry storage), BL-20 Keychain pattern. NOT behind Pv2 or S6a — MCP is orchd/core-outbound JSON-RPC, never Hop-B | Builds on: §16 trust layer + BL-20 Keychain generalize verbatim (V34). DoD: prowl.chat connected; tools listed; one research tool invoked; result persisted as a durable artifact. Metric: MCP tools invocable from workflow steps. Open decision — default: MCP v1 surface = tools + auth only; sampling DISABLED by default; resources/prompts → backlog (Q6). Open decision — default: skills adopt the Claude Code SKILL.md format for portability (Q14). |
@@ -203,9 +210,11 @@ S0 ─┬─ S1 ─ Pv2 ──────────────────�
 ```
 
 **Current slice:** S0+S1 **DONE**; docs-truth/CI pass **DONE**; vision-alignment pass **DONE**;
-**Pv2 (Protocol v2) DONE (`[0.2.0]`, this branch).** Next: S2 → S3 → S4 ∥ S-EXT ∥ S5 → S-IDEA →
+Pv2 (Protocol v2) **DONE** (`[0.2.0]`); **S2 (multi-root workspaces + file explorer +
+attention-first Home) DONE (`[0.3.0]`, this branch).** Next: S3 → S4 ∥ S-EXT ∥ S5 → S-IDEA →
 S6a → SW1 → …
-Spec: `2026-07-01-builderpro-s0s1-foundation-terminal-design.md`.
+Spec: `2026-07-01-builderpro-s0s1-foundation-terminal-design.md` (S0+S1);
+`2026-07-08-s2-workspace-explorer-home-design.md` (S2).
 
 ---
 

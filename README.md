@@ -11,17 +11,45 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI). Ships as a universal m
 
 ## Status
 
-**S0+S1 implemented.** The foundation slice (app scaffold, shared wire protocol) and the terminal
-core slice (daemon-owned PTYs, OSC-driven status, sanitized scrollback replay, SQLite persistence,
-launchd-supervised survival) are done, tested, and documented. See
+**S0+S1+Pv2+S2 implemented.** The foundation slice, the terminal core (daemon-owned PTYs,
+OSC-driven status, sanitized scrollback replay, SQLite persistence, launchd-supervised survival),
+Protocol v2 (CBOR wire, version negotiation, multi-subscriber attach), and S2 (multi-root
+workspaces, a core-owned file explorer + read-only preview + live watch, an attention-first Home,
+an OSC-133 command strip, terminal file links) are done, tested, and documented. See
 [`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this implementation is derived
 from and [`docs/traceability.md`](docs/traceability.md) for the contract → test matrix.
 
 - **Platform overview & roadmap:** [`2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md)
-- **S0+S1 spec (this slice):** [`2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
+- **S0+S1 spec:** [`2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
+- **S2 spec (workspace multi-root + file explorer + attention-first Home):** [`2026-07-08-s2-workspace-explorer-home-design.md`](docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md)
 - **Architecture summary:** [`docs/architecture.md`](docs/architecture.md)
 - **Contract → test traceability:** [`docs/traceability.md`](docs/traceability.md)
 - **Release build/sign/notarize runbook:** [`docs/build-macos.md`](docs/build-macos.md)
+
+### Features shipped so far
+
+- **Terminal engine (S1):** real PTYs, multi-terminal per workspace, OSC-133/OSC-7 shell
+  integration, sanitized scrollback replay, launchd-supervised daemon survives GUI close/crash.
+- **Protocol v2:** CBOR wire codec, `[min,max]` version negotiation, multi-subscriber attach,
+  real drain-on-upgrade with owner consent, cold-rehydrate of past sessions as inactive.
+- **Multi-root workspaces (S2):** a workspace is an ordered list of equal repo roots
+  (`Workspace.roots: Vec<String>`; `root_path` stays a compat mirror of `roots[0]`); add/remove a
+  root without recreating the workspace.
+- **File explorer + read-only preview (S2):** gitignore-aware lazy tree (`ignore` crate, `.git`
+  always hidden), a 1 MiB-capped read-only preview (binary/too-large/error render honest
+  placeholders, never a silent truncation), create/rename/move/delete (always to Trash), reveal in
+  Finder / open externally — all core-local (`src-tauri/src/fs_explorer.rs`), path-validated
+  against the active workspace's roots before any disk access.
+- **Live file watch (S2):** debounced FSEvents watch (`notify`/`notify-debouncer-full`) per active
+  root, gitignore-filtered, point-refreshing only the affected expanded tree nodes.
+- **Attention-first Home (S2):** on open, sessions waiting for input are pinned first (amber) with
+  a one-click «Пройти →» that jumps to and focuses that terminal, then running, then recently
+  exited (✓/✗ by exit code) — across every workspace, no polling.
+- **OSC-133 command strip (S2):** per-session recent-command chips (✓/✗ by exit code) sourced from
+  `command_events` — the first real UI consumer of that table (persisted since Pv2).
+- **Terminal file links (S2):** click a path printed in terminal output to open it in the
+  right-rail preview (regex detection + OSC-8 hyperlinks; validated against the workspace's roots
+  on click, never a silent no-op on a miss).
 
 ## Principles
 
@@ -30,19 +58,23 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
 - **Max autonomy, min human-in-the-loop.** Humans set goals and quality; agents decide the rest.
 - **Honest about boundaries.** The app never lies about session/agent state.
 
-## Architecture (S0+S1)
+## Architecture
 
 Two OS processes, two IPC hops. The daemon owns every PTY so the GUI can close, crash, or restart
-without killing a running shell (tmux/re-attach model) — full detail in
-[`docs/architecture.md`](docs/architecture.md).
+without killing a running shell (tmux/re-attach model). File I/O + live watch (S2) live in the
+Tauri core instead — GUI-lifetime, never over Hop-B, so the daemon's charter stays terminal-domain
+only — full detail (incl. the three-rail UI) in [`docs/architecture.md`](docs/architecture.md).
 
 ```
 ┌──────────────────────── Builder Pro AI.app ────────────────────────┐
 │  React webview (UI)                Rust core (broker)               │
-│  • xterm panes                     • #[tauri::command] surface      │
-│  • workspace sidebar      ◄──Hop A──►  • UDS client to daemon       │
-│  • status dots             Tauri IPC   • maps daemon frames ⇄ UI    │
-│  • Zustand (metadata only)         • app settings (tauri-plugin-store)│
+│  • xterm panes (⌂ Home |           • #[tauri::command] surface      │
+│    workspace | FILES rail)         • fs_explorer.rs (listDir/       │
+│  • workspace sidebar      ◄──Hop A──►  preview/create/rename/       │
+│  • status dots             Tauri IPC   move/delete→Trash/reveal)    │
+│  • Zustand (metadata only)         • fs_watcher.rs (FSEvents watch) │
+│                                     • UDS client to daemon          │
+│                                     • app settings (tauri-plugin-store)│
 └───────────────────────────────────│────────────────────────────────┘
                                      │ Hop B: Unix domain socket
                                      │ (codec-agnostic preamble handshake, then u32-LE length
@@ -52,9 +84,11 @@ without killing a running shell (tmux/re-attach model) — full detail in
                           │  • PTY supervisor      │    (KeepAlive{Crashed:true})
                           │  • OSC-133 parser + SM │
                           │  • sanitized byte ring │   owns ALL PTYs +
-                          │  • alacritty live grid │   ALL durable state
-                          │  • rusqlite (WAL)      │
-                          └──────────┬─────────────┘
+                          │  • alacritty live grid │   ALL durable terminal-
+                          │  • rusqlite (WAL,       │   domain state (incl.
+                          │    workspace roots,     │   multi-root workspaces,
+                          │    command_events)      │   command_events) — NEVER
+                          └──────────┬─────────────┘   file content
                      PTYs via portable-pty (child setsid'd, own pgrp)
                           ┌──────────▼─────────────┐
                           │ zsh / bash / agent CLI │
@@ -111,8 +145,8 @@ bash scripts/build-universal.sh
 
 | Suite | Command | What it covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | daemon (`bpa-sessiond`), shared protocol (`bpa-protocol`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — 238 tests as of the last full run |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store, terminal-manager (attach state machine), IPC wrappers, components — 118 tests |
+| Rust workspace | `cargo test --workspace` | daemon (`bpa-sessiond`), shared protocol (`bpa-protocol`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — 384 tests as of the last full run (S2, `[0.3.0]`) |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store, terminal-manager (attach state machine), IPC wrappers, components — 297 tests, 22 files (S2, `[0.3.0]`) |
 | End-to-end | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
 | Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` — a real, enforcing ≥80% line-coverage gate on the daemon crate (requires `cargo install cargo-llvm-cov`) |
 | Everything, in order | `bash scripts/final-suite.sh` | 8 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff → coverage gate → e2e; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) |

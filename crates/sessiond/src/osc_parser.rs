@@ -391,7 +391,7 @@ mod tests {
         let mut p = OscParser::new();
         let mut stream = vec![ESC, b']'];
         stream.extend_from_slice(b"133;");
-        stream.extend(std::iter::repeat(b'x').take(9000)); // exceeds 8 KiB cap
+        stream.extend(std::iter::repeat_n(b'x', 9000)); // exceeds 8 KiB cap
         stream.push(BEL);
         // Oversized OSC yields no event; parser recovers to Ground.
         assert_eq!(p.feed(&stream), Vec::<OscEvent>::new());

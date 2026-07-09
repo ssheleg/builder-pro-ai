@@ -517,7 +517,7 @@ mod tests {
         // dropped just because it started with an ESC byte.
         let mut r = ScrollbackRing::new(1 << 20);
         let mut chunk = vec![ESC];
-        chunk.extend(std::iter::repeat(b'Q').take(300));
+        chunk.extend(std::iter::repeat_n(b'Q', 300));
         r.push(&chunk);
         r.push(b"tail");
         let snap = r.snapshot();

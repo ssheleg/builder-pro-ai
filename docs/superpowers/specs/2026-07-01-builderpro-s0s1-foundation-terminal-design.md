@@ -121,7 +121,7 @@ sessions (tmux/retach model).
 | Plugin | `tauri-plugin-dialog` + `@tauri-apps/plugin-dialog` | major `2` — folder picker |
 | Plugin | `tauri-plugin-fs` + `@tauri-apps/plugin-fs` | major `2` — scoped (used from S2; workspace-root read now) |
 | Plugin | `tauri-plugin-shell` + `@tauri-apps/plugin-shell` | major `2` — **bundling only** |
-| Toolchain | Rust | ≥ **1.77.2** |
+| Toolchain | Rust | ≥ **1.88.0** *(amended 2026-07-09, S2 docs-truth pass: originally locked 1.77.2 here; the real floor of the resolved `Cargo.lock` dep graph — `plist`/`time`/`darling`/`serde_with`, transitively via `tauri`, pre-dating S2 — is 1.88.0, higher than the S2-added `trash` crate's own 1.85.0. `rust-toolchain.toml` pins 1.92, so this was never a build-breaking gap in practice — only a false floor claim. See `CHANGELOG.md` `[0.3.0]`.)* |
 | PTY | `portable-pty` (wezterm) | **0.9.0** |
 | VT (live grid state) | `alacritty_terminal` | pin exact (0.24/0.25) — used for cursor/alt-screen/size, **not** serialized |
 | DB | `rusqlite` (bundled sqlite) | 0.32 (≥0.31) |

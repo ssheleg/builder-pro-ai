@@ -80,12 +80,20 @@ client is dropped without stalling the daemon or any other session (spec §13).
 src/                              # React frontend
 ├─ ipc/
 │  ├─ types.ts     # GENERATED from crates/protocol via ts-rs — never hand-edit
-│  ├─ commands.ts  # typed invoke() wrappers (Hop A)
+│  ├─ commands.ts  # typed invoke() wrappers (Hop A) — S2 adds addWorkspaceRoot/
+│  │                 removeWorkspaceRoot/getCommandEvents
+│  ├─ fs.ts        # S2: typed wrappers for the fs_explorer commands (listDir, readFilePreview,
+│  │                 create/rename/move/delete, reveal/openExternal)
 │  ├─ channel.ts   # attach_session Channel<TerminalEvent> plumbing
-│  └─ events.ts    # global emit/listen subscriptions
-├─ store/          # Zustand: sessions/workspaces METADATA ONLY — no bytes
-├─ terminal/       # terminal-manager.ts — non-reactive Map<SessionId, Terminal>, keep-alive
-└─ components/     # TerminalPane, TerminalTabs, WorkspaceSidebar, StatusDot, DaemonBanner
+│  └─ events.ts    # global emit/listen subscriptions — S2 adds onFsChanged/onFsWatchError/
+│                    onWorkspaceUpdated
+├─ store/          # Zustand: sessions/workspaces METADATA ONLY — no bytes; S2 adds the fs-slice
+│                    (expanded/treeCache/selectedFile/showIgnored/filesRailOpen/watchPaused) and
+│                    the `view: "home" | "workspace"` navigation slice
+├─ terminal/       # terminal-manager.ts — non-reactive Map<SessionId, Terminal>, keep-alive;
+│                    S2 adds link-provider.ts (pure regex file-link resolver, spec §6.5/D9)
+└─ components/     # TerminalPane, TerminalTabs, WorkspaceSidebar, StatusDot, DaemonBanner;
+                     S2 adds HomeView, FileTree, FilePreview, FilesRail, CommandStrip, Toast
 
 src-tauri/src/                    # Tauri core (the broker)
 ├─ main.rs / lib.rs               # Tauri Builder, plugin init, managed state, setup
@@ -93,11 +101,21 @@ src-tauri/src/                    # Tauri core (the broker)
 ├─ broker.rs                      # daemon frames → Channel/global events; Promise correlation
 ├─ socket_client.rs               # connect/handshake/reconnect (Hop B client, bounded backoff)
 ├─ paths.rs                       # thin re-export of bpa-paths (fail-fast pre-flights, spec §16)
+├─ fs_explorer.rs                 # S2: core-local file I/O — listDir/readFilePreview/create/
+│                                  # rename/move/delete(→Trash)/reveal/openExternal over the
+│                                  # `ignore`/`trash`/`opener` crates; every op validated by
+│                                  # bpa_paths::validate_path_within first (spec §4, §16)
+├─ fs_watcher.rs                  # S2: debounced FSEvents watch (`notify`/`notify-debouncer-full`)
+│                                  # per active workspace root, gitignore-filtered → `fs://changed`
+│                                  # / `fs://watch-error`; GUI-lifetime only (spec §5)
 └─ launchd.rs                     # install/bootstrap/kickstart the per-user LaunchAgent
 
 crates/protocol/src/lib.rs        # SHARED Hop-B wire types (serde + ts-rs) — source of truth
 crates/paths/src/lib.rs           # SHARED bpa-paths: workspace-root/cwd validation incl.
-                                  # symlink-escape — one impl for core AND daemon (spec §16)
+                                  # symlink-escape — one impl for core AND daemon (spec §16).
+                                  # S2 adds `validate_path_within`/`validate_parent_within`
+                                  # (canonicalize + `starts_with` root; the per-op guard every
+                                  # fs_explorer command runs before touching disk, spec S2 §4.1)
 crates/sessiond/src/              # the daemon binary
 ├─ main.rs                        # arg parse, tracing init, flock, socket bind, SIGTERM drain
 ├─ boot.rs                        # testable boot core: bind → wire deps → serve → drain
@@ -118,6 +136,59 @@ crates/sessiond/src/              # the daemon binary
 drifts from what's committed. Every other module above is owned by exactly one file-disjoint slice
 of the daemon, the core, or the frontend — this is what let S0+S1's 25 tasks run largely in
 parallel (see the plan's dependency graph).
+
+## Three-rail UI + the core-owned file I/O boundary (S2, shipped `[0.3.0]`)
+
+S2 (`docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md`) adds multi-root
+workspaces, a file explorer + read-only preview, live file-watch, and an attention-first Home. The
+webview grew from a two-pane (sidebar + terminal) layout to three rails:
+
+```
+┌ DaemonBanner ───────────────────────────────────────────────────────────┐
+├──────────┬─────────────────────────────────────────────┬────────────────┤
+│ ⌂ Home   │ Home: attention queue («нужен ты» → работают │ FILES (right,  │
+│ • ws-... │  → завершились, «Пройти →» jumps+focuses)    │ collapsible):  │
+│ (nav     │  | Workspace: stat chips + TerminalTabs +    │ FileTree       │
+│  only)   │  per-session OSC-133 command strip           │ + FilePreview  │
+└──────────┴─────────────────────────────────────────────┴────────────────┘
+```
+
+Left rail is pure navigation (`⌂ Home` + the existing workspace list). The center pane is either
+`HomeView` (attention-first queue over the whole store, spec §6.2) or the workspace view (stat
+chips + `TerminalTabs`/`TerminalPane` + `CommandStrip`, spec §6.3). The right rail (`FilesRail` →
+`FileTree` + `FilePreview`) is hidden on Home, collapsible on a workspace.
+
+**File I/O ownership (owner decision D4, "Approach A" — locked, not the only option considered):**
+file listing, preview, create/rename/move/delete, and live watch run **in the Tauri core**
+(`src-tauri/src/fs_explorer.rs`, `fs_watcher.rs`), not the daemon, and not over Hop-B. This keeps
+`bpa-sessiond`'s charter unchanged (Data-layer charter, overview doc: *terminal-domain durable
+state ONLY*) — the daemon still owns the `Workspace` row (`name`, `roots`) as data, but never reads
+a byte of file content. Consequences of this split:
+
+- File I/O is **GUI-lifetime only**: watchers start on workspace activation, stop on
+  switch/unmount, and nothing is watched while the app is closed (D4) — unlike terminals, which the
+  daemon keeps alive independent of the GUI.
+- Every `fs_explorer` op validates its target against one of the active workspace's roots via the
+  shared `bpa_paths::validate_path_within`/`validate_parent_within` (same crate, same
+  canonicalize-then-`starts_with` pattern the daemon already used for `create_workspace`/
+  `create_session` cwd checks — spec §16 "one impl for core AND daemon" extends to this new path
+  class) — defense in depth on top of the daemon having already validated the root itself at
+  `AddWorkspaceRoot` time.
+- `fs_watcher.rs` uses `notify` + `notify-debouncer-full` (macOS → FSEvents, 250 ms debounce) per
+  active root, filtered through the same `ignore`-crate gitignore matcher `fs_explorer` uses for
+  listing, emitting `fs://changed { root, changedRelPaths }` (capped/deduped, `["*"]` on overflow
+  meaning "refresh everything expanded") or `fs://watch-error { root, reason }` on failure — the
+  frontend point-refreshes only affected expanded directories, never a full re-list.
+- Delete always goes to the OS Trash (crate `trash`, `DeleteMethod::NsFileManager` on macOS —
+  the default Finder/AppleScript method measured 60+s per delete in CI and was swapped for the
+  direct `NSFileManager` API, same reversibility, ~0.15s) — never a permanent unlink.
+- `Request::GetCommandEvents` (daemon, reads `command_events` — persisted since Pv2 but unconsumed
+  until now) is the one S2 wire addition that *does* cross Hop-B: the per-session OSC-133 command
+  strip is the first real UI consumer of that table.
+
+If a future slice needs headless (no-GUI) file reads — e.g. `bpa-orchd` — that is explicitly
+out of scope here (S2 spec §9): orchd gets its own file API in S9 when it actually needs it, not by
+widening this core-local surface.
 
 ## The survival model, restated
 
@@ -170,5 +241,8 @@ sessions; a configurable cap + typed `SessionLimitReached` error is planned (BL-
   (`scripts/build-universal.sh`, `scripts/sign-verify.sh`, `scripts/smoke-clean-vm.sh`).
 - `docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md` — the locked
   spec this whole implementation is derived from.
+- `docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md` — the S2 spec (multi-root
+  workspaces, file explorer + preview + watch, attention-first Home, command strip, terminal file
+  links) the "Three-rail UI" section above summarizes.
 - `tests/e2e/README.md` — the three ways to exercise the survive-restart property (socket harness,
   launchd-managed variant, full-GUI manual/CI confirmation).

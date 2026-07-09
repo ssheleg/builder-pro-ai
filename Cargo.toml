@@ -4,7 +4,13 @@ members = ["src-tauri", "crates/protocol", "crates/paths", "crates/sessiond"]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.77.2"
+# True floor of the resolved dep graph (verified against every locked Cargo.lock entry's own
+# `rust-version`, both macOS targets — see CHANGELOG [0.3.0]): `plist`/`time`/`darling`/
+# `serde_with` (pulled in transitively via `tauri`, present since before S2) declare 1.88.0, the
+# highest of any resolved crate — higher than `trash` 5.2.6's 1.85.0 (the S2 regression that
+# triggered this reconciliation). 1.77.2 was already false pre-S2; this is the honest number,
+# still <= the pinned toolchain (rust-toolchain.toml, 1.92).
+rust-version = "1.88.0"
 
 [workspace.dependencies]
 bpa-protocol = { path = "crates/protocol" }

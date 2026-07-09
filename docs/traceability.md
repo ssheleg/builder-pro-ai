@@ -66,11 +66,64 @@ the daemon (spec §16). Commands below use `-p <package name>`.
 | Frontend: coalesce in-flight attach — StrictMode/rapid-tab double-attach fires ONE IPC; rejection retryable; reset/dispose during in-flight invalidates the stale completion (§12, A2) | `npx vitest run src/terminal/terminal-manager.test.ts` (`coalesces two synchronous attach() calls for the same session into ONE IPC (StrictMode double-attach)`, `after an in-flight attach REJECTS, a later attach re-attempts (state back to detached)`, `resetAllAttachments() during an in-flight attach: the stale completion is NOT recorded, next attach re-fires`, `resetAttachment(id) during an in-flight attach also invalidates the stale completion`, `dispose() during an in-flight attach: the stale completion does not resurrect attach state`) |
 | E2E survive-restart, incl. daemon-restart rehydration (§14.1, §13 core promise; Pv2 §9.8) | `npm run e2e:survive` (`tests/e2e/survive-restart.mjs`, phases 0–5 — the harness speaks the Pv2 preamble+CBOR wire; phase 5 closes BL-7) |
 
+## S2 contract rows (`docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md`)
+
+Multi-root workspaces, a core-owned file explorer + read-only preview + live watch, an
+attention-first Home, an OSC-133 command strip, and terminal file links — shipped `[0.3.0]`.
+
+| Contract (S2 spec §) | Test (command) |
+|---|---|
+| Shared path-escape guard: `validate_path_within`/`validate_parent_within` — root itself, canonical-candidate-inside-root, `..`/symlink escape, non-existent create-parent, multi-segment/`.`/`..` final-component rejection (§4.1) | `cargo test -p bpa-paths` (`candidate_inside_root_returns_canonical_path`, `candidate_equal_to_root_is_ok`, `dotdot_escape_is_rejected`, `symlink_pointing_outside_root_is_rejected`, `symlink_within_parent_is_allowed`, `candidate_that_does_not_exist_fails_closed`, `parent_within_root_with_fresh_filename_is_ok`, `parent_within_nested_existing_dir_with_fresh_filename_is_ok`, `parent_within_multi_segment_final_component_is_rejected`, `parent_within_dotdot_final_component_is_rejected`, `parent_within_dot_final_component_is_rejected`, `parent_within_root_but_symlink_escaping_parent_is_rejected`) |
+| Schema v3 `workspace_root` table + fail-closed forward-only v2→v3 migration; `root_path` stays the `ord=0` mirror (§3.2) | `cargo test -p bpa-sessiond --lib persistence::tests::fresh_db_is_v3_with_workspace_root_table persistence::tests::v2_db_migrates_to_v3_backfills_ord0_for_every_workspace persistence::tests::migration_v2_to_v3_fails_closed_on_error_and_leaves_v2_intact persistence::tests::v3_reopen_is_noop` |
+| Multi-root persistence: ordered upsert/list, replace-not-accumulate on update, empty-roots rejected (§3.1-3.2) | `cargo test -p bpa-sessiond --lib persistence::tests::upsert_workspace_multi_root_then_list_preserves_order_and_root_path_mirror persistence::tests::upsert_workspace_replaces_roots_on_update_rather_than_accumulating persistence::tests::upsert_workspace_rejects_empty_roots` |
+| `Add`/`RemoveWorkspaceRoot`: validate→append/renormalize ordering, reject removing the LAST root, idempotent no-op on an already-absent path, unknown-workspace error (§3.3) | `cargo test -p bpa-sessiond --lib persistence::tests::add_and_remove_workspace_root_ordering_and_renormalization persistence::tests::remove_last_workspace_root_is_rejected persistence::tests::remove_workspace_root_nonexistent_path_is_an_idempotent_noop persistence::tests::add_workspace_root_on_unknown_workspace_errors` |
+| `Add`/`RemoveWorkspaceRoot` over the wire: persists + broadcasts `Push::WorkspaceUpdated` to OTHER clients too (Pv2 multi-subscriber), missing-dir rejected before persisting, last-root rejected with the `LastRoot` code (§3.3) | `cargo test -p bpa-sessiond --lib socket_server::tests::add_workspace_root_persists_and_broadcasts_to_other_clients socket_server::tests::add_workspace_root_rejects_missing_dir_and_persists_nothing socket_server::tests::remove_workspace_root_last_one_is_rejected_with_last_root_code socket_server::tests::remove_workspace_root_non_last_persists_and_broadcasts` |
+| `GetCommandEvents`: newest-first, `limit` respected, unknown-session → empty (not an error) (§3.3) | `cargo test -p bpa-sessiond --lib socket_server::tests::get_command_events_returns_newest_first_and_respects_limit persistence::tests::list_command_events_respects_limit_and_unknown_session_is_empty` |
+| `Workspace.roots` / `CommandEvent` Rust⇄TS parity (camelCase, `roots` array, `seq`/`ts` as `number`) (§3.1, §3.3) | `cargo test -p bpa-protocol --test ts_export` (`workspace_exposes_roots_array`, `command_event_is_exported_camelcase_with_number_seq_and_ts`) then `git diff --exit-code -- src/ipc/types.ts` |
+| `Workspace`/`CommandEvent` CBOR round-trip, multi-root shape (§3.1, §3.3) | `cargo test -p bpa-protocol --test roundtrip` (`workspace_with_multiple_roots_roundtrips_via_cbor`, `command_event_roundtrips_via_cbor`) |
+| `fs_explorer`: `listDir` one-level-lazy, `.gitignore`/nested-`.gitignore`/`.git`-always-hidden, outside-root rejected (§4.2) | `cargo test -p builder-pro-ai --lib fs_explorer::tests::list_dir_one_level_returns_files_and_dirs fs_explorer::tests::list_dir_second_level_is_lazy_via_rel fs_explorer::tests::list_dir_never_lists_dot_git fs_explorer::tests::list_dir_gitignored_entry_omitted_unless_include_ignored fs_explorer::tests::list_dir_respects_nested_gitignore fs_explorer::tests::list_dir_rejects_outside_root fs_explorer::tests::list_dir_on_a_file_is_not_found` |
+| `fs_explorer`: `readFilePreview` — 1 MiB cap, text/binary/truncated detection (NUL/invalid-UTF8 in first 8 KiB probe), outside-root/directory rejected (§4.2) | `cargo test -p builder-pro-ai --lib fs_explorer::tests::build_preview_text_is_not_truncated_when_bytes_match_size fs_explorer::tests::build_preview_truncated_when_stat_size_exceeds_bytes_read fs_explorer::tests::build_preview_binary_on_nul_byte_in_first_probe_window fs_explorer::tests::build_preview_binary_on_invalid_utf8_in_first_probe_window fs_explorer::tests::build_preview_nul_beyond_probe_window_is_still_text fs_explorer::tests::read_file_preview_text_happy_path fs_explorer::tests::read_file_preview_binary_on_real_file fs_explorer::tests::read_file_preview_too_large_over_cap_never_reads_content fs_explorer::tests::read_file_preview_exactly_at_cap_is_text fs_explorer::tests::read_file_preview_rejects_outside_root fs_explorer::tests::read_file_preview_on_a_directory_is_an_honest_io_error` |
+| `fs_explorer`: create/rename/move/delete(→Trash) — happy paths, outside-root on every side (src/dest), separator-in-name rejected, reveal/open outside-root rejected, every `FsError` variant camelCase-serializes (§4.2, §8) | `cargo test -p builder-pro-ai --lib fs_explorer::tests::create_file_happy_path fs_explorer::tests::create_file_does_not_overwrite_existing fs_explorer::tests::create_file_rejects_outside_root fs_explorer::tests::create_file_rejects_separator_in_name fs_explorer::tests::create_dir_happy_path fs_explorer::tests::create_dir_rejects_outside_root fs_explorer::tests::rename_entry_happy_path fs_explorer::tests::rename_entry_nested_happy_path fs_explorer::tests::rename_entry_rejects_outside_root_source fs_explorer::tests::rename_entry_rejects_separator_in_new_name fs_explorer::tests::move_entry_happy_path fs_explorer::tests::move_entry_rejects_outside_root_destination fs_explorer::tests::move_entry_rejects_outside_root_source fs_explorer::tests::delete_entry_rejects_outside_root fs_explorer::tests::delete_entry_moves_file_out_of_its_original_location fs_explorer::tests::reveal_in_finder_rejects_outside_root fs_explorer::tests::open_external_rejects_outside_root fs_explorer::tests::fs_error_serializes_with_camel_case_tag fs_explorer::tests::file_preview_serializes_with_camel_case_tag fs_explorer::tests::fs_entry_serializes_camel_case_fields` |
+| `fs_watcher`: debounced FSEvents watch, gitignore filter (root-level + `.git`-always), dedupe, 500-path cap → `["*"]` overflow sentinel, multi-root routing, `fs://watch-error` on nonexistent/failed root, stop/restart lifecycle, camelCase payload shape, real `notify` integration (§5) | `cargo test -p builder-pro-ai --lib fs_watcher::tests::build_root_gitignore_matches_root_patterns fs_watcher::tests::gitignored_path_dropped_unless_show_ignored fs_watcher::tests::dot_git_internal_paths_always_dropped_even_with_show_ignored fs_watcher::tests::path_outside_all_roots_is_dropped fs_watcher::tests::duplicate_paths_are_deduped fs_watcher::tests::over_cap_paths_collapse_to_refresh_everything_sentinel fs_watcher::tests::exactly_at_cap_is_not_collapsed fs_watcher::tests::multiple_roots_routed_to_the_right_root fs_watcher::tests::watch_error_with_matching_path_routes_to_its_root fs_watcher::tests::watch_error_without_path_info_surfaces_against_every_root fs_watcher::tests::nonexistent_root_emits_watch_error_and_is_excluded_from_matchers fs_watcher::tests::changed_payload_uses_camel_case_changed_rel_paths_key fs_watcher::tests::watch_error_payload_shape fs_watcher::tests::stop_on_an_already_empty_slot_is_a_harmless_noop fs_watcher::tests::starting_again_replaces_the_previous_watch_state fs_watcher::tests::real_notify_watch_delivers_debounced_changed_event_filters_gitignore_and_respects_stop fs_watcher::tests::watch_start_failure_on_a_nonexistent_root_emits_watch_error_not_a_panic` |
+| Frontend `fs`-slice + IPC wrappers: `treeCache`/`expanded`/`selectedFile` reducers, point-refresh `invalidateDirs` (keeps `expanded`, `["*"]` clears a whole root), typed `fs.ts` wrappers, `onFsChanged`/`onFsWatchError`/`onWorkspaceUpdated` listeners, `addWorkspaceRoot`/`removeWorkspaceRoot`/`getCommandEvents` command wrappers (§6.6) | `npx vitest run src/store/store.test.ts src/ipc/fs.test.ts src/ipc/events.test.ts src/ipc/commands.test.ts` |
+| `FileTree`: lazy per-level fetch + cache, windowed rendering (<500 DOM rows @10k), dirs-first sort, ignored-dimmed behind toggle, context menu (new file/folder/rename/delete→Trash-with-confirm/reveal/open-external), root «+ Add root», FsError→toast on every op (§6.4) | `npx vitest run src/components/FileTree.test.tsx` (20 tests) |
+| `FilePreview`: text/binary/tooLarge/error placeholders, re-fetch on selection change, stale-request guard, error also fires a toast (§6.4, §7) | `npx vitest run src/components/FilePreview.test.tsx` (10 tests) |
+| `FilesRail`: collapsed/expanded, show-ignored toggle invalidates+refetches, watch-paused affordance restarts the watch (§6.4, §5) | `npx vitest run src/components/FilesRail.test.tsx` (8 tests) |
+| `HomeView` attention-first ordering: waiting pinned first (exited always wins over a stale flag), «Пройти →» / row-click navigate+activate+focus, stats strip, ✓/✗ exited rows, empty states (§6.2) | `npx vitest run src/components/HomeView.test.tsx` (12 tests) + `npx vitest run src/App.test.tsx` (`end-to-end: Пройти from Home switches to the workspace view with that session active and focuses its terminal`) |
+| Workspace stat chips (live/waiting/exited/roots, scoped to the active workspace, click-to-expand detail) + root-aware new-terminal cwd (§6.3) | `npx vitest run src/App.test.tsx` (`stat chips show correct live/waiting/exited/roots counts, scoped to the active workspace only`, `clicking a stat chip toggles an inline detail list; clicking it again closes it`, `stat chips render nothing while no workspace is active`) |
+| `CommandStrip`: ✓/✗ chips from `command_events`, running-dot for an unmatched `started`, newest-first pairing, empty is calm (not an error), fetch failure toasts + renders nothing, refetches on lifecycle/exit change scoped to its own session (§6.3) | `npx vitest run src/components/CommandStrip.test.tsx` (10 tests) |
+| Terminal file links: lexical token patterns (absolute/dot-relative/extensioned-relative), `:line[:col]` suffix stripped from the path but kept in the span, `~/` detected-then-skipped, prose/bare-word rejected, `endCol` xterm-inclusive conversion (§6.5, D9) | `npx vitest run src/terminal/link-provider.test.ts` (18 tests) |
+
 ## Uncovered rows
 
-None. Every §14.2 row above resolves to at least one real, currently-passing test.
+None. Every §14.2 row above resolves to at least one real, currently-passing test. Same for every
+S2 contract row above.
 
-## Test totals — current (Pv2, `[0.2.0]`, 2026-07-07)
+## Test totals — current (S2, `[0.3.0]`, 2026-07-09)
+
+- Rust workspace (`cargo test --workspace`): **384 tests**, 0 failed. Delta vs. the prior Pv2 pass
+  (238): `bpa-paths` grew 7→18 (+11: `validate_path_within`/`validate_parent_within` and their
+  escape/parent/final-component edge cases, S2 §4.1); `bpa-protocol` grew (+2 ts_export:
+  `workspace_exposes_roots_array`, `command_event_is_exported_camelcase_with_number_seq_and_ts`;
+  +2 roundtrip: `workspace_with_multiple_roots_roundtrips_via_cbor`,
+  `command_event_roundtrips_via_cbor`); `bpa-sessiond` lib grew 167 (schema v3 migration +
+  multi-root persistence + Add/RemoveWorkspaceRoot + GetCommandEvents handlers, S2 §3); the core
+  crate (`builder-pro-ai`) lib grew to include the whole new `fs_explorer` (38 tests) and
+  `fs_watcher` (21 tests) modules (S2 §4-§5). Re-run `cargo test --workspace -- --list` yourself
+  for the exact per-crate breakdown — the paragraphs below are kept for history and no longer
+  reflect current totals.
+- TypeScript (`npx vitest run`): **297 tests**, 22 test files, 0 failed. Delta vs. the prior Pv2
+  pass (118, 13 files): S2 added 9 new test files — `ipc/fs.test.ts` (15), `terminal/
+  link-provider.test.ts` (18), `components/HomeView.test.tsx` (12), `components/FileTree.test.tsx`
+  (20), `components/FilePreview.test.tsx` (10), `components/FilesRail.test.tsx` (8),
+  `components/CommandStrip.test.tsx` (10), plus growth in `store/store.test.ts`, `ipc/
+  events.test.ts`, `ipc/commands.test.ts`, and `App.test.tsx` for the fs-slice, workspace-root
+  IPC, attention-first navigation, and root-aware stat chips (S2 §6).
+- E2E (`npm run e2e:survive`): green, **6 phases** (0–5, socket-harness variant), unchanged by S2
+  (the survive-restart property is orthogonal to multi-root/file-explorer additions — additive
+  wire changes keep passing through the same harness).
+
+## Test totals — Pv2 (`[0.2.0]`, 2026-07-07) — historical, superseded above
 
 - Rust workspace (`cargo test --workspace`): **238 tests**, 0 failed. Delta vs. the prior
   docs-truth pass (205): the Pv2 cycle added the `preamble` module + its dedicated test file (6),
@@ -120,25 +173,30 @@ None. Every §14.2 row above resolves to at least one real, currently-passing te
 ## Coverage
 
 `scripts/coverage-gate.sh` runs `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` — a
-real, enforcing gate (non-zero exit below 80%). **Measured (2026-07-07, Pv2/`[0.2.0]` cycle):
-`bpa-sessiond` line coverage = 89.58 %** (functions 88.17 %, regions 88.65 %) — the gate passes
-with headroom. *(Historical: 2026-07-05, docs-truth/CI cycle measured 88.06 % line / 86.70 %
-functions / 89.20 % regions — the Pv2 cycle added substantial new daemon surface — preamble
-handshake, multi-subscriber attach, real drain, cold-rehydrate, schema-v2 writer — all TDD-covered,
-which is why the number moved.)* The gate now runs in two enforced places:
+real, enforcing gate (non-zero exit below 80%). **Measured (2026-07-09, S2/`[0.3.0]` cycle):
+`bpa-sessiond` line coverage = 89.16 %** (functions 89.28 %, regions 90.25 %; 12632 regions/1369
+missed, 653 functions/70 missed, 7960 lines/776 missed) — the gate passes with headroom.
+*(Historical: 2026-07-07, Pv2/`[0.2.0]` cycle measured 89.58 % line / 88.17 % functions / 88.65 %
+regions; 2026-07-05, docs-truth/CI cycle measured 88.06 % line / 86.70 % functions / 89.20 %
+regions — S2 added the schema-v3 multi-root migration, Add/RemoveWorkspaceRoot,
+GetCommandEvents handlers to the daemon crate, all TDD-covered, which is why the number moved
+again; the small dip vs. Pv2's 89.58 % is new surface area landing slightly denser than its own
+tests in a couple of branch-heavy spots, still comfortably above the 80 % floor.)* The gate now
+runs in two enforced places:
 
 - locally as `scripts/final-suite.sh` stage 7/8 (requires
   `rustup component add llvm-tools-preview && cargo install cargo-llvm-cov`);
 - in CI as the blocking `coverage` job of `.github/workflows/ci.yml` (see `docs/backlog.md`
   BL-17 — added and verified green this cycle).
 
-The evidence base behind the number: 134 `--lib` tests directly inside `bpa-sessiond`
-(covering every module: `attach`, `boot`, `live_grid`, `logging`, `osc_parser`, `persistence`,
-`pty_supervisor`, `scrollback`, `shell_integration`, `singleton`, `socket_server`) plus 3
+The evidence base behind the number: `bpa-sessiond --lib` grew to 167 tests this cycle (covering
+every module: `attach`, `boot`, `live_grid`, `logging`, `osc_parser`, `persistence`,
+`pty_supervisor`, `scrollback`, `shell_integration`, `singleton`, `socket_server` — `persistence`
+and `socket_server` gained the S2 schema-v3/multi-root/GetCommandEvents coverage) plus 3
 `boot_integration` + 1 `no_secrets_in_logs` + 1 `rehydrate_attach` + 1 `skeleton` integration tests
 exercising the full boot→serve→drain (and cold-rehydrate→attach) lifecycle over the real wire
-protocol. (117 → 134 reflects the Pv2 cycle's new coverage: preamble/negotiation, multi-subscriber
-attach, real drain, cold-rehydrate, schema-v2 `command_events`.)
+protocol. (134 → 167 reflects S2's new daemon-crate coverage: schema v3 migration, multi-root
+persistence, Add/RemoveWorkspaceRoot, GetCommandEvents.)
 
 *(History: at S0+S1 completion this gate was documented but not executed — the authoring
 environment lacked the ~3–5 GB the instrumented build needs. That gap was closed by the

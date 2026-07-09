@@ -75,7 +75,7 @@ defect. New tokens are added to `theme.ts` first, doc second, usage third.
 | Atom | Contract |
 |---|---|
 | **Status dot** | 7-8px circle, status token; the smallest unit of "what state is this" |
-| **Chip** | mono 11px, 1px border, radius 999; optional status dot; counts use tabular-nums |
+| **Chip** | mono 11px, 1px border, radius 999; optional status dot; counts use tabular-nums. **Debt (`docs/backlog.md` BL-41):** S2 shipped three independent inline implementations of this atom (`App.tsx`'s `statChipStyle`, `CommandStrip.tsx`'s `chipBaseStyle`, and the `MONO_FONT` constant redefined in 5 files) instead of one shared `Chip` component — the contract above is what any future extraction must match, not yet what the code reuses |
 | **Card** | `bgElevated` + 1px border + radius 9; title row = 13-15px/600 + right-aligned chip |
 | **Delta line** | one line under a card title: «what changed since you last looked»; bold the verb |
 | **Agent row** | status dot + mono agent name + plain-text current action |
