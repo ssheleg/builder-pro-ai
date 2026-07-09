@@ -1434,7 +1434,7 @@ mod tests {
         (path, tx, jh, dir, runtime)
     }
 
-    /// Send a [`ClientPreamble`] (min/max = 2, the current client range) and read back the daemon's
+    /// Send a [`ClientPreamble`] (min/max = 3, the current client range) and read back the daemon's
     /// decoded [`DaemonReply`]. Distinct from [`send_frame`]/[`recv_frame`]: the preamble is a raw
     /// codec-agnostic byte layout (Pv2 §4.2), not a CBOR `Frame`, so it needs its own wire helper.
     async fn preamble(s: &mut UnixStream) -> DaemonReply {
@@ -1494,8 +1494,11 @@ mod tests {
     async fn incompatible_client_range_is_rejected_and_closed() {
         let (path, _tx, _jh, _d, _r) = spawn_server().await;
         let mut c = UnixStream::connect(&path).await.unwrap();
-        // Client advertises [3, 3]; daemon only speaks [2, 2] ⇒ no overlap.
-        send_preamble(&mut c, 3, 3, "test").await;
+        // Client advertises [2, 2] (a stale pre-S2 build); daemon now only speaks [3, 3]
+        // (CLIENT/DAEMON_*_VERSION bumped v2 -> v3 in S2, `[0.3.0]`) ⇒ no overlap. This is the
+        // mirror of the critical wire-compat scenario the bump fixes: an old GUI against a new
+        // daemon must get Incompatible, never a silent misdecode.
+        send_preamble(&mut c, 2, 2, "test").await;
         match recv_daemon_reply(&mut c).await {
             DaemonReply::Incompatible { min, max } => {
                 assert_eq!((min, max), (DAEMON_MIN_VERSION, DAEMON_MAX_VERSION));

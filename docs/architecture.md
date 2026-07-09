@@ -55,7 +55,10 @@ server) speak the same wire protocol. Every connection opens with a **codec-agno
 (fixed-format raw LE bytes, magic `BPAA`, client `[min,max]` version range → daemon
 `Accepted{chosen}`/`Incompatible{min,max}`, bounded read timeout, 256-byte build-string cap) —
 version negotiation happens before either side commits to a codec, so a future codec change can
-never be misparsed as a frame. Once negotiated (`chosen == 2` today), both sides switch to `u32`-LE
+never be misparsed as a frame. Once negotiated (`chosen == 3` today — bumped from `2` in S2,
+`[0.3.0]`: multi-root `Workspace` + new verbs are a planned wire break, so an old v2 daemon
+negotiates `Incompatible` against a v3 client rather than silently misdecoding), both sides switch
+to `u32`-LE
 length-prefixed **CBOR** (`ciborium`)-encoded `Frame` (`Request { id, req }` / `Response { id, res
 }` / `Push(..)`), defined once in `crates/protocol` and shared by both binaries — the shared crate
 prevents *type* drift. CBOR is self-describing, so `SessionLifecycle` and `TerminalEvent` are plain

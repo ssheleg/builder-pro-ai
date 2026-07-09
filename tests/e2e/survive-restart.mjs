@@ -137,12 +137,12 @@ async function main() {
   }
   assert.ok(conn, `could not connect to daemon socket at ${SOCK} within 5s`);
   cleanup.conns.push(conn);
-  // `connect()` itself performs the v2 preamble handshake (magic/version negotiation) before
+  // `connect()` itself performs the v3 preamble handshake (magic/version negotiation) before
   // resolving — see `preambleHandshake()` in daemon-harness.mjs. A bad magic, an Incompatible
   // result, or an unexpected chosen version throws loudly from inside `connect()` itself, so
   // reaching here already proves the handshake succeeded; assert the negotiated version explicitly
   // too, matching the old harness's self-checking `Welcome` roundtrip assertion style.
-  assert.equal(conn.chosenVersion, 2, `preamble negotiated unexpected version: ${JSON.stringify(conn)}`);
+  assert.equal(conn.chosenVersion, 3, `preamble negotiated unexpected version: ${JSON.stringify(conn)}`);
   log(`phase0 OK: preamble handshake (chosen=${conn.chosenVersion}, daemonBuild=${JSON.stringify(conn.daemonBuild)})`);
 
   // ---- phase 1: create a workspace + session rooted in a temp dir ----
@@ -233,7 +233,7 @@ async function main() {
   // the marker written before the "quit".
   const conn2 = await connect(SOCK);
   cleanup.conns.push(conn2);
-  assert.equal(conn2.chosenVersion, 2, `reattach handshake negotiated unexpected version: ${JSON.stringify(conn2)}`);
+  assert.equal(conn2.chosenVersion, 3, `reattach handshake negotiated unexpected version: ${JSON.stringify(conn2)}`);
 
   const sessions = await request(conn2, { t: "ListSessions" });
   assert.equal(sessions.t, "Sessions", `ListSessions failed after relaunch: ${JSON.stringify(sessions)}`);
@@ -327,7 +327,7 @@ async function main() {
   cleanup.conns.push(conn3);
   assert.equal(
     conn3.chosenVersion,
-    2,
+    3,
     `post-relaunch preamble handshake negotiated unexpected version: ${JSON.stringify(conn3)}`,
   );
   log(`phase5 OK: reconnected to relaunched daemon (pid ${cleanup.daemonPid})`);

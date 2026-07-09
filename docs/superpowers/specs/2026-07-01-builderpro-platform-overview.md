@@ -130,7 +130,9 @@ improvisation:
 - **Version negotiation (SHIPPED, Pv2 §4):** a codec-agnostic preamble (magic `BPAA`, 5 s bound,
   256-byte build-string cap) carries the client's supported `[min,max]` range; the daemon answers
   `Accepted{chosen}` (highest common version) or `Incompatible{min,max}` — never a silent misparse.
-  Today `[2,2]` is exact-match (clean break from v1); the negotiation machinery is built for
+  Now `[3,3]` is exact-match (bumped from `[2,2]` in S2, `[0.3.0]`: multi-root `Workspace.roots` +
+  the new `AddWorkspaceRoot`/`RemoveWorkspaceRoot`/`Push::WorkspaceUpdated` verbs are not
+  v2-decodable, a planned wire break exactly like v1→v2); the negotiation machinery is built for
   `[min,max]`-style ranges in future cycles. *(Historical: this row previously described
   PROTO_VERSION=1 exact-match with negotiation "landing with v2" — that is now the current state,
   not a future one.)*
@@ -142,7 +144,7 @@ improvisation:
   `command_events`, real semantics now — no longer a no-op) → `launchctl kickstart -k` → **the core
   process itself calls `app.restart()`** (a full app relaunch, not an in-place socket reconnect —
   simpler and avoids reasoning about mid-flight state across a version jump); on relaunch the core
-  reconnects, negotiates v2, and rehydrated-inactive sessions appear. Kickstart failure surfaces an
+  reconnects, negotiates v3, and rehydrated-inactive sessions appear. Kickstart failure surfaces an
   honest banner, never a fake "connected" state. *(Historical: this row previously said SIGTERM +
   `DaemonShutdown` no-op-Ack + in-place reconnect — the app.restart() step and the real drain were
   added during Pv2 implementation, not part of the original plan.)*

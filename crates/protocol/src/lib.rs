@@ -260,10 +260,12 @@ mod tests {
         assert_eq!(PREAMBLE_MAGIC, 0x4250_4141);
         assert_eq!(&PREAMBLE_MAGIC.to_be_bytes(), b"BPAA");
         assert_eq!(&PREAMBLE_MAGIC.to_le_bytes(), b"AAPB");
-        assert_eq!(CLIENT_MIN_VERSION, 2);
-        assert_eq!(CLIENT_MAX_VERSION, 2);
-        assert_eq!(DAEMON_MIN_VERSION, 2);
-        assert_eq!(DAEMON_MAX_VERSION, 2);
+        // v3 (S2, `[0.3.0]`): multi-root Workspace + new verbs are a planned wire
+        // break from v2 — see `preamble.rs`'s "Version history" doc.
+        assert_eq!(CLIENT_MIN_VERSION, 3);
+        assert_eq!(CLIENT_MAX_VERSION, 3);
+        assert_eq!(DAEMON_MIN_VERSION, 3);
+        assert_eq!(DAEMON_MAX_VERSION, 3);
         assert_eq!(MAX_PREAMBLE_BUILD_LEN, 256);
     }
 }

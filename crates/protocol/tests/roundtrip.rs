@@ -321,8 +321,10 @@ fn command_event_roundtrips_via_cbor() {
 #[test]
 fn constants_are_locked() {
     assert_eq!(PREAMBLE_MAGIC, 0x4250_4141);
-    assert_eq!(CLIENT_MIN_VERSION, 2);
-    assert_eq!(CLIENT_MAX_VERSION, 2);
-    assert_eq!(DAEMON_MIN_VERSION, 2);
-    assert_eq!(DAEMON_MAX_VERSION, 2);
+    // v3 (S2, `[0.3.0]`): multi-root Workspace + new verbs are a planned wire
+    // break from v2 — see `preamble.rs`'s "Version history" doc.
+    assert_eq!(CLIENT_MIN_VERSION, 3);
+    assert_eq!(CLIENT_MAX_VERSION, 3);
+    assert_eq!(DAEMON_MIN_VERSION, 3);
+    assert_eq!(DAEMON_MAX_VERSION, 3);
 }

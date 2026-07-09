@@ -1065,13 +1065,13 @@ mod tests {
         bpa_protocol::preamble::decode_client_preamble(&buf).expect("valid client preamble")
     }
 
-    /// Read the client preamble then reply `Accepted{chosen:2, build:"stub"}` — the standard
+    /// Read the client preamble then reply `Accepted{chosen:3, build:"stub"}` — the standard
     /// stub-daemon handshake every test in this module drives before exercising request/response
     /// behavior.
     async fn accept_handshake(stream: &mut UnixStream) {
         let _client_preamble = read_client_preamble_stub(stream).await;
         let reply = encode_daemon_reply(&DaemonReply::Accepted {
-            chosen: 2,
+            chosen: 3,
             build: "stub".into(),
         });
         stream.write_all(&reply).await.unwrap();

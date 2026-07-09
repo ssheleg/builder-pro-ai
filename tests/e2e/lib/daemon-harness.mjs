@@ -43,8 +43,11 @@ import fs from "node:fs";
 // "BPAA" ASCII read big-endian; encoded little-endian on the wire (raw bytes b"AAPB").
 // Locked in `crates/protocol/src/preamble.rs::PREAMBLE_MAGIC` (Pv2 §4.2).
 export const MAGIC = 0x42504141;
-export const CLIENT_MIN_VERSION = 2;
-export const CLIENT_MAX_VERSION = 2;
+// v3 (S2, `[0.3.0]`): multi-root Workspace + new verbs are a planned wire break from v2 — see
+// `preamble.rs`'s "Version history" doc. The harness must speak the same version the (v3) daemon
+// under test advertises, or the daemon negotiates Incompatible and every phase fails.
+export const CLIENT_MIN_VERSION = 3;
+export const CLIENT_MAX_VERSION = 3;
 export const CLIENT_BUILD = "e2e-harness";
 
 // ============================================================================
@@ -166,8 +169,8 @@ export async function preambleHandshake(sock, { timeoutMs = 5000 } = {}) {
 
   const chosen = a;
   const buildLen = b;
-  if (chosen !== 2) {
-    throw new Error(`preamble negotiated unexpected version: chosen=${chosen} (expected 2)`);
+  if (chosen !== 3) {
+    throw new Error(`preamble negotiated unexpected version: chosen=${chosen} (expected 3)`);
   }
   const buildBytes = buildLen > 0 ? await readExactly(sock, buildLen, timeoutMs, state) : Buffer.alloc(0);
   const daemonBuild = buildBytes.toString("utf8");

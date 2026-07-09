@@ -49,6 +49,10 @@ All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: s
   pinned toolchain (`rust-toolchain.toml`) is 1.92, so this was never a build-breaking gap in
   practice on this repo's own CI/dev machines — only a false floor claim for anyone building on an
   older, "supported" Rust. Fixed in `Cargo.toml` and the S0+S1 spec's locked-versions table.
+- **Protocol v2 → v3** (one planned wire break: S2's multi-root `Workspace` + new verbs are not
+  v2-decodable). An old v2 daemon negotiates `Incompatible` → the upgrade-consent dialog +
+  `kickstart -k` restart the bundled v3 daemon; existing 0.2.0 installs upgrade through the dialog
+  and live sessions rehydrate inactive (D4).
 
 ### Fixed
 - **BL-14:** `applyReplay` now calls `term.reset()` before every Replay (including re-attach) —

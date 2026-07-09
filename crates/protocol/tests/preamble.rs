@@ -16,6 +16,27 @@ fn negotiate_disjoint_is_incompatible() {
     ));
 }
 
+/// S2 (`[0.3.0]`) bumped `CLIENT_MIN_VERSION`/`CLIENT_MAX_VERSION` v2 → v3 (multi-root
+/// `Workspace.roots` + new verbs are not v2-decodable — see `preamble.rs`'s "Version history"
+/// doc). This is the exact real-world upgrade trigger: an updated (v3) app talking to a
+/// still-running OLD (v2) daemon must negotiate `Incompatible`, not silently "succeed" and then
+/// fail to decode `Workspace`/new verbs later. `Incompatible` is what drives the existing
+/// upgrade-consent dialog + `kickstart -k` (D4) — never a version this client build actually
+/// speaks gets chosen against a stale daemon.
+#[test]
+fn new_v3_client_rejects_stale_v2_daemon_triggers_upgrade_dialog() {
+    let old_v2_daemon = (2u16, 2u16);
+    match negotiate(
+        CLIENT_MIN_VERSION,
+        CLIENT_MAX_VERSION,
+        old_v2_daemon.0,
+        old_v2_daemon.1,
+    ) {
+        DaemonReply::Incompatible { min, max } => assert_eq!((min, max), old_v2_daemon),
+        other => panic!("expected Incompatible{{2,2}} against a stale v2 daemon, got {other:?}"),
+    }
+}
+
 #[test]
 fn negotiate_overlap_picks_min_of_maxes() {
     match negotiate(1, 3, 2, 4) {

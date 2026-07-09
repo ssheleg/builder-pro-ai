@@ -18,6 +18,21 @@
 //! the connection and its read timeout) live per-side in the daemon and core
 //! crates and read the fixed-size header first, then exactly `build_len` more
 //! bytes for the trailing `build` string.
+//!
+//! ## Version history
+//!
+//! - **v2** (Pv2, `[0.2.0]`): the codec migration above — clean break from v1's
+//!   bincode-framed handshake; supported range `[2,2]`.
+//! - **v3** (S2, `[0.3.0]`): S2 grew the wire — multi-root `Workspace` (a new
+//!   required `roots: Vec<String>` field) plus the `AddWorkspaceRoot`/
+//!   `RemoveWorkspaceRoot`/`Push::WorkspaceUpdated` verbs — none of which an old
+//!   v2 peer can decode. This is a **planned wire break**, exactly like v1→v2:
+//!   supported range is now `[3,3]`. An old v2 daemon negotiating against a v3
+//!   client has no overlapping version, so `negotiate()` returns
+//!   `Incompatible{min:2,max:2}` — the core surfaces this as the existing
+//!   upgrade-consent dialog (`launchctl kickstart -k` restarts the bundled v3
+//!   daemon), the same choreography v1→v2 already used. No new machinery
+//!   needed; this is what the `[min,max]`-range negotiation was built for.
 
 use std::fmt;
 
@@ -26,13 +41,13 @@ use std::fmt;
 pub const PREAMBLE_MAGIC: u32 = 0x4250_4141;
 
 /// Lowest protocol version this client build can speak.
-pub const CLIENT_MIN_VERSION: u16 = 2;
+pub const CLIENT_MIN_VERSION: u16 = 3;
 /// Highest protocol version this client build can speak.
-pub const CLIENT_MAX_VERSION: u16 = 2;
+pub const CLIENT_MAX_VERSION: u16 = 3;
 /// Lowest protocol version this daemon build can speak.
-pub const DAEMON_MIN_VERSION: u16 = 2;
+pub const DAEMON_MIN_VERSION: u16 = 3;
 /// Highest protocol version this daemon build can speak.
-pub const DAEMON_MAX_VERSION: u16 = 2;
+pub const DAEMON_MAX_VERSION: u16 = 3;
 
 /// Hard cap on the trailing `build` string length, in bytes. A larger declared
 /// `build_len` is treated as garbage/DoS and rejected rather than allocated/read.
