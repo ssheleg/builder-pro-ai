@@ -227,7 +227,13 @@ export class TerminalManager {
         const links: ILink[] = resolved.map((link) => ({
           range: {
             start: { x: link.startCol, y: bufferLineNumber },
-            end: { x: link.endCol, y: bufferLineNumber },
+            // `link.endCol` is 1-based EXCLUSIVE (one past the last char — see
+            // `ResolvedFileLink.endCol`'s doc comment). xterm's `IBufferRange.end.x` is 1-based
+            // INCLUSIVE (its internal link-lookup/removal both loop `x <= end.x`), so the
+            // exclusive resolver column must be converted with a `-1` here or every link's
+            // clickable/underlined hit-box extends one column past the token (e.g. into the
+            // trailing space after a `path` token).
+            end: { x: link.endCol - 1, y: bufferLineNumber },
           },
           text: lineText.slice(link.startCol - 1, link.endCol - 1),
           activate: () => openFileLink(link.root, link.rel),

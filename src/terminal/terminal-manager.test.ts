@@ -36,7 +36,15 @@ vi.mock("@tauri-apps/plugin-shell", () => ({
 interface FakeLinkProvider {
   provideLinks(
     y: number,
-    callback: (links: Array<{ text: string; activate: () => void }> | undefined) => void,
+    callback: (
+      links:
+        | Array<{
+            text: string;
+            activate: () => void;
+            range: { start: { x: number; y: number }; end: { x: number; y: number } };
+          }>
+        | undefined,
+    ) => void,
   ): void;
 }
 
@@ -751,6 +759,37 @@ describe("TerminalManager — file links (spec §6.5/D9)", () => {
     const s = useAppStore.getState();
     expect(s.selectedFile).toEqual({ root: "/repo", rel: "src/app.ts" });
     expect(s.filesRailOpen).toBe(true);
+  });
+
+  it("provideLinks maps each link's IBufferRange to xterm's 1-based INCLUSIVE end.x (not the resolver's exclusive endCol) — regression for the off-by-one that made the hit-box swallow the trailing space", () => {
+    useAppStore.setState({
+      sessions: { s1: meta({ cwd: "/repo" }) },
+      workspaces: { w1: workspace({ roots: ["/repo"] }) },
+    });
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const term = terminals[0];
+    // "diff src/a.ts src/b.ts": "src/a.ts" occupies 1-based cols 6..13 inclusive,
+    // "src/b.ts" occupies 1-based cols 15..22 inclusive.
+    term.bufferLines.set(0, "diff src/a.ts src/b.ts");
+
+    const provider = term.registeredLinkProviders[0];
+    let received:
+      | Array<{
+          text: string;
+          activate: () => void;
+          range: { start: { x: number; y: number }; end: { x: number; y: number } };
+        }>
+      | undefined;
+    provider.provideLinks(1, (links) => {
+      received = links;
+    });
+
+    expect(received).toHaveLength(2);
+    expect(received![0].text).toBe("src/a.ts");
+    expect(received![0].range).toEqual({ start: { x: 6, y: 1 }, end: { x: 13, y: 1 } });
+    expect(received![1].text).toBe("src/b.ts");
+    expect(received![1].range).toEqual({ start: { x: 15, y: 1 }, end: { x: 22, y: 1 } });
   });
 
   it("provideLinks reports no links for a line with none, and for an unknown buffer line", () => {

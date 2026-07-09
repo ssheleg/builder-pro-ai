@@ -34,8 +34,11 @@ export interface ResolvedFileLink {
   /**
    * 1-based column ONE PAST the token's last character (EXCLUSIVE) — mirrors
    * `IBufferLine.translateToString`'s documented "endColumn ... exclusive" convention, so
-   * `line.slice(startCol - 1, endCol - 1)` is exactly the matched token text and the caller can
-   * hand `{ x: startCol, y }` / `{ x: endCol, y }` straight to `IBufferRange` unchanged.
+   * `line.slice(startCol - 1, endCol - 1)` is exactly the matched token text. UNLIKE `startCol`,
+   * this is NOT handed to `IBufferRange` unchanged: xterm's `IBufferRange.end.x` is 1-based
+   * INCLUSIVE (its internal link-lookup/removal code loops `x <= range.end.x`), so the caller
+   * (`terminal-manager.ts`'s `wireFileLinks`) must convert with `{ x: endCol - 1, y }` — passing
+   * `endCol` straight through would make the link's hit-box extend one column past the token.
    * Spans the WHOLE token including a stripped `:line[:col]` suffix, if present — the owner
    * clicked on `path:42`, not just `path`, so the whole idiom underlines/activates together.
    */
