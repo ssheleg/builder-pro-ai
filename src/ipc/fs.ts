@@ -41,6 +41,7 @@ export type FsError =
   | { kind: "permissionDenied" }
   | { kind: "outsideRoot" }
   | { kind: "tooLarge" }
+  | { kind: "alreadyExists" }
   | { kind: "io"; message: string };
 
 /**

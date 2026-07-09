@@ -56,6 +56,8 @@ export function describeFsError(err: unknown): string {
       return "путь вне корня воркспейса";
     case "tooLarge":
       return "файл слишком большой";
+    case "alreadyExists":
+      return "файл с таким именем уже существует";
     case "io":
       return e.message ?? "ошибка ввода-вывода";
     default:
