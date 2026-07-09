@@ -573,11 +573,15 @@ pub async fn create_workspace(
 }
 
 /// Add an additional root directory to a workspace (spec §3.3/§6.6, multi-root). The daemon
-/// re-validates `path` (canonicalizes, rejects duplicates/escapes) independently — this wrapper is
-/// deliberately thin, same shape as `create_workspace`/`list_workspaces`. On success the daemon
-/// also broadcasts `Push::WorkspaceUpdated` (see `broker::EV_WORKSPACE_UPDATED`) to every connected
-/// client, including this one; the returned `Workspace` here is this caller's direct reply, not
-/// sourced from that broadcast.
+/// re-validates `path` (canonicalizes, rejects paths that aren't existing directories)
+/// independently, and DEDUPS IDEMPOTENTLY: adding a path that's already one of the workspace's
+/// current roots is a no-op success (returns the unchanged `Workspace`, not an error, and never
+/// persists a second identical root — see `bpa_sessiond::persistence::Db::add_workspace_root`) —
+/// this wrapper itself is deliberately thin, same shape as `create_workspace`/`list_workspaces`.
+/// On success the daemon also broadcasts `Push::WorkspaceUpdated` (see
+/// `broker::EV_WORKSPACE_UPDATED`) to every connected client, including this one — even on the
+/// idempotent no-op path, since it's a harmless resync rather than a spurious change notification;
+/// the returned `Workspace` here is this caller's direct reply, not sourced from that broadcast.
 #[tauri::command]
 pub async fn add_workspace_root(
     state: State<'_, AppState>,

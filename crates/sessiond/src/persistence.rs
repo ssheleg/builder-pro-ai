@@ -359,25 +359,40 @@ impl Db {
     }
 
     /// Append a new root at `ord = max(ord) + 1` (spec §3.3 `AddWorkspaceRoot`; the caller —
-    /// `socket_server.rs` — validates the path with `bpa_paths::validate_dir` first). Returns
-    /// the updated `Workspace` (assembled via the same path as `list_workspaces`). Adding a
-    /// root never touches `root_path` (it always mirrors `roots[0]`, unaffected by an append).
+    /// `socket_server.rs` — validates the path with `bpa_paths::validate_dir` first). IDEMPOTENT
+    /// on a duplicate: if `path` already names one of the workspace's current roots, this is a
+    /// no-op — no second row is inserted, `ord` is left untouched, and the unchanged `Workspace`
+    /// is returned as `Ok`, never an error. This rules out `roots = ["/a", "/a"]` entirely, which
+    /// (pre-fix) was both a duplicate React key for `FileTree` (two rows silently sharing
+    /// expanded/cache/selection state) AND an un-removable trap: `remove_workspace_root("/a")`
+    /// filters out BOTH copies in one pass, so `remaining` jumps straight to empty and hits
+    /// `PersistError::LastRoot` — the duplicate could never be individually removed. Returns the
+    /// updated `Workspace` (assembled via the same path as `list_workspaces`). Adding a root
+    /// never touches `root_path` (it always mirrors `roots[0]`, unaffected by an append or a
+    /// no-op).
     pub fn add_workspace_root(
         &self,
         workspace_id: &WorkspaceId,
         path: &str,
     ) -> Result<Workspace, PersistError> {
         let tx = self.conn.unchecked_transaction()?;
-        let max_ord: Option<i64> = tx.query_row(
-            "SELECT MAX(ord) FROM workspace_root WHERE workspace_id = ?1",
-            rusqlite::params![workspace_id],
+        let already_present: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM workspace_root WHERE workspace_id = ?1 AND path = ?2",
+            rusqlite::params![workspace_id, path],
             |r| r.get(0),
         )?;
-        let next_ord = max_ord.map(|o| o + 1).unwrap_or(0);
-        tx.execute(
-            "INSERT INTO workspace_root (workspace_id, ord, path) VALUES (?1, ?2, ?3)",
-            rusqlite::params![workspace_id, next_ord, path],
-        )?;
+        if already_present == 0 {
+            let max_ord: Option<i64> = tx.query_row(
+                "SELECT MAX(ord) FROM workspace_root WHERE workspace_id = ?1",
+                rusqlite::params![workspace_id],
+                |r| r.get(0),
+            )?;
+            let next_ord = max_ord.map(|o| o + 1).unwrap_or(0);
+            tx.execute(
+                "INSERT INTO workspace_root (workspace_id, ord, path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![workspace_id, next_ord, path],
+            )?;
+        }
         tx.commit()?;
         self.list_workspaces()?
             .into_iter()
@@ -1542,6 +1557,70 @@ mod tests {
         assert!(
             matches!(err, PersistError::Sql(_)),
             "adding a root to a nonexistent workspace must fail (FK constraint), got {err:?}"
+        );
+    }
+
+    // ---- S2 final review, fix wave B / B1: AddWorkspaceRoot must be idempotent on a
+    // duplicate path — the pre-fix behavior appended it UNCONDITIONALLY, producing
+    // roots = ["/a", "/a"]: a duplicate FileTree React key AND an un-removable trap
+    // (remove_workspace_root filters out BOTH copies at once, so `remaining` goes
+    // straight to empty and hits `PersistError::LastRoot` — the duplicate can never be
+    // individually removed). ----
+
+    #[test]
+    fn add_workspace_root_duplicate_path_is_idempotent_no_duplicate_row() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("w1", &["/tmp/a"])).unwrap();
+
+        // Re-adding the SAME path must be a no-op: no duplicate row, roots unchanged.
+        let again = db.add_workspace_root(&"w1".to_string(), "/tmp/a").unwrap();
+        assert_eq!(
+            again.roots,
+            vec!["/tmp/a".to_string()],
+            "adding an already-present root must not append a duplicate"
+        );
+
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_root WHERE workspace_id = 'w1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "exactly one workspace_root row must exist for /tmp/a, never two"
+        );
+
+        // A genuinely new root still appends normally (idempotency doesn't break the
+        // happy path).
+        let with_b = db.add_workspace_root(&"w1".to_string(), "/tmp/b").unwrap();
+        assert_eq!(
+            with_b.roots,
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+            "a new path still appends"
+        );
+
+        // Re-adding /tmp/a again (now that there are two roots) is still a no-op: it
+        // must not touch /tmp/b's ord, and must not reach roots = ["/tmp/a","/tmp/a","/tmp/b"]
+        // (the un-removable-trap state this fix rules out entirely).
+        let again2 = db.add_workspace_root(&"w1".to_string(), "/tmp/a").unwrap();
+        assert_eq!(
+            again2.roots,
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+            "duplicate add against a multi-root workspace stays idempotent"
+        );
+
+        // Regression: the resulting workspace must remain fully removable — a state
+        // reachable only via this idempotent add can never become an un-removable trap.
+        let after_remove = db
+            .remove_workspace_root(&"w1".to_string(), "/tmp/a")
+            .unwrap();
+        assert_eq!(
+            after_remove.roots,
+            vec!["/tmp/b".to_string()],
+            "removing /tmp/a leaves exactly /tmp/b, proving no phantom duplicate survived"
         );
     }
 }
