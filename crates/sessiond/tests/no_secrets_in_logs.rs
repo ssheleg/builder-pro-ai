@@ -22,7 +22,9 @@ use std::io::Read;
 use std::time::Duration;
 
 use bpa_sessiond::protocol::{decode_daemon_reply, encode_client_preamble, encode_frame};
-use bpa_sessiond::protocol::{ClientPreamble, DaemonReply, FrameDecoder};
+use bpa_sessiond::protocol::{
+    ClientPreamble, DaemonReply, FrameDecoder, CLIENT_MAX_VERSION, CLIENT_MIN_VERSION,
+};
 use bpa_sessiond::protocol::{Frame, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -51,13 +53,14 @@ async fn recv_frame(s: &mut UnixStream) -> Frame {
 }
 
 /// Perform the Pv2 §4.2/§4.4 preamble handshake and assert the daemon accepts: write the raw
-/// codec-agnostic client preamble (`min:2, max:2`), then read + `decode_daemon_reply` the fixed
+/// codec-agnostic client preamble (`CLIENT_MIN_VERSION..=CLIENT_MAX_VERSION`, so it tracks the
+/// current wire version and can never desync from a version bump), then read + `decode_daemon_reply` the fixed
 /// 9-byte reply header (plus the trailing build string when accepted) and require `Accepted`.
 /// Distinct from `send_frame`/`recv_frame`: the preamble is a raw byte layout, not a CBOR `Frame`.
 async fn preamble_handshake(s: &mut UnixStream) {
     let bytes = encode_client_preamble(&ClientPreamble {
-        min: 2,
-        max: 2,
+        min: CLIENT_MIN_VERSION,
+        max: CLIENT_MAX_VERSION,
         build: "test".into(),
     });
     s.write_all(&bytes).await.unwrap();

@@ -16,7 +16,9 @@
 use std::time::Duration;
 
 use bpa_sessiond::protocol::{decode_daemon_reply, encode_client_preamble, encode_frame};
-use bpa_sessiond::protocol::{ClientPreamble, DaemonReply, FrameDecoder};
+use bpa_sessiond::protocol::{
+    ClientPreamble, DaemonReply, FrameDecoder, CLIENT_MAX_VERSION, CLIENT_MIN_VERSION,
+};
 use bpa_sessiond::protocol::{Frame, Push, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -49,8 +51,8 @@ async fn recv_frame(s: &mut UnixStream) -> Frame {
 
 async fn preamble_handshake(s: &mut UnixStream) {
     let bytes = encode_client_preamble(&ClientPreamble {
-        min: 2,
-        max: 2,
+        min: CLIENT_MIN_VERSION,
+        max: CLIENT_MAX_VERSION,
         build: "test".into(),
     });
     s.write_all(&bytes).await.unwrap();
