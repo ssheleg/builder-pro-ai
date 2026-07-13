@@ -45,34 +45,16 @@ fn parse_args() -> Args {
 /// Initialize structured logging under `{APP_SUPPORT}/logs/sessiond.tracing.log` (spec §13,
 /// §16: no secret values are logged — only paths, session ids, and lifecycle events). Falls
 /// back to `EnvFilter`'s default (`info`) when `RUST_LOG` is unset.
+///
+/// Thin re-seat (S3 phase 1 extraction, spec §3) over `bpa_daemon_core::logging::init_tracing`,
+/// pinned to sessiond's exact on-disk log file name. That function returns `io::Result<()>` (the
+/// extraction's locked signature); this wrapper panics on `Err`, matching the pre-extraction
+/// behavior of `tracing_subscriber`'s own `.init()` (which panics if a global subscriber is
+/// already installed in this process — never true at sessiond's single `main()` call site).
 fn init_tracing() {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let log_dir = home.join("Library/Application Support/ai.builderpro.desktop/logs");
-    if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!(
-            "bpa-sessiond: failed to create log dir {}: {e}",
-            log_dir.display()
-        );
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700));
-        }
+    if let Err(e) = bpa_daemon_core::logging::init_tracing("sessiond.tracing.log") {
+        panic!("bpa-sessiond: failed to init tracing: {e}");
     }
-
-    let file_appender = tracing_appender::rolling::never(&log_dir, "sessiond.tracing.log");
-    // `serve`/`run` also emit to stderr indirectly via launchd's StandardOutPath/StandardErrorPath
-    // capture (spec §8.3 plist); the file layer is the daemon's own structured log.
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(file_appender).with_ansi(false))
-        .init();
 }
 
 /// Install SIGTERM (and SIGINT, for dev `Ctrl-C`) handling: on first signal, flip the shutdown

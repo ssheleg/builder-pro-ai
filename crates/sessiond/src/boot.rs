@@ -15,12 +15,10 @@ use crate::singleton::{assert_socket_path_len, set_socket_mode};
 use crate::socket_server::{serve, ServerDeps};
 
 /// Resolve `~/Library/Application Support/ai.builderpro.desktop` (spec §8.1: durable state —
-/// DB, settings, logs — lives here, never next to the short socket path).
+/// DB, settings, logs — lives here, never next to the short socket path). Thin wrapper over
+/// `bpa_daemon_core::dirs::app_support_dir` (S3 phase 1 extraction, spec §3) — body unchanged.
 pub(crate) fn app_support_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join("Library/Application Support/ai.builderpro.desktop")
+    bpa_daemon_core::dirs::app_support_dir()
 }
 
 /// Test-support wrapper exposing [`app_support_dir`] to integration tests (D6: proves a test's
@@ -221,11 +219,8 @@ pub async fn run(
 mod tests {
     use super::*;
 
-    #[test]
-    fn app_support_dir_is_under_home() {
-        let dir = app_support_dir();
-        assert!(dir.ends_with("Library/Application Support/ai.builderpro.desktop"));
-    }
+    // `app_support_dir_is_under_home` moved to `bpa_daemon_core::dirs::tests` (S3 phase 1, spec
+    // §3) alongside the code it tests.
 
     #[tokio::test]
     async fn bind_fresh_rejects_overlong_path() {

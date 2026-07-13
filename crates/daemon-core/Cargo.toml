@@ -1,0 +1,22 @@
+[package]
+name = "bpa-daemon-core"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+name = "bpa_daemon_core"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+rustix = { workspace = true }
+libc = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
