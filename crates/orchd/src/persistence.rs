@@ -10,7 +10,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bpa_orchd_proto::{Goal, GoalKind, GoalStatus, Project, ProjectStatus};
+use bpa_orchd_proto::{
+    DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
+    InsightStatus, Project, ProjectStatus, TaskSource, TaskStatus,
+};
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -423,6 +426,127 @@ fn decode_metric_refs(s: &str) -> Result<Vec<String>, OrchdPersistError> {
         .map_err(|e| OrchdPersistError::Io(format!("corrupt goal.metric_refs json: {e}")))
 }
 
+// ---- idea / insight / task enum <-> TEXT helpers (spec §5.1 CHECK literals, snake_case — the
+// persistence layer OWNS this mapping; it is deliberately distinct from `bpa_orchd_proto`'s wire
+// serde reprs, which are camelCase, e.g. `IdeaLifecycle::InDev` is `"inDev"` on the wire but
+// `"in_dev"` in the DB CHECK constraint). ----
+
+fn encode_idea_lifecycle(l: &IdeaLifecycle) -> &'static str {
+    match l {
+        IdeaLifecycle::Captured => "captured",
+        IdeaLifecycle::Researching => "researching",
+        IdeaLifecycle::Specced => "specced",
+        IdeaLifecycle::InDev => "in_dev",
+        IdeaLifecycle::Shipped => "shipped",
+        IdeaLifecycle::Archived => "archived",
+    }
+}
+
+fn decode_idea_lifecycle(s: &str) -> Result<IdeaLifecycle, OrchdPersistError> {
+    match s {
+        "captured" => Ok(IdeaLifecycle::Captured),
+        "researching" => Ok(IdeaLifecycle::Researching),
+        "specced" => Ok(IdeaLifecycle::Specced),
+        "in_dev" => Ok(IdeaLifecycle::InDev),
+        "shipped" => Ok(IdeaLifecycle::Shipped),
+        "archived" => Ok(IdeaLifecycle::Archived),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt idea.lifecycle value: {other}"
+        ))),
+    }
+}
+
+fn encode_fit_verdict(v: &FitVerdict) -> &'static str {
+    match v {
+        FitVerdict::Fit => "fit",
+        FitVerdict::NoFit => "no_fit",
+        FitVerdict::Unknown => "unknown",
+    }
+}
+
+fn decode_fit_verdict(s: &str) -> Result<FitVerdict, OrchdPersistError> {
+    match s {
+        "fit" => Ok(FitVerdict::Fit),
+        "no_fit" => Ok(FitVerdict::NoFit),
+        "unknown" => Ok(FitVerdict::Unknown),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt insight.fit_verdict value: {other}"
+        ))),
+    }
+}
+
+fn encode_insight_status(s: &InsightStatus) -> &'static str {
+    match s {
+        InsightStatus::New => "new",
+        InsightStatus::Accepted => "accepted",
+        InsightStatus::Archived => "archived",
+    }
+}
+
+fn decode_insight_status(s: &str) -> Result<InsightStatus, OrchdPersistError> {
+    match s {
+        "new" => Ok(InsightStatus::New),
+        "accepted" => Ok(InsightStatus::Accepted),
+        "archived" => Ok(InsightStatus::Archived),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt insight.status value: {other}"
+        ))),
+    }
+}
+
+fn encode_task_status(s: &TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Backlog => "backlog",
+        TaskStatus::Todo => "todo",
+        TaskStatus::Waiting => "waiting",
+        TaskStatus::Progress => "progress",
+        TaskStatus::Testing => "testing",
+        TaskStatus::Done => "done",
+    }
+}
+
+fn decode_task_status(s: &str) -> Result<TaskStatus, OrchdPersistError> {
+    match s {
+        "backlog" => Ok(TaskStatus::Backlog),
+        "todo" => Ok(TaskStatus::Todo),
+        "waiting" => Ok(TaskStatus::Waiting),
+        "progress" => Ok(TaskStatus::Progress),
+        "testing" => Ok(TaskStatus::Testing),
+        "done" => Ok(TaskStatus::Done),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt task.status value: {other}"
+        ))),
+    }
+}
+
+fn encode_task_source(s: &TaskSource) -> &'static str {
+    match s {
+        TaskSource::Idea => "idea",
+        TaskSource::Insight => "insight",
+        TaskSource::Bug => "bug",
+        TaskSource::Plan => "plan",
+    }
+}
+
+fn decode_task_source(s: &str) -> Result<TaskSource, OrchdPersistError> {
+    match s {
+        "idea" => Ok(TaskSource::Idea),
+        "insight" => Ok(TaskSource::Insight),
+        "bug" => Ok(TaskSource::Bug),
+        "plan" => Ok(TaskSource::Plan),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt task.source value: {other}"
+        ))),
+    }
+}
+
+/// `task.tags` JSON array of strings round-trip (metric-refs-style JSON, mirrors
+/// [`decode_metric_refs`]).
+fn decode_tags(s: &str) -> Result<Vec<String>, OrchdPersistError> {
+    serde_json::from_str(s)
+        .map_err(|e| OrchdPersistError::Io(format!("corrupt task.tags json: {e}")))
+}
+
 /// `project.status` guard shared by every mutator (spec §5.2: "EVERY mutating verb touching
 /// [an archived project] or its children ⇒ `Invariant`"). Takes `&Connection` so it works both
 /// directly against `&self.conn` and — via `rusqlite::Transaction`'s
@@ -439,6 +563,21 @@ fn ensure_project_active(conn: &Connection, project_id: &str) -> Result<(), Orch
         None => Err(OrchdPersistError::NotFound),
         Some("archived") => Err(OrchdPersistError::Invariant("project archived".to_string())),
         Some(_) => Ok(()),
+    }
+}
+
+/// Archived-project guard for idea/insight rows, whose `project_id` column is NULLABLE
+/// (orphaning keeps the row — spec §5.1 `idea`/`insight` DDL comments). A `None` (orphan) is
+/// ALWAYS mutable — there is no project to be archived; a `Some(pid)` defers to
+/// [`ensure_project_active`] as-is (so an unknown `pid` still surfaces `NotFound`, and an
+/// archived `pid` still surfaces `Invariant`).
+fn ensure_optional_project_active(
+    conn: &Connection,
+    project_id: Option<&str>,
+) -> Result<(), OrchdPersistError> {
+    match project_id {
+        Some(pid) => ensure_project_active(conn, pid),
+        None => Ok(()),
     }
 }
 
@@ -564,6 +703,225 @@ fn ancestor_chain_contains(
         current = conn
             .query_row(
                 "SELECT parent_id FROM goal WHERE id = ?1",
+                rusqlite::params![cur],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+    }
+    Ok(false)
+}
+
+/// Raw `idea` row (text-encoded `lifecycle`) before decoding into the wire [`Idea`] type —
+/// mirrors [`GoalRow`]'s shape.
+struct IdeaRow {
+    id: String,
+    project_id: Option<String>,
+    title: String,
+    body: String,
+    lifecycle: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl IdeaRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<IdeaRow> {
+        Ok(IdeaRow {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            title: r.get(2)?,
+            body: r.get(3)?,
+            lifecycle: r.get(4)?,
+            created_at: r.get(5)?,
+            updated_at: r.get(6)?,
+        })
+    }
+
+    fn into_idea(self) -> Result<Idea, OrchdPersistError> {
+        Ok(Idea {
+            id: self.id,
+            project_id: self.project_id,
+            title: self.title,
+            body: self.body,
+            lifecycle: decode_idea_lifecycle(&self.lifecycle)?,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+fn load_idea(conn: &Connection, id: &str) -> Result<Idea, OrchdPersistError> {
+    conn.query_row(
+        "SELECT id, project_id, title, body, lifecycle, created_at, updated_at
+         FROM idea WHERE id = ?1",
+        rusqlite::params![id],
+        IdeaRow::from_row,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)?
+    .into_idea()
+}
+
+/// Raw `insight` row (text-encoded `fit_verdict`/`status`) before decoding into the wire
+/// [`Insight`] type — mirrors [`GoalRow`]'s shape.
+struct InsightRow {
+    id: String,
+    project_id: Option<String>,
+    source: String,
+    title: String,
+    body: String,
+    fit_verdict: Option<String>,
+    fit_reasoning: String,
+    status: String,
+    resolution_reasoning: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl InsightRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InsightRow> {
+        Ok(InsightRow {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            source: r.get(2)?,
+            title: r.get(3)?,
+            body: r.get(4)?,
+            fit_verdict: r.get(5)?,
+            fit_reasoning: r.get(6)?,
+            status: r.get(7)?,
+            resolution_reasoning: r.get(8)?,
+            created_at: r.get(9)?,
+            updated_at: r.get(10)?,
+        })
+    }
+
+    fn into_insight(self) -> Result<Insight, OrchdPersistError> {
+        Ok(Insight {
+            id: self.id,
+            project_id: self.project_id,
+            source: self.source,
+            title: self.title,
+            body: self.body,
+            fit_verdict: self
+                .fit_verdict
+                .as_deref()
+                .map(decode_fit_verdict)
+                .transpose()?,
+            fit_reasoning: self.fit_reasoning,
+            status: decode_insight_status(&self.status)?,
+            resolution_reasoning: self.resolution_reasoning,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+fn load_insight(conn: &Connection, id: &str) -> Result<Insight, OrchdPersistError> {
+    conn.query_row(
+        "SELECT id, project_id, source, title, body, fit_verdict, fit_reasoning, status,
+                resolution_reasoning, created_at, updated_at
+         FROM insight WHERE id = ?1",
+        rusqlite::params![id],
+        InsightRow::from_row,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)?
+    .into_insight()
+}
+
+/// Raw `task` row (text-encoded `status`/`source`, JSON-encoded `tags`) before decoding into the
+/// wire [`DomainTask`] type — mirrors [`GoalRow`]'s shape.
+struct TaskRow {
+    id: String,
+    project_id: String,
+    parent_id: Option<String>,
+    title: String,
+    body: String,
+    status: String,
+    source: String,
+    source_id: Option<String>,
+    tags: String,
+    rank: f64,
+    rank_agent: Option<f64>,
+    rank_agent_reasoning: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl TaskRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+        Ok(TaskRow {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            parent_id: r.get(2)?,
+            title: r.get(3)?,
+            body: r.get(4)?,
+            status: r.get(5)?,
+            source: r.get(6)?,
+            source_id: r.get(7)?,
+            tags: r.get(8)?,
+            rank: r.get(9)?,
+            rank_agent: r.get(10)?,
+            rank_agent_reasoning: r.get(11)?,
+            created_at: r.get(12)?,
+            updated_at: r.get(13)?,
+        })
+    }
+
+    fn into_task(self) -> Result<DomainTask, OrchdPersistError> {
+        Ok(DomainTask {
+            id: self.id,
+            project_id: self.project_id,
+            parent_id: self.parent_id,
+            title: self.title,
+            body: self.body,
+            status: decode_task_status(&self.status)?,
+            source: decode_task_source(&self.source)?,
+            source_id: self.source_id,
+            tags: decode_tags(&self.tags)?,
+            rank: self.rank,
+            rank_agent: self.rank_agent,
+            rank_agent_reasoning: self.rank_agent_reasoning,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+fn load_task(conn: &Connection, id: &str) -> Result<DomainTask, OrchdPersistError> {
+    conn.query_row(
+        "SELECT id, project_id, parent_id, title, body, status, source, source_id, tags,
+                rank, rank_agent, rank_agent_reasoning, created_at, updated_at
+         FROM task WHERE id = ?1",
+        rusqlite::params![id],
+        TaskRow::from_row,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)?
+    .into_task()
+}
+
+/// Task analogue of [`ancestor_chain_contains`] (identical walk-up shape, `task` table instead
+/// of `goal`; spec §5.2 "Task `parent_id` same-project + cycle-rejected (same walk-up)").
+/// [`Db::create_task`] calls this defensively when validating `parent_id` against the
+/// about-to-be-inserted task's own (pre-generated) id — in v1 there is no task reparent verb, so
+/// a NEWLY created task can never actually be its own ancestor and this branch cannot trigger
+/// through the public API today, but the walk-up logic itself is real and independently exercised
+/// (see the `task_ancestor_chain_contains_*` tests below) for a future reparent verb (backlog,
+/// spec §13) to reuse as-is.
+fn task_ancestor_chain_contains(
+    conn: &Connection,
+    start_id: &str,
+    target_id: &str,
+) -> Result<bool, OrchdPersistError> {
+    let mut current = Some(start_id.to_string());
+    while let Some(cur) = current {
+        if cur == target_id {
+            return Ok(true);
+        }
+        current = conn
+            .query_row(
+                "SELECT parent_id FROM task WHERE id = ?1",
                 rusqlite::params![cur],
                 |r| r.get::<_, Option<String>>(0),
             )
@@ -1037,6 +1395,561 @@ impl Db {
             .query_map(rusqlite::params![project_id], GoalRow::from_row)?
             .collect::<Result<_, _>>()?;
         rows.into_iter().map(GoalRow::into_goal).collect()
+    }
+}
+
+// ================================================================================
+// ---- domain persistence (spec §5.2): idea + insight + task CRUD (T7) ----
+// ================================================================================
+
+impl Db {
+    /// `CreateIdea` (spec §4.2/§5.2). `project_id: None` ⇒ orphan idea (always mutable, per the
+    /// `idea.project_id` `ON DELETE SET NULL` column comment "orphaning keeps the idea");
+    /// `Some(pid)` ⇒ `pid` must resolve to an existing, active project
+    /// ([`ensure_optional_project_active`] gives `NotFound`/`Invariant` as appropriate).
+    /// `lifecycle` always starts `Captured` (DB column default `'captured'`).
+    pub fn create_idea(
+        &self,
+        project_id: Option<&str>,
+        title: &str,
+        body: &str,
+    ) -> Result<Idea, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_optional_project_active(&tx, project_id)?;
+
+        let id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO idea (id, project_id, title, body, lifecycle, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'captured', ?5, ?5)",
+            rusqlite::params![id, project_id, title, body, now],
+        )?;
+
+        let idea = load_idea(&tx, &id)?;
+        tx.commit()?;
+        Ok(idea)
+    }
+
+    /// `UpdateIdea` (spec §4.2). Only provided fields change, `updated_at` bumps only if at
+    /// least one did. Guard uses the idea's OWN current `project_id`
+    /// ([`ensure_optional_project_active`] — orphan ideas are always mutable). Unknown `id` ⇒
+    /// `NotFound`.
+    pub fn update_idea(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<Idea, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM idea WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+
+        if title.is_some() || body.is_some() {
+            tx.execute(
+                "UPDATE idea SET
+                   title = COALESCE(?2, title),
+                   body = COALESCE(?3, body),
+                   updated_at = ?4
+                 WHERE id = ?1",
+                rusqlite::params![id, title, body, now_ms()],
+            )?;
+        }
+
+        let idea = load_idea(&tx, id)?;
+        tx.commit()?;
+        Ok(idea)
+    }
+
+    /// `SetIdeaProject` (D11 dedicated verb, spec §4.2: no `Option<Option<T>>`): `project_id:
+    /// None` detaches (column ⇒ `NULL`). Guards BOTH the idea's CURRENT project (if any —
+    /// moving/detaching a child of an archived project is itself a mutating verb touching that
+    /// project) and the NEW target project (if any — attaching to an archived project is
+    /// disallowed; an unknown target `pid` ⇒ `NotFound`, via [`ensure_project_active`] inside
+    /// [`ensure_optional_project_active`]). Unknown `id` ⇒ `NotFound`.
+    pub fn set_idea_project(
+        &self,
+        id: &str,
+        project_id: Option<&str>,
+    ) -> Result<Idea, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let current_project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM idea WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, current_project_id.as_deref())?;
+        ensure_optional_project_active(&tx, project_id)?;
+
+        tx.execute(
+            "UPDATE idea SET project_id = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, project_id, now_ms()],
+        )?;
+
+        let idea = load_idea(&tx, id)?;
+        tx.commit()?;
+        Ok(idea)
+    }
+
+    /// `SetIdeaLifecycle` (spec §4.2). Guard uses the idea's OWN current `project_id`. Unknown
+    /// `id` ⇒ `NotFound`.
+    pub fn set_idea_lifecycle(
+        &self,
+        id: &str,
+        lifecycle: IdeaLifecycle,
+    ) -> Result<Idea, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM idea WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+
+        tx.execute(
+            "UPDATE idea SET lifecycle = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, encode_idea_lifecycle(&lifecycle), now_ms()],
+        )?;
+
+        let idea = load_idea(&tx, id)?;
+        tx.commit()?;
+        Ok(idea)
+    }
+
+    /// `DeleteIdea` (spec §4.2). Guard uses the idea's OWN current `project_id`. Unknown `id` ⇒
+    /// `NotFound`.
+    pub fn delete_idea(&self, id: &str) -> Result<(), OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM idea WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+
+        tx.execute("DELETE FROM idea WHERE id = ?1", rusqlite::params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `ListIdeas` (spec §4.2): `project_id: None` ⇒ every idea including orphans; `Some(pid)`
+    /// ⇒ only that project's ideas (orphans excluded). `created_at DESC`. Reads work
+    /// unconditionally (no archived-project guard on reads, mirrors [`Db::list_goals`]).
+    pub fn list_ideas(&self, project_id: Option<&str>) -> Result<Vec<Idea>, OrchdPersistError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM idea WHERE ?1 IS NULL OR project_id = ?1 ORDER BY created_at DESC, id",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![project_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        ids.iter().map(|id| load_idea(&self.conn, id)).collect()
+    }
+
+    /// `CreateInsight` (spec §4.2/§5.2). `project_id: None` ⇒ orphan insight (always mutable);
+    /// `Some(pid)` ⇒ `pid` must resolve to an existing, active project. `status` always starts
+    /// `New`, `fit_verdict` starts unset (`NULL`), `fit_reasoning`/`resolution_reasoning` start
+    /// `""` (DB column defaults).
+    pub fn create_insight(
+        &self,
+        project_id: Option<&str>,
+        source: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<Insight, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_optional_project_active(&tx, project_id)?;
+
+        let id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO insight
+               (id, project_id, source, title, body, status, fit_reasoning,
+                resolution_reasoning, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'new', '', '', ?6, ?6)",
+            rusqlite::params![id, project_id, source, title, body, now],
+        )?;
+
+        let insight = load_insight(&tx, &id)?;
+        tx.commit()?;
+        Ok(insight)
+    }
+
+    /// `UpdateInsight` (spec §4.2). Only provided fields change. Guard uses the insight's OWN
+    /// current `project_id`. Unknown `id` ⇒ `NotFound`.
+    pub fn update_insight(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<Insight, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM insight WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+
+        if title.is_some() || body.is_some() {
+            tx.execute(
+                "UPDATE insight SET
+                   title = COALESCE(?2, title),
+                   body = COALESCE(?3, body),
+                   updated_at = ?4
+                 WHERE id = ?1",
+                rusqlite::params![id, title, body, now_ms()],
+            )?;
+        }
+
+        let insight = load_insight(&tx, id)?;
+        tx.commit()?;
+        Ok(insight)
+    }
+
+    /// `SetInsightFitVerdict` (D11 dedicated verb, spec §4.2: no `Option<Option<T>>`) — sets
+    /// BOTH `fit_verdict` (nullable, `None` ⇒ `NULL`) and `fit_reasoning` (non-null, always
+    /// overwritten) together. Guard uses the insight's OWN current `project_id`. Unknown `id` ⇒
+    /// `NotFound`.
+    pub fn set_insight_fit_verdict(
+        &self,
+        id: &str,
+        fit_verdict: Option<FitVerdict>,
+        fit_reasoning: &str,
+    ) -> Result<Insight, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM insight WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+
+        let fit_verdict_text = fit_verdict.as_ref().map(encode_fit_verdict);
+        tx.execute(
+            "UPDATE insight SET fit_verdict = ?2, fit_reasoning = ?3, updated_at = ?4
+             WHERE id = ?1",
+            rusqlite::params![id, fit_verdict_text, fit_reasoning, now_ms()],
+        )?;
+
+        let insight = load_insight(&tx, id)?;
+        tx.commit()?;
+        Ok(insight)
+    }
+
+    /// `SetInsightStatus` (spec §4.2). `resolution_reasoning: None` leaves the column unchanged
+    /// (D11: plain `Option<T>` on a NON-nullable column means "absent/null = unchanged"; `Some`
+    /// overwrites, including with `""`). Guard uses the insight's OWN current `project_id`.
+    /// Unknown `id` ⇒ `NotFound`.
+    pub fn set_insight_status(
+        &self,
+        id: &str,
+        status: InsightStatus,
+        resolution_reasoning: Option<&str>,
+    ) -> Result<Insight, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM insight WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+
+        tx.execute(
+            "UPDATE insight SET
+               status = ?2,
+               resolution_reasoning = COALESCE(?3, resolution_reasoning),
+               updated_at = ?4
+             WHERE id = ?1",
+            rusqlite::params![
+                id,
+                encode_insight_status(&status),
+                resolution_reasoning,
+                now_ms()
+            ],
+        )?;
+
+        let insight = load_insight(&tx, id)?;
+        tx.commit()?;
+        Ok(insight)
+    }
+
+    /// `DeleteInsight` (spec §4.2). Guard uses the insight's OWN current `project_id`. Unknown
+    /// `id` ⇒ `NotFound`.
+    pub fn delete_insight(&self, id: &str) -> Result<(), OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM insight WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+
+        tx.execute("DELETE FROM insight WHERE id = ?1", rusqlite::params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `ListInsights` (spec §4.2): `project_id: None` ⇒ every insight including orphans;
+    /// `Some(pid)` ⇒ only that project's insights. `created_at DESC`. Reads work
+    /// unconditionally, mirrors [`Db::list_ideas`].
+    pub fn list_insights(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<Insight>, OrchdPersistError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM insight WHERE ?1 IS NULL OR project_id = ?1
+             ORDER BY created_at DESC, id",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![project_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        ids.iter().map(|id| load_insight(&self.conn, id)).collect()
+    }
+
+    /// `CreateTask` (spec §4.2/§5.2). `project_id` is REQUIRED (unlike idea/insight — the `task`
+    /// table has `project_id TEXT NOT NULL`) and must resolve to an existing, active project
+    /// (unknown ⇒ `NotFound`, archived ⇒ `Invariant`, via [`ensure_project_active`]). `parent_id`
+    /// (if `Some`) must reference an EXISTING task (else `NotFound`) in the SAME `project_id`
+    /// (else `Invariant`); the walk-up cycle guard ([`task_ancestor_chain_contains`]) is checked
+    /// defensively too (see that function's doc for why it can't trigger through this verb in
+    /// v1). `rank = COALESCE(MAX(rank), 0) + 1024` scoped to `project_id` (first task in a
+    /// project ⇒ exactly `1024`). `status` defaults `Backlog` when `None`. `rank_agent` starts
+    /// unset, `rank_agent_reasoning` starts `""` (DB column defaults) — those are agent-set
+    /// fields with no owning verb in T7.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_task(
+        &self,
+        project_id: &str,
+        parent_id: Option<&str>,
+        title: &str,
+        body: &str,
+        status: Option<TaskStatus>,
+        source: TaskSource,
+        source_id: Option<&str>,
+        tags: &[String],
+    ) -> Result<DomainTask, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_project_active(&tx, project_id)?;
+
+        let id = Uuid::new_v4().to_string();
+
+        if let Some(parent) = parent_id {
+            let parent_project: Option<String> = tx
+                .query_row(
+                    "SELECT project_id FROM task WHERE id = ?1",
+                    rusqlite::params![parent],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let parent_project = parent_project.ok_or(OrchdPersistError::NotFound)?;
+            if parent_project != project_id {
+                return Err(OrchdPersistError::Invariant(
+                    "task parent_id must belong to the same project".to_string(),
+                ));
+            }
+            if task_ancestor_chain_contains(&tx, parent, &id)? {
+                return Err(OrchdPersistError::Invariant(
+                    "cannot create a task under itself or one of its own descendants".to_string(),
+                ));
+            }
+        }
+
+        let max_rank: Option<f64> = tx.query_row(
+            "SELECT MAX(rank) FROM task WHERE project_id = ?1",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )?;
+        let rank = max_rank.unwrap_or(0.0) + 1024.0;
+
+        let tags_json = serde_json::to_string(tags)
+            .map_err(|e| OrchdPersistError::Io(format!("failed to serialize tags: {e}")))?;
+        let status = status.unwrap_or(TaskStatus::Backlog);
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO task
+               (id, project_id, parent_id, title, body, status, source, source_id, tags,
+                rank, rank_agent, rank_agent_reasoning, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, '', ?11, ?11)",
+            rusqlite::params![
+                id,
+                project_id,
+                parent_id,
+                title,
+                body,
+                encode_task_status(&status),
+                encode_task_source(&source),
+                source_id,
+                tags_json,
+                rank,
+                now
+            ],
+        )?;
+
+        let task = load_task(&tx, &id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// `UpdateTask` (spec §4.2). Only provided fields change; `tags` round-trips as a JSON
+    /// array of strings. Guard uses the task's OWN `project_id` (never null for a task). Unknown
+    /// `id` ⇒ `NotFound`.
+    pub fn update_task(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> Result<DomainTask, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: String = tx
+            .query_row(
+                "SELECT project_id FROM task WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_project_active(&tx, &project_id)?;
+
+        let tags_json = tags
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| OrchdPersistError::Io(format!("failed to serialize tags: {e}")))?;
+
+        if title.is_some() || body.is_some() || tags_json.is_some() {
+            tx.execute(
+                "UPDATE task SET
+                   title = COALESCE(?2, title),
+                   body = COALESCE(?3, body),
+                   tags = COALESCE(?4, tags),
+                   updated_at = ?5
+                 WHERE id = ?1",
+                rusqlite::params![id, title, body, tags_json, now_ms()],
+            )?;
+        }
+
+        let task = load_task(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// `SetTaskStatus` (spec §4.2). Guard uses the task's OWN `project_id`. Unknown `id` ⇒
+    /// `NotFound`.
+    pub fn set_task_status(
+        &self,
+        id: &str,
+        status: TaskStatus,
+    ) -> Result<DomainTask, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: String = tx
+            .query_row(
+                "SELECT project_id FROM task WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_project_active(&tx, &project_id)?;
+
+        tx.execute(
+            "UPDATE task SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, encode_task_status(&status), now_ms()],
+        )?;
+
+        let task = load_task(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// `SetTaskRank` (spec §4.2/§5.2): takes an explicit `f64` verbatim — fractional
+    /// insert-between midpoint math is the CLIENT's move, this verb just persists whatever it is
+    /// given. Guard uses the task's OWN `project_id`. Unknown `id` ⇒ `NotFound`.
+    pub fn set_task_rank(&self, id: &str, rank: f64) -> Result<DomainTask, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: String = tx
+            .query_row(
+                "SELECT project_id FROM task WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_project_active(&tx, &project_id)?;
+
+        tx.execute(
+            "UPDATE task SET rank = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, rank, now_ms()],
+        )?;
+
+        let task = load_task(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// `DeleteTask` (spec §4.2). Guard uses the task's OWN `project_id`. The FK
+    /// `task.parent_id REFERENCES task(id) ON DELETE CASCADE` removes the whole subtask
+    /// subtree. Unknown `id` ⇒ `NotFound`.
+    pub fn delete_task(&self, id: &str) -> Result<(), OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: String = tx
+            .query_row(
+                "SELECT project_id FROM task WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_project_active(&tx, &project_id)?;
+
+        tx.execute("DELETE FROM task WHERE id = ?1", rusqlite::params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `ListTasks` (spec §4.2): `project_id: None` ⇒ every task across every project;
+    /// `Some(pid)` ⇒ only that project's tasks. `ORDER BY rank`. Reads work unconditionally,
+    /// mirrors [`Db::list_ideas`].
+    pub fn list_tasks(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<DomainTask>, OrchdPersistError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM task WHERE ?1 IS NULL OR project_id = ?1 ORDER BY rank, id")?;
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![project_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        ids.iter().map(|id| load_task(&self.conn, id)).collect()
     }
 }
 
@@ -1845,5 +2758,1207 @@ mod domain_tests {
         let db = Db::open_in_memory().unwrap();
         let err = db.list_goals("nope").unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    // ================================================================================
+    // ---- idea / insight / task CRUD (T7), every invariant from spec §5.2's table, TDD
+    // (written RED before `impl Db { create_idea, ... }` above went GREEN) ----
+    // ================================================================================
+
+    fn idea_lifecycle_raw(db: &Db, id: &str) -> String {
+        db.conn()
+            .query_row(
+                "SELECT lifecycle FROM idea WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn insight_fit_verdict_raw(db: &Db, id: &str) -> Option<String> {
+        db.conn()
+            .query_row(
+                "SELECT fit_verdict FROM insight WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn insight_fit_reasoning_raw(db: &Db, id: &str) -> String {
+        db.conn()
+            .query_row(
+                "SELECT fit_reasoning FROM insight WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn task_rank_raw(db: &Db, id: &str) -> f64 {
+        db.conn()
+            .query_row(
+                "SELECT rank FROM task WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    // ---- create_idea / list_ideas ----
+
+    #[test]
+    fn create_idea_defaults_lifecycle_captured_orphan_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        let idea = db.create_idea(None, "t", "b").unwrap();
+        assert!(uuid::Uuid::parse_str(&idea.id).is_ok(), "id must be a uuid");
+        assert!(idea.project_id.is_none());
+        assert_eq!(idea.title, "t");
+        assert_eq!(idea.body, "b");
+        assert_eq!(idea.lifecycle, IdeaLifecycle::Captured);
+        assert_eq!(idea.created_at, idea.updated_at);
+        assert_eq!(idea_lifecycle_raw(&db, &idea.id), "captured");
+    }
+
+    #[test]
+    fn create_idea_attached_to_project() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let idea = db.create_idea(Some(&project.id), "t", "").unwrap();
+        assert_eq!(idea.project_id.as_deref(), Some(project.id.as_str()));
+    }
+
+    #[test]
+    fn create_idea_unknown_project_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.create_idea(Some("nope"), "t", "").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_create_idea() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.create_idea(Some(&project.id), "t", "").unwrap_err();
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn list_ideas_none_includes_orphans_but_project_filter_excludes_them() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let orphan = db.create_idea(None, "orphan", "").unwrap();
+        let attached = db.create_idea(Some(&project.id), "attached", "").unwrap();
+
+        let all = db.list_ideas(None).unwrap();
+        let all_ids: Vec<&str> = all.iter().map(|i| i.id.as_str()).collect();
+        assert!(all_ids.contains(&orphan.id.as_str()));
+        assert!(all_ids.contains(&attached.id.as_str()));
+
+        let scoped = db.list_ideas(Some(&project.id)).unwrap();
+        let scoped_ids: Vec<&str> = scoped.iter().map(|i| i.id.as_str()).collect();
+        assert!(
+            !scoped_ids.contains(&orphan.id.as_str()),
+            "orphan idea must not appear in a project-scoped list"
+        );
+        assert!(scoped_ids.contains(&attached.id.as_str()));
+    }
+
+    #[test]
+    fn list_ideas_orders_created_at_desc() {
+        let db = Db::open_in_memory().unwrap();
+        let older = db.create_idea(None, "older", "").unwrap();
+        let newer = db.create_idea(None, "newer", "").unwrap();
+        // force distinct timestamps regardless of clock resolution, so DESC order is
+        // unambiguous.
+        db.conn()
+            .execute(
+                "UPDATE idea SET created_at = 1000 WHERE id = ?1",
+                rusqlite::params![older.id],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE idea SET created_at = 2000 WHERE id = ?1",
+                rusqlite::params![newer.id],
+            )
+            .unwrap();
+
+        let all = db.list_ideas(None).unwrap();
+        assert_eq!(all[0].id, newer.id, "newest idea must sort first");
+        assert_eq!(all[1].id, older.id);
+    }
+
+    // ---- update_idea ----
+
+    #[test]
+    fn update_idea_changes_only_provided_fields() {
+        let db = Db::open_in_memory().unwrap();
+        let idea = db.create_idea(None, "t0", "b0").unwrap();
+        let updated = db.update_idea(&idea.id, Some("t1"), None).unwrap();
+        assert_eq!(updated.title, "t1");
+        assert_eq!(updated.body, "b0", "body left untouched when None");
+    }
+
+    #[test]
+    fn update_idea_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.update_idea("nope", Some("x"), None).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_update_idea() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let idea = db.create_idea(Some(&project.id), "t", "").unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.update_idea(&idea.id, Some("x"), None).unwrap_err();
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn orphan_idea_remains_mutable_with_no_project() {
+        // An orphan idea has no project to be archived, so every mutator on it must succeed
+        // unconditionally — proves ensure_optional_project_active's None branch is a true no-op.
+        let db = Db::open_in_memory().unwrap();
+        let idea = db.create_idea(None, "t", "b").unwrap();
+
+        let updated = db.update_idea(&idea.id, Some("t2"), None).unwrap();
+        assert_eq!(updated.title, "t2");
+        let relifecycled = db
+            .set_idea_lifecycle(&idea.id, IdeaLifecycle::Researching)
+            .unwrap();
+        assert_eq!(relifecycled.lifecycle, IdeaLifecycle::Researching);
+        db.delete_idea(&idea.id).unwrap();
+        assert!(db.list_ideas(None).unwrap().is_empty());
+    }
+
+    // ---- set_idea_project (D11) ----
+
+    #[test]
+    fn set_idea_project_none_detaches() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let idea = db.create_idea(Some(&project.id), "t", "").unwrap();
+
+        let detached = db.set_idea_project(&idea.id, None).unwrap();
+        assert!(detached.project_id.is_none());
+
+        // orphan now: appears in the None-scoped list but not the project-scoped one.
+        assert!(db
+            .list_ideas(Some(&project.id))
+            .unwrap()
+            .into_iter()
+            .all(|i| i.id != idea.id));
+    }
+
+    #[test]
+    fn set_idea_project_attaches_orphan_to_a_project() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let idea = db.create_idea(None, "t", "").unwrap();
+
+        let attached = db.set_idea_project(&idea.id, Some(&project.id)).unwrap();
+        assert_eq!(attached.project_id.as_deref(), Some(project.id.as_str()));
+    }
+
+    #[test]
+    fn set_idea_project_unknown_target_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let idea = db.create_idea(None, "t", "").unwrap();
+        let err = db.set_idea_project(&idea.id, Some("nope")).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn set_idea_project_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.set_idea_project("nope", None).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn set_idea_project_blocked_when_target_project_archived() {
+        let db = Db::open_in_memory().unwrap();
+        let idea = db.create_idea(None, "t", "").unwrap();
+        let target = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        db.archive_project(&target.id).unwrap();
+
+        let err = db.set_idea_project(&idea.id, Some(&target.id)).unwrap_err();
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn set_idea_project_blocked_when_current_project_archived() {
+        let db = Db::open_in_memory().unwrap();
+        let source = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let idea = db.create_idea(Some(&source.id), "t", "").unwrap();
+        db.archive_project(&source.id).unwrap();
+
+        let err = db.set_idea_project(&idea.id, None).unwrap_err();
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+    }
+
+    // ---- set_idea_lifecycle ----
+
+    #[test]
+    fn set_idea_lifecycle_persists_snake_case_db_literal() {
+        // The wire enum tag is camelCase ("inDev"); the DB CHECK-constraint literal (spec §5.1)
+        // is snake_case ("in_dev") — this pins the persistence layer's OWN mapping, independent
+        // of serde.
+        let db = Db::open_in_memory().unwrap();
+        let idea = db.create_idea(None, "t", "").unwrap();
+
+        let updated = db
+            .set_idea_lifecycle(&idea.id, IdeaLifecycle::InDev)
+            .unwrap();
+        assert_eq!(updated.lifecycle, IdeaLifecycle::InDev);
+        assert_eq!(idea_lifecycle_raw(&db, &idea.id), "in_dev");
+    }
+
+    #[test]
+    fn set_idea_lifecycle_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .set_idea_lifecycle("nope", IdeaLifecycle::Shipped)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_set_idea_lifecycle() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let idea = db.create_idea(Some(&project.id), "t", "").unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db
+            .set_idea_lifecycle(&idea.id, IdeaLifecycle::Archived)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- delete_idea ----
+
+    #[test]
+    fn delete_idea_removes_row() {
+        let db = Db::open_in_memory().unwrap();
+        let idea = db.create_idea(None, "t", "").unwrap();
+        db.delete_idea(&idea.id).unwrap();
+        assert!(db.list_ideas(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_idea_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.delete_idea("nope").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_delete_idea() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let idea = db.create_idea(Some(&project.id), "t", "").unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.delete_idea(&idea.id).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+        assert_eq!(db.list_ideas(None).unwrap().len(), 1, "delete must not run");
+    }
+
+    // ---- create_insight / list_insights ----
+
+    #[test]
+    fn create_insight_defaults_status_new_orphan_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "src", "t", "b").unwrap();
+        assert!(insight.project_id.is_none());
+        assert_eq!(insight.source, "src");
+        assert_eq!(insight.title, "t");
+        assert_eq!(insight.body, "b");
+        assert_eq!(insight.status, InsightStatus::New);
+        assert!(insight.fit_verdict.is_none());
+        assert_eq!(insight.fit_reasoning, "");
+        assert_eq!(insight.resolution_reasoning, "");
+    }
+
+    #[test]
+    fn create_insight_unknown_project_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.create_insight(Some("nope"), "s", "t", "").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_create_insight() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db
+            .create_insight(Some(&project.id), "s", "t", "")
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    #[test]
+    fn list_insights_none_includes_orphans_but_project_filter_excludes_them() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let orphan = db.create_insight(None, "s", "orphan", "").unwrap();
+        let attached = db
+            .create_insight(Some(&project.id), "s", "attached", "")
+            .unwrap();
+
+        let all_ids: Vec<String> = db
+            .list_insights(None)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert!(all_ids.contains(&orphan.id));
+        assert!(all_ids.contains(&attached.id));
+
+        let scoped_ids: Vec<String> = db
+            .list_insights(Some(&project.id))
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert!(!scoped_ids.contains(&orphan.id));
+        assert!(scoped_ids.contains(&attached.id));
+    }
+
+    // ---- update_insight ----
+
+    #[test]
+    fn update_insight_changes_only_provided_fields() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "s", "t0", "b0").unwrap();
+        let updated = db.update_insight(&insight.id, None, Some("b1")).unwrap();
+        assert_eq!(updated.title, "t0", "title left untouched when None");
+        assert_eq!(updated.body, "b1");
+    }
+
+    #[test]
+    fn update_insight_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.update_insight("nope", Some("x"), None).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_update_insight() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let insight = db.create_insight(Some(&project.id), "s", "t", "").unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.update_insight(&insight.id, Some("x"), None).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    #[test]
+    fn orphan_insight_remains_mutable_with_no_project() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "s", "t", "").unwrap();
+        let updated = db.update_insight(&insight.id, Some("t2"), None).unwrap();
+        assert_eq!(updated.title, "t2");
+        db.delete_insight(&insight.id).unwrap();
+        assert!(db.list_insights(None).unwrap().is_empty());
+    }
+
+    // ---- set_insight_fit_verdict (D11) ----
+
+    #[test]
+    fn set_insight_fit_verdict_stores_verdict_and_reasoning() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "s", "t", "").unwrap();
+
+        let updated = db
+            .set_insight_fit_verdict(
+                &insight.id,
+                Some(FitVerdict::NoFit),
+                "doesn't fit because X",
+            )
+            .unwrap();
+        assert_eq!(updated.fit_verdict, Some(FitVerdict::NoFit));
+        assert_eq!(updated.fit_reasoning, "doesn't fit because X");
+        // DB CHECK-constraint literal is snake_case ("no_fit"), distinct from the wire tag
+        // ("noFit").
+        assert_eq!(
+            insight_fit_verdict_raw(&db, &insight.id),
+            Some("no_fit".to_string())
+        );
+        assert_eq!(
+            insight_fit_reasoning_raw(&db, &insight.id),
+            "doesn't fit because X"
+        );
+    }
+
+    #[test]
+    fn set_insight_fit_verdict_none_clears_verdict_but_keeps_reasoning() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "s", "t", "").unwrap();
+        db.set_insight_fit_verdict(&insight.id, Some(FitVerdict::Fit), "fits")
+            .unwrap();
+
+        let cleared = db
+            .set_insight_fit_verdict(&insight.id, None, "undecided again")
+            .unwrap();
+        assert!(cleared.fit_verdict.is_none());
+        assert_eq!(cleared.fit_reasoning, "undecided again");
+        assert_eq!(insight_fit_verdict_raw(&db, &insight.id), None);
+    }
+
+    #[test]
+    fn set_insight_fit_verdict_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .set_insight_fit_verdict("nope", Some(FitVerdict::Fit), "")
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_set_insight_fit_verdict() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let insight = db.create_insight(Some(&project.id), "s", "t", "").unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db
+            .set_insight_fit_verdict(&insight.id, Some(FitVerdict::Fit), "x")
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- set_insight_status ----
+
+    #[test]
+    fn set_insight_status_updates_status_and_resolution_reasoning() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "s", "t", "").unwrap();
+
+        let updated = db
+            .set_insight_status(&insight.id, InsightStatus::Accepted, Some("looks good"))
+            .unwrap();
+        assert_eq!(updated.status, InsightStatus::Accepted);
+        assert_eq!(updated.resolution_reasoning, "looks good");
+    }
+
+    #[test]
+    fn set_insight_status_none_reasoning_leaves_it_unchanged() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "s", "t", "").unwrap();
+        db.set_insight_status(&insight.id, InsightStatus::Accepted, Some("kept"))
+            .unwrap();
+
+        let updated = db
+            .set_insight_status(&insight.id, InsightStatus::Archived, None)
+            .unwrap();
+        assert_eq!(updated.status, InsightStatus::Archived);
+        assert_eq!(
+            updated.resolution_reasoning, "kept",
+            "None must leave resolution_reasoning unchanged (D11: non-nullable column)"
+        );
+    }
+
+    #[test]
+    fn set_insight_status_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .set_insight_status("nope", InsightStatus::Accepted, None)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_set_insight_status() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let insight = db.create_insight(Some(&project.id), "s", "t", "").unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db
+            .set_insight_status(&insight.id, InsightStatus::Accepted, None)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- delete_insight ----
+
+    #[test]
+    fn delete_insight_removes_row() {
+        let db = Db::open_in_memory().unwrap();
+        let insight = db.create_insight(None, "s", "t", "").unwrap();
+        db.delete_insight(&insight.id).unwrap();
+        assert!(db.list_insights(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_insight_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.delete_insight("nope").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_delete_insight() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let insight = db.create_insight(Some(&project.id), "s", "t", "").unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.delete_insight(&insight.id).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- create_task / rank math ----
+
+    #[test]
+    fn create_task_rank_sequence_1024_2048_3072() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+
+        let t1 = db
+            .create_task(
+                &project.id,
+                None,
+                "t1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let t2 = db
+            .create_task(
+                &project.id,
+                None,
+                "t2",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let t3 = db
+            .create_task(
+                &project.id,
+                None,
+                "t3",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(t1.rank, 1024.0, "first task in a project must rank 1024");
+        assert_eq!(t2.rank, 2048.0);
+        assert_eq!(t3.rank, 3072.0);
+    }
+
+    #[test]
+    fn create_task_rank_is_scoped_per_project() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let b = db.create_project("B", "", &ids(&["w2"])).unwrap();
+        db.create_task(&a.id, None, "a1", "", None, TaskSource::Plan, None, &[])
+            .unwrap();
+
+        // b's first task must still rank 1024, unaffected by a's existing task.
+        let b1 = db
+            .create_task(&b.id, None, "b1", "", None, TaskSource::Plan, None, &[])
+            .unwrap();
+        assert_eq!(b1.rank, 1024.0);
+    }
+
+    #[test]
+    fn create_task_defaults_status_backlog_and_round_trips_source_and_tags() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "b",
+                None,
+                TaskSource::Idea,
+                Some("idea-1"),
+                &ids(&["urgent", "backend"]),
+            )
+            .unwrap();
+
+        assert_eq!(task.status, TaskStatus::Backlog);
+        assert_eq!(task.source, TaskSource::Idea);
+        assert_eq!(task.source_id.as_deref(), Some("idea-1"));
+        assert_eq!(task.tags, ids(&["urgent", "backend"]));
+        assert!(task.rank_agent.is_none());
+        assert_eq!(task.rank_agent_reasoning, "");
+
+        // re-fetch independently to prove the tags JSON round-tripped through SQLite.
+        let refetched = db
+            .list_tasks(Some(&project.id))
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == task.id)
+            .unwrap();
+        assert_eq!(refetched.tags, ids(&["urgent", "backend"]));
+    }
+
+    #[test]
+    fn create_task_explicit_status_is_honored() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                Some(TaskStatus::Waiting),
+                TaskSource::Bug,
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Waiting);
+    }
+
+    #[test]
+    fn create_task_unknown_project_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .create_task("nope", None, "t", "", None, TaskSource::Plan, None, &[])
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn create_task_unknown_parent_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let err = db
+            .create_task(
+                &project.id,
+                Some("nope"),
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn create_task_cross_project_parent_is_invariant() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let b = db.create_project("B", "", &ids(&["w2"])).unwrap();
+        let a_task = db
+            .create_task(&a.id, None, "a1", "", None, TaskSource::Plan, None, &[])
+            .unwrap();
+
+        let err = db
+            .create_task(
+                &b.id,
+                Some(&a_task.id),
+                "b1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "task parent_id must belong to the same project"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn create_task_parent_makes_a_valid_subtask() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let parent = db
+            .create_task(
+                &project.id,
+                None,
+                "parent",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let child = db
+            .create_task(
+                &project.id,
+                Some(&parent.id),
+                "child",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    }
+
+    #[test]
+    fn archived_project_blocks_create_task() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn list_tasks_still_works_on_archived_project() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        db.create_task(
+            &project.id,
+            None,
+            "t",
+            "",
+            None,
+            TaskSource::Plan,
+            None,
+            &[],
+        )
+        .unwrap();
+        db.archive_project(&project.id).unwrap();
+        let tasks = db.list_tasks(Some(&project.id)).unwrap();
+        assert_eq!(tasks.len(), 1, "reads still work on an archived project");
+    }
+
+    #[test]
+    fn task_ancestor_chain_contains_detects_direct_and_transitive_cycle() {
+        // Tasks have no reparent verb in T7 (only create_task ever sets parent_id), so the
+        // walk-up cycle-guard branch inside create_task can never actually trigger through the
+        // public API — a brand-new task cannot be its own ancestor before it exists. This test
+        // exercises the reusable walk-up helper directly instead (same shape as goals'
+        // `ancestor_chain_contains`), which is what create_task's defensive check — and any
+        // future reparent verb — relies on.
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let a = db
+            .create_task(
+                &project.id,
+                None,
+                "a",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let b = db
+            .create_task(
+                &project.id,
+                Some(&a.id),
+                "b",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let c = db
+            .create_task(
+                &project.id,
+                Some(&b.id),
+                "c",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+
+        assert!(task_ancestor_chain_contains(db.conn(), &b.id, &a.id).unwrap());
+        assert!(
+            task_ancestor_chain_contains(db.conn(), &c.id, &a.id).unwrap(),
+            "transitive ancestor (grandparent) must be detected"
+        );
+        assert!(
+            task_ancestor_chain_contains(db.conn(), &b.id, &b.id).unwrap(),
+            "a node is its own trivial ancestor (self-cycle case)"
+        );
+        assert!(
+            !task_ancestor_chain_contains(db.conn(), &a.id, &c.id).unwrap(),
+            "wrong direction: c is a's descendant, not its ancestor"
+        );
+    }
+
+    // ---- update_task ----
+
+    #[test]
+    fn update_task_changes_only_provided_fields_and_tags_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t0",
+                "b0",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+
+        let updated = db
+            .update_task(&task.id, Some("t1"), None, Some(&ids(&["x"])))
+            .unwrap();
+        assert_eq!(updated.title, "t1");
+        assert_eq!(updated.body, "b0", "body left untouched when None");
+        assert_eq!(updated.tags, ids(&["x"]));
+    }
+
+    #[test]
+    fn update_task_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.update_task("nope", Some("x"), None, None).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_update_task() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.update_task(&task.id, Some("x"), None, None).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- set_task_status ----
+
+    #[test]
+    fn set_task_status_updates_status_and_db_literal() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+
+        let updated = db.set_task_status(&task.id, TaskStatus::Progress).unwrap();
+        assert_eq!(updated.status, TaskStatus::Progress);
+        let raw: String = db
+            .conn()
+            .query_row(
+                "SELECT status FROM task WHERE id = ?1",
+                rusqlite::params![task.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "progress");
+    }
+
+    #[test]
+    fn set_task_status_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.set_task_status("nope", TaskStatus::Done).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_set_task_status() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.set_task_status(&task.id, TaskStatus::Done).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- set_task_rank ----
+
+    #[test]
+    fn set_task_rank_persists_f64_midpoint() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let t1 = db
+            .create_task(
+                &project.id,
+                None,
+                "t1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let t2 = db
+            .create_task(
+                &project.id,
+                None,
+                "t2",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(t1.rank, 1024.0);
+        assert_eq!(t2.rank, 2048.0);
+
+        let midpoint = (t1.rank + t2.rank) / 2.0; // 1536.0 — client-side insert-between math
+        let moved = db.set_task_rank(&t2.id, midpoint).unwrap();
+        assert_eq!(moved.rank, 1536.0);
+        assert_eq!(task_rank_raw(&db, &t2.id), 1536.0);
+    }
+
+    #[test]
+    fn set_task_rank_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.set_task_rank("nope", 1.0).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_set_task_rank() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.set_task_rank(&task.id, 1.0).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- delete_task ----
+
+    #[test]
+    fn delete_task_cascades_subtasks() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let parent = db
+            .create_task(
+                &project.id,
+                None,
+                "parent",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let child = db
+            .create_task(
+                &project.id,
+                Some(&parent.id),
+                "child",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let grandchild = db
+            .create_task(
+                &project.id,
+                Some(&child.id),
+                "gc",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+
+        db.delete_task(&parent.id).unwrap();
+
+        let remaining = db.list_tasks(Some(&project.id)).unwrap();
+        assert!(
+            remaining.is_empty(),
+            "parent, child AND grandchild must all be gone"
+        );
+
+        let raw_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM task WHERE id IN (?1, ?2, ?3)",
+                rusqlite::params![parent.id, child.id, grandchild.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_count, 0);
+    }
+
+    #[test]
+    fn delete_task_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.delete_task("nope").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_delete_task() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db.delete_task(&task.id).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- list_tasks ----
+
+    #[test]
+    fn list_tasks_none_includes_every_project_ordered_by_rank() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let b = db.create_project("B", "", &ids(&["w2"])).unwrap();
+        let a1 = db
+            .create_task(&a.id, None, "a1", "", None, TaskSource::Plan, None, &[])
+            .unwrap();
+        let b1 = db
+            .create_task(&b.id, None, "b1", "", None, TaskSource::Plan, None, &[])
+            .unwrap();
+
+        let all = db.list_tasks(None).unwrap();
+        let all_ids: Vec<&str> = all.iter().map(|t| t.id.as_str()).collect();
+        assert!(all_ids.contains(&a1.id.as_str()));
+        assert!(all_ids.contains(&b1.id.as_str()));
+
+        let scoped = db.list_tasks(Some(&a.id)).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, a1.id);
+    }
+
+    #[test]
+    fn list_tasks_orders_by_rank() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let t1 = db
+            .create_task(
+                &project.id,
+                None,
+                "t1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        let t2 = db
+            .create_task(
+                &project.id,
+                None,
+                "t2",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+            )
+            .unwrap();
+        // move t2 to rank BEFORE t1.
+        db.set_task_rank(&t2.id, 1.0).unwrap();
+
+        let tasks = db.list_tasks(Some(&project.id)).unwrap();
+        assert_eq!(tasks[0].id, t2.id, "lower rank must sort first");
+        assert_eq!(tasks[1].id, t1.id);
     }
 }
