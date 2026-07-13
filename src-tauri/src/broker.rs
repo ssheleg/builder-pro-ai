@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use bpa_orchd_proto::OrchdPush;
 use bpa_protocol::{Push, SessionId, TerminalEvent};
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -27,6 +28,7 @@ use tauri::{AppHandle, Emitter};
 use tracing::{debug, warn};
 
 use crate::commands::WriteStdinLocks;
+use crate::orchd_client::{ConnState as OrchdConnState, OrchdClient};
 use crate::socket_client::{ConnState, DaemonClient};
 
 /// Global event names (spec §6.3). Kept as constants so this module and T18's frontend-facing
@@ -45,6 +47,31 @@ pub const EV_DAEMON_RECONNECTED: &str = "daemon://reconnected";
 /// incompatible with this client build — the signal that drives the upgrade flow (spec §6.2).
 /// Distinct from `EV_DAEMON_DISCONNECTED`: a bounded reconnect can never resolve this on its own.
 pub const EV_DAEMON_INCOMPATIBLE: &str = "daemon://incompatible";
+
+/// `bpa-orchd` coarse-invalidation event names (spec §9, D10): deliberately kept under the
+/// `orchd://` prefix rather than per-resource names (`project://changed`) — these are
+/// daemon-scoped invalidation signals, not resource lifecycle events (D10's rationale), mirroring
+/// the `daemon://…` trio's naming convention. Produced by [`map_orchd_push`]; consumed by
+/// `lib.rs`'s `bring_up_orchd` wiring (via [`register_orchd`]).
+pub const EV_ORCHD_PROJECTS_CHANGED: &str = "orchd://projects-changed";
+/// Payload `{ projectId }`.
+pub const EV_ORCHD_GOALS_CHANGED: &str = "orchd://goals-changed";
+pub const EV_ORCHD_IDEAS_CHANGED: &str = "orchd://ideas-changed";
+pub const EV_ORCHD_INSIGHTS_CHANGED: &str = "orchd://insights-changed";
+/// Payload `{ projectId }`.
+pub const EV_ORCHD_TASKS_CHANGED: &str = "orchd://tasks-changed";
+/// Payload `{ scope, projectId? }`.
+pub const EV_ORCHD_RULESET_CHANGED: &str = "orchd://ruleset-changed";
+/// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
+/// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
+/// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
+/// a DIRECT 1:1 from `orchd_client::ConnState` — every `Connected` fires `orchd://up`, every
+/// `Disconnected` fires `orchd://down`, a fatal `Incompatible` fires `orchd://incompatible`. The
+/// frontend (S3 T13) tracks a plain `orchdDown` boolean rather than sessiond's richer
+/// disconnected/reconnected distinction, so no reconnect-tracking state is needed here.
+pub const EV_ORCHD_DOWN: &str = "orchd://down";
+pub const EV_ORCHD_UP: &str = "orchd://up";
+pub const EV_ORCHD_INCOMPATIBLE: &str = "orchd://incompatible";
 
 /// The effect a single `Push` frame should have on Hop-A, decided without touching the Tauri
 /// runtime. Produced by [`map_push`]; consumed by [`Broker::dispatch_push`].
@@ -148,6 +175,52 @@ pub fn map_push(push: Push) -> BrokerAction {
             warn!(target: "broker", ?session_id, code = %code, message = %message, "daemon async error push");
             BrokerAction::Ignore
         }
+    }
+}
+
+/// Pure mapping table: `OrchdPush` variant -> `BrokerAction` (spec §9). Mirrors [`map_push`]'s
+/// design exactly — no I/O, no Tauri runtime, fully unit-testable — but simpler: an `OrchdPush`
+/// never maps to `SendChannel` (orchd has no PTY firehose / attach channels), so every arm is
+/// `BrokerAction::Emit`. Fields already carry the wire's `project_id`/`scope` in Rust snake_case
+/// (`OrchdPush` is Hop-B wire-only, not TS-exported — see `bpa_orchd_proto`'s module docs); the
+/// JSON payloads built here are the camelCase reshaping the frontend actually consumes, same as
+/// `map_push`'s `StateChanged`/`ChildExited` arms. Variants with no fields (`ProjectsChanged`/
+/// `IdeasChanged`/`InsightsChanged`) emit a `null` payload rather than an empty object — there is
+/// nothing to name.
+pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
+    match push {
+        OrchdPush::ProjectsChanged => {
+            BrokerAction::Emit(EV_ORCHD_PROJECTS_CHANGED, serde_json::Value::Null)
+        }
+        OrchdPush::GoalsChanged { project_id } => BrokerAction::Emit(
+            EV_ORCHD_GOALS_CHANGED,
+            serde_json::json!({ "projectId": project_id }),
+        ),
+        OrchdPush::IdeasChanged => {
+            BrokerAction::Emit(EV_ORCHD_IDEAS_CHANGED, serde_json::Value::Null)
+        }
+        OrchdPush::InsightsChanged => {
+            BrokerAction::Emit(EV_ORCHD_INSIGHTS_CHANGED, serde_json::Value::Null)
+        }
+        OrchdPush::TasksChanged { project_id } => BrokerAction::Emit(
+            EV_ORCHD_TASKS_CHANGED,
+            serde_json::json!({ "projectId": project_id }),
+        ),
+        OrchdPush::RuleSetChanged { scope, project_id } => BrokerAction::Emit(
+            EV_ORCHD_RULESET_CHANGED,
+            serde_json::json!({ "scope": scope, "projectId": project_id }),
+        ),
+    }
+}
+
+/// Pure mapping from an orchd `ConnState` transition to the event name [`Broker::
+/// dispatch_orchd_conn`] should emit (spec §9). See [`EV_ORCHD_DOWN`]'s docs for why this is a
+/// direct 1:1 mapping rather than [`map_conn_state`]'s reconnect-tracking scheme.
+pub fn map_orchd_conn_state(state: OrchdConnState) -> &'static str {
+    match state {
+        OrchdConnState::Connected => EV_ORCHD_UP,
+        OrchdConnState::Disconnected => EV_ORCHD_DOWN,
+        OrchdConnState::Incompatible { .. } => EV_ORCHD_INCOMPATIBLE,
     }
 }
 
@@ -268,6 +341,26 @@ impl Broker {
         }
     }
 
+    /// Apply [`map_orchd_push`] and carry out its `BrokerAction` (spec §9). Mirrors
+    /// [`dispatch_push`](Self::dispatch_push)'s non-blocking contract exactly — this is the body
+    /// invoked (via [`register_orchd`]) from `OrchdClient::on_push`. An `OrchdPush` never produces
+    /// `SendChannel`/`Ignore` (see [`map_orchd_push`]'s docs), but both are handled defensively
+    /// (logged, not panicked) rather than assumed unreachable.
+    pub fn dispatch_orchd_push(&self, push: OrchdPush) {
+        match map_orchd_push(push) {
+            BrokerAction::Emit(event, payload) => self.emit(event, payload),
+            other => {
+                warn!(target: "broker", ?other, "unexpected BrokerAction for an OrchdPush");
+            }
+        }
+    }
+
+    /// Apply [`map_orchd_conn_state`] and emit the resulting `orchd://down|up|incompatible` event
+    /// (spec §9). This is the body invoked (via [`register_orchd`]) from `OrchdClient::on_conn`.
+    pub fn dispatch_orchd_conn(&self, state: OrchdConnState) {
+        self.emit_no_payload(map_orchd_conn_state(state));
+    }
+
     fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
         if let Err(e) = self.app.emit(event, payload) {
             warn!(target: "broker", event, error = %e, "emit failed");
@@ -326,6 +419,24 @@ pub fn register(
     // replayed `Connected` leaves it `false` and emits nothing (see `map_conn_state` docs).
     let seen_disconnected = std::sync::Mutex::new(false);
     client.on_conn(move |state| broker.dispatch_conn(state, &seen_disconnected));
+}
+
+/// Wire a [`Broker`] into an `OrchdClient`'s push/conn callbacks (spec §9) — mirrors [`register`]
+/// exactly, for the second daemon: `on_push` -> [`Broker::dispatch_orchd_push`] (`map_orchd_push`
+/// -> emit); `on_conn` -> [`Broker::dispatch_orchd_conn`] (`orchd://down|up|incompatible`).
+/// Called once from `lib.rs`'s `bring_up_orchd`, after the `OrchdClient` connects — replaces the
+/// T11 placeholder that only logged pushes via `tracing::debug!`. The SAME `Broker` instance
+/// `register` wires sessiond into may be reused here: `Broker`'s orchd-facing methods only touch
+/// `self.app` (never the sessiond-only `self.attachments` map), so there is no cross-daemon state
+/// to keep separate.
+///
+/// `client.on_push`/`client.on_conn` callbacks run inline on `OrchdClient`'s connection task
+/// (locked contract, see `orchd_client` module docs) — both closures below only call non-blocking
+/// `AppHandle::emit`, so neither one blocks that task.
+pub fn register_orchd(broker: Arc<Broker>, client: &OrchdClient) {
+    let push_broker = broker.clone();
+    client.on_push(move |push| push_broker.dispatch_orchd_push(push));
+    client.on_conn(move |state| broker.dispatch_orchd_conn(state));
 }
 
 #[cfg(test)]
@@ -515,6 +626,125 @@ mod tests {
             message: "bad".into(),
         };
         assert_eq!(map_push(push_no_session), BrokerAction::Ignore);
+    }
+
+    // ── map_orchd_push: exhaustive, one test per OrchdPush variant (spec §9, S3 T12) ──────
+
+    #[test]
+    fn orchd_projects_changed_maps_to_emit_with_null_payload() {
+        let action = map_orchd_push(OrchdPush::ProjectsChanged);
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_PROJECTS_CHANGED);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_goals_changed_maps_to_emit_with_camel_case_project_id_payload() {
+        let action = map_orchd_push(OrchdPush::GoalsChanged {
+            project_id: "proj-1".to_string(),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_GOALS_CHANGED);
+                assert_eq!(payload["projectId"], "proj-1");
+                // snake_case key must NOT leak through.
+                assert!(payload.get("project_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_ideas_changed_maps_to_emit_with_null_payload() {
+        let action = map_orchd_push(OrchdPush::IdeasChanged);
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_IDEAS_CHANGED);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_insights_changed_maps_to_emit_with_null_payload() {
+        let action = map_orchd_push(OrchdPush::InsightsChanged);
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_INSIGHTS_CHANGED);
+                assert!(payload.is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_tasks_changed_maps_to_emit_with_camel_case_project_id_payload() {
+        let action = map_orchd_push(OrchdPush::TasksChanged {
+            project_id: "proj-2".to_string(),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_TASKS_CHANGED);
+                assert_eq!(payload["projectId"], "proj-2");
+                assert!(payload.get("project_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_ruleset_changed_maps_to_emit_with_scope_and_project_id_payload() {
+        let action = map_orchd_push(OrchdPush::RuleSetChanged {
+            scope: bpa_orchd_proto::RuleScope::Project,
+            project_id: Some("proj-3".to_string()),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_RULESET_CHANGED);
+                assert_eq!(payload["scope"], "project");
+                assert_eq!(payload["projectId"], "proj-3");
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_ruleset_changed_global_scope_has_null_project_id() {
+        let action = map_orchd_push(OrchdPush::RuleSetChanged {
+            scope: bpa_orchd_proto::RuleScope::Global,
+            project_id: None,
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_RULESET_CHANGED);
+                assert_eq!(payload["scope"], "global");
+                assert!(payload["projectId"].is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    // ── map_orchd_conn_state: direct 1:1 mapping (spec §9, S3 T12) ─────────────────────────
+
+    #[test]
+    fn map_orchd_conn_state_maps_every_variant() {
+        assert_eq!(map_orchd_conn_state(OrchdConnState::Connected), EV_ORCHD_UP);
+        assert_eq!(
+            map_orchd_conn_state(OrchdConnState::Disconnected),
+            EV_ORCHD_DOWN
+        );
+        assert_eq!(
+            map_orchd_conn_state(OrchdConnState::Incompatible {
+                daemon_min: 2,
+                daemon_max: 2,
+            }),
+            EV_ORCHD_INCOMPATIBLE
+        );
     }
 
     // ── map_conn_state: initial-connect vs reconnect tracking ──────────────────────────────

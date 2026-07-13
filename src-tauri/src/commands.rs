@@ -11,9 +11,25 @@
 //! socket; the `#[tauri::command]` fns themselves are exercised against a real `DaemonClient`
 //! talking to a stub daemon (see the `commands_over_stub_daemon` test module), reusing the T14
 //! stub-daemon pattern.
+//!
+//! ## `orchd_*` surface (spec §9, S3 T12)
+//!
+//! Mirrors the shape above exactly, over the second daemon: `state.orchd()?.request(req).await`
+//! (`state.orchd()` mirrors `state.client()`), then the matching `expect_*` unwrapper. `bpa-orchd`
+//! already converts its own wire `OrchdResponse::Error` into `Err(OrchdClientError::Daemon)`
+//! inside `OrchdClient::request` (see `orchd_client.rs`'s `run_connection`), so by the time an
+//! `orchd_*` command sees `Ok(response)` it can never be `OrchdResponse::Error` — `?` on
+//! `.request(..).await` alone surfaces that case as `CommandError::Daemon` via the `From<
+//! OrchdClientError>` impl below. `err_from_orchd_response` still matches `OrchdResponse::Error`
+//! defensively (belt-and-suspenders, same as `err_from_response` above), never as the only path.
 
 use std::sync::Arc;
 
+use bpa_orchd_proto::{
+    DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
+    InsightStatus, OrchdRequest, OrchdResponse, PolicyRules, Project, RuleScope, RuleSetView,
+    TaskSource, TaskStatus,
+};
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
 };
@@ -24,7 +40,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::broker::Broker;
-use crate::orchd_client::OrchdClientSlot;
+use crate::orchd_client::{OrchdClient, OrchdClientError, OrchdClientSlot};
 use crate::socket_client::{ClientError, DaemonClient};
 
 /// The daemon client slot: `None` while disconnected/incompatible, `Some` once a connection is
@@ -181,6 +197,15 @@ pub(crate) fn slot_client(slot: &ClientSlot) -> Result<Arc<DaemonClient>, Comman
         .ok_or(CommandError::Disconnected)
 }
 
+/// The exact logic behind `AppState::orchd()` — mirrors [`slot_client`] exactly, for the second
+/// daemon (S3 T12, spec §9).
+pub(crate) fn slot_orchd(slot: &OrchdClientSlot) -> Result<Arc<OrchdClient>, CommandError> {
+    slot.read()
+        .unwrap()
+        .clone()
+        .ok_or(CommandError::Disconnected)
+}
+
 /// Read the current [`DaemonStatus`] out of a bare `StatusSlot` — pulled out as a free function for
 /// the same unit-testability reason as `slot_client` above.
 pub(crate) fn read_status(slot: &StatusSlot) -> DaemonStatus {
@@ -210,6 +235,12 @@ impl AppState {
     }
     pub fn set_client(&self, c: Option<Arc<DaemonClient>>) {
         *self.client.write().unwrap() = c;
+    }
+
+    /// Current live orchd client, or `Disconnected` if the slot is empty — mirrors
+    /// [`AppState::client`] exactly, for the second daemon (S3 T12, spec §9).
+    pub fn orchd(&self) -> Result<Arc<OrchdClient>, CommandError> {
+        slot_orchd(&self.orchd)
     }
 }
 
@@ -269,6 +300,13 @@ pub enum CommandError {
     /// `size` is the encoded CBOR body length in bytes.
     #[serde(rename_all = "camelCase")]
     TooLarge { size: usize },
+    /// ADDITIVE (S3 T12, spec §9): the second daemon's (`bpa-orchd`) handshake preamble found its
+    /// protocol range incompatible with this client build. Mirrors `IncompatibleDaemon` exactly,
+    /// distinct field names (`orchd_min`/`orchd_max`) so the frontend can tell the two daemons'
+    /// upgrade flows apart when both fire (spec §10/§11: sessiond's dialog takes precedence, but
+    /// both flags must be independently readable).
+    #[serde(rename_all = "camelCase")]
+    IncompatibleOrchd { orchd_min: u16, orchd_max: u16 },
 }
 
 impl std::fmt::Display for CommandError {
@@ -288,6 +326,13 @@ impl std::fmt::Display for CommandError {
             CommandError::TooLarge { size } => {
                 write!(f, "request too large once encoded ({size} bytes)")
             }
+            CommandError::IncompatibleOrchd {
+                orchd_min,
+                orchd_max,
+            } => write!(
+                f,
+                "incompatible orchd (orchd supports [{orchd_min}, {orchd_max}])"
+            ),
         }
     }
 }
@@ -307,6 +352,27 @@ impl From<ClientError> for CommandError {
                 daemon_max,
             },
             ClientError::RequestTooLarge { size } => CommandError::TooLarge { size },
+        }
+    }
+}
+
+/// Mirrors `From<ClientError> for CommandError` exactly, for the second daemon (S3 T12, spec §9).
+/// `OrchdClientError::Daemon { code, message }` already carries `code` as `OrchdErrorCode`'s
+/// `Debug` name (e.g. `"Invariant"`, set by `orchd_client.rs`'s own `run_connection`) — spec §9's
+/// locked code strings — so it copies straight across, same as `ClientError::Daemon` does today.
+impl From<OrchdClientError> for CommandError {
+    fn from(e: OrchdClientError) -> Self {
+        match e {
+            OrchdClientError::Disconnected => CommandError::Disconnected,
+            OrchdClientError::Daemon { code, message } => CommandError::Daemon { code, message },
+            OrchdClientError::IncompatibleOrchd {
+                daemon_min,
+                daemon_max,
+            } => CommandError::IncompatibleOrchd {
+                orchd_min: daemon_min,
+                orchd_max: daemon_max,
+            },
+            OrchdClientError::RequestTooLarge { size } => CommandError::TooLarge { size },
         }
     }
 }
@@ -470,6 +536,158 @@ fn expect_ack(res: Response) -> Result<(), CommandError> {
     match res {
         Response::Ack => Ok(()),
         other => Err(err_from_response(other)),
+    }
+}
+
+// ── orchd response unwrappers (spec §9, S3 T12) — mirrors the block above exactly ──────────
+
+/// Aggregate per-family row counts from a successful `orchd_import_bundle` (spec §4.2's
+/// `OrchdResponse::ImportReport { projects, goals, ideas, insights, tasks, rulesets }`), re-shaped
+/// into its own camelCase-serialized struct: `OrchdResponse`'s frame variants are Hop-B wire-only
+/// (plain Rust snake_case, never TS-exported — see `bpa_orchd_proto`'s module docs), not something
+/// a `#[tauri::command]` should hand the webview directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    pub projects: u32,
+    pub goals: u32,
+    pub ideas: u32,
+    pub insights: u32,
+    pub tasks: u32,
+    pub rulesets: u32,
+}
+
+/// Mirrors `err_from_response` exactly, for `OrchdResponse` (spec §9). `OrchdResponse::Error` is
+/// handled here defensively — see this module's top-level doc for why it is never the ONLY path
+/// an orchd daemon error reaches `CommandError::Daemon` through.
+fn err_from_orchd_response(res: OrchdResponse) -> CommandError {
+    match res {
+        OrchdResponse::Error { code, message } => CommandError::Daemon {
+            code: format!("{code:?}"),
+            message,
+        },
+        other => CommandError::Internal(format!("unexpected orchd response: {other:?}")),
+    }
+}
+
+fn expect_pong(res: OrchdResponse) -> Result<(), CommandError> {
+    match res {
+        OrchdResponse::Pong => Ok(()),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_project(res: OrchdResponse) -> Result<Project, CommandError> {
+    match res {
+        OrchdResponse::Project(p) => Ok(p),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_projects(res: OrchdResponse) -> Result<Vec<Project>, CommandError> {
+    match res {
+        OrchdResponse::Projects(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_goal(res: OrchdResponse) -> Result<Goal, CommandError> {
+    match res {
+        OrchdResponse::Goal(g) => Ok(g),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_goals(res: OrchdResponse) -> Result<Vec<Goal>, CommandError> {
+    match res {
+        OrchdResponse::Goals(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_idea(res: OrchdResponse) -> Result<Idea, CommandError> {
+    match res {
+        OrchdResponse::Idea(i) => Ok(i),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_ideas(res: OrchdResponse) -> Result<Vec<Idea>, CommandError> {
+    match res {
+        OrchdResponse::Ideas(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_insight(res: OrchdResponse) -> Result<Insight, CommandError> {
+    match res {
+        OrchdResponse::Insight(i) => Ok(i),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_insights(res: OrchdResponse) -> Result<Vec<Insight>, CommandError> {
+    match res {
+        OrchdResponse::Insights(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+/// Named to avoid clashing with `expect_ack`-adjacent sessiond naming, mirroring
+/// `bpa_orchd_proto::DomainTask`'s own "avoid the `tokio::task` clash" rationale.
+fn expect_domain_task(res: OrchdResponse) -> Result<DomainTask, CommandError> {
+    match res {
+        OrchdResponse::Task(t) => Ok(t),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_domain_tasks(res: OrchdResponse) -> Result<Vec<DomainTask>, CommandError> {
+    match res {
+        OrchdResponse::Tasks(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_rule_set_view(res: OrchdResponse) -> Result<RuleSetView, CommandError> {
+    match res {
+        OrchdResponse::RuleSetView(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_export_json(res: OrchdResponse) -> Result<String, CommandError> {
+    match res {
+        OrchdResponse::ExportJson(s) => Ok(s),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_import_report(res: OrchdResponse) -> Result<ImportReport, CommandError> {
+    match res {
+        OrchdResponse::ImportReport {
+            projects,
+            goals,
+            ideas,
+            insights,
+            tasks,
+            rulesets,
+        } => Ok(ImportReport {
+            projects,
+            goals,
+            ideas,
+            insights,
+            tasks,
+            rulesets,
+        }),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_orchd_ack(res: OrchdResponse) -> Result<(), CommandError> {
+    match res {
+        OrchdResponse::Ack => Ok(()),
+        other => Err(err_from_orchd_response(other)),
     }
 }
 
@@ -765,6 +983,766 @@ pub async fn upgrade_daemon(
     app.restart();
 }
 
+// ── orchd #[tauri::command] surface (spec §9, §4.2 — S3 T12) ───────────────────────────────
+//
+// One thin command per `OrchdRequest` verb, named `orchd_` + snake_case verb (locked, spec §9).
+// `OrchdRequest::OrchdShutdown` has NO command here (it's internal-only, used by
+// `orchd_upgrade_core` below) — every other verb gets exactly one.
+
+#[tauri::command]
+pub async fn orchd_ping(state: State<'_, AppState>) -> Result<(), CommandError> {
+    expect_pong(state.orchd()?.request(OrchdRequest::Ping).await?)
+}
+
+#[tauri::command]
+pub async fn orchd_create_project(
+    state: State<'_, AppState>,
+    name: String,
+    description: String,
+    workspace_ids: Vec<String>,
+) -> Result<Project, CommandError> {
+    expect_project(
+        state
+            .orchd()?
+            .request(OrchdRequest::CreateProject {
+                name,
+                description,
+                workspace_ids,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_update_project(
+    state: State<'_, AppState>,
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<Project, CommandError> {
+    expect_project(
+        state
+            .orchd()?
+            .request(OrchdRequest::UpdateProject {
+                id,
+                name,
+                description,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_archive_project(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Project, CommandError> {
+    expect_project(
+        state
+            .orchd()?
+            .request(OrchdRequest::ArchiveProject { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, CommandError> {
+    expect_projects(state.orchd()?.request(OrchdRequest::ListProjects).await?)
+}
+
+#[tauri::command]
+pub async fn orchd_add_project_workspace(
+    state: State<'_, AppState>,
+    project_id: String,
+    workspace_id: String,
+) -> Result<Project, CommandError> {
+    expect_project(
+        state
+            .orchd()?
+            .request(OrchdRequest::AddProjectWorkspace {
+                project_id,
+                workspace_id,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_remove_project_workspace(
+    state: State<'_, AppState>,
+    project_id: String,
+    workspace_id: String,
+) -> Result<Project, CommandError> {
+    expect_project(
+        state
+            .orchd()?
+            .request(OrchdRequest::RemoveProjectWorkspace {
+                project_id,
+                workspace_id,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_create_goal(
+    state: State<'_, AppState>,
+    project_id: String,
+    parent_id: Option<String>,
+    kind: GoalKind,
+    title: String,
+    body: String,
+) -> Result<Goal, CommandError> {
+    expect_goal(
+        state
+            .orchd()?
+            .request(OrchdRequest::CreateGoal {
+                project_id,
+                parent_id,
+                kind,
+                title,
+                body,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_update_goal(
+    state: State<'_, AppState>,
+    id: String,
+    title: Option<String>,
+    body: Option<String>,
+    status: Option<GoalStatus>,
+    metric_refs: Option<Vec<String>>,
+) -> Result<Goal, CommandError> {
+    expect_goal(
+        state
+            .orchd()?
+            .request(OrchdRequest::UpdateGoal {
+                id,
+                title,
+                body,
+                status,
+                metric_refs,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_move_goal(
+    state: State<'_, AppState>,
+    id: String,
+    new_parent_id: Option<String>,
+    new_ord: i64,
+) -> Result<Goal, CommandError> {
+    expect_goal(
+        state
+            .orchd()?
+            .request(OrchdRequest::MoveGoal {
+                id,
+                new_parent_id,
+                new_ord,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_delete_goal(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::DeleteGoal { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_list_goals(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<Goal>, CommandError> {
+    expect_goals(
+        state
+            .orchd()?
+            .request(OrchdRequest::ListGoals { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_create_idea(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    title: String,
+    body: String,
+) -> Result<Idea, CommandError> {
+    expect_idea(
+        state
+            .orchd()?
+            .request(OrchdRequest::CreateIdea {
+                project_id,
+                title,
+                body,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_update_idea(
+    state: State<'_, AppState>,
+    id: String,
+    title: Option<String>,
+    body: Option<String>,
+) -> Result<Idea, CommandError> {
+    expect_idea(
+        state
+            .orchd()?
+            .request(OrchdRequest::UpdateIdea { id, title, body })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_set_idea_project(
+    state: State<'_, AppState>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<Idea, CommandError> {
+    expect_idea(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetIdeaProject { id, project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_set_idea_lifecycle(
+    state: State<'_, AppState>,
+    id: String,
+    lifecycle: IdeaLifecycle,
+) -> Result<Idea, CommandError> {
+    expect_idea(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetIdeaLifecycle { id, lifecycle })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_delete_idea(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::DeleteIdea { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_list_ideas(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<Idea>, CommandError> {
+    expect_ideas(
+        state
+            .orchd()?
+            .request(OrchdRequest::ListIdeas { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_create_insight(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    source: String,
+    title: String,
+    body: String,
+) -> Result<Insight, CommandError> {
+    expect_insight(
+        state
+            .orchd()?
+            .request(OrchdRequest::CreateInsight {
+                project_id,
+                source,
+                title,
+                body,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_update_insight(
+    state: State<'_, AppState>,
+    id: String,
+    title: Option<String>,
+    body: Option<String>,
+) -> Result<Insight, CommandError> {
+    expect_insight(
+        state
+            .orchd()?
+            .request(OrchdRequest::UpdateInsight { id, title, body })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_set_insight_fit_verdict(
+    state: State<'_, AppState>,
+    id: String,
+    fit_verdict: Option<FitVerdict>,
+    fit_reasoning: String,
+) -> Result<Insight, CommandError> {
+    expect_insight(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetInsightFitVerdict {
+                id,
+                fit_verdict,
+                fit_reasoning,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_set_insight_status(
+    state: State<'_, AppState>,
+    id: String,
+    status: InsightStatus,
+    resolution_reasoning: Option<String>,
+) -> Result<Insight, CommandError> {
+    expect_insight(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetInsightStatus {
+                id,
+                status,
+                resolution_reasoning,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_delete_insight(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::DeleteInsight { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_list_insights(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<Insight>, CommandError> {
+    expect_insights(
+        state
+            .orchd()?
+            .request(OrchdRequest::ListInsights { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn orchd_create_task(
+    state: State<'_, AppState>,
+    project_id: String,
+    parent_id: Option<String>,
+    title: String,
+    body: String,
+    status: Option<TaskStatus>,
+    source: TaskSource,
+    source_id: Option<String>,
+    tags: Vec<String>,
+) -> Result<DomainTask, CommandError> {
+    expect_domain_task(
+        state
+            .orchd()?
+            .request(OrchdRequest::CreateTask {
+                project_id,
+                parent_id,
+                title,
+                body,
+                status,
+                source,
+                source_id,
+                tags,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_update_task(
+    state: State<'_, AppState>,
+    id: String,
+    title: Option<String>,
+    body: Option<String>,
+    tags: Option<Vec<String>>,
+) -> Result<DomainTask, CommandError> {
+    expect_domain_task(
+        state
+            .orchd()?
+            .request(OrchdRequest::UpdateTask {
+                id,
+                title,
+                body,
+                tags,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_set_task_status(
+    state: State<'_, AppState>,
+    id: String,
+    status: TaskStatus,
+) -> Result<DomainTask, CommandError> {
+    expect_domain_task(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetTaskStatus { id, status })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_set_task_rank(
+    state: State<'_, AppState>,
+    id: String,
+    rank: f64,
+) -> Result<DomainTask, CommandError> {
+    expect_domain_task(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetTaskRank { id, rank })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_delete_task(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::DeleteTask { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_list_tasks(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<DomainTask>, CommandError> {
+    expect_domain_tasks(
+        state
+            .orchd()?
+            .request(OrchdRequest::ListTasks { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_get_ruleset(
+    state: State<'_, AppState>,
+    scope: RuleScope,
+    project_id: Option<String>,
+) -> Result<RuleSetView, CommandError> {
+    expect_rule_set_view(
+        state
+            .orchd()?
+            .request(OrchdRequest::GetRuleSet { scope, project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_upsert_ruleset(
+    state: State<'_, AppState>,
+    scope: RuleScope,
+    project_id: Option<String>,
+    md_content: Option<String>,
+    md_path: Option<String>,
+    policy: Option<PolicyRules>,
+) -> Result<RuleSetView, CommandError> {
+    expect_rule_set_view(
+        state
+            .orchd()?
+            .request(OrchdRequest::UpsertRuleSet {
+                scope,
+                project_id,
+                md_content,
+                md_path,
+                policy,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_acknowledge_rule_file(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<RuleSetView, CommandError> {
+    expect_rule_set_view(
+        state
+            .orchd()?
+            .request(OrchdRequest::AcknowledgeRuleFile { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_export_project(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<String, CommandError> {
+    expect_export_json(
+        state
+            .orchd()?
+            .request(OrchdRequest::ExportProject { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_export_all(state: State<'_, AppState>) -> Result<String, CommandError> {
+    expect_export_json(state.orchd()?.request(OrchdRequest::ExportAll).await?)
+}
+
+#[tauri::command]
+pub async fn orchd_import_bundle(
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<ImportReport, CommandError> {
+    expect_import_report(
+        state
+            .orchd()?
+            .request(OrchdRequest::ImportBundle { json })
+            .await?,
+    )
+}
+
+// ── orchd special flows (spec §9: reveal / export-to-file / import-from-file / lifecycle) ──
+
+/// Pure core of `orchd_reveal_rules_file` (spec §9: "JS never passes a path"): fetches the
+/// `RuleSetView` for `(scope, project_id)` and returns the path `opener::reveal` should be called
+/// with — always `view.rule.md_path`, i.e. the path `GetRuleSet` itself just returned, never
+/// anything a caller could substitute. Pulled out from the `#[tauri::command]` wrapper so the
+/// SECURITY-RELEVANT part (the path always comes from the daemon's own reply) is unit-testable
+/// against a stub daemon without ever invoking the real `opener::reveal` (which would open a
+/// Finder window) inside a test process.
+pub(crate) async fn reveal_rules_file_core(
+    client: &OrchdClient,
+    scope: RuleScope,
+    project_id: Option<String>,
+) -> Result<String, CommandError> {
+    let view = expect_rule_set_view(
+        client
+            .request(OrchdRequest::GetRuleSet { scope, project_id })
+            .await?,
+    )?;
+    Ok(view.rule.md_path)
+}
+
+#[tauri::command]
+pub async fn orchd_reveal_rules_file(
+    state: State<'_, AppState>,
+    scope: RuleScope,
+    project_id: Option<String>,
+) -> Result<(), CommandError> {
+    let client = state.orchd()?;
+    let path = reveal_rules_file_core(&client, scope, project_id).await?;
+    opener::reveal(&path)
+        .map_err(|e| CommandError::Internal(format!("failed to reveal rules file: {e}")))
+}
+
+/// Sanitize a string for safe use as a filename component: keeps alphanumerics/`-`/`_`, collapses
+/// whitespace to `-`, drops everything else (defense in depth — the exported name is user data,
+/// e.g. a project's `name` field, and must never inject a path separator/traversal into the
+/// written filename even though `dest_dir` itself is a trusted `pick_folder` result). Falls back
+/// to `"project"` if sanitizing empties the string.
+fn sanitize_filename_component(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else if c.is_whitespace() {
+                '-'
+            } else {
+                '\0'
+            }
+        })
+        .filter(|c| *c != '\0')
+        .collect();
+    let trimmed = cleaned.trim_matches('-');
+    if trimmed.is_empty() {
+        "project".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Derive the base filename (before `-export.json`) for `orchd_export_to_file` (spec §9: "write
+/// `<name-or-'store'>-export.json`"). A whole-store export always uses the literal `"store"`; a
+/// per-project export reads the name straight out of the already-serialized export JSON
+/// (`export::export_project`'s own top-level `project.name` field, spec §8) rather than requiring
+/// a second value threaded through the call site — keeping this a pure function of the one string
+/// `orchd_export_to_file` already has in hand. An unparseable/missing name (should not happen
+/// against a real daemon reply) falls back to `"project"`.
+pub(crate) fn export_base_name(json: &str, is_project_export: bool) -> String {
+    if !is_project_export {
+        return "store".to_string();
+    }
+    let name = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("project")?.get("name")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| "project".to_string());
+    sanitize_filename_component(&name)
+}
+
+/// Write `json` to `<dest_dir>/<base_name>-export.json` (spec §9: "write via `std::fs`, error →
+/// `CommandError::Internal`"). Returns the written path. Pulled out from the `#[tauri::command]`
+/// wrapper so the filesystem write is unit-testable directly against a tempdir.
+pub(crate) fn write_export_file(
+    dest_dir: &str,
+    base_name: &str,
+    json: &str,
+) -> Result<std::path::PathBuf, CommandError> {
+    let path = std::path::Path::new(dest_dir).join(format!("{base_name}-export.json"));
+    std::fs::write(&path, json)
+        .map_err(|e| CommandError::Internal(format!("failed to write export file: {e}")))?;
+    Ok(path)
+}
+
+/// `dest_dir` is documented (spec §9) to be the exact `pick_folder` result passed straight
+/// through — JS supplies it, but only ever as the return value of the `pick_folder` command (a
+/// native folder picker), never a freehand path. Returns the written file's absolute path so the
+/// frontend can toast/display it.
+#[tauri::command]
+pub async fn orchd_export_to_file(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    dest_dir: String,
+) -> Result<String, CommandError> {
+    let client = state.orchd()?;
+    let is_project_export = project_id.is_some();
+    let json = match project_id {
+        Some(id) => expect_export_json(
+            client
+                .request(OrchdRequest::ExportProject { project_id: id })
+                .await?,
+        )?,
+        None => expect_export_json(client.request(OrchdRequest::ExportAll).await?)?,
+    };
+    let base_name = export_base_name(&json, is_project_export);
+    let path = write_export_file(&dest_dir, &base_name, &json)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Local, pre-brokering read cap (spec §9: "10 MiB read cap guard") — independent of
+/// `bpa_protocol::MAX_FRAME_LEN` (16 MiB), which the CLIENT enforces once the request is actually
+/// CBOR-encoded (`OrchdClientError::RequestTooLarge`). Checked against the file's METADATA before
+/// any read happens, so an absurdly large file is rejected without ever being loaded into memory.
+pub(crate) const IMPORT_FILE_READ_CAP: u64 = 10 * 1024 * 1024;
+
+/// Read `path` for `orchd_import_from_file`, enforcing [`IMPORT_FILE_READ_CAP`]. Pulled out from
+/// the `#[tauri::command]` wrapper so the cap is unit-testable without a stub daemon.
+pub(crate) fn read_import_file(path: &str) -> Result<String, CommandError> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| CommandError::Internal(format!("cannot read import file: {e}")))?;
+    if meta.len() > IMPORT_FILE_READ_CAP {
+        return Err(CommandError::Internal(format!(
+            "import file ({} bytes) exceeds the {IMPORT_FILE_READ_CAP}-byte read cap",
+            meta.len()
+        )));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| CommandError::Internal(format!("cannot read import file: {e}")))
+}
+
+#[tauri::command]
+pub async fn orchd_import_from_file(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ImportReport, CommandError> {
+    let json = read_import_file(&path)?;
+    expect_import_report(
+        state
+            .orchd()?
+            .request(OrchdRequest::ImportBundle { json })
+            .await?,
+    )
+}
+
+/// Drops the current orchd client slot, then re-runs `lib.rs`'s `bring_up_orchd` connect sequence
+/// from scratch (spec §9's locked flow — the [Повторить] button's target, T19). Spawned via
+/// `tauri::async_runtime::spawn` rather than awaited inline: `bring_up_orchd`'s bounded retry can
+/// take up to ~4s (`BOOT_CONNECT_ATTEMPTS` x 500ms), and the frontend observes the outcome via the
+/// `orchd://down|up|incompatible` events / `AppState.orchd_status` rather than this command's
+/// resolved `Promise` — mirrors the fire-and-forget shape `setup()` itself uses for the initial
+/// bring-up.
+#[tauri::command]
+pub async fn orchd_reconnect(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), CommandError> {
+    state.orchd.write().unwrap().take();
+    let agent = state.orchd_launchd.clone();
+    let broker = state.broker.clone();
+    let slot = state.orchd.clone();
+    let status = state.orchd_status.clone();
+    tauri::async_runtime::spawn(crate::bring_up_orchd(app, agent, broker, slot, status));
+    Ok(())
+}
+
+/// Core of the orchd-upgrade flow (spec §9): mirrors [`upgrade_daemon_core`] EXACTLY for the
+/// second daemon — best-effort `OrchdShutdown{drain:true}` (an old, not-yet-upgraded `bpa-orchd`
+/// binary may not even parse this frame; the failure is expected and swallowed, same rationale as
+/// `upgrade_daemon_core`'s sessiond drain), then the one honest, surfaced failure:
+/// `kickstart_force()` (spec §6.2.4/§9: never claim success when `launchctl kickstart -k` failed).
+pub async fn orchd_upgrade_core(
+    client: Option<Arc<OrchdClient>>,
+    agent: &crate::launchd::LaunchdAgent<'_>,
+) -> Result<(), CommandError> {
+    if let Some(c) = client {
+        let _ = c.request(OrchdRequest::OrchdShutdown { drain: true }).await;
+    }
+    agent
+        .kickstart_force()
+        .map_err(|e| CommandError::UpgradeFailed {
+            reason: e.to_string(),
+        })?;
+    Ok(())
+}
+
+/// `#[tauri::command]` entry point for the orchd-upgrade flow — mirrors [`upgrade_daemon`]
+/// verbatim, over the orchd slot/launchd agent instead of the sessiond ones (spec §9).
+#[tauri::command]
+pub async fn orchd_upgrade(state: State<'_, AppState>, app: AppHandle) -> Result<(), CommandError> {
+    let client = state.orchd.read().unwrap().clone();
+    orchd_upgrade_core(client, &state.orchd_launchd).await?;
+    app.restart();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1056,6 +2034,64 @@ mod tests {
         assert_eq!(v3["daemonMax"], 2);
     }
 
+    // ── From<OrchdClientError> for CommandError (S3 T12, spec §9) ──────────────────────────
+
+    #[test]
+    fn orchd_client_error_disconnected_maps_to_command_error_disconnected() {
+        let err: CommandError = OrchdClientError::Disconnected.into();
+        assert_eq!(err, CommandError::Disconnected);
+    }
+
+    #[test]
+    fn orchd_client_error_daemon_maps_to_command_error_daemon() {
+        let err: CommandError = OrchdClientError::Daemon {
+            code: "Invariant".into(),
+            message: "cannot remove the last project workspace".into(),
+        }
+        .into();
+        assert_eq!(
+            err,
+            CommandError::Daemon {
+                code: "Invariant".into(),
+                message: "cannot remove the last project workspace".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn orchd_client_error_incompatible_orchd_maps_to_command_error_incompatible_orchd() {
+        let err: CommandError = OrchdClientError::IncompatibleOrchd {
+            daemon_min: 2,
+            daemon_max: 3,
+        }
+        .into();
+        assert_eq!(
+            err,
+            CommandError::IncompatibleOrchd {
+                orchd_min: 2,
+                orchd_max: 3
+            }
+        );
+    }
+
+    #[test]
+    fn orchd_client_error_request_too_large_maps_to_command_error_too_large() {
+        let err: CommandError = OrchdClientError::RequestTooLarge { size: 999 }.into();
+        assert_eq!(err, CommandError::TooLarge { size: 999 });
+    }
+
+    #[test]
+    fn command_error_serializes_incompatible_orchd_with_camel_case() {
+        let v = serde_json::to_value(CommandError::IncompatibleOrchd {
+            orchd_min: 4,
+            orchd_max: 5,
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "incompatibleOrchd");
+        assert_eq!(v["orchdMin"], 4);
+        assert_eq!(v["orchdMax"], 5);
+    }
+
     #[test]
     fn pick_folder_is_core_only_no_daemon_request() {
         // Every brokered command has a Request variant it forwards. pick_folder must NOT — there
@@ -1240,6 +2276,107 @@ mod tests {
         }
     }
 
+    // ── orchd_upgrade_core tests (S3 T12, spec §9) — mirrors the upgrade_daemon_core block
+    // ── above exactly, over the orchd stub/agent instead of the sessiond ones. ──────────────
+
+    /// Mirrors `test_agent` exactly, with the orchd identity (`ORCHD_LABEL`/`bpa-orchd`/
+    /// `orchd.sock`) — so `mock.calls()` below asserts the orchd `launchctl` invocation string,
+    /// not the sessiond one.
+    fn test_orchd_agent<'a>(
+        runner: &'a dyn crate::launchd::LaunchctlRunner,
+        root: &std::path::Path,
+    ) -> crate::launchd::LaunchdAgent<'a> {
+        crate::launchd::LaunchdAgent {
+            runner,
+            uid: 501,
+            launch_agents_dir: root.join("LaunchAgents"),
+            app_support_dir: root.join("AppSupport"),
+            daemon_path: std::path::PathBuf::from(
+                "/Applications/Builder Pro AI.app/Contents/MacOS/bpa-orchd",
+            ),
+            socket_path: std::path::PathBuf::from("/tmp/bpa-501/orchd.sock"),
+            label: crate::launchd::ORCHD_LABEL,
+            stdout_log_name: "orchd.out.log",
+            stderr_log_name: "orchd.err.log",
+        }
+    }
+
+    #[tokio::test]
+    async fn orchd_upgrade_core_drains_then_kickstarts() {
+        let (client, _sock) =
+            super::orchd_commands_over_stub_daemon::connect_orchd_to_stub(|req| match req {
+                OrchdRequest::OrchdShutdown { drain } => {
+                    assert!(
+                        drain,
+                        "orchd_upgrade_core must request a drain, not a hard kill"
+                    );
+                    OrchdResponse::Ack
+                }
+                other => panic!("expected OrchdShutdown, got {other:?}"),
+            })
+            .await;
+
+        let mock = MockLaunchctl::new(vec![ok_output()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = test_orchd_agent(&mock, tmp.path());
+
+        let result = orchd_upgrade_core(Some(Arc::new(client)), &agent).await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(
+            mock.calls(),
+            vec![vec![
+                "kickstart",
+                "-k",
+                "gui/501/ai.builderpro.desktop.orchd"
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn orchd_upgrade_core_without_client_still_kickstarts() {
+        let mock = MockLaunchctl::new(vec![ok_output()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = test_orchd_agent(&mock, tmp.path());
+
+        let result = orchd_upgrade_core(None, &agent).await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(
+            mock.calls(),
+            vec![vec![
+                "kickstart",
+                "-k",
+                "gui/501/ai.builderpro.desktop.orchd"
+            ]],
+            "kickstart must still run even with no client to drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchd_upgrade_core_surfaces_kickstart_failure() {
+        let boom = crate::launchd::LaunchctlOutput {
+            code: 78,
+            stdout: String::new(),
+            stderr: "Operation not permitted (TCC)".into(),
+        };
+        let mock = MockLaunchctl::new(vec![boom]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = test_orchd_agent(&mock, tmp.path());
+
+        let err = orchd_upgrade_core(None, &agent).await.unwrap_err();
+
+        match err {
+            CommandError::UpgradeFailed { reason } => {
+                assert!(
+                    reason.contains("Operation not permitted"),
+                    "reason must carry the honest launchctl failure, got: {reason}"
+                );
+            }
+            other => panic!("expected UpgradeFailed, got {other:?}"),
+        }
+    }
+
     // `AppState::client()`/`set_client()` are one-line delegates to `slot_client`/a direct
     // `RwLock` write over the bare `ClientSlot` (see their definitions above) — tested here
     // directly against a `ClientSlot`, rather than through a fully-constructed `AppState`, because
@@ -1268,6 +2405,33 @@ mod tests {
         let got = slot_client(&slot).expect("slot must now yield the client");
         assert!(
             got.request(Request::ListWorkspaces).await.is_ok(),
+            "the returned client must be the real, live one"
+        );
+    }
+
+    // ── AppState::orchd()/slot_orchd (S3 T12, spec §9) — mirrors the ClientSlot block above ──
+
+    #[test]
+    fn app_state_orchd_returns_disconnected_when_slot_empty() {
+        let slot: OrchdClientSlot = Arc::new(std::sync::RwLock::new(None));
+        assert_eq!(slot_orchd(&slot).unwrap_err(), CommandError::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn app_state_orchd_returns_client_when_present() {
+        let slot: OrchdClientSlot = Arc::new(std::sync::RwLock::new(None));
+        assert_eq!(slot_orchd(&slot).unwrap_err(), CommandError::Disconnected);
+
+        let (client, _sock) =
+            super::orchd_commands_over_stub_daemon::connect_orchd_to_stub(|_req| {
+                OrchdResponse::Pong
+            })
+            .await;
+        *slot.write().unwrap() = Some(Arc::new(client));
+
+        let got = slot_orchd(&slot).expect("slot must now yield the client");
+        assert!(
+            got.request(OrchdRequest::Ping).await.is_ok(),
             "the returned client must be the real, live one"
         );
     }
@@ -1384,7 +2548,12 @@ pub(crate) mod commands_over_stub_daemon {
     // — that `.await` is exactly the section that needs serializing, since a second test's
     // `set_var` racing in in the middle of it would otherwise redirect this test's `connect()` to
     // the wrong socket.
-    static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    //
+    // `pub(super)` (not private): `orchd_commands_over_stub_daemon`'s `OrchdClient::connect` reads
+    // the SAME process-wide `XDG_RUNTIME_DIR` — a second, independent lock there would not
+    // serialize against this one and reintroduces exactly the race this lock exists to prevent
+    // (both `commands.rs` test modules manipulating the same env var must share ONE lock).
+    pub(super) static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn read_frame(stream: &mut UnixStream) -> Option<Frame> {
         // Read exactly one length-prefixed CBOR frame via the shared FrameDecoder: read the
@@ -2210,5 +3379,355 @@ pub(crate) mod commands_over_stub_daemon {
                 .any(|(sid, b)| sid == "sess-B" && b == b"from-b"),
             "session B's chunk must have been observed"
         );
+    }
+}
+
+/// orchd-flavored counterpart of [`commands_over_stub_daemon`] (S3 T12, spec §9): mirrors its
+/// stub-daemon pattern exactly (handshake, then reply to each `OrchdRequest` with a
+/// distinguishable `OrchdResponse`), instantiated over `bpa_orchd_proto`'s wire types and
+/// `orchd.sock` instead of `bpa_protocol`'s and `d.sock`. The stub's `Accepted` reply uses
+/// `ORCHD_DAEMON_MAX_VERSION` (the version CONST, never a hardcoded literal — spec §9's locked
+/// test discipline).
+#[cfg(test)]
+pub(crate) mod orchd_commands_over_stub_daemon {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use bpa_orchd_proto::{
+        encode_orchd_frame, OrchdFrame, OrchdFrameDecoder, OrchdRequest, OrchdResponse,
+        ORCHD_DAEMON_MAX_VERSION,
+    };
+    use bpa_protocol::preamble::{decode_client_preamble, encode_daemon_reply, DaemonReply};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{UnixListener, UnixStream};
+
+    use crate::orchd_client::OrchdClient;
+
+    use super::*;
+
+    // REUSES `commands_over_stub_daemon::ENV_TEST_LOCK` rather than declaring a second, independent
+    // lock: `OrchdClient::connect` and `DaemonClient::connect` both resolve their socket path from
+    // the SAME process-wide `XDG_RUNTIME_DIR` env var, so both test modules must serialize against
+    // ONE shared lock — two independent locks over the same mutable global would not serialize
+    // against each other and would silently reintroduce the exact race this discipline exists to
+    // prevent (confirmed empirically: this module originally declared its own lock, and
+    // `commands::tests::app_state_client_returns_client_when_present` — a `commands_over_stub_daemon`
+    // consumer — flaked with a spurious `Disconnected` under `cargo test`'s default parallelism).
+    use super::commands_over_stub_daemon::ENV_TEST_LOCK;
+
+    async fn read_frame(stream: &mut UnixStream) -> Option<OrchdFrame> {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.ok()?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).await.ok()?;
+        let mut decoder = OrchdFrameDecoder::new();
+        decoder.push(&len_buf);
+        decoder.push(&body);
+        decoder.decode().ok()?.into_iter().next()
+    }
+
+    async fn write_stub_frame(stream: &mut UnixStream, frame: &OrchdFrame) {
+        let bytes = encode_orchd_frame(frame).unwrap();
+        stream.write_all(&bytes).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn read_client_preamble_stub(stream: &mut UnixStream) -> bpa_protocol::ClientPreamble {
+        let mut header = [0u8; 10];
+        stream.read_exact(&mut header).await.unwrap();
+        let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
+        let mut buf = header.to_vec();
+        if build_len > 0 {
+            let mut build = vec![0u8; build_len];
+            stream.read_exact(&mut build).await.unwrap();
+            buf.extend_from_slice(&build);
+        }
+        decode_client_preamble(&buf).expect("valid client preamble")
+    }
+
+    /// Bind a stub `bpa-orchd` under a fresh tempdir, handshake, then reply to exactly one
+    /// `OrchdRequest` with `respond`. Returns the connected, handshaken `OrchdClient` (via
+    /// `XDG_RUNTIME_DIR`, so `OrchdClient::connect` resolves to this stub's socket).
+    pub(crate) async fn connect_orchd_to_stub<F>(respond: F) -> (OrchdClient, PathBuf)
+    where
+        F: FnOnce(OrchdRequest) -> OrchdResponse + Send + 'static,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("orchd.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        let sock_path2 = sock_path.clone();
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _client_preamble = read_client_preamble_stub(&mut stream).await;
+            let reply = encode_daemon_reply(&DaemonReply::Accepted {
+                chosen: ORCHD_DAEMON_MAX_VERSION,
+                build: "stub".into(),
+            });
+            stream.write_all(&reply).await.unwrap();
+            stream.flush().await.unwrap();
+
+            if let Some(OrchdFrame::Request { id, req }) = read_frame(&mut stream).await {
+                let res = respond(req);
+                write_stub_frame(&mut stream, &OrchdFrame::Response { id, res }).await;
+            }
+            // Keep the stream (and tempdir) alive for the rest of the test.
+            let _ = sock_path2;
+            std::future::pending::<()>().await;
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let client = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            let client = OrchdClient::connect("test-build".to_string())
+                .await
+                .unwrap();
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            client
+        };
+        std::mem::forget(dir); // keep the tempdir (and its socket) alive for the test's duration
+
+        (client, sock_path)
+    }
+
+    #[tokio::test]
+    async fn orchd_create_project_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::CreateProject {
+                name,
+                description,
+                workspace_ids,
+            } => OrchdResponse::Project(bpa_orchd_proto::Project {
+                id: "proj-1".into(),
+                name,
+                description,
+                status: bpa_orchd_proto::ProjectStatus::Active,
+                workspace_ids,
+                created_at: 0,
+                updated_at: 0,
+            }),
+            other => panic!("expected CreateProject, got {other:?}"),
+        })
+        .await;
+
+        let req = OrchdRequest::CreateProject {
+            name: "Proj".into(),
+            description: "Desc".into(),
+            workspace_ids: vec!["ws-1".into()],
+        };
+        let res = client.request(req).await.unwrap();
+        let project = expect_project(res).unwrap();
+        assert_eq!(project.id, "proj-1");
+        assert_eq!(project.name, "Proj");
+        assert_eq!(project.workspace_ids, vec!["ws-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn orchd_invariant_error_response_becomes_command_error_daemon_invariant_end_to_end() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Invariant,
+            message: "a project must keep at least one workspace".into(),
+        })
+        .await;
+
+        let res = client.request(OrchdRequest::ListProjects).await;
+        // OrchdClientError::Daemon is raised directly by OrchdClient::request (mirrors
+        // socket_client's own Response::Error handling) — confirm the CommandError `From` impl
+        // reshapes it to `Daemon { code: "Invariant", .. }`, the spec §9-locked shape.
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Invariant");
+                assert_eq!(message, "a project must keep at least one workspace");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn orchd_reveal_rules_file_core_uses_the_get_rule_set_returned_path() {
+        // Locks the security property spec §9 requires: the path handed to `opener::reveal` is
+        // ALWAYS whatever GetRuleSet's own reply carried, never anything JS could substitute.
+        // Asserted at this inner-fn boundary (never calling the real `opener::reveal`, which would
+        // open a Finder window inside the test process).
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::GetRuleSet { scope, project_id } => {
+                assert_eq!(scope, RuleScope::Global);
+                assert_eq!(project_id, None);
+                OrchdResponse::RuleSetView(bpa_orchd_proto::RuleSetView {
+                    rule: bpa_orchd_proto::RuleSet {
+                        id: "rs-1".into(),
+                        scope: RuleScope::Global,
+                        project_id: None,
+                        md_path: "/app-support/global-rules.md".into(),
+                        md_hash: "abc123".into(),
+                        policy: bpa_orchd_proto::PolicyRules {
+                            spend_cap_usd: None,
+                            approval_classes: vec![],
+                            path_allowlist: vec![],
+                        },
+                        created_at: 0,
+                        updated_at: 0,
+                    },
+                    md_content: Some("# rules".into()),
+                    file_state: bpa_orchd_proto::RuleFileState::Ok,
+                })
+            }
+            other => panic!("expected GetRuleSet, got {other:?}"),
+        })
+        .await;
+
+        let path = super::reveal_rules_file_core(&client, RuleScope::Global, None)
+            .await
+            .unwrap();
+        assert_eq!(path, "/app-support/global-rules.md");
+    }
+
+    #[tokio::test]
+    async fn orchd_export_to_file_all_export_writes_json_named_store() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::ExportAll => {
+                OrchdResponse::ExportJson(r#"{"bundleFormat":1,"projects":[]}"#.into())
+            }
+            other => panic!("expected ExportAll, got {other:?}"),
+        })
+        .await;
+
+        let json =
+            expect_export_json(client.request(OrchdRequest::ExportAll).await.unwrap()).unwrap();
+        let base = super::export_base_name(&json, false);
+        assert_eq!(base, "store");
+
+        let dest = tempfile::tempdir().unwrap();
+        let path = super::write_export_file(dest.path().to_str().unwrap(), &base, &json).unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "store-export.json"
+        );
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, json);
+    }
+
+    #[tokio::test]
+    async fn orchd_export_to_file_project_export_uses_sanitized_project_name() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::ExportProject { project_id } => {
+                assert_eq!(project_id, "proj-1");
+                OrchdResponse::ExportJson(
+                    r#"{"bundleFormat":1,"project":{"id":"proj-1","name":"My Cool Project!"}}"#
+                        .into(),
+                )
+            }
+            other => panic!("expected ExportProject, got {other:?}"),
+        })
+        .await;
+
+        let json = expect_export_json(
+            client
+                .request(OrchdRequest::ExportProject {
+                    project_id: "proj-1".into(),
+                })
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let base = super::export_base_name(&json, true);
+        assert_eq!(base, "My-Cool-Project");
+
+        let dest = tempfile::tempdir().unwrap();
+        let path = super::write_export_file(dest.path().to_str().unwrap(), &base, &json).unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "My-Cool-Project-export.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchd_import_from_file_reads_file_and_round_trips_through_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("bundle.json");
+        let json_content = r#"{"bundleFormat":1,"projects":[]}"#;
+        std::fs::write(&file_path, json_content).unwrap();
+
+        let (client, _sock) = connect_orchd_to_stub(move |req| match req {
+            OrchdRequest::ImportBundle { json } => {
+                assert_eq!(json, json_content);
+                OrchdResponse::ImportReport {
+                    projects: 1,
+                    goals: 2,
+                    ideas: 3,
+                    insights: 4,
+                    tasks: 5,
+                    rulesets: 6,
+                }
+            }
+            other => panic!("expected ImportBundle, got {other:?}"),
+        })
+        .await;
+
+        let read_json = super::read_import_file(file_path.to_str().unwrap()).unwrap();
+        assert_eq!(read_json, json_content);
+        let report = expect_import_report(
+            client
+                .request(OrchdRequest::ImportBundle { json: read_json })
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            report,
+            ImportReport {
+                projects: 1,
+                goals: 2,
+                ideas: 3,
+                insights: 4,
+                tasks: 5,
+                rulesets: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn orchd_import_from_file_refuses_a_file_over_the_10_mib_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("huge.json");
+        let huge = vec![b'a'; (super::IMPORT_FILE_READ_CAP + 1) as usize];
+        std::fs::write(&file_path, &huge).unwrap();
+
+        let err = super::read_import_file(file_path.to_str().unwrap()).unwrap_err();
+        match err {
+            CommandError::Internal(msg) => {
+                assert!(
+                    msg.contains("exceeds"),
+                    "expected an honest 'exceeds the cap' message, got: {msg}"
+                );
+            }
+            other => panic!("expected CommandError::Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_import_from_file_accepts_a_file_exactly_at_the_10_mib_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("exact.json");
+        let exact = vec![b'a'; super::IMPORT_FILE_READ_CAP as usize];
+        std::fs::write(&file_path, &exact).unwrap();
+
+        let read = super::read_import_file(file_path.to_str().unwrap()).unwrap();
+        assert_eq!(read.len(), super::IMPORT_FILE_READ_CAP as usize);
     }
 }

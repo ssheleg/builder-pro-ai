@@ -39,7 +39,7 @@
 //! `bring_up_daemon`, spawned on `tauri::async_runtime` so the window opens immediately regardless
 //! of how long the daemon bring-up takes.
 //!
-//! ## `bpa-orchd` bring-up (spec §9, S3 T11)
+//! ## `bpa-orchd` bring-up (spec §9, S3 T11/T12)
 //!
 //! `bring_up_orchd` mirrors every part of the above for the SECOND daemon, `bpa-orchd`: same
 //! three-outcome shape (connected / `IncompatibleOrchd` / other-error), same honest-degradation
@@ -52,7 +52,13 @@
 //! `orchd_status` exist and are valid from the instant `AppState` becomes managed), and
 //! `bring_up_orchd` only ever writes into those same `Arc`s — it never fetches `State<AppState>`
 //! itself, so it has no ordering dependency on which of the two tasks finishes its own bring-up
-//! first.
+//! first. On a successful connect it wires the SAME `Broker` `bring_up_daemon` uses into the
+//! `OrchdClient` via `broker::register_orchd` (T12) — every `OrchdPush` is fanned out through
+//! `broker::map_orchd_push` to an `orchd://…-changed` event, and every `ConnState` transition
+//! fans out through `broker::map_orchd_conn_state` to `orchd://down|up|incompatible`, superseding
+//! T11's placeholder `tracing::debug!`-only push handler. `bring_up_orchd` itself is `pub(crate)`
+//! (not private) so `commands::orchd_reconnect` can re-run this exact sequence after dropping the
+//! slot (the [Повторить] button's target, spec §9).
 
 pub mod broker;
 pub mod commands;
@@ -69,7 +75,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
 
-use crate::broker::{register, Broker};
+use crate::broker::{register, register_orchd, Broker};
 use crate::commands::{AppState, DaemonStatus, OrchdStatus, OrchdStatusSlot, StatusSlot};
 use crate::launchd::{LaunchdAgent, LaunchdError, RealLaunchctl};
 use crate::orchd_client::{
@@ -87,16 +93,16 @@ pub const DAEMON_DISCONNECTED_EVENT: &str = broker::EV_DAEMON_DISCONNECTED;
 pub const DAEMON_RECONNECTED_EVENT: &str = broker::EV_DAEMON_RECONNECTED;
 
 /// Emitted (no payload) when the core loses — or never establishes — the `bpa-orchd` socket
-/// (spec §9). A `broker::EV_ORCHD_DOWN` constant matching this exact string, plus the full
-/// orchd push→event dispatch table, land in a later task (T12) — this constant is defined HERE,
-/// not there, purely because that table doesn't exist yet; `bring_up_orchd` must still emit an
-/// honest signal from day one (spec §13) rather than silently swallowing a boot failure until
-/// T12 lands.
-pub const ORCHD_DOWN_EVENT: &str = "orchd://down";
+/// (spec §9, S3 T12). Mirrors [`broker::EV_ORCHD_DOWN`] byte-for-byte — kept as its own constant
+/// for the identical reason [`DAEMON_DISCONNECTED_EVENT`] is.
+pub const ORCHD_DOWN_EVENT: &str = broker::EV_ORCHD_DOWN;
+/// Emitted (no payload) when the core (re)establishes the `bpa-orchd` socket (spec §9, S3 T12).
+/// Mirrors [`broker::EV_ORCHD_UP`] byte-for-byte.
+pub const ORCHD_UP_EVENT: &str = broker::EV_ORCHD_UP;
 /// Emitted (no payload) when the handshake preamble finds `bpa-orchd`'s protocol range
-/// incompatible with this client build (spec §9's locked event name). See
-/// [`ORCHD_DOWN_EVENT`]'s doc for why this is defined here rather than in `broker.rs` yet.
-pub const ORCHD_INCOMPATIBLE_EVENT: &str = "orchd://incompatible";
+/// incompatible with this client build (spec §9's locked event name). Mirrors
+/// [`broker::EV_ORCHD_INCOMPATIBLE`] byte-for-byte.
+pub const ORCHD_INCOMPATIBLE_EVENT: &str = broker::EV_ORCHD_INCOMPATIBLE;
 
 /// Trivial invoke smoke command; proves the JS<->Rust IPC round-trip works (Task 1).
 #[tauri::command]
@@ -512,7 +518,7 @@ async fn bring_up_daemon(
 }
 
 /// Bring up `bpa-orchd` (launchd install+bootstrap+kickstart) and connect to it (spec §9, S3
-/// T11) — mirrors [`bring_up_daemon`] EXACTLY in shape: install+bootstrap+kickstart
+/// T11/T12) — mirrors [`bring_up_daemon`] EXACTLY in shape: install+bootstrap+kickstart
 /// unconditionally, then a bounded-retry connect resolving to one of the same three outcomes
 /// (connected / `IncompatibleOrchd` / other-error), each with an honest signal (spec §13).
 ///
@@ -520,15 +526,24 @@ async fn bring_up_daemon(
 /// it) — see the module doc's "`bpa-orchd` bring-up" section for why `slot`/`status` are passed
 /// in already-built rather than fetched via `State<AppState>`: this function only ever WRITES
 /// into them, so it has no ordering dependency on when `bring_up_daemon` calls `app.manage(...)`.
+/// `broker` is the SAME instance `bring_up_daemon` registers sessiond into (see
+/// [`register_orchd`]'s docs for why sharing one `Broker` across both daemons is safe).
 ///
-/// Push wiring: no orchd push→event dispatch table exists yet (spec §9's `broker.rs` consts land
-/// in T12) — every `OrchdPush` is logged via `tracing::debug!` for now rather than dropped
-/// silently, so nothing observable is lost once the real dispatch lands. `on_conn` already keeps
-/// `status` live and correct from THIS task onward (finding [12]'s pull-fallback pattern, applied
-/// to orchd from day one).
-async fn bring_up_orchd(
+/// Push/conn wiring (T12): on a successful connect, [`register_orchd`] wires `on_push` ->
+/// `broker::map_orchd_push` -> emit and `on_conn` -> `broker::map_orchd_conn_state` -> emit —
+/// superseding T11's placeholder `tracing::debug!`-only push handler. A SECOND `on_conn`
+/// registration (mirrors `bring_up_daemon`'s own second registration) keeps `status` live and
+/// correct from THIS task onward (finding [12]'s pull-fallback pattern, applied to orchd from day
+/// one) — `OrchdClient::on_conn` supports multiple callbacks (locked contract), so this is
+/// independent of `register_orchd`'s own `on_conn` registration.
+///
+/// `pub(crate)` (not private): [`commands::orchd_reconnect`] calls this directly to re-run the
+/// exact same bring-up sequence after dropping the slot (spec §9's locked `orchd_reconnect`
+/// flow — the [Повторить] button's target).
+pub(crate) async fn bring_up_orchd(
     app: tauri::AppHandle,
     agent: Arc<LaunchdAgent<'static>>,
+    broker: Arc<Broker>,
     slot: OrchdClientSlot,
     status: OrchdStatusSlot,
 ) {
@@ -553,12 +568,11 @@ async fn bring_up_orchd(
     match connect_result {
         Ok(client) => {
             let client = Arc::new(client);
-            client.on_push(|push| {
-                tracing::debug!(
-                    ?push,
-                    "orchd push received (broker push->event wiring lands in a later task)"
-                );
-            });
+            // register_orchd wires on_push -> broker.dispatch_orchd_push (map_orchd_push -> emit)
+            // and on_conn -> broker.dispatch_orchd_conn (orchd://down|up|incompatible), mirroring
+            // `register()`'s sessiond wiring exactly (spec §9, T12). Call exactly once, BEFORE
+            // moving the client into the slot.
+            register_orchd(broker, &client);
             let status_for_conn = status.clone();
             client.on_conn(move |state| {
                 commands::write_orchd_status(&status_for_conn, status_for_orchd_conn_state(state));
@@ -649,6 +663,47 @@ pub fn run() {
             commands::pick_folder,
             commands::upgrade_daemon,
             commands::daemon_status,
+            commands::orchd_ping,
+            commands::orchd_create_project,
+            commands::orchd_update_project,
+            commands::orchd_archive_project,
+            commands::orchd_list_projects,
+            commands::orchd_add_project_workspace,
+            commands::orchd_remove_project_workspace,
+            commands::orchd_create_goal,
+            commands::orchd_update_goal,
+            commands::orchd_move_goal,
+            commands::orchd_delete_goal,
+            commands::orchd_list_goals,
+            commands::orchd_create_idea,
+            commands::orchd_update_idea,
+            commands::orchd_set_idea_project,
+            commands::orchd_set_idea_lifecycle,
+            commands::orchd_delete_idea,
+            commands::orchd_list_ideas,
+            commands::orchd_create_insight,
+            commands::orchd_update_insight,
+            commands::orchd_set_insight_fit_verdict,
+            commands::orchd_set_insight_status,
+            commands::orchd_delete_insight,
+            commands::orchd_list_insights,
+            commands::orchd_create_task,
+            commands::orchd_update_task,
+            commands::orchd_set_task_status,
+            commands::orchd_set_task_rank,
+            commands::orchd_delete_task,
+            commands::orchd_list_tasks,
+            commands::orchd_get_ruleset,
+            commands::orchd_upsert_ruleset,
+            commands::orchd_acknowledge_rule_file,
+            commands::orchd_export_project,
+            commands::orchd_export_all,
+            commands::orchd_import_bundle,
+            commands::orchd_reveal_rules_file,
+            commands::orchd_export_to_file,
+            commands::orchd_import_from_file,
+            commands::orchd_reconnect,
+            commands::orchd_upgrade,
             fs_explorer::list_dir,
             fs_explorer::read_file_preview,
             fs_explorer::create_file,
@@ -698,7 +753,7 @@ pub fn run() {
             // inside the other.
             tauri::async_runtime::spawn(bring_up_daemon(
                 handle.clone(),
-                broker,
+                broker.clone(),
                 orchd_slot.clone(),
                 orchd_agent.clone(),
                 orchd_status.clone(),
@@ -706,6 +761,7 @@ pub fn run() {
             tauri::async_runtime::spawn(bring_up_orchd(
                 handle,
                 orchd_agent,
+                broker,
                 orchd_slot,
                 orchd_status,
             ));
@@ -851,6 +907,7 @@ mod tests {
     #[test]
     fn orchd_event_names_are_locked() {
         assert_eq!(ORCHD_DOWN_EVENT, "orchd://down");
+        assert_eq!(ORCHD_UP_EVENT, "orchd://up");
         assert_eq!(ORCHD_INCOMPATIBLE_EVENT, "orchd://incompatible");
     }
 
