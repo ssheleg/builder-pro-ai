@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { SessionMeta, SessionLifecycle, Workspace } from "./types";
 import type { SessionId } from "./commands";
+import type { RuleScope } from "./orchd-types";
 
 /**
  * Payload of `session://state-changed` (spec §6.3), reshaped by
@@ -105,4 +106,89 @@ export function onDaemonReconnected(cb: () => void): Promise<UnlistenFn> {
  */
 export function onDaemonIncompatible(cb: () => void): Promise<UnlistenFn> {
   return listen<null>("daemon://incompatible", () => cb());
+}
+
+// ── orchd coarse-invalidation + connection events (spec §9/§10, D6/D10, S3 T13) ────────────────
+//
+// `src-tauri/src/broker.rs`'s `EV_ORCHD_*` consts, produced by `map_orchd_push`/
+// `map_orchd_conn_state`. Every `orchd://*-changed` push names ONLY what changed (never the
+// updated entity itself — D6 "coarse-grained invalidation... GUI re-fetches lists"); the frontend
+// store's matching `refresh*` action (`store.ts`) does the actual re-fetch via `./orchd.ts`.
+
+/** Payload of `orchd://goals-changed`: the ONE project whose goal list changed — `refreshGoals`
+ * must re-fetch only that project, never every project's goals. */
+export interface GoalsChangedPayload {
+  projectId: string;
+}
+
+/** Payload of `orchd://tasks-changed` — mirrors `GoalsChangedPayload` exactly, for tasks. */
+export interface TasksChangedPayload {
+  projectId: string;
+}
+
+/** Payload of `orchd://ruleset-changed`: `projectId` is `null` for the global scope (mirrors
+ * `map_orchd_push`'s `RuleSetChanged` arm — `scope`/`projectId` are the raw fields, already
+ * camelCase-reshaped by the broker, same as `StateChangedPayload`'s `sessionId`). */
+export interface RulesetChangedPayload {
+  scope: RuleScope;
+  projectId: string | null;
+}
+
+/** Subscribe to `orchd://projects-changed`. Carries no payload — there is nothing to name. */
+export function onOrchdProjectsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://projects-changed", () => cb());
+}
+
+/** Subscribe to `orchd://goals-changed` — see `GoalsChangedPayload`. */
+export function onOrchdGoalsChanged(cb: (p: GoalsChangedPayload) => void): Promise<UnlistenFn> {
+  return listen<GoalsChangedPayload>("orchd://goals-changed", (e) => cb(e.payload));
+}
+
+/** Subscribe to `orchd://ideas-changed`. Carries no payload — this store slice's `ideas: Idea[]`
+ * is not project-scoped, so a full `refreshIdeas` is the only meaningful reaction. */
+export function onOrchdIdeasChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://ideas-changed", () => cb());
+}
+
+/** Subscribe to `orchd://insights-changed`. Mirrors `onOrchdIdeasChanged`, for insights. */
+export function onOrchdInsightsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://insights-changed", () => cb());
+}
+
+/** Subscribe to `orchd://tasks-changed` — see `TasksChangedPayload`. */
+export function onOrchdTasksChanged(cb: (p: TasksChangedPayload) => void): Promise<UnlistenFn> {
+  return listen<TasksChangedPayload>("orchd://tasks-changed", (e) => cb(e.payload));
+}
+
+/** Subscribe to `orchd://ruleset-changed` — see `RulesetChangedPayload`. */
+export function onOrchdRulesetChanged(
+  cb: (p: RulesetChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<RulesetChangedPayload>("orchd://ruleset-changed", (e) => cb(e.payload));
+}
+
+/**
+ * `orchd://down` carries no payload. Unlike the sessiond `daemon://disconnected`/`reconnected`
+ * pair (which tracks "have we seen a disconnect yet" to decide whether a later connect counts as
+ * a "reconnect"), orchd's mapping is a DIRECT 1:1 from `OrchdClient`'s connection state
+ * (`broker.rs::map_orchd_conn_state`'s doc) — every `Disconnected` fires this event, every
+ * `Connected` fires `orchd://up`.
+ */
+export function onOrchdDown(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://down", () => cb());
+}
+
+/** `orchd://up` carries no payload — fires on every successful (re)connect. See `onOrchdDown`'s
+ * doc for why this is a direct 1:1 mapping rather than a reconnect-tracking scheme. */
+export function onOrchdUp(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://up", () => cb());
+}
+
+/**
+ * `orchd://incompatible` carries no payload. FATAL like `daemon://incompatible` (Pv2 §6.2): the
+ * orchd client's connection task has exited and will NOT reconnect on its own — the frontend must
+ * offer the upgrade flow (`orchdUpgrade`, `./orchd.ts`) rather than waiting.
+ */
+export function onOrchdIncompatible(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://incompatible", () => cb());
 }

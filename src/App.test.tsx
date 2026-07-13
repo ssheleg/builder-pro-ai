@@ -46,6 +46,63 @@ vi.mock("./ipc/events", () => ({
     cbs.fsWatchError = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdProjectsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdProjectsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdGoalsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdGoalsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdIdeasChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdIdeasChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdInsightsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdInsightsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdTasksChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdTasksChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdRulesetChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdRulesetChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdDown: (cb: (p: unknown) => void) => {
+    cbs.orchdDown = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdUp: (cb: (p: unknown) => void) => {
+    cbs.orchdUp = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdIncompatible: (cb: (p: unknown) => void) => {
+    cbs.orchdIncompatible = cb;
+    return Promise.resolve(unlisten);
+  },
+}));
+
+// The store's `refresh*` actions (S3 T13) call straight through to `./ipc/orchd`; mocked here so
+// App's initial `refreshProjects()` call (and any orchd://*-changed-driven refresh) resolves
+// deterministically instead of hitting the real `invoke()` (which would reject in jsdom — no
+// Tauri runtime — and, being routed through `showToast`, could spuriously surface a second
+// role="alert" element that would break the DaemonBanner-focused assertions below).
+const orchdListProjectsMock = vi.fn().mockResolvedValue([]);
+const orchdListGoalsMock = vi.fn().mockResolvedValue([]);
+const orchdListIdeasMock = vi.fn().mockResolvedValue([]);
+const orchdListInsightsMock = vi.fn().mockResolvedValue([]);
+const orchdListTasksMock = vi.fn().mockResolvedValue([]);
+const orchdGetRulesetMock = vi.fn();
+vi.mock("./ipc/orchd", () => ({
+  orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
+  orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
+  orchdListIdeas: (...a: unknown[]) => orchdListIdeasMock(...a),
+  orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
+  orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
+  orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
+  describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
 const listSessionsMock = vi.fn().mockResolvedValue([]);
@@ -151,6 +208,12 @@ beforeEach(() => {
   getCommandEventsMock.mockReset().mockResolvedValue([]);
   startWorkspaceWatchMock.mockReset().mockResolvedValue(undefined);
   stopWorkspaceWatchMock.mockReset().mockResolvedValue(undefined);
+  orchdListProjectsMock.mockReset().mockResolvedValue([]);
+  orchdListGoalsMock.mockReset().mockResolvedValue([]);
+  orchdListIdeasMock.mockReset().mockResolvedValue([]);
+  orchdListInsightsMock.mockReset().mockResolvedValue([]);
+  orchdListTasksMock.mockReset().mockResolvedValue([]);
+  orchdGetRulesetMock.mockReset();
   useAppStore.setState(
     {
       sessions: {},
@@ -168,13 +231,23 @@ beforeEach(() => {
       treeCache: {},
       watchPaused: false,
       showIgnored: false,
+      activeProjectId: null,
+      projects: [],
+      goalsByProject: {},
+      ideas: [],
+      insights: [],
+      tasksByProject: {},
+      rulesets: {},
+      orchdDown: false,
+      orchdIncompatible: false,
+      orchdUpgradeDialogOpen: false,
     },
     false,
   );
 });
 
 describe("App", () => {
-  it("registers all ten IPC subscriptions on mount", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + nine orchd, S3 T13)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -189,9 +262,25 @@ describe("App", () => {
       "disc",
       "recon",
       "incompatible",
+      "orchdProjectsChanged",
+      "orchdGoalsChanged",
+      "orchdIdeasChanged",
+      "orchdInsightsChanged",
+      "orchdTasksChanged",
+      "orchdRulesetChanged",
+      "orchdDown",
+      "orchdUp",
+      "orchdIncompatible",
     ]) {
       expect(typeof cbs[key]).toBe("function");
     }
+  });
+
+  it("calls refreshProjects (via orchd_list_projects) once on mount", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(orchdListProjectsMock).toHaveBeenCalled();
   });
 
   it("hydrates on mount: listWorkspaces+listSessions succeed -> daemonConnected true, hydrated true", async () => {
@@ -884,5 +973,198 @@ describe("T12: workspace view — stat chips + command strip + root-aware cwd", 
     expect(getCommandEventsMock).not.toHaveBeenCalled();
     expect(screen.queryByTestId("command-strip")).toBeNull();
     expect(screen.queryByTestId("command-strip-empty")).toBeNull();
+  });
+});
+
+describe("S3 T13: orchd domain event wiring", () => {
+  it("orchd://projects-changed re-fetches the project list", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    orchdListProjectsMock.mockClear();
+    await act(async () => {
+      cbs.orchdProjectsChanged(null);
+    });
+    expect(orchdListProjectsMock).toHaveBeenCalled();
+  });
+
+  it("orchd://goals-changed refreshes ONLY the named project's goals", async () => {
+    orchdListGoalsMock.mockResolvedValue([
+      { id: "g1", projectId: "p1", parentId: null, kind: "strategic", title: "t", body: "",
+        ord: 0, status: "active", metricRefs: [], createdAt: 1, updatedAt: 1 },
+    ]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.orchdGoalsChanged({ projectId: "p1" });
+    });
+    expect(orchdListGoalsMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().goalsByProject["p1"]).toHaveLength(1);
+  });
+
+  it("orchd://tasks-changed refreshes ONLY the named project's tasks", async () => {
+    orchdListTasksMock.mockResolvedValue([
+      { id: "t1", projectId: "p1", parentId: null, title: "t", body: "", status: "todo",
+        source: "idea", sourceId: null, tags: [], rank: 0, rankAgent: null,
+        rankAgentReasoning: "", createdAt: 1, updatedAt: 1 },
+    ]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.orchdTasksChanged({ projectId: "p1" });
+    });
+    expect(orchdListTasksMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().tasksByProject["p1"]).toHaveLength(1);
+  });
+
+  it("orchd://ideas-changed and orchd://insights-changed re-fetch their whole-store lists", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.orchdIdeasChanged(null);
+    });
+    expect(orchdListIdeasMock).toHaveBeenCalledWith(null);
+    await act(async () => {
+      cbs.orchdInsightsChanged(null);
+    });
+    expect(orchdListInsightsMock).toHaveBeenCalledWith(null);
+  });
+
+  it('orchd://ruleset-changed builds the "global" key for the global scope', async () => {
+    orchdGetRulesetMock.mockResolvedValue({
+      rule: {
+        id: "r1", scope: "global", projectId: null, mdPath: "/x", mdHash: "h",
+        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        createdAt: 1, updatedAt: 1,
+      },
+      mdContent: null,
+      fileState: "ok",
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.orchdRulesetChanged({ scope: "global", projectId: null });
+    });
+    expect(orchdGetRulesetMock).toHaveBeenCalledWith("global", null);
+    expect(useAppStore.getState().rulesets["global"]).toBeTruthy();
+  });
+
+  it('orchd://ruleset-changed builds the "project:<id>" key for a project scope', async () => {
+    orchdGetRulesetMock.mockResolvedValue({
+      rule: {
+        id: "r2", scope: "project", projectId: "p1", mdPath: "/x", mdHash: "h",
+        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        createdAt: 1, updatedAt: 1,
+      },
+      mdContent: null,
+      fileState: "ok",
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.orchdRulesetChanged({ scope: "project", projectId: "p1" });
+    });
+    expect(orchdGetRulesetMock).toHaveBeenCalledWith("project", "p1");
+    expect(useAppStore.getState().rulesets["project:p1"]).toBeTruthy();
+  });
+
+  it("orchd://down sets orchdDown; orchd://up clears it", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(useAppStore.getState().orchdDown).toBe(false);
+    await act(async () => {
+      cbs.orchdDown(null);
+    });
+    expect(useAppStore.getState().orchdDown).toBe(true);
+    await act(async () => {
+      cbs.orchdUp(null);
+    });
+    expect(useAppStore.getState().orchdDown).toBe(false);
+  });
+
+  it("orchd://up re-fetches the project list (self-heals a lost initial-load race, review fix)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    // Simulate the cold-boot race: the initial refreshProjects() lost (orchd not yet connected).
+    // Clear the mock so we only observe the up-driven refetch, and confirm nothing has populated.
+    orchdListProjectsMock.mockClear();
+    orchdListProjectsMock.mockResolvedValue([
+      { id: "p1", name: "Acme", description: "", status: "active", workspaceIds: [],
+        createdAt: 1, updatedAt: 1 },
+    ]);
+    expect(useAppStore.getState().projects).toEqual([]);
+
+    await act(async () => {
+      cbs.orchdUp(null);
+    });
+
+    // orchd://up must re-trigger the project load (not merely clear orchdDown), so the core
+    // "open the app → see my projects" path populates once orchd finally connects.
+    expect(orchdListProjectsMock).toHaveBeenCalled();
+    expect(useAppStore.getState().projects).toHaveLength(1);
+  });
+
+  it("orchd://up with an open project also refreshes that project's goals/tasks/ideas/insights/ruleset", async () => {
+    orchdGetRulesetMock.mockResolvedValue({
+      rule: {
+        id: "r1", scope: "project", projectId: "p1", mdPath: "/x", mdHash: "h",
+        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        createdAt: 1, updatedAt: 1,
+      },
+      mdContent: null,
+      fileState: "ok",
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    act(() => useAppStore.getState().openProject("p1"));
+    orchdListGoalsMock.mockClear();
+    orchdListTasksMock.mockClear();
+    orchdListIdeasMock.mockClear();
+    orchdListInsightsMock.mockClear();
+    orchdGetRulesetMock.mockClear();
+
+    await act(async () => {
+      cbs.orchdUp(null);
+    });
+
+    expect(orchdListGoalsMock).toHaveBeenCalledWith("p1");
+    expect(orchdListTasksMock).toHaveBeenCalledWith("p1");
+    expect(orchdListIdeasMock).toHaveBeenCalledWith(null);
+    expect(orchdListInsightsMock).toHaveBeenCalledWith(null);
+    expect(orchdGetRulesetMock).toHaveBeenCalledWith("project", "p1");
+  });
+
+  it("orchd://up with NO project open refreshes only the project list (no per-project fetches)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    orchdListGoalsMock.mockClear();
+    orchdListTasksMock.mockClear();
+
+    await act(async () => {
+      cbs.orchdUp(null);
+    });
+
+    expect(orchdListGoalsMock).not.toHaveBeenCalled();
+    expect(orchdListTasksMock).not.toHaveBeenCalled();
+  });
+
+  it("orchd://incompatible sets orchdIncompatible (never auto-clears)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(useAppStore.getState().orchdIncompatible).toBe(false);
+    await act(async () => {
+      cbs.orchdIncompatible(null);
+    });
+    expect(useAppStore.getState().orchdIncompatible).toBe(true);
   });
 });

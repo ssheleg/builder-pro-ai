@@ -11,6 +11,15 @@ import {
   onFsChanged,
   onFsWatchError,
   onWorkspaceUpdated,
+  onOrchdProjectsChanged,
+  onOrchdGoalsChanged,
+  onOrchdIdeasChanged,
+  onOrchdInsightsChanged,
+  onOrchdTasksChanged,
+  onOrchdRulesetChanged,
+  onOrchdDown,
+  onOrchdUp,
+  onOrchdIncompatible,
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
@@ -166,6 +175,57 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       }),
     );
 
+    // orchd domain events (spec §9/§10, D6, S3 T13): coarse invalidation pushes — each
+    // `orchd://*-changed` names ONLY what changed, so the handler just re-fetches that list from
+    // the daemon via the store's matching `refresh*` action. `goals-changed`/`tasks-changed` name
+    // the ONE project whose list changed and re-fetch ONLY that project's entry, never every
+    // project's (see `store.ts`'s `goalsByProject`/`tasksByProject` docs).
+    track(onOrchdProjectsChanged(() => void useAppStore.getState().refreshProjects()));
+    track(onOrchdGoalsChanged((p) => void useAppStore.getState().refreshGoals(p.projectId)));
+    track(onOrchdIdeasChanged(() => void useAppStore.getState().refreshIdeas()));
+    track(onOrchdInsightsChanged(() => void useAppStore.getState().refreshInsights()));
+    track(onOrchdTasksChanged((p) => void useAppStore.getState().refreshTasks(p.projectId)));
+    track(
+      onOrchdRulesetChanged((p) => {
+        const key = p.scope === "global" ? "global" : `project:${p.projectId}`;
+        void useAppStore.getState().refreshRuleset(key);
+      }),
+    );
+    // orchd connection state (spec §9): a DIRECT 1:1 mapping (see
+    // `broker.rs::map_orchd_conn_state`'s doc) — unlike the sessiond trio there is no
+    // reconnect-tracking scheme, `orchd://down`/`orchd://up` just flip `orchdDown`.
+    track(onOrchdDown(() => useAppStore.getState().setOrchdDown(true)));
+    track(
+      onOrchdUp(() => {
+        // `orchd://up` is the "orchd is now reachable" signal — for the INITIAL connect as well
+        // as every later reconnect (broker.rs fires it on every `Connected`). The initial
+        // `refreshProjects()` below (fired once, right after these subscriptions register) races
+        // orchd's async bring-up: `bring_up_orchd` is spawned and `setup()` returns immediately,
+        // and orchd's bounded connect-retry can take up to ~4s — so on a cold boot that race is
+        // routinely LOST, that first fetch rejects with `Disconnected`, and without this refetch
+        // `projects` would stay `[]` permanently until some unrelated `orchd://projects-changed`
+        // happened to fire (the core "open the app → see my projects" path silently never
+        // populating). So re-load the project list here, and — if a project panel is currently
+        // open — repopulate its lists too, so an open panel isn't left stale after a reconnect.
+        const s = useAppStore.getState();
+        s.setOrchdDown(false);
+        void s.refreshProjects();
+        const projectId = s.activeProjectId;
+        if (projectId !== null) {
+          void s.refreshGoals(projectId);
+          void s.refreshTasks(projectId);
+          void s.refreshIdeas();
+          void s.refreshInsights();
+          void s.refreshRuleset(`project:${projectId}`);
+        }
+      }),
+    );
+    // FATAL (Pv2 §6.2, mirrors `onDaemonIncompatible` above): the orchd client's connection task
+    // has exited and will not reconnect on its own. The upgrade dialog itself is T19's job (spec
+    // §10: the generalized `UpgradeDialog` reads both daemons' flag pairs) — this task only owns
+    // the flag.
+    track(onOrchdIncompatible(() => useAppStore.getState().setOrchdIncompatible(true)));
+
     /**
      * `list_workspaces`/`list_sessions` reject while the core hasn't finished connecting to
      * the daemon yet (no event marks that first success). Retry with a bounded backoff until
@@ -237,6 +297,15 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     }
 
     void hydrate(0);
+    // Initial orchd hydrate (spec §10, S3 T13): mirrors `hydrate(0)` above but for the domain
+    // slice — fire once, right after every subscription above is registered. This has no
+    // bounded-retry loop of its own: a failure (e.g. orchd not yet connected — its async
+    // bring-up routinely loses the race with this call on a cold boot) is surfaced honestly via
+    // `refreshProjects`'s own toast (`store.ts`), and the `onOrchdUp` handler above re-fires this
+    // exact load once orchd actually connects — so a lost initial race self-heals rather than
+    // leaving `projects` empty forever. Later `orchd://projects-changed` pushes keep it live
+    // thereafter.
+    void useAppStore.getState().refreshProjects();
 
     return () => {
       disposed = true;

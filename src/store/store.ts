@@ -3,6 +3,24 @@ import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
 import type { FsEntry } from "../ipc/fs";
+import type {
+  DomainTask,
+  Goal,
+  Idea,
+  Insight,
+  Project,
+  RuleScope,
+  RuleSetView,
+} from "../ipc/orchd-types";
+import {
+  orchdGetRuleset,
+  orchdListGoals,
+  orchdListIdeas,
+  orchdListInsights,
+  orchdListProjects,
+  orchdListTasks,
+  describeOrchdError,
+} from "../ipc/orchd";
 
 /**
  * Global app state (spec §12). METADATA ONLY — PTY bytes never enter this store;
@@ -50,11 +68,12 @@ export interface AppState {
   hydrated: boolean;
 
   /**
-   * Top-level navigation (spec §6.6/§6.2): `"home"` is the attention-first Home view over ALL
-   * terminals across workspaces; `"workspace"` is the existing per-workspace terminal layout.
-   * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
+   * Top-level navigation (spec §6.6/§6.2/§10): `"home"` is the attention-first Home view over ALL
+   * terminals across workspaces; `"workspace"` is the existing per-workspace terminal layout;
+   * `"project"` is the S3 project panel (`openProject`, T18). Defaults to `"home"` — the owner's
+   * daily loop starts there, never mid-workspace.
    */
-  view: "home" | "workspace";
+  view: "home" | "workspace" | "project";
 
   /**
    * File-explorer slice (spec §6.6/§6.4). Every keyed map here uses the SAME key format:
@@ -90,6 +109,53 @@ export interface AppState {
    */
   toast: string | null;
 
+  /**
+   * App-domain slice (spec §10, S3 T13): projects/goals/ideas/insights/tasks/rulesets live in
+   * `bpa-orchd`, a SECOND daemon independent of sessiond — this slice is invalidation-driven
+   * (D6: coarse `orchd://*-changed` pushes tell the frontend WHAT changed; the matching `refresh*`
+   * action below re-fetches that list wholesale from `./orchd.ts`, replacing it — no client-side
+   * merge/patch of individual rows).
+   */
+  /** The project currently open in the project panel (T18), or `null` on Home/workspace views.
+   * Set by `openProject`. */
+  activeProjectId: string | null;
+  /** Every project (spec §5.1: `orchd_list_projects` has no filter — always the whole table).
+   * Replaced wholesale by `refreshProjects`. */
+  projects: Project[];
+  /** A project's goal TREE (D5: full tree, not just top-level), keyed by `projectId`. Absence
+   * means "not yet fetched" — same convention as `treeCache`. Replaced per-key by
+   * `refreshGoals(projectId)`; a `GoalsChanged{projectId}` push never touches any OTHER project's
+   * entry. */
+  goalsByProject: Record<string, Goal[]>;
+  /** Every idea, across every project (ideas are NOT split per project in this slice — the
+   * ⌘K quick-capture inbox and Идеи panel filter client-side). Replaced wholesale by
+   * `refreshIdeas`. */
+  ideas: Idea[];
+  /** Every insight, across every project. Mirrors `ideas` exactly. Replaced wholesale by
+   * `refreshInsights`. */
+  insights: Insight[];
+  /** A project's flat task list (subtasks included, `parentId`-linked), keyed by `projectId`.
+   * Mirrors `goalsByProject` exactly — absence means "not yet fetched", replaced per-key by
+   * `refreshTasks(projectId)`. */
+  tasksByProject: Record<string, DomainTask[]>;
+  /** RuleSet views keyed `` `global` `` (the one global ruleset) or `` `project:${id}` `` (a
+   * single project's ruleset) — mirrors `orchd_get_ruleset`'s `(scope, projectId)` pair collapsed
+   * into one string key. Replaced per-key by `refreshRuleset(key)`. */
+  rulesets: Record<string, RuleSetView>;
+  /** Honest orchd connectivity (spec §9/§11, mirrors sessiond's `daemonConnected` inverted):
+   * `true` while the `orchd://down` event is the most recent connection-state signal seen, `false`
+   * once `orchd://up` fires. Every domain surface shows the shared "Оркестратор недоступен"
+   * banner + disables mutating controls while this is `true` (T19). */
+  orchdDown: boolean;
+  /** Set by `orchd://incompatible` (FATAL, like `daemonIncompatible` — the orchd client's
+   * connection task has exited and will not reconnect on its own; never auto-clears). */
+  orchdIncompatible: boolean;
+  /** Pure UI visibility for the (T19-generalized) upgrade dialog's orchd branch. Independent of
+   * `orchdIncompatible` (mirrors `upgradeDialogOpen`'s relationship to `daemonIncompatible` — see
+   * that field's doc above for the same honesty invariant: Cancel must not clear
+   * `orchdIncompatible`). */
+  orchdUpgradeDialogOpen: boolean;
+
   /** Insert or replace a session by `meta.id`. Idempotent. */
   upsertSession: (meta: SessionMeta) => void;
   /** Delete a session; clears `activeSessionId` if it pointed at the removed session. */
@@ -122,7 +188,7 @@ export interface AppState {
   setActiveSession: (id: SessionId | null) => void;
 
   /** Switch the top-level view. See `view`'s doc above. */
-  setView: (v: "home" | "workspace") => void;
+  setView: (v: "home" | "workspace" | "project") => void;
   /** Set (`open=true`) or clear (`open=false`) one directory's expanded flag. */
   setExpanded: (root: string, rel: string, open: boolean) => void;
   /** Insert or replace one directory's cached listing. */
@@ -160,6 +226,34 @@ export interface AppState {
   /** Clear the current toast immediately (e.g. a manual dismiss action) and cancel its pending
    * auto-dismiss timer so it cannot later clear a DIFFERENT toast shown after this one. */
   dismissToast: () => void;
+
+  /** Re-fetch `projects` wholesale from orchd (`orchd_list_projects` has no filter). The
+   * `orchd://projects-changed` handler (App.tsx) and T18's project UI both call this directly —
+   * a failure shows the mapped honest message as a toast (spec §7) rather than being swallowed. */
+  refreshProjects: () => Promise<void>;
+  /** Re-fetch ONE project's goal tree, replacing only `goalsByProject[projectId]` — every other
+   * project's entry is left untouched (see `goalsByProject`'s doc above). */
+  refreshGoals: (projectId: string) => Promise<void>;
+  /** Re-fetch `ideas` wholesale (every project, unfiltered — see `ideas`'s doc above). */
+  refreshIdeas: () => Promise<void>;
+  /** Re-fetch `insights` wholesale. Mirrors `refreshIdeas` exactly. */
+  refreshInsights: () => Promise<void>;
+  /** Re-fetch ONE project's task list, replacing only `tasksByProject[projectId]`. Mirrors
+   * `refreshGoals` exactly. */
+  refreshTasks: (projectId: string) => Promise<void>;
+  /** Re-fetch one ruleset by its `rulesets` key (`` `global` `` or `` `project:${id}` `` — see
+   * `rulesets`'s doc above), replacing only that key's entry. */
+  refreshRuleset: (key: string) => Promise<void>;
+  /** Open the project panel: sets `view: "project"` and `activeProjectId: id` (T18 renders the
+   * panel itself; this task only owns the state transition). */
+  openProject: (id: string) => void;
+  /** Set `orchdDown`. See its doc above. */
+  setOrchdDown: (v: boolean) => void;
+  /** Set `orchdIncompatible`. See its doc above — never auto-clears, mirrors
+   * `setDaemonIncompatible`. */
+  setOrchdIncompatible: (v: boolean) => void;
+  /** Set `orchdUpgradeDialogOpen`. See its doc above. */
+  setOrchdUpgradeDialogOpen: (v: boolean) => void;
 }
 
 /** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
@@ -167,10 +261,23 @@ function fsKey(root: string, rel: string): string {
   return `${root}\t${rel}`;
 }
 
+/**
+ * The global ruleset scope's key is the literal `` `global` `` (spec §10: `rulesets`' key
+ * format). Every OTHER key is a project scope, `` `project:${id}` `` — this parses one key back
+ * into `orchd_get_ruleset`'s `(scope, projectId)` pair. A key that is neither `"global"` nor a
+ * `"project:"`-prefixed string is treated as a project id verbatim (defensive default; every
+ * caller in this codebase only ever constructs keys via the two documented forms).
+ */
+function parseRulesetKey(key: string): { scope: RuleScope; projectId: string | null } {
+  if (key === "global") return { scope: "global", projectId: null };
+  const projectId = key.startsWith("project:") ? key.slice("project:".length) : key;
+  return { scope: "project", projectId };
+}
+
 /** How long a toast stays up before auto-dismissing (Toast atom, spec §7). */
 const TOAST_AUTO_DISMISS_MS = 4000;
 
-export const useAppStore = create<AppState>((set) => {
+export const useAppStore = create<AppState>((set, get) => {
   // Toast auto-dismiss bookkeeping (closure state, not store state — it's write-only plumbing,
   // like terminal-manager's attachGeneration guard). `token` is bumped by every showToast/
   // dismissToast call; a pending timeout only clears the toast if its OWN token still matches the
@@ -203,6 +310,16 @@ export const useAppStore = create<AppState>((set) => {
     showIgnored: false,
     filesRailOpen: false,
     watchPaused: false,
+    activeProjectId: null,
+    projects: [],
+    goalsByProject: {},
+    ideas: [],
+    insights: [],
+    tasksByProject: {},
+    rulesets: {},
+    orchdDown: false,
+    orchdIncompatible: false,
+    orchdUpgradeDialogOpen: false,
     toast: null,
 
     upsertSession: (meta) =>
@@ -334,5 +451,73 @@ export const useAppStore = create<AppState>((set) => {
       toastToken += 1;
       set({ toast: null });
     },
+
+    // ── app-domain slice (spec §10, S3 T13) ─────────────────────────────────────────────────
+    //
+    // Every `refresh*` below follows the same shape: fetch via `./orchd.ts`, replace the
+    // matching slice on success, or surface the mapped honest message as a toast on failure
+    // (spec §7 "every async failure is a toast... never console-only") — never a silent no-op,
+    // never a thrown/unhandled rejection.
+
+    refreshProjects: async () => {
+      try {
+        const projects = await orchdListProjects();
+        set({ projects });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshGoals: async (projectId) => {
+      try {
+        const goals = await orchdListGoals(projectId);
+        set((s) => ({ goalsByProject: { ...s.goalsByProject, [projectId]: goals } }));
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshIdeas: async () => {
+      try {
+        const ideas = await orchdListIdeas(null);
+        set({ ideas });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshInsights: async () => {
+      try {
+        const insights = await orchdListInsights(null);
+        set({ insights });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshTasks: async (projectId) => {
+      try {
+        const tasks = await orchdListTasks(projectId);
+        set((s) => ({ tasksByProject: { ...s.tasksByProject, [projectId]: tasks } }));
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshRuleset: async (key) => {
+      const { scope, projectId } = parseRulesetKey(key);
+      try {
+        const view = await orchdGetRuleset(scope, projectId);
+        set((s) => ({ rulesets: { ...s.rulesets, [key]: view } }));
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    openProject: (id) => set({ view: "project", activeProjectId: id }),
+
+    setOrchdDown: (v) => set({ orchdDown: v }),
+    setOrchdIncompatible: (v) => set({ orchdIncompatible: v }),
+    setOrchdUpgradeDialogOpen: (v) => set({ orchdUpgradeDialogOpen: v }),
   };
 });

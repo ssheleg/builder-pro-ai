@@ -1,8 +1,26 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { useAppStore } from "./store";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
 import type { FsEntry } from "../ipc/fs";
+import type { DomainTask, Goal, Idea, Insight, Project, RuleSetView } from "../ipc/orchd-types";
+
+const orchdListProjectsMock = vi.fn();
+const orchdListGoalsMock = vi.fn();
+const orchdListIdeasMock = vi.fn();
+const orchdListInsightsMock = vi.fn();
+const orchdListTasksMock = vi.fn();
+const orchdGetRulesetMock = vi.fn();
+vi.mock("../ipc/orchd", () => ({
+  orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
+  orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
+  orchdListIdeas: (...a: unknown[]) => orchdListIdeasMock(...a),
+  orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
+  orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
+  orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
+  describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
+}));
+
+import { useAppStore } from "./store";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: "s1",
@@ -23,6 +41,12 @@ const initial = useAppStore.getState();
 
 describe("useAppStore", () => {
   beforeEach(() => {
+    orchdListProjectsMock.mockReset();
+    orchdListGoalsMock.mockReset();
+    orchdListIdeasMock.mockReset();
+    orchdListInsightsMock.mockReset();
+    orchdListTasksMock.mockReset();
+    orchdGetRulesetMock.mockReset();
     useAppStore.setState(
       {
         sessions: {},
@@ -41,6 +65,16 @@ describe("useAppStore", () => {
         filesRailOpen: false,
         watchPaused: false,
         toast: null,
+        activeProjectId: null,
+        projects: [],
+        goalsByProject: {},
+        ideas: [],
+        insights: [],
+        tasksByProject: {},
+        rulesets: {},
+        orchdDown: false,
+        orchdIncompatible: false,
+        orchdUpgradeDialogOpen: false,
       },
       false,
     );
@@ -78,10 +112,12 @@ describe("useAppStore", () => {
     expect(typeof initial.setWatchPaused).toBe("function");
   });
 
-  it("setView flips between \"home\" and \"workspace\"", () => {
+  it('setView flips between "home", "workspace" and "project" (spec §10 widened union)', () => {
     expect(useAppStore.getState().view).toBe("home");
     useAppStore.getState().setView("workspace");
     expect(useAppStore.getState().view).toBe("workspace");
+    useAppStore.getState().setView("project");
+    expect(useAppStore.getState().view).toBe("project");
     useAppStore.getState().setView("home");
     expect(useAppStore.getState().view).toBe("home");
   });
@@ -468,5 +504,221 @@ describe("useAppStore", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ---- App-domain slice (S3 T13, spec §10) ----
+
+  const project = (over: Partial<Project> = {}): Project => ({
+    id: "p1",
+    name: "Acme",
+    description: "desc",
+    status: "active",
+    workspaceIds: ["w1"],
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  const goal = (over: Partial<Goal> = {}): Goal => ({
+    id: "g1",
+    projectId: "p1",
+    parentId: null,
+    kind: "strategic",
+    title: "Ship v1",
+    body: "",
+    ord: 0,
+    status: "active",
+    metricRefs: [],
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  const idea = (over: Partial<Idea> = {}): Idea => ({
+    id: "i1",
+    projectId: null,
+    title: "An idea",
+    body: "",
+    lifecycle: "captured",
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  const insight = (over: Partial<Insight> = {}): Insight => ({
+    id: "in1",
+    projectId: null,
+    source: "interview",
+    title: "An insight",
+    body: "",
+    fitVerdict: null,
+    fitReasoning: "",
+    status: "new",
+    resolutionReasoning: "",
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  const task = (over: Partial<DomainTask> = {}): DomainTask => ({
+    id: "t1",
+    projectId: "p1",
+    parentId: null,
+    title: "A task",
+    body: "",
+    status: "todo",
+    source: "idea",
+    sourceId: null,
+    tags: [],
+    rank: 0,
+    rankAgent: null,
+    rankAgentReasoning: "",
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  const rulesetView = (over: Partial<RuleSetView> = {}): RuleSetView => ({
+    rule: {
+      id: "r1",
+      scope: "global",
+      projectId: null,
+      mdPath: "/rules.md",
+      mdHash: "abc",
+      policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    mdContent: "# rules",
+    fileState: "ok",
+    ...over,
+  });
+
+  it("has the spec §10 initial shape (empty/false everywhere)", () => {
+    const s = useAppStore.getState();
+    expect(s.activeProjectId).toBeNull();
+    expect(s.projects).toEqual([]);
+    expect(s.goalsByProject).toEqual({});
+    expect(s.ideas).toEqual([]);
+    expect(s.insights).toEqual([]);
+    expect(s.tasksByProject).toEqual({});
+    expect(s.rulesets).toEqual({});
+    expect(s.orchdDown).toBe(false);
+    expect(s.orchdIncompatible).toBe(false);
+    expect(s.orchdUpgradeDialogOpen).toBe(false);
+  });
+
+  it("openProject sets view to \"project\" and activeProjectId to the given id", () => {
+    useAppStore.getState().openProject("p1");
+    expect(useAppStore.getState().view).toBe("project");
+    expect(useAppStore.getState().activeProjectId).toBe("p1");
+  });
+
+  it("refreshProjects replaces the projects list from orchdListProjects", async () => {
+    orchdListProjectsMock.mockResolvedValueOnce([project()]);
+    await useAppStore.getState().refreshProjects();
+    expect(useAppStore.getState().projects).toEqual([project()]);
+
+    orchdListProjectsMock.mockResolvedValueOnce([project({ id: "p2", name: "Other" })]);
+    await useAppStore.getState().refreshProjects();
+    // REPLACED, not merged/appended — only the new list survives.
+    expect(useAppStore.getState().projects).toEqual([project({ id: "p2", name: "Other" })]);
+  });
+
+  it("refreshProjects surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    orchdListProjectsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshProjects();
+    expect(useAppStore.getState().projects).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  it("refreshGoals(projectId) updates ONLY the named project's goals, leaving others untouched", async () => {
+    useAppStore.setState({ goalsByProject: { p2: [goal({ id: "g2", projectId: "p2" })] } }, false);
+
+    orchdListGoalsMock.mockResolvedValueOnce([goal({ id: "g1", projectId: "p1" })]);
+    await useAppStore.getState().refreshGoals("p1");
+
+    expect(orchdListGoalsMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().goalsByProject["p1"]).toEqual([
+      goal({ id: "g1", projectId: "p1" }),
+    ]);
+    // A DIFFERENT project's entry (p2) must be untouched by a p1 refresh.
+    expect(useAppStore.getState().goalsByProject["p2"]).toEqual([
+      goal({ id: "g2", projectId: "p2" }),
+    ]);
+  });
+
+  it("refreshIdeas replaces the whole-store ideas list, calling orchdListIdeas(null)", async () => {
+    orchdListIdeasMock.mockResolvedValueOnce([idea()]);
+    await useAppStore.getState().refreshIdeas();
+    expect(orchdListIdeasMock).toHaveBeenCalledWith(null);
+    expect(useAppStore.getState().ideas).toEqual([idea()]);
+  });
+
+  it("refreshInsights replaces the whole-store insights list, calling orchdListInsights(null)", async () => {
+    orchdListInsightsMock.mockResolvedValueOnce([insight()]);
+    await useAppStore.getState().refreshInsights();
+    expect(orchdListInsightsMock).toHaveBeenCalledWith(null);
+    expect(useAppStore.getState().insights).toEqual([insight()]);
+  });
+
+  it("refreshTasks(projectId) updates ONLY the named project's tasks, leaving others untouched", async () => {
+    useAppStore.setState({ tasksByProject: { p2: [task({ id: "t2", projectId: "p2" })] } }, false);
+
+    orchdListTasksMock.mockResolvedValueOnce([task({ id: "t1", projectId: "p1" })]);
+    await useAppStore.getState().refreshTasks("p1");
+
+    expect(orchdListTasksMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().tasksByProject["p1"]).toEqual([
+      task({ id: "t1", projectId: "p1" }),
+    ]);
+    expect(useAppStore.getState().tasksByProject["p2"]).toEqual([
+      task({ id: "t2", projectId: "p2" }),
+    ]);
+  });
+
+  it('refreshRuleset("global") calls orchdGetRuleset("global", null) and keys the result "global"', async () => {
+    orchdGetRulesetMock.mockResolvedValueOnce(rulesetView());
+    await useAppStore.getState().refreshRuleset("global");
+    expect(orchdGetRulesetMock).toHaveBeenCalledWith("global", null);
+    expect(useAppStore.getState().rulesets["global"]).toEqual(rulesetView());
+  });
+
+  it('refreshRuleset("project:<id>") calls orchdGetRuleset("project", id) and keys by the full string, leaving other keys untouched', async () => {
+    useAppStore.setState({ rulesets: { global: rulesetView() } }, false);
+    const projectView = rulesetView({
+      rule: { ...rulesetView().rule, id: "r2", scope: "project", projectId: "p1" },
+    });
+    orchdGetRulesetMock.mockResolvedValueOnce(projectView);
+
+    await useAppStore.getState().refreshRuleset("project:p1");
+
+    expect(orchdGetRulesetMock).toHaveBeenCalledWith("project", "p1");
+    expect(useAppStore.getState().rulesets["project:p1"]).toEqual(projectView);
+    // The pre-existing "global" entry must be untouched by a project-scoped refresh.
+    expect(useAppStore.getState().rulesets["global"]).toEqual(rulesetView());
+  });
+
+  it("setOrchdDown and setOrchdIncompatible flip their flags independently from the false default", () => {
+    expect(useAppStore.getState().orchdDown).toBe(false);
+    expect(useAppStore.getState().orchdIncompatible).toBe(false);
+    useAppStore.getState().setOrchdDown(true);
+    expect(useAppStore.getState().orchdDown).toBe(true);
+    expect(useAppStore.getState().orchdIncompatible).toBe(false);
+    useAppStore.getState().setOrchdIncompatible(true);
+    expect(useAppStore.getState().orchdIncompatible).toBe(true);
+    useAppStore.getState().setOrchdDown(false);
+    expect(useAppStore.getState().orchdDown).toBe(false);
+    // setOrchdDown(false) must not touch orchdIncompatible (independent flags).
+    expect(useAppStore.getState().orchdIncompatible).toBe(true);
+  });
+
+  it("setOrchdUpgradeDialogOpen flips the flag from the false default", () => {
+    expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(false);
+    useAppStore.getState().setOrchdUpgradeDialogOpen(true);
+    expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(true);
+    useAppStore.getState().setOrchdUpgradeDialogOpen(false);
+    expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(false);
   });
 });

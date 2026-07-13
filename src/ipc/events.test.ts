@@ -22,6 +22,15 @@ import {
   onFsChanged,
   onFsWatchError,
   onWorkspaceUpdated,
+  onOrchdProjectsChanged,
+  onOrchdGoalsChanged,
+  onOrchdIdeasChanged,
+  onOrchdInsightsChanged,
+  onOrchdTasksChanged,
+  onOrchdRulesetChanged,
+  onOrchdDown,
+  onOrchdUp,
+  onOrchdIncompatible,
 } from "./events";
 import type { SessionMeta, Workspace } from "./types";
 import type {
@@ -29,6 +38,9 @@ import type {
   ExitedPayload,
   FsChangedPayload,
   FsWatchErrorPayload,
+  GoalsChangedPayload,
+  TasksChangedPayload,
+  RulesetChangedPayload,
 } from "./events";
 
 describe("ipc/events", () => {
@@ -142,5 +154,91 @@ describe("ipc/events", () => {
     const w: Workspace = { id: "w1", name: "p", rootPath: "/p", roots: ["/p", "/q"] };
     registered.get("workspace://updated")!({ payload: w });
     expect(cb).toHaveBeenCalledWith(w);
+  });
+
+  // ── orchd coarse-invalidation + connection events (S3 T13) ─────────────────────────────────
+
+  it("onOrchdProjectsChanged subscribes to orchd://projects-changed and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    const un = await onOrchdProjectsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://projects-changed", expect.any(Function));
+    registered.get("orchd://projects-changed")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(un).toBe(unlisten);
+  });
+
+  it("onOrchdGoalsChanged subscribes to orchd://goals-changed and unwraps {projectId}", async () => {
+    const cb = vi.fn();
+    await onOrchdGoalsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://goals-changed", expect.any(Function));
+    const p: GoalsChangedPayload = { projectId: "p1" };
+    registered.get("orchd://goals-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdIdeasChanged subscribes to orchd://ideas-changed and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    await onOrchdIdeasChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://ideas-changed", expect.any(Function));
+    registered.get("orchd://ideas-changed")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("onOrchdInsightsChanged subscribes to orchd://insights-changed and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    await onOrchdInsightsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://insights-changed", expect.any(Function));
+    registered.get("orchd://insights-changed")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("onOrchdTasksChanged subscribes to orchd://tasks-changed and unwraps {projectId}", async () => {
+    const cb = vi.fn();
+    await onOrchdTasksChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://tasks-changed", expect.any(Function));
+    const p: TasksChangedPayload = { projectId: "p1" };
+    registered.get("orchd://tasks-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdRulesetChanged subscribes to orchd://ruleset-changed and unwraps {scope, projectId}", async () => {
+    const cb = vi.fn();
+    await onOrchdRulesetChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://ruleset-changed", expect.any(Function));
+    const p: RulesetChangedPayload = { scope: "project", projectId: "p1" };
+    registered.get("orchd://ruleset-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdRulesetChanged carries a null projectId through for the global scope", async () => {
+    const cb = vi.fn();
+    await onOrchdRulesetChanged(cb);
+    const p: RulesetChangedPayload = { scope: "global", projectId: null };
+    registered.get("orchd://ruleset-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdDown subscribes to orchd://down and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    await onOrchdDown(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://down", expect.any(Function));
+    registered.get("orchd://down")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("onOrchdUp subscribes to orchd://up and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    await onOrchdUp(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://up", expect.any(Function));
+    registered.get("orchd://up")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("onOrchdIncompatible subscribes to orchd://incompatible and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    await onOrchdIncompatible(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://incompatible", expect.any(Function));
+    registered.get("orchd://incompatible")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
   });
 });
