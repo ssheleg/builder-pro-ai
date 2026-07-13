@@ -8,4 +8,5 @@
 
 pub mod dirs;
 pub mod logging;
+pub mod migrate;
 pub mod singleton;

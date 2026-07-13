@@ -188,72 +188,92 @@ impl Db {
 
     /// Run migrations from `from_version` to `SCHEMA_VERSION` in one transaction.
     /// Fails closed (typed error) on any error — never panics (spec §11).
+    ///
+    /// Re-seated (S3 phase 1, spec §3) onto `bpa_daemon_core::migrate::run_migrations`: the
+    /// whole-chain-transaction, fail-closed semantics now live there, byte-for-byte unchanged.
+    /// This wrapper only supplies the 3-entry step table (each step's `execute_batch` body moved
+    /// verbatim from the pre-extraction inline `migrate`) and re-wraps `MigrateError` back into
+    /// `PersistError::Migration` so `.code() == "DbMigration"` and every message string existing
+    /// consumers see stay identical.
     fn migrate(&self, from_version: i64) -> Result<(), PersistError> {
-        if from_version == SCHEMA_VERSION {
-            return Ok(());
-        }
-        if from_version > SCHEMA_VERSION {
-            return Err(PersistError::Migration(format!(
-                "db user_version {from_version} newer than supported {SCHEMA_VERSION}"
-            )));
-        }
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .map_err(|e| PersistError::Migration(e.to_string()))?;
-        if from_version < 1 {
-            tx.execute_batch(
-                "CREATE TABLE IF NOT EXISTS workspace (
-                   id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
-                 CREATE TABLE IF NOT EXISTS session (
-                   id TEXT PRIMARY KEY,
-                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
-                   title TEXT NOT NULL, shell TEXT NOT NULL, cwd TEXT NOT NULL,
-                   cols INTEGER NOT NULL, rows INTEGER NOT NULL,
-                   lifecycle TEXT NOT NULL,
-                   exit_code INTEGER, exit_signal TEXT,
-                   created_at INTEGER NOT NULL);
-                 CREATE TABLE IF NOT EXISTS scrollback (
-                   session_id TEXT NOT NULL REFERENCES session(id),
-                   seq INTEGER NOT NULL, bytes BLOB NOT NULL, ts INTEGER NOT NULL,
-                   PRIMARY KEY (session_id, seq));",
-            )
-            .map_err(|e| PersistError::Migration(e.to_string()))?;
-        }
-        if from_version < 2 {
-            tx.execute_batch(
-                "CREATE TABLE IF NOT EXISTS command_events (
-                   session_id TEXT NOT NULL REFERENCES session(id),
-                   seq        INTEGER NOT NULL,
-                   ts         INTEGER NOT NULL,
-                   kind       TEXT NOT NULL,
-                   exit_code  INTEGER,
-                   origin     TEXT NOT NULL DEFAULT 'gui',
-                   PRIMARY KEY (session_id, seq));",
-            )
-            .map_err(|e| PersistError::Migration(e.to_string()))?;
-        }
-        if from_version < 3 {
-            // S2 §3.2: equal ordered multi-root workspaces. Every pre-existing workspace's
-            // single `root_path` becomes its ord=0 root; `workspace.root_path` stays as a
-            // compat mirror (kept in sync by `upsert_workspace`/`remove_workspace_root`).
-            tx.execute_batch(
-                "CREATE TABLE IF NOT EXISTS workspace_root (
-                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
-                   ord          INTEGER NOT NULL,
-                   path         TEXT NOT NULL,
-                   PRIMARY KEY (workspace_id, ord));
-                 INSERT INTO workspace_root (workspace_id, ord, path)
-                   SELECT id, 0, root_path FROM workspace;",
-            )
-            .map_err(|e| PersistError::Migration(e.to_string()))?;
-        }
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| PersistError::Migration(e.to_string()))?;
-        tx.commit()
-            .map_err(|e| PersistError::Migration(e.to_string()))?;
-        Ok(())
+        const STEPS: &[bpa_daemon_core::migrate::Migration] = &[
+            bpa_daemon_core::migrate::Migration {
+                upto: 1,
+                apply: migrate_v1,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 2,
+                apply: migrate_v2,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 3,
+                apply: migrate_v3,
+            },
+        ];
+        bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
+            .map_err(|e| match e {
+                bpa_daemon_core::migrate::MigrateError::VersionTooNew { found, supported } => {
+                    PersistError::Migration(format!(
+                        "db user_version {found} newer than supported {supported}"
+                    ))
+                }
+                bpa_daemon_core::migrate::MigrateError::Sql(e) => {
+                    PersistError::Migration(e.to_string())
+                }
+            })
     }
+}
+
+/// v0 -> v1: base schema (workspace/session/scrollback). Body moved verbatim from the
+/// pre-extraction inline `migrate` (S3 phase 1, spec §3).
+fn migrate_v1(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workspace (
+           id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS session (
+           id TEXT PRIMARY KEY,
+           workspace_id TEXT NOT NULL REFERENCES workspace(id),
+           title TEXT NOT NULL, shell TEXT NOT NULL, cwd TEXT NOT NULL,
+           cols INTEGER NOT NULL, rows INTEGER NOT NULL,
+           lifecycle TEXT NOT NULL,
+           exit_code INTEGER, exit_signal TEXT,
+           created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS scrollback (
+           session_id TEXT NOT NULL REFERENCES session(id),
+           seq INTEGER NOT NULL, bytes BLOB NOT NULL, ts INTEGER NOT NULL,
+           PRIMARY KEY (session_id, seq));",
+    )
+}
+
+/// v1 -> v2: `command_events`. Body moved verbatim from the pre-extraction inline `migrate`
+/// (S3 phase 1, spec §3).
+fn migrate_v2(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS command_events (
+           session_id TEXT NOT NULL REFERENCES session(id),
+           seq        INTEGER NOT NULL,
+           ts         INTEGER NOT NULL,
+           kind       TEXT NOT NULL,
+           exit_code  INTEGER,
+           origin     TEXT NOT NULL DEFAULT 'gui',
+           PRIMARY KEY (session_id, seq));",
+    )
+}
+
+/// v2 -> v3 (S2 §3.2): equal ordered multi-root workspaces. Every pre-existing workspace's
+/// single `root_path` becomes its ord=0 root; `workspace.root_path` stays as a compat mirror
+/// (kept in sync by `upsert_workspace`/`remove_workspace_root`). Body moved verbatim from the
+/// pre-extraction inline `migrate` (S3 phase 1, spec §3).
+fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workspace_root (
+           workspace_id TEXT NOT NULL REFERENCES workspace(id),
+           ord          INTEGER NOT NULL,
+           path         TEXT NOT NULL,
+           PRIMARY KEY (workspace_id, ord));
+         INSERT INTO workspace_root (workspace_id, ord, path)
+           SELECT id, 0, root_path FROM workspace;",
+    )
 }
 
 /// Encode a lifecycle into (tag, exit_code, exit_signal) columns (spec §11).
