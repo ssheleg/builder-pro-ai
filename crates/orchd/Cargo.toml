@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 bpa-daemon-core = { workspace = true }
 bpa-orchd-proto = { workspace = true }
+bpa-paths = { workspace = true }
 bpa-protocol = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }

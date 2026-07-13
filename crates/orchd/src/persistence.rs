@@ -385,6 +385,18 @@ fn decode_project_status(s: &str) -> Result<ProjectStatus, OrchdPersistError> {
     }
 }
 
+/// Inverse of [`decode_project_status`] — needed by T9's `insert_project_raw` (spec §8), which
+/// writes an ALREADY-TYPED `Project.status` (parsed from an import bundle) back to its `TEXT`
+/// column; every other project-status write in this file goes through the `Create*`/mutating
+/// verbs above, which hard-code the literal `'active'`/`'archived'` SQL themselves instead of
+/// needing a reusable encoder.
+fn encode_project_status(s: &ProjectStatus) -> &'static str {
+    match s {
+        ProjectStatus::Active => "active",
+        ProjectStatus::Archived => "archived",
+    }
+}
+
 fn encode_goal_kind(k: &GoalKind) -> &'static str {
     match k {
         GoalKind::Strategic => "strategic",
@@ -1045,6 +1057,14 @@ impl Db {
             .collect::<Result<_, _>>()?;
         drop(stmt);
         ids.iter().map(|id| load_project(&self.conn, id)).collect()
+    }
+
+    /// Single-project fetch by id (spec §8's `export::export_project` needs a by-id lookup that
+    /// no other project verb provides — every other project method either creates/mutates one
+    /// project or lists ALL of them). Reads work unconditionally (no archived-project guard),
+    /// mirrors [`Db::list_projects`]/[`Db::list_goals`]. Unknown `id` ⇒ `NotFound`.
+    pub fn get_project(&self, id: &str) -> Result<Project, OrchdPersistError> {
+        load_project(&self.conn, id)
     }
 
     /// `AddProjectWorkspace` (spec §5.2): appends at `ord = max(ord) + 1`. A `workspace_id`
@@ -2222,6 +2242,248 @@ impl Db {
         tx.commit()?;
         Ok(ruleset)
     }
+}
+
+// ================================================================================
+// ---- raw-insert helpers for import (T9, spec §8, D7): field-verbatim inserts used ONLY by
+// `export::import_bundle`'s single transaction. Every value here comes from an already-parsed,
+// already-typed bundle row and is written to the DB EXACTLY as given — ids, `created_at`,
+// `updated_at`, `rank`, `ord`, `md_hash` included; nothing here generates an id, stamps
+// `now_ms()`, or auto-creates a strategic goal/ruleset row the way the `Create*` verb methods
+// above do (spec §8: "Import inserts raw rows in the tx (NOT the `CreateProject` verb) —
+// §5.2 auto-creates never double-fire"). Each helper maps a PK/UNIQUE collision to
+// `Conflict("<entity> <id> already exists")`; any other rusqlite error passes through as `Sql`
+// unchanged. Callers run every insert inside ONE transaction with `defer_foreign_keys` on (see
+// `export::import_project_bundles`), so these can run in whatever order the bundle's arrays are
+// in — a bundle's `tasks[]`/`goals[]` are NOT guaranteed parent-before-child (e.g. `tasks[]` is
+// sorted by `rank`, which can put a reparented/reranked subtask ahead of its parent).
+// ================================================================================
+
+/// Maps a raw-insert failure to `Conflict("<entity> <id> already exists")` (spec §8: "any id
+/// already present in the store ⇒ `Conflict`") when it's a PK/UNIQUE collision, otherwise passes
+/// the raw SQL error through unchanged. Shared by every `insert_*_raw` helper below.
+fn conflict_or_sql(e: rusqlite::Error, entity: &str, id: &str) -> OrchdPersistError {
+    if is_constraint_violation(&e) {
+        OrchdPersistError::Conflict(format!("{entity} {id} already exists"))
+    } else {
+        OrchdPersistError::Sql(e)
+    }
+}
+
+/// Raw-inserts a `project` row plus its `project_workspace` links, in the bundle's own
+/// `workspace_ids` order (`ord` = array index — mirrors [`Db::create_project`]'s own `ord`
+/// assignment, but here the ids/order come straight from the bundle, not freshly assigned). A
+/// `workspace_id` already linked to ANY project ⇒ `Conflict` (reuses [`map_workspace_conflict`]'s
+/// existing wording), same as the live verb.
+pub(crate) fn insert_project_raw(
+    tx: &rusqlite::Transaction,
+    p: &Project,
+) -> Result<(), OrchdPersistError> {
+    tx.execute(
+        "INSERT INTO project (id, name, description, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            p.id,
+            p.name,
+            p.description,
+            encode_project_status(&p.status),
+            p.created_at,
+            p.updated_at
+        ],
+    )
+    .map_err(|e| conflict_or_sql(e, "project", &p.id))?;
+    for (ord, workspace_id) in p.workspace_ids.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO project_workspace (project_id, workspace_id, ord) VALUES (?1, ?2, ?3)",
+            rusqlite::params![p.id, workspace_id, ord as i64],
+        )
+        .map_err(|e| map_workspace_conflict(e, workspace_id))?;
+    }
+    Ok(())
+}
+
+/// Raw-inserts one `goal` row.
+pub(crate) fn insert_goal_raw(
+    tx: &rusqlite::Transaction,
+    g: &Goal,
+) -> Result<(), OrchdPersistError> {
+    let metric_refs = serde_json::to_string(&g.metric_refs)
+        .map_err(|e| OrchdPersistError::Io(format!("failed to serialize goal.metric_refs: {e}")))?;
+    tx.execute(
+        "INSERT INTO goal
+           (id, project_id, parent_id, kind, title, body, ord, status, metric_refs,
+            created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            g.id,
+            g.project_id,
+            g.parent_id,
+            encode_goal_kind(&g.kind),
+            g.title,
+            g.body,
+            g.ord,
+            encode_goal_status(&g.status),
+            metric_refs,
+            g.created_at,
+            g.updated_at
+        ],
+    )
+    .map_err(|e| conflict_or_sql(e, "goal", &g.id))?;
+    Ok(())
+}
+
+/// Raw-inserts one `idea` row.
+pub(crate) fn insert_idea_raw(
+    tx: &rusqlite::Transaction,
+    i: &Idea,
+) -> Result<(), OrchdPersistError> {
+    tx.execute(
+        "INSERT INTO idea (id, project_id, title, body, lifecycle, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            i.id,
+            i.project_id,
+            i.title,
+            i.body,
+            encode_idea_lifecycle(&i.lifecycle),
+            i.created_at,
+            i.updated_at
+        ],
+    )
+    .map_err(|e| conflict_or_sql(e, "idea", &i.id))?;
+    Ok(())
+}
+
+/// Raw-inserts one `insight` row.
+pub(crate) fn insert_insight_raw(
+    tx: &rusqlite::Transaction,
+    ins: &Insight,
+) -> Result<(), OrchdPersistError> {
+    let fit_verdict = ins.fit_verdict.as_ref().map(encode_fit_verdict);
+    tx.execute(
+        "INSERT INTO insight
+           (id, project_id, source, title, body, fit_verdict, fit_reasoning, status,
+            resolution_reasoning, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            ins.id,
+            ins.project_id,
+            ins.source,
+            ins.title,
+            ins.body,
+            fit_verdict,
+            ins.fit_reasoning,
+            encode_insight_status(&ins.status),
+            ins.resolution_reasoning,
+            ins.created_at,
+            ins.updated_at
+        ],
+    )
+    .map_err(|e| conflict_or_sql(e, "insight", &ins.id))?;
+    Ok(())
+}
+
+/// Raw-inserts one `task` row.
+pub(crate) fn insert_task_raw(
+    tx: &rusqlite::Transaction,
+    t: &DomainTask,
+) -> Result<(), OrchdPersistError> {
+    let tags = serde_json::to_string(&t.tags)
+        .map_err(|e| OrchdPersistError::Io(format!("failed to serialize task.tags: {e}")))?;
+    tx.execute(
+        "INSERT INTO task
+           (id, project_id, parent_id, title, body, status, source, source_id, tags,
+            rank, rank_agent, rank_agent_reasoning, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        rusqlite::params![
+            t.id,
+            t.project_id,
+            t.parent_id,
+            t.title,
+            t.body,
+            encode_task_status(&t.status),
+            encode_task_source(&t.source),
+            t.source_id,
+            tags,
+            t.rank,
+            t.rank_agent,
+            t.rank_agent_reasoning,
+            t.created_at,
+            t.updated_at
+        ],
+    )
+    .map_err(|e| conflict_or_sql(e, "task", &t.id))?;
+    Ok(())
+}
+
+/// Inserts (or, for the GLOBAL scope, RECONCILES) one `ruleset` row. The caller
+/// (`export::import_ruleset`) has already resolved `r.md_path` to its FINAL on-disk location
+/// (verbatim if under `app_support`, repointed to the scope's default app-support path otherwise)
+/// and written any `mdContent` there BEFORE calling this — this function only ever writes the row,
+/// never touches the filesystem itself. `md_hash` is written verbatim from `r.md_hash` (never
+/// recomputed here), per D7 field-verbatim preservation.
+///
+/// **Scope split (spec §8 whole-store restore):**
+/// - `scope='global'` is a boot-seeded SINGLETON — `boot::ensure_global_ruleset` pre-creates
+///   exactly one such row at EVERY daemon boot, guarded by the `ruleset_single_global` partial
+///   unique index. A blind `INSERT` of a bundle's own global row would therefore ALWAYS collide
+///   on a real (booted) daemon, rolling back the entire one-tx import and losing every project.
+///   So global is RECONCILED: `ON CONFLICT(scope) WHERE scope='global' DO UPDATE` overwrites the
+///   existing seeded row's `md_path`/`md_hash`/`policy`/`updated_at` with the bundle's, keeping
+///   the seeded row's `id`/`created_at` (both boot impl details, not meaningful data). Into a
+///   TRULY empty store (no seeded row — e.g. the spec §8 "import into an empty store" DoD) the
+///   same statement just INSERTs the bundle's row verbatim, so the round-trip guarantee holds.
+/// - `scope='project'` keeps the strict field-verbatim `INSERT`: a project's ruleset row is
+///   1:1 with its (globally-unique) project, so a real collision there means the project already
+///   exists ⇒ `Conflict` + full rollback, which is correct.
+pub(crate) fn insert_ruleset_raw(
+    tx: &rusqlite::Transaction,
+    r: &RuleSet,
+) -> Result<(), OrchdPersistError> {
+    let policy = serde_json::to_string(&r.policy)
+        .map_err(|e| OrchdPersistError::Io(format!("failed to serialize ruleset.policy: {e}")))?;
+    match r.scope {
+        RuleScope::Global => {
+            // Reconcile the boot-seeded singleton (or insert verbatim if the store is empty).
+            tx.execute(
+                "INSERT INTO ruleset
+                   (id, scope, project_id, md_path, md_hash, policy, created_at, updated_at)
+                 VALUES (?1, 'global', NULL, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(scope) WHERE scope = 'global' DO UPDATE SET
+                   md_path = excluded.md_path,
+                   md_hash = excluded.md_hash,
+                   policy = excluded.policy,
+                   updated_at = excluded.updated_at",
+                rusqlite::params![
+                    r.id,
+                    r.md_path,
+                    r.md_hash,
+                    policy,
+                    r.created_at,
+                    r.updated_at
+                ],
+            )
+            .map_err(|e| conflict_or_sql(e, "ruleset", &r.id))?;
+        }
+        RuleScope::Project => {
+            tx.execute(
+                "INSERT INTO ruleset
+                   (id, scope, project_id, md_path, md_hash, policy, created_at, updated_at)
+                 VALUES (?1, 'project', ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    r.id,
+                    r.project_id,
+                    r.md_path,
+                    r.md_hash,
+                    policy,
+                    r.created_at,
+                    r.updated_at
+                ],
+            )
+            .map_err(|e| conflict_or_sql(e, "ruleset", &r.id))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

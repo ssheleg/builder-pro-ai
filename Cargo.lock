@@ -344,6 +344,7 @@ version = "0.1.0"
 dependencies = [
  "bpa-daemon-core",
  "bpa-orchd-proto",
+ "bpa-paths",
  "bpa-protocol",
  "libc",
  "rusqlite",

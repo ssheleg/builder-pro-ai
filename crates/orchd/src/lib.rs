@@ -3,6 +3,11 @@
 
 pub use bpa_orchd_proto as protocol;
 
+/// Export / import (spec §8, D7): `bundleFormat: 1` JSON bundles, field-verbatim import,
+/// frame-cap guard. Builds directly on `persistence::Db`'s public CRUD/getter surface plus a
+/// small set of `pub(crate)` raw-insert helpers `persistence` exposes just for this module's
+/// import transaction.
+pub mod export;
 pub mod persistence;
 pub mod socket_server;
 
