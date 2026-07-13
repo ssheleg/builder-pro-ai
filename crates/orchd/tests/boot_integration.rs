@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdRequest, OrchdResponse,
+    encode_orchd_frame, OrchdFrame, OrchdFrameDecoder, OrchdRequest, OrchdResponse,
     ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
@@ -156,8 +156,7 @@ async fn boot_handshake_ping_pong_and_clean_shutdown() {
         other => panic!("expected Pong, got {other:?}"),
     }
 
-    // Every other verb is a stub in this skeleton (T10 replaces the arm) — prove the honest
-    // "not implemented" error shape rather than a silent no-op or a crash.
+    // Real domain dispatch (T10): a fresh boot's project list is honestly empty, not a stub error.
     send_frame(
         &mut c,
         &OrchdFrame::Request {
@@ -169,12 +168,11 @@ async fn boot_handshake_ping_pong_and_clean_shutdown() {
     match recv_frame(&mut c).await {
         OrchdFrame::Response {
             id: 2,
-            res: OrchdResponse::Error { code, message },
+            res: OrchdResponse::Projects(projects),
         } => {
-            assert_eq!(code, OrchdErrorCode::Validation);
-            assert_eq!(message, "not implemented");
+            assert!(projects.is_empty(), "a fresh boot has no projects yet");
         }
-        other => panic!("expected a stub Error, got {other:?}"),
+        other => panic!("expected Projects([]), got {other:?}"),
     }
 
     // Real OrchdShutdown{drain:true} semantics: Ack over the wire, then `run()` returns and the
