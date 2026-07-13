@@ -9,6 +9,7 @@ name = "bpa_daemon_core"
 path = "src/lib.rs"
 
 [dependencies]
+bpa-protocol = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 tracing = { workspace = true }

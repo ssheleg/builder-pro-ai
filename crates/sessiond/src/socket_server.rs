@@ -9,9 +9,11 @@
 //! The very first bytes on every connection are a fixed, codec-independent preamble — not a CBOR
 //! frame — so a version-incompatible peer can always be told so, even one that cannot decode this
 //! daemon's CBOR at all (the failure mode `Request::Hello`-as-a-CBOR-frame had in v1). `handle_client`
-//! reads the client's `[min, max]` + build string within [`PREAMBLE_TIMEOUT`], negotiates a version
-//! via [`bpa_protocol::negotiate`], and replies `Accepted`/`Incompatible` before ever touching the
-//! CBOR frame dispatch loop below. A stuck, silent, or garbage-writing peer is closed once the
+//! delegates the whole handshake to `bpa_daemon_core::handshake::server_handshake` (S3 phase 1
+//! extraction, spec §3 — moved out of this module verbatim): it reads the client's `[min, max]` +
+//! build string within `bpa_protocol::PREAMBLE_TIMEOUT`, negotiates a version via
+//! `bpa_protocol::negotiate`, and writes `Accepted`/`Incompatible` before this module ever touches
+//! the CBOR frame dispatch loop below. A stuck, silent, or garbage-writing peer is closed once the
 //! timeout elapses rather than left to hang the connection task indefinitely.
 //!
 //! ## What this module owns vs. what Task 13 owns
@@ -59,9 +61,8 @@ use crate::shell_integration::{classify_shell, write_session_assets};
 use crate::singleton::check_peer_cred;
 
 use bpa_protocol::{
-    decode_client_preamble, encode_daemon_reply, encode_frame, negotiate, DaemonReply, Frame,
-    FrameDecoder, Push, Request, Response, SessionMeta, Workspace, DAEMON_MAX_VERSION,
-    DAEMON_MIN_VERSION, MAX_PREAMBLE_BUILD_LEN, PREAMBLE_TIMEOUT,
+    encode_frame, Frame, FrameDecoder, Push, Request, Response, SessionMeta, Workspace,
+    DAEMON_MAX_VERSION, DAEMON_MIN_VERSION,
 };
 
 /// Per-client bounded outbound queue depth (frames). Overflow (a client that stopped reading) ⇒
@@ -208,28 +209,13 @@ impl ServerDeps {
 /// `try_send`; a full/closed queue is silently skipped here (the owning client task independently
 /// detects overflow on its own reply path and tears itself down) so one dead client never blocks
 /// the fan-out to the others.
-#[derive(Clone, Default)]
-struct Broadcaster {
-    inner: Arc<std::sync::Mutex<std::collections::HashMap<u64, mpsc::Sender<Frame>>>>,
-}
-
-impl Broadcaster {
-    fn register(&self, id: u64, tx: mpsc::Sender<Frame>) {
-        self.inner.lock().unwrap().insert(id, tx);
-    }
-
-    fn deregister(&self, id: u64) {
-        self.inner.lock().unwrap().remove(&id);
-    }
-
-    /// Enqueue `push` into every registered client's outbound queue (best-effort, non-blocking).
-    fn broadcast(&self, push: Push) {
-        let map = self.inner.lock().unwrap();
-        for tx in map.values() {
-            let _ = tx.try_send(Frame::Push(push.clone()));
-        }
-    }
-}
+///
+/// Re-seated (S3 phase 1, spec §3) onto `bpa_daemon_core::broadcast::Broadcaster<F>` — the
+/// generic extraction of this exact type (was `socket_server.rs:211-231`). `Frame` is the fanned
+/// -out value here, so every call site now wraps its `Push` in `Frame::Push(..)` before calling
+/// `.broadcast(..)` — the bytes ultimately enqueued on each client's outbound queue are
+/// byte-identical to before the re-seat.
+type Broadcaster = bpa_daemon_core::broadcast::Broadcaster<Frame>;
 
 /// Accept loop (spec §7/§8.2/§13): peer-cred gate on accept, one task per client, handshake-gated
 /// dispatch, supervisor→push fan-out, best-effort scrollback persistence. Runs until `shutdown`
@@ -316,17 +302,17 @@ fn install_push_callbacks(deps: &Arc<ServerDeps>, broadcaster: Broadcaster) {
 
     let b_created = broadcaster.clone();
     supervisor.on_created(move |meta: SessionMeta| {
-        b_created.broadcast(Push::SessionCreated { meta });
+        b_created.broadcast(Frame::Push(Push::SessionCreated { meta }));
     });
 
     let b_status = broadcaster.clone();
     supervisor.on_status(move |u: StatusUpdate| {
-        b_status.broadcast(Push::StateChanged {
+        b_status.broadcast(Frame::Push(Push::StateChanged {
             session_id: u.session_id,
             lifecycle: u.lifecycle,
             waiting_for_input: u.waiting_for_input,
             cwd: u.cwd,
-        });
+        }));
     });
 
     let b_exited = broadcaster;
@@ -405,11 +391,11 @@ fn install_push_callbacks(deps: &Arc<ServerDeps>, broadcaster: Broadcaster) {
             let deps_for_track = deps.clone();
             let handle = rt_handle.spawn(async move {
                 flush_session_final(&deps, &session_id, meta, scrollback, events).await;
-                b_exited.broadcast(Push::ChildExited {
+                b_exited.broadcast(Frame::Push(Push::ChildExited {
                     session_id,
                     code,
                     signal,
-                });
+                }));
             });
             // H1: track this handle so a clean shutdown can await it (see the doc comment above and
             // `ServerDeps::await_pending_final_flushes`). Registering AFTER `spawn()` returns is
@@ -603,43 +589,25 @@ async fn handle_client(
 
     // ---- Preamble handshake (Pv2 §4.2/§4.4): a fixed, codec-independent header precedes the CBOR
     // frame stream so a version-incompatible peer can always be told so, even if it can't decode
-    // CBOR. Every read here is `PREAMBLE_TIMEOUT`-bounded: a stuck or garbage-writing peer must not
-    // be able to hang this connection task or hold the socket open indefinitely (fail closed).
+    // CBOR. Re-seated (S3 phase 1, spec §3) onto `bpa_daemon_core::handshake::server_handshake`
+    // (moved out of this module verbatim, was `socket_server.rs:606-643`): every read/write there
+    // is still `PREAMBLE_TIMEOUT`-bounded, so a stuck or garbage-writing peer still cannot hang
+    // this connection task or hold the socket open indefinitely (fail closed). This call site
+    // keeps its OWN quiet-`Ok(())` handling of both the `Ok(None)` (Incompatible already written,
+    // just close) and `Err` (malformed/timeout, close without a reply) cases — sessiond's
+    // externally observable behavior is unchanged.
     let mut stream = stream;
-    match tokio::time::timeout(PREAMBLE_TIMEOUT, read_client_preamble(&mut stream)).await {
-        Ok(Ok(client)) => {
-            let mut reply = negotiate(
-                client.min,
-                client.max,
-                DAEMON_MIN_VERSION,
-                DAEMON_MAX_VERSION,
-            );
-            if let DaemonReply::Accepted { build, .. } = &mut reply {
-                // `negotiate()` never knows the daemon's real build string (it's a pure
-                // version-arithmetic function in the protocol crate) — it always returns an empty
-                // one. Fill in the real build here before it goes on the wire.
-                *build = deps.daemon_build.clone();
-            }
-            let incompatible = matches!(reply, DaemonReply::Incompatible { .. });
-            let out = encode_daemon_reply(&reply);
-            if tokio::time::timeout(PREAMBLE_TIMEOUT, async {
-                use tokio::io::AsyncWriteExt as _;
-                stream.write_all(&out).await?;
-                stream.flush().await
-            })
-            .await
-            .is_err()
-            {
-                return Ok(()); // peer gone / write stalled past the timeout ⇒ give up quietly
-            }
-            if incompatible {
-                // Version mismatch: the reply already told the peer why. Close without entering
-                // the CBOR dispatch loop.
-                return Ok(());
-            }
-        }
-        Ok(Err(_)) => return Ok(()), // malformed/garbage preamble ⇒ close without a reply
-        Err(_) => return Ok(()),     // preamble never arrived within PREAMBLE_TIMEOUT ⇒ close
+    match bpa_daemon_core::handshake::server_handshake(
+        &mut stream,
+        DAEMON_MIN_VERSION,
+        DAEMON_MAX_VERSION,
+        &deps.daemon_build,
+    )
+    .await
+    {
+        Ok(Some(_chosen)) => {} // Accepted; fall through into the CBOR dispatch loop below
+        Ok(None) => return Ok(()), // Incompatible: reply already written, just close
+        Err(_) => return Ok(()), // malformed/garbage preamble, or the read/write timed out
     }
 
     // ---- Split into an independent reader + writer, joined by a bounded outbound queue. ----
@@ -741,39 +709,6 @@ async fn handle_client(
         writer.abort();
     }
     outcome
-}
-
-/// Fixed length of the client preamble's header, before the trailing `build` string (Pv2 §4.2):
-/// `magic:u32 | min:u16 | max:u16 | build_len:u16`.
-const CLIENT_PREAMBLE_HEADER_LEN: usize = 4 + 2 + 2 + 2;
-
-/// Read and decode one [`bpa_protocol::ClientPreamble`] off `stream` (Pv2 §4.2/§4.4): the fixed
-/// 10-byte header first, then exactly `build_len` more bytes for the trailing `build` string — never
-/// more, so a peer that declares an oversized `build_len` is rejected by [`decode_client_preamble`]
-/// (via the header's own bound check) before any attempt to read/allocate that many bytes. Callers
-/// are expected to wrap this in a `PREAMBLE_TIMEOUT`; this function itself has no timeout so it can
-/// be unit-tested directly against an in-memory pipe if ever needed.
-async fn read_client_preamble(
-    stream: &mut UnixStream,
-) -> std::io::Result<bpa_protocol::ClientPreamble> {
-    use tokio::io::AsyncReadExt;
-    let mut header = [0u8; CLIENT_PREAMBLE_HEADER_LEN];
-    stream.read_exact(&mut header).await?;
-    let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
-    if build_len > MAX_PREAMBLE_BUILD_LEN {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "preamble build string exceeds MAX_PREAMBLE_BUILD_LEN",
-        ));
-    }
-    let mut buf = Vec::with_capacity(CLIENT_PREAMBLE_HEADER_LEN + build_len);
-    buf.extend_from_slice(&header);
-    if build_len > 0 {
-        let mut build = vec![0u8; build_len];
-        stream.read_exact(&mut build).await?;
-        buf.extend_from_slice(&build);
-    }
-    decode_client_preamble(&buf).map_err(to_io)
 }
 
 /// A stateful frame reader for one connection. Owns the protocol [`FrameDecoder`] plus a queue of
@@ -941,7 +876,7 @@ async fn dispatch(
             let db = deps.db.lock().await;
             match db.add_workspace_root(&workspace_id, &canonical) {
                 Ok(updated) => {
-                    broadcaster.broadcast(Push::WorkspaceUpdated(updated.clone()));
+                    broadcaster.broadcast(Frame::Push(Push::WorkspaceUpdated(updated.clone())));
                     Response::Workspace(updated)
                 }
                 Err(e) => err(e.code(), e),
@@ -958,7 +893,7 @@ async fn dispatch(
             let db = deps.db.lock().await;
             match db.remove_workspace_root(&workspace_id, &path) {
                 Ok(updated) => {
-                    broadcaster.broadcast(Push::WorkspaceUpdated(updated.clone()));
+                    broadcaster.broadcast(Frame::Push(Push::WorkspaceUpdated(updated.clone())));
                     Response::Workspace(updated)
                 }
                 Err(e) => err(e.code(), e),

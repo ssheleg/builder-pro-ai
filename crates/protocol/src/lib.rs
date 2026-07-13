@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 mod framing;
-pub use framing::{encode_frame, FrameDecoder, FrameError, MAX_FRAME_LEN};
+pub use framing::{
+    encode_cbor_frame, encode_frame, CborFrameDecoder, FrameDecoder, FrameError, MAX_FRAME_LEN,
+};
 
 pub mod preamble;
 pub use preamble::{

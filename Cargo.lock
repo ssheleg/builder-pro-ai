@@ -326,6 +326,7 @@ dependencies = [
 name = "bpa-daemon-core"
 version = "0.1.0"
 dependencies = [
+ "bpa-protocol",
  "libc",
  "rusqlite",
  "rustix 0.38.44",

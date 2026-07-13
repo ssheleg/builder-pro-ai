@@ -6,7 +6,9 @@
 //! pre-extraction `bpa-sessiond` code. `bpa-sessiond` re-seats onto this crate via thin wrappers
 //! that pin its own on-disk names (`d.sock`/`d.lock`/`sessiond.tracing.log`).
 
+pub mod broadcast;
 pub mod dirs;
+pub mod handshake;
 pub mod logging;
 pub mod migrate;
 pub mod singleton;
