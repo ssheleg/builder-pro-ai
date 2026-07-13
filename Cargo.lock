@@ -339,6 +339,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bpa-orchd"
+version = "0.1.0"
+dependencies = [
+ "bpa-daemon-core",
+ "bpa-orchd-proto",
+ "bpa-protocol",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "bpa-orchd-proto"
 version = "0.1.0"
 dependencies = [
