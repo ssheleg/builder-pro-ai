@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{watch, Mutex};
 
@@ -115,7 +114,9 @@ fn open_db_degrading(app_support: &Path) -> Db {
 /// the DB row — the partial unique index `ruleset_single_global` makes a second/Nth boot's insert
 /// a silent no-op rather than a duplicate row or an error. Best-effort: a failure here is logged
 /// and must never fail the whole boot (mirrors the DB's own honest-degradation stance) — rule
-/// content is supplementary state, not a boot-blocking dependency.
+/// content is supplementary state, not a boot-blocking dependency. Re-seated (T8) onto
+/// `ruleset_files::write_atomic`/`sha256_hex` so the global.md write path and hashing are the SAME
+/// code every other ruleset file write/hash in this crate uses — no duplicate hashing impl here.
 fn ensure_global_ruleset(db: &Db, app_support: &Path) {
     if let Err(e) = ensure_global_ruleset_inner(db, app_support) {
         tracing::error!(error = %e, "failed to ensure global ruleset");
@@ -127,10 +128,13 @@ fn ensure_global_ruleset_inner(db: &Db, app_support: &Path) -> std::io::Result<(
     std::fs::create_dir_all(&rules_dir)?;
     let md_path = rules_dir.join("global.md");
     if !md_path.exists() {
-        std::fs::write(&md_path, GLOBAL_RULESET_TEMPLATE)?;
+        // write_atomic also creates parent dirs itself, but rules_dir must exist unconditionally
+        // above so the `md_path.exists()` check just performed is meaningful even on a fresh
+        // app-support dir.
+        crate::ruleset_files::write_atomic(&md_path, GLOBAL_RULESET_TEMPLATE)?;
     }
-    let content = std::fs::read(&md_path)?;
-    let md_hash = format!("{:x}", Sha256::digest(&content));
+    let content = std::fs::read_to_string(&md_path)?;
+    let md_hash = crate::ruleset_files::sha256_hex(&content);
     let md_path_str = md_path.to_string_lossy().into_owned();
     let now = now_ms();
     let id = uuid::Uuid::new_v4().to_string();
@@ -242,6 +246,35 @@ mod tests {
         assert_eq!(
             count, 1,
             "second ensure call must not duplicate the global row"
+        );
+    }
+
+    /// Deferred from T5 (task-8 brief): a later boot must never clobber an operator's hand-edit
+    /// of `global.md`. The FIRST `ensure_global_ruleset` call in
+    /// `ensure_global_ruleset_writes_file_and_row_idempotently` above only proves the TEMPLATE
+    /// content survives repeated calls — this proves ARBITRARY hand-edited content survives too,
+    /// which is the actual owner-facing guarantee (spec §5.2 "Writes the template file only if
+    /// missing").
+    #[test]
+    fn ensure_global_ruleset_does_not_clobber_a_hand_edited_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // First boot creates the template file + DB row.
+        ensure_global_ruleset(&db, dir.path());
+
+        // Operator hand-edits the file (e.g. directly in an editor, or via a repo-tracked copy).
+        let md_path = dir.path().join("rules/global.md");
+        let hand_edited = "# Мои собственные правила\n\nникогда не перезаписывай меня\n";
+        std::fs::write(&md_path, hand_edited).unwrap();
+
+        // A later boot (app relaunch, daemon restart) must NOT overwrite the hand-edit.
+        ensure_global_ruleset(&db, dir.path());
+
+        assert_eq!(
+            std::fs::read_to_string(&md_path).unwrap(),
+            hand_edited,
+            "ensure_global_ruleset must never overwrite an existing file, hand-edited or not"
         );
     }
 }

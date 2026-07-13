@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bpa_orchd_proto::{
     DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
-    InsightStatus, Project, ProjectStatus, TaskSource, TaskStatus,
+    InsightStatus, PolicyRules, Project, ProjectStatus, RuleScope, RuleSet, TaskSource, TaskStatus,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
@@ -1950,6 +1950,277 @@ impl Db {
             .collect::<Result<_, _>>()?;
         drop(stmt);
         ids.iter().map(|id| load_task(&self.conn, id)).collect()
+    }
+}
+
+// ================================================================================
+// ---- domain persistence (spec §5.2, §7): ruleset get/upsert/acknowledge (T8) ----
+// ================================================================================
+
+fn encode_rule_scope(s: &RuleScope) -> &'static str {
+    match s {
+        RuleScope::Global => "global",
+        RuleScope::Project => "project",
+    }
+}
+
+fn decode_rule_scope(s: &str) -> Result<RuleScope, OrchdPersistError> {
+    match s {
+        "global" => Ok(RuleScope::Global),
+        "project" => Ok(RuleScope::Project),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt ruleset.scope value: {other}"
+        ))),
+    }
+}
+
+/// Local "shape contract" mirror of `bpa_orchd_proto::PolicyRules`. Two jobs:
+/// 1. STRICT-VALIDATE a policy before it is stored (spec §5.2: "`PolicyRules` strict-validated
+///    (`deny_unknown_fields`, `spend_cap_usd >= 0`, non-empty allowlist entries)").
+///    [`validate_policy`] round-trips the caller's already-typed `&PolicyRules` through JSON into
+///    THIS struct: because it derives `deny_unknown_fields`, that round trip fails loudly the
+///    moment `PolicyRules` (the wire type in `bpa-orchd-proto`) grows a field this mirror doesn't
+///    know about yet, instead of silently dropping the unrecognized field into the DB's JSON blob
+///    — the persistence layer's understanding of "what a policy is" is forced to stay in lockstep
+///    with the wire type. See the `validate_policy_rejects_an_unknown_json_key` test below for a
+///    direct proof of the mechanism.
+/// 2. DECODE a stored `ruleset.policy` value back into [`RuleSet`] ([`RuleSetRow::into_ruleset`]):
+///    `#[serde(default)]` lets the DB's own `'{}'` default (every ruleset row starts this way —
+///    `Db::create_project`'s INSERT, the migration's `DEFAULT '{}'`) decode into "no fields set"
+///    instead of a spurious "missing field" error — `PolicyRules` itself has no such defaults
+///    (`approval_classes`/`path_allowlist` are non-`Option` on the wire, by design: an update that
+///    actually SETS them must send them explicitly, spec D11).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct PolicyRulesStrict {
+    spend_cap_usd: Option<f64>,
+    approval_classes: Vec<String>,
+    path_allowlist: Vec<String>,
+}
+
+/// Validates `policy` (spec §5.2) and returns its canonical JSON encoding (camelCase, matching
+/// the wire shape — the DB's `ruleset.policy` column stores exactly this) ready to store.
+/// `spend_cap_usd`, if present, must be non-negative; every `approval_classes`/`path_allowlist`
+/// entry must be non-empty; any key [`PolicyRulesStrict`]'s mirror doesn't recognize ⇒
+/// `Validation` (see its doc for why that check exists at all despite the input already being a
+/// typed `&PolicyRules`).
+fn validate_policy(policy: &PolicyRules) -> Result<String, OrchdPersistError> {
+    let json = serde_json::to_string(policy)
+        .map_err(|e| OrchdPersistError::Io(format!("failed to serialize policy: {e}")))?;
+    let strict: PolicyRulesStrict = serde_json::from_str(&json)
+        .map_err(|e| OrchdPersistError::Validation(format!("invalid policy: {e}")))?;
+    if let Some(cap) = strict.spend_cap_usd {
+        if cap < 0.0 {
+            return Err(OrchdPersistError::Validation(
+                "policy.spend_cap_usd must be >= 0".to_string(),
+            ));
+        }
+    }
+    if strict.approval_classes.iter().any(|s| s.is_empty()) {
+        return Err(OrchdPersistError::Validation(
+            "policy.approval_classes entries must be non-empty".to_string(),
+        ));
+    }
+    if strict.path_allowlist.iter().any(|s| s.is_empty()) {
+        return Err(OrchdPersistError::Validation(
+            "policy.path_allowlist entries must be non-empty".to_string(),
+        ));
+    }
+    Ok(json)
+}
+
+/// Raw `ruleset` row (text-encoded `scope`, JSON-encoded `policy`) before decoding into the wire
+/// [`RuleSet`] type — mirrors [`GoalRow`]'s shape.
+struct RuleSetRow {
+    id: String,
+    scope: String,
+    project_id: Option<String>,
+    md_path: String,
+    md_hash: String,
+    policy: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl RuleSetRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RuleSetRow> {
+        Ok(RuleSetRow {
+            id: r.get(0)?,
+            scope: r.get(1)?,
+            project_id: r.get(2)?,
+            md_path: r.get(3)?,
+            md_hash: r.get(4)?,
+            policy: r.get(5)?,
+            created_at: r.get(6)?,
+            updated_at: r.get(7)?,
+        })
+    }
+
+    fn into_ruleset(self) -> Result<RuleSet, OrchdPersistError> {
+        // See `PolicyRulesStrict`'s doc (job 2): decoding through it (not directly into
+        // `PolicyRules`) lets the DB's `'{}'` default decode cleanly.
+        let decoded: PolicyRulesStrict = serde_json::from_str(&self.policy)
+            .map_err(|e| OrchdPersistError::Io(format!("corrupt ruleset.policy json: {e}")))?;
+        let policy = PolicyRules {
+            spend_cap_usd: decoded.spend_cap_usd,
+            approval_classes: decoded.approval_classes,
+            path_allowlist: decoded.path_allowlist,
+        };
+        Ok(RuleSet {
+            id: self.id,
+            scope: decode_rule_scope(&self.scope)?,
+            project_id: self.project_id,
+            md_path: self.md_path,
+            md_hash: self.md_hash,
+            policy,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+/// `scope`/`project_id` lookup (spec §5.1 CHECK: exactly one `global` row with `project_id IS
+/// NULL`, at most one `project` row per `project_id`). `IS` (not `=`) so `project_id: None`
+/// correctly matches `project_id IS NULL` rather than never matching (SQL `NULL = NULL` is
+/// `NULL`, not true) — same pattern as [`Db::create_goal`]'s `parent_id IS ?2` lookup.
+fn load_ruleset_row_by_scope(
+    conn: &Connection,
+    scope: &RuleScope,
+    project_id: Option<&str>,
+) -> Result<RuleSetRow, OrchdPersistError> {
+    conn.query_row(
+        "SELECT id, scope, project_id, md_path, md_hash, policy, created_at, updated_at
+         FROM ruleset WHERE scope = ?1 AND project_id IS ?2",
+        rusqlite::params![encode_rule_scope(scope), project_id],
+        RuleSetRow::from_row,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)
+}
+
+fn load_ruleset_row_by_id(conn: &Connection, id: &str) -> Result<RuleSetRow, OrchdPersistError> {
+    conn.query_row(
+        "SELECT id, scope, project_id, md_path, md_hash, policy, created_at, updated_at
+         FROM ruleset WHERE id = ?1",
+        rusqlite::params![id],
+        RuleSetRow::from_row,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)
+}
+
+fn load_ruleset_by_id(conn: &Connection, id: &str) -> Result<RuleSet, OrchdPersistError> {
+    load_ruleset_row_by_id(conn, id)?.into_ruleset()
+}
+
+impl Db {
+    /// `GetRuleSet`'s DB-row half (spec §4.2/§7 — the FILE half is read separately, fresh, by
+    /// `ruleset_files::read_state`; the socket dispatch layer (a later task) assembles both into
+    /// the wire `RuleSetView`). Unknown `(scope, project_id)` ⇒ `NotFound`.
+    pub fn get_ruleset(
+        &self,
+        scope: RuleScope,
+        project_id: Option<&str>,
+    ) -> Result<RuleSet, OrchdPersistError> {
+        load_ruleset_row_by_scope(&self.conn, &scope, project_id)?.into_ruleset()
+    }
+
+    /// `UpsertRuleSet` (spec §7, D4). Every ruleset ROW already exists by the time this is
+    /// called — the global row is ensured at every boot (`boot::ensure_global_ruleset`), a
+    /// project's row is auto-created WITH the project (`Db::create_project`, spec §5.2) — so this
+    /// only ever UPDATES that existing row's `md_path`/`md_hash`/`policy`; unknown
+    /// `(scope, project_id)` ⇒ `NotFound`. Order (spec §7), all inside one transaction:
+    /// 1. `md_path: Some` is validated (absolute + parent dir exists, else `Validation`) and
+    ///    repoints the row — checked BEFORE any side effect, so an invalid path never leaves a
+    ///    half-applied write.
+    /// 2. `md_content: Some` is written atomically ([`crate::ruleset_files::write_atomic`]) to the
+    ///    (possibly just-repointed) path and its sha256 replaces `md_hash`.
+    /// 3. `policy: Some` is strict-validated ([`validate_policy`]) and replaces `policy`.
+    ///
+    /// `updated_at` always bumps — unlike the other `update_*` verbs (which only bump when a
+    /// field actually changed), every `UpsertRuleSet` call is by definition a real touch; there is
+    /// no "nothing provided" no-op form of an upsert.
+    pub fn upsert_ruleset(
+        &self,
+        scope: RuleScope,
+        project_id: Option<&str>,
+        md_content: Option<&str>,
+        md_path: Option<&str>,
+        policy: Option<&PolicyRules>,
+    ) -> Result<RuleSet, OrchdPersistError> {
+        if let Some(p) = md_path {
+            let path = Path::new(p);
+            if !path.is_absolute() {
+                return Err(OrchdPersistError::Validation(
+                    "ruleset md_path must be absolute".to_string(),
+                ));
+            }
+            let parent_exists = path.parent().is_some_and(|d| d.is_dir());
+            if !parent_exists {
+                return Err(OrchdPersistError::Validation(
+                    "ruleset md_path's parent directory does not exist".to_string(),
+                ));
+            }
+        }
+        // Validate policy up front too (before touching the DB/filesystem) — a Validation error
+        // must never leave a half-applied upsert behind.
+        let policy_json = policy.map(validate_policy).transpose()?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        let row = load_ruleset_row_by_scope(&tx, &scope, project_id)?;
+        let effective_path = md_path.unwrap_or(&row.md_path).to_string();
+
+        let new_hash = match md_content {
+            Some(content) => Some(
+                crate::ruleset_files::write_atomic(Path::new(&effective_path), content)
+                    .map_err(|e| OrchdPersistError::Io(e.to_string()))?,
+            ),
+            None => None,
+        };
+
+        tx.execute(
+            "UPDATE ruleset SET
+               md_path = ?2,
+               md_hash = COALESCE(?3, md_hash),
+               policy = COALESCE(?4, policy),
+               updated_at = ?5
+             WHERE id = ?1",
+            rusqlite::params![row.id, effective_path, new_hash, policy_json, now_ms()],
+        )?;
+
+        let ruleset = load_ruleset_by_id(&tx, &row.id)?;
+        tx.commit()?;
+        Ok(ruleset)
+    }
+
+    /// `AcknowledgeRuleFile` (spec §7): re-reads the file at the row's CURRENT `md_path` and
+    /// stores its fresh sha256 as `md_hash` — the owner's "yes, I've seen the external edit, this
+    /// is now the accepted content" action (spec §11: "`ExternallyModified` → banner + [Принять]
+    /// (rehash)"). Unknown `id` ⇒ `NotFound`. The file being missing is `Invariant("file
+    /// missing")` (spec, task-8 brief) — the ROW is found, it's the FILE that's gone, and
+    /// "acknowledge" a file that isn't there is a contradiction in terms, not silently ignored.
+    /// Any OTHER read failure (permission denied, …) is `Io`, distinct from the missing-file case.
+    pub fn acknowledge_rule_file(&self, id: &str) -> Result<RuleSet, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let row = load_ruleset_row_by_id(&tx, id)?;
+
+        let content = match std::fs::read_to_string(&row.md_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(OrchdPersistError::Invariant("file missing".to_string()));
+            }
+            Err(e) => return Err(OrchdPersistError::Io(e.to_string())),
+        };
+        let hash = crate::ruleset_files::sha256_hex(&content);
+
+        tx.execute(
+            "UPDATE ruleset SET md_hash = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, hash, now_ms()],
+        )?;
+
+        let ruleset = load_ruleset_by_id(&tx, id)?;
+        tx.commit()?;
+        Ok(ruleset)
     }
 }
 
@@ -3960,5 +4231,372 @@ mod domain_tests {
         let tasks = db.list_tasks(Some(&project.id)).unwrap();
         assert_eq!(tasks[0].id, t2.id, "lower rank must sort first");
         assert_eq!(tasks[1].id, t1.id);
+    }
+}
+
+/// RuleSet persistence tests (spec §5.2, §7, task-8 brief): `get_ruleset`/`upsert_ruleset`/
+/// `acknowledge_rule_file`, every validation branch, TDD (written RED before the `impl Db` block
+/// above went GREEN).
+#[cfg(test)]
+mod ruleset_tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Fetch a freshly-created project's own (auto-created) ruleset row.
+    fn project_ruleset(db: &Db, project_id: &str) -> RuleSet {
+        db.get_ruleset(RuleScope::Project, Some(project_id))
+            .expect("project ruleset row must exist")
+    }
+
+    // ---- get_ruleset ----
+
+    #[test]
+    fn get_ruleset_unknown_scope_project_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        // A bare in-memory DB has no ruleset rows at all yet — `Db::open*` only applies the
+        // schema; the global row is inserted separately by `boot::ensure_global_ruleset`.
+        let err = db.get_ruleset(RuleScope::Global, None).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn get_ruleset_returns_the_row_auto_created_with_the_project() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+
+        let rs = project_ruleset(&db, &project.id);
+
+        assert_eq!(rs.scope, RuleScope::Project);
+        assert_eq!(rs.project_id.as_deref(), Some(project.id.as_str()));
+        assert!(rs.md_path.contains(&format!("project-{}.md", project.id)));
+        assert_eq!(rs.md_hash, "");
+        assert_eq!(rs.policy.spend_cap_usd, None);
+        assert!(rs.policy.approval_classes.is_empty());
+        assert!(rs.policy.path_allowlist.is_empty());
+    }
+
+    // ---- upsert_ruleset: md_content rehash ----
+
+    #[test]
+    fn upsert_ruleset_with_content_writes_the_file_and_rehashes() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let before = project_ruleset(&db, &project.id);
+
+        // HERMETICITY: a project row's default md_path resolves under the REAL
+        // `app_support_dir()` ($HOME/Library/Application Support/...) — a test that writes content
+        // with `md_path: None` would leave junk in the production app-support tree. Repoint to an
+        // explicit tempdir path so the file write lands there and is cleaned up on drop (same
+        // pattern as `upsert_ruleset_md_path_repoints_and_writes_content_there`).
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("rules.md");
+
+        let updated = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                Some("# rules\n"),
+                Some(md_path.to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+
+        assert_ne!(updated.md_hash, before.md_hash);
+        assert_eq!(
+            updated.md_hash,
+            crate::ruleset_files::sha256_hex("# rules\n")
+        );
+        assert_eq!(updated.md_path, md_path.to_string_lossy());
+        assert_eq!(std::fs::read_to_string(&md_path).unwrap(), "# rules\n");
+        assert!(updated.updated_at >= before.updated_at);
+
+        // Persisted, not just returned — re-fetch confirms the row itself changed.
+        let refetched = project_ruleset(&db, &project.id);
+        assert_eq!(refetched.md_hash, updated.md_hash);
+    }
+
+    #[test]
+    fn upsert_ruleset_unknown_scope_project_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .upsert_ruleset(RuleScope::Project, Some("nope"), Some("x"), None, None)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    // ---- upsert_ruleset: md_path validation ----
+
+    #[test]
+    fn upsert_ruleset_relative_md_path_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                Some("relative/rules.md"),
+                None,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, OrchdPersistError::Validation(_)));
+        // No partial effect: the row's path is unchanged.
+        assert_ne!(
+            project_ruleset(&db, &project.id).md_path,
+            "relative/rules.md"
+        );
+    }
+
+    #[test]
+    fn upsert_ruleset_md_path_with_missing_parent_dir_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let missing_parent = dir.path().join("does-not-exist").join("rules.md");
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                Some(missing_parent.to_str().unwrap()),
+                None,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, OrchdPersistError::Validation(_)));
+    }
+
+    #[test]
+    fn upsert_ruleset_md_path_repoints_and_writes_content_there() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let new_path = dir.path().join("custom-rules.md");
+
+        let updated = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                Some("custom content"),
+                Some(new_path.to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(updated.md_path, new_path.to_string_lossy());
+        assert_eq!(
+            std::fs::read_to_string(&new_path).unwrap(),
+            "custom content"
+        );
+    }
+
+    #[test]
+    fn upsert_ruleset_md_path_alone_repoints_without_writing_content() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let new_path = dir.path().join("repointed.md");
+
+        let updated = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                Some(new_path.to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(updated.md_path, new_path.to_string_lossy());
+        assert!(
+            !new_path.exists(),
+            "repointing alone (no md_content) must not write a file"
+        );
+    }
+
+    // ---- upsert_ruleset: policy validation ----
+
+    #[test]
+    fn upsert_ruleset_policy_negative_spend_cap_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: Some(-1.0),
+            approval_classes: vec![],
+            path_allowlist: vec![],
+        };
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, OrchdPersistError::Validation(_)));
+    }
+
+    #[test]
+    fn upsert_ruleset_policy_empty_approval_class_entry_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: None,
+            approval_classes: vec!["".to_string()],
+            path_allowlist: vec![],
+        };
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, OrchdPersistError::Validation(_)));
+    }
+
+    #[test]
+    fn upsert_ruleset_policy_empty_path_allowlist_entry_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: None,
+            approval_classes: vec![],
+            path_allowlist: vec!["".to_string()],
+        };
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, OrchdPersistError::Validation(_)));
+    }
+
+    #[test]
+    fn upsert_ruleset_policy_valid_is_stored_and_round_trips() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: Some(12.5),
+            approval_classes: vec!["deploy".to_string()],
+            path_allowlist: vec!["/tmp".to_string()],
+        };
+
+        let updated = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap();
+        assert_eq!(updated.policy, policy);
+
+        // Persisted, not just returned.
+        assert_eq!(project_ruleset(&db, &project.id).policy, policy);
+    }
+
+    #[test]
+    fn validate_policy_rejects_an_unknown_json_key() {
+        // Direct unit-level proof of the deny_unknown_fields mirror (spec §5.2, PolicyRulesStrict
+        // doc above): a hand-crafted JSON payload with an extra key must be rejected. This is the
+        // exact mechanism `validate_policy` leans on to catch drift between `PolicyRules` (the
+        // wire type) and `PolicyRulesStrict` (this module's storage-validation mirror) if the
+        // wire type ever grows a field this mirror hasn't been updated to know about — see
+        // `PolicyRulesStrict`'s doc comment.
+        let err = serde_json::from_str::<PolicyRulesStrict>(
+            r#"{"spendCapUsd":1.0,"approvalClasses":[],"pathAllowlist":[],"extra":"nope"}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    // ---- acknowledge_rule_file ----
+
+    #[test]
+    fn acknowledge_rule_file_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.acknowledge_rule_file("nope").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn acknowledge_rule_file_missing_file_is_invariant() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let rs = project_ruleset(&db, &project.id);
+        // create_project persists the row's md_path but never writes the file itself (see
+        // `Db::create_project`'s own doc comment: "the FILE itself is written later by the T10
+        // dispatch handler") — so acknowledging fresh off project creation must see a missing
+        // file, with no extra setup needed to prove this branch.
+
+        let err = db.acknowledge_rule_file(&rs.id).unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "file missing"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn acknowledge_rule_file_after_external_edit_stores_the_new_hash() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+
+        // HERMETICITY: repoint md_path to a tempdir so BOTH the upsert's file write AND the
+        // simulated external hand-edit below land under the tempdir, not the real
+        // `app_support_dir()` tree (see `upsert_ruleset_with_content_writes_the_file_and_rehashes`).
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("rules.md");
+        let rs = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                Some("v1"),
+                Some(md_path.to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+
+        // Simulate an external hand-edit: write different content directly, bypassing orchd.
+        std::fs::write(&rs.md_path, "v2 - hand edited").unwrap();
+
+        let acknowledged = db.acknowledge_rule_file(&rs.id).unwrap();
+
+        assert_eq!(
+            acknowledged.md_hash,
+            crate::ruleset_files::sha256_hex("v2 - hand edited")
+        );
+        assert_ne!(acknowledged.md_hash, rs.md_hash);
+        assert!(acknowledged.updated_at >= rs.updated_at);
+
+        // The whole point of Acknowledge (spec §7/§11: "[Принять] → AcknowledgeRuleFile"):
+        // read_state against the acknowledged hash must now report Ok, not ExternallyModified.
+        let (content, state) = crate::ruleset_files::read_state(
+            Path::new(&acknowledged.md_path),
+            &acknowledged.md_hash,
+        );
+        assert_eq!(content, Some("v2 - hand edited".to_string()));
+        assert_eq!(state, bpa_orchd_proto::RuleFileState::Ok);
     }
 }
