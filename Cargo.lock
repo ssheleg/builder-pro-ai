@@ -339,6 +339,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bpa-orchd-proto"
+version = "0.1.0"
+dependencies = [
+ "bpa-protocol",
+ "serde",
+ "ts-rs",
+]
+
+[[package]]
 name = "bpa-paths"
 version = "0.1.0"
 dependencies = [
