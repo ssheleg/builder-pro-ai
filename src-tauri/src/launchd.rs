@@ -1,14 +1,22 @@
-//! Per-user LaunchAgent management for `bpa-sessiond` (spec §8.3).
-//! launchd owns the daemon lifecycle; the GUI installs the plist, bootstraps it,
-//! and kickstarts on demand. All launchctl calls go through an injectable runner
-//! so unit tests never mutate the real service database. Degradation: hard
-//! failures surface a typed error the UI renders as an actionable banner (spec §13).
+//! Per-user LaunchAgent management, shared by BOTH `bpa-sessiond` (spec §8.3) and `bpa-orchd`
+//! (spec §9): `LaunchdAgent` is parameterized by `label`/`stdout_log_name`/`stderr_log_name` (S3
+//! T11) so the exact same install/bootstrap/kickstart machinery manages either daemon — only the
+//! caller-supplied identity/log names differ, never the logic. launchd owns the daemon lifecycle;
+//! the GUI installs the plist, bootstraps it, and kickstarts on demand. All launchctl calls go
+//! through an injectable runner so unit tests never mutate the real service database.
+//! Degradation: hard failures surface a typed error the UI renders as an actionable banner (spec
+//! §13).
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Locked identity (spec Global Constraints).
+/// Locked identity (spec Global Constraints). Kept as the sessiond call site's canonical value
+/// (`lib.rs::build_launchd_agent`) — the parameterization (S3 T11) is purely additive, so this
+/// const's value, and every plist/service-target it produces, are unchanged.
 pub const LABEL: &str = "ai.builderpro.desktop.sessiond";
+/// orchd's LaunchAgent label (spec §9, S3 T11) — the second daemon this same `LaunchdAgent`
+/// machinery now manages.
+pub const ORCHD_LABEL: &str = "ai.builderpro.desktop.orchd";
 
 /// Result of a single `launchctl <args...>` invocation.
 #[derive(Debug, Clone)]
@@ -54,10 +62,18 @@ pub enum LaunchdError {
     DaemonPath(String),
 }
 
-/// Per-user LaunchAgent for `bpa-sessiond`: renders the plist, installs it under
-/// `launch_agents_dir`, and drives `launchctl` (bootstrap/kickstart/print) through
-/// the injectable `runner`. All fields are injectable so unit tests operate purely
-/// on temp dirs + a mock runner — never the real `~/Library/LaunchAgents` or `launchctl`.
+/// Per-user LaunchAgent for a single daemon (`bpa-sessiond` OR `bpa-orchd`, spec §8.3/§9): renders
+/// the plist, installs it under `launch_agents_dir`, and drives `launchctl`
+/// (bootstrap/kickstart/print) through the injectable `runner`. All fields are injectable so unit
+/// tests operate purely on temp dirs + a mock runner — never the real `~/Library/LaunchAgents` or
+/// `launchctl`.
+///
+/// `label`/`stdout_log_name`/`stderr_log_name` (S3 T11, added ADDITIVELY) are what let the exact
+/// same struct/methods manage either daemon: the sessiond call site (`lib.rs::
+/// build_launchd_agent`) passes [`LABEL`]/`"sessiond.out.log"`/`"sessiond.err.log"` — the same
+/// values that were hardcoded before this parameterization, so the rendered sessiond plist and
+/// service target are byte-identical to pre-T11 — while the orchd call site (`lib.rs::
+/// build_orchd_launchd_agent`) passes [`ORCHD_LABEL`]/`"orchd.out.log"`/`"orchd.err.log"`.
 pub struct LaunchdAgent<'a> {
     pub runner: &'a dyn LaunchctlRunner,
     pub uid: u32,
@@ -65,10 +81,17 @@ pub struct LaunchdAgent<'a> {
     pub launch_agents_dir: PathBuf,
     /// APP_SUPPORT (for log paths in the plist)
     pub app_support_dir: PathBuf,
-    /// absolute path to the bundled bpa-sessiond
+    /// absolute path to the bundled daemon binary (`bpa-sessiond` or `bpa-orchd`)
     pub daemon_path: PathBuf,
     /// RESOLVED_SOCKET_PATH
     pub socket_path: PathBuf,
+    /// launchd Label + plist filename + service-target suffix (spec Global Constraints / §9):
+    /// `LABEL` for sessiond, `ORCHD_LABEL` for orchd.
+    pub label: &'static str,
+    /// `StandardOutPath` leaf filename under `app_support_dir/logs/`.
+    pub stdout_log_name: &'static str,
+    /// `StandardErrorPath` leaf filename under `app_support_dir/logs/`.
+    pub stderr_log_name: &'static str,
 }
 
 fn xml_escape(s: &str) -> String {
@@ -93,7 +116,7 @@ fn is_already_running(out: &LaunchctlOutput) -> bool {
 
 impl<'a> LaunchdAgent<'a> {
     fn plist_filename(&self) -> String {
-        format!("{LABEL}.plist")
+        format!("{}.plist", self.label)
     }
 
     fn plist_path(&self) -> PathBuf {
@@ -101,7 +124,7 @@ impl<'a> LaunchdAgent<'a> {
     }
 
     fn service_target(&self) -> String {
-        format!("gui/{}/{}", self.uid, LABEL)
+        format!("gui/{}/{}", self.uid, self.label)
     }
 
     fn domain_target(&self) -> String {
@@ -116,8 +139,8 @@ impl<'a> LaunchdAgent<'a> {
     pub fn render_plist(&self) -> String {
         let daemon = xml_escape(&self.daemon_path.to_string_lossy());
         let socket = xml_escape(&self.socket_path.to_string_lossy());
-        let out_log = xml_escape(&self.logs_dir().join("sessiond.out.log").to_string_lossy());
-        let err_log = xml_escape(&self.logs_dir().join("sessiond.err.log").to_string_lossy());
+        let out_log = xml_escape(&self.logs_dir().join(self.stdout_log_name).to_string_lossy());
+        let err_log = xml_escape(&self.logs_dir().join(self.stderr_log_name).to_string_lossy());
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -149,7 +172,7 @@ impl<'a> LaunchdAgent<'a> {
 </dict>
 </plist>
 "#,
-            label = LABEL,
+            label = self.label,
             daemon = daemon,
             socket = socket,
             out_log = out_log,
@@ -240,18 +263,20 @@ impl<'a> LaunchdAgent<'a> {
         matches!(self.runner.run(&["print", &target]), Ok(o) if o.code == 0)
     }
 
-    /// Resolve the bundled daemon path from `current_exe()`'s sibling (production helper).
-    pub fn resolve_daemon_path() -> Result<PathBuf, LaunchdError> {
+    /// Resolve a bundled daemon's path from `current_exe()`'s sibling (production helper).
+    /// `bin_name` (S3 T11, additive param) is the sidecar binary's leaf name — `"bpa-sessiond"` or
+    /// `"bpa-orchd"`; the `current_exe`-sibling resolution rule itself is unchanged.
+    pub fn resolve_daemon_path(bin_name: &str) -> Result<PathBuf, LaunchdError> {
         let exe = std::env::current_exe().map_err(|e| LaunchdError::DaemonPath(e.to_string()))?;
         let dir = exe
             .parent()
             .ok_or_else(|| LaunchdError::DaemonPath("current_exe has no parent".into()))?;
-        let candidate = dir.join("bpa-sessiond");
+        let candidate = dir.join(bin_name);
         if candidate.exists() {
             Ok(candidate)
         } else {
             Err(LaunchdError::DaemonPath(format!(
-                "bpa-sessiond not found beside {}",
+                "{bin_name} not found beside {}",
                 exe.display()
             )))
         }
@@ -328,6 +353,28 @@ mod tests {
                 "/Applications/Builder Pro AI.app/Contents/MacOS/bpa-sessiond",
             ),
             socket_path: PathBuf::from("/tmp/bpa-501/d.sock"),
+            label: LABEL,
+            stdout_log_name: "sessiond.out.log",
+            stderr_log_name: "sessiond.err.log",
+        }
+    }
+
+    /// Same shape as `agent()`, but for the orchd identity (S3 T11) — proves the
+    /// parameterization is a genuine parameter, not a disguised sessiond-only constant.
+    fn orchd_agent<'a>(
+        runner: &'a dyn LaunchctlRunner,
+        root: &std::path::Path,
+    ) -> LaunchdAgent<'a> {
+        LaunchdAgent {
+            runner,
+            uid: 501,
+            launch_agents_dir: root.join("LaunchAgents"),
+            app_support_dir: root.join("AppSupport"),
+            daemon_path: PathBuf::from("/Applications/Builder Pro AI.app/Contents/MacOS/bpa-orchd"),
+            socket_path: PathBuf::from("/tmp/bpa-501/orchd.sock"),
+            label: ORCHD_LABEL,
+            stdout_log_name: "orchd.out.log",
+            stderr_log_name: "orchd.err.log",
         }
     }
 
@@ -351,6 +398,95 @@ mod tests {
         assert!(plist.contains("<string>Background</string>"));
         assert!(plist.contains("sessiond.out.log"));
         assert!(plist.contains("sessiond.err.log"));
+    }
+
+    /// Locked golden-string test (S3 T11, spec §9): `LaunchdAgent` gained `label`/
+    /// `stdout_log_name`/`stderr_log_name` fields (previously hardcoded `LABEL`/
+    /// `"sessiond.out.log"`/`"sessiond.err.log"` baked directly into `render_plist`'s template) —
+    /// the sessiond call site must still render BYTE-IDENTICAL output. `golden` is written
+    /// independently of the (now-parameterized) `render_plist()`, reconstructing exactly what the
+    /// pre-T11 hardcoded template produced for the same inputs, so this test actually proves
+    /// parity rather than tautologically comparing the function to itself.
+    #[test]
+    fn render_plist_is_byte_identical_to_pre_parameterization_output_for_sessiond() {
+        let mock = MockLaunchctl::new(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let a = agent(&mock, tmp.path());
+
+        let out_log = a.app_support_dir.join("logs").join("sessiond.out.log");
+        let err_log = a.app_support_dir.join("logs").join("sessiond.err.log");
+        let golden = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.builderpro.desktop.sessiond</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{daemon}</string>
+    <string>--socket</string>
+    <string>{socket}</string>
+  </array>
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>{out_log}</string>
+  <key>StandardErrorPath</key>
+  <string>{err_log}</string>
+</dict>
+</plist>
+"#,
+            daemon = a.daemon_path.to_string_lossy(),
+            socket = a.socket_path.to_string_lossy(),
+            out_log = out_log.to_string_lossy(),
+            err_log = err_log.to_string_lossy(),
+        );
+
+        assert_eq!(
+            a.render_plist(),
+            golden,
+            "sessiond's rendered plist must not change one byte across the T11 parameterization"
+        );
+    }
+
+    /// Proves the parameterization is a genuine parameter (not a disguised sessiond-only
+    /// constant): the orchd agent's rendered plist/service-target must use ITS OWN label and log
+    /// names, never sessiond's.
+    #[test]
+    fn render_plist_and_service_target_use_orchd_identity_for_orchd_agent() {
+        let mock = MockLaunchctl::new(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let a = orchd_agent(&mock, tmp.path());
+
+        let plist = a.render_plist();
+        assert!(plist.contains("<string>ai.builderpro.desktop.orchd</string>"));
+        assert!(!plist.contains("ai.builderpro.desktop.sessiond"));
+        assert!(plist.contains("orchd.out.log"));
+        assert!(plist.contains("orchd.err.log"));
+        assert!(!plist.contains("sessiond.out.log"));
+        assert!(!plist.contains("sessiond.err.log"));
+
+        let plist_path = a.install_agent().unwrap();
+        assert!(plist_path.ends_with("ai.builderpro.desktop.orchd.plist"));
+
+        a.bootstrap().unwrap();
+        assert_eq!(mock.calls()[0][0], "bootstrap");
+        assert_eq!(mock.calls()[0][1], "gui/501");
+        a.kickstart().unwrap();
+        assert_eq!(
+            mock.calls()[1],
+            vec!["kickstart", "gui/501/ai.builderpro.desktop.orchd"]
+        );
     }
 
     #[test]
@@ -479,5 +615,25 @@ mod tests {
             unloaded.calls()[0],
             vec!["print", "gui/501/ai.builderpro.desktop.sessiond"]
         );
+    }
+
+    #[test]
+    fn resolve_daemon_path_uses_the_given_bin_name() {
+        // Can't mock `current_exe()` itself, but a bin name that's guaranteed not to exist beside
+        // the test binary proves `bin_name` (S3 T11's additive param) actually drives which
+        // sibling filename is looked up and quoted back in the error, not a leftover hardcoded
+        // "bpa-sessiond".
+        let err =
+            crate::launchd::LaunchdAgent::resolve_daemon_path("definitely-not-a-real-binary-xyz")
+                .unwrap_err();
+        match err {
+            LaunchdError::DaemonPath(msg) => {
+                assert!(
+                    msg.contains("definitely-not-a-real-binary-xyz"),
+                    "expected the error to name the requested bin_name, got: {msg}"
+                );
+            }
+            o => panic!("expected DaemonPath error, got {o:?}"),
+        }
     }
 }

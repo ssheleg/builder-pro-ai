@@ -24,6 +24,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::broker::Broker;
+use crate::orchd_client::OrchdClientSlot;
 use crate::socket_client::{ClientError, DaemonClient};
 
 /// The daemon client slot: `None` while disconnected/incompatible, `Some` once a connection is
@@ -60,6 +61,33 @@ pub enum DaemonStatus {
 /// changes (both of `bring_up_daemon`'s outcomes in `lib.rs`, and the second `on_conn` callback
 /// registered alongside the broker's) and read by the `daemon_status` command.
 pub type StatusSlot = Arc<std::sync::Mutex<DaemonStatus>>;
+
+/// Queryable orchd connection status (S3 T11, spec §9): the same pull-based-fallback shape as
+/// [`DaemonStatus`], for the second daemon (`bpa-orchd`). Written by `lib.rs`'s `bring_up_orchd`
+/// at every place the truth changes, mirroring `bring_up_daemon`'s `DaemonStatus` wiring exactly.
+/// A dedicated `orchd_status` command (and the matching frontend poll) is out of this task's
+/// scope — this type exists now so `AppState`'s shape is locked once, not re-shaped by a later
+/// task — but the slot is already kept live and correct from the very first connect attempt.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OrchdStatus {
+    Connected,
+    Disconnected,
+    /// Field names match `OrchdClientError::IncompatibleOrchd`/`orchd_client::ConnState::
+    /// Incompatible` exactly (`daemon_min`/`daemon_max`, spec §9's locked shape), so the mapping
+    /// in `lib.rs` copies them straight across with no renaming. Per-variant `rename_all` kept
+    /// even so (same Task-8 lesson as `DaemonStatus::Incompatible`): the container's
+    /// `rename_all` does NOT cascade into struct-variant fields.
+    #[serde(rename_all = "camelCase")]
+    Incompatible {
+        daemon_min: u16,
+        daemon_max: u16,
+    },
+}
+
+/// Shared, mutex-guarded slot for the current [`OrchdStatus`] — same shape/rationale as
+/// [`StatusSlot`].
+pub type OrchdStatusSlot = Arc<std::sync::Mutex<OrchdStatus>>;
 
 /// Per-session write-serialization locks (round-2 regression R3): a chunked `write_stdin` (finding
 /// [2]/C4) sends several sequential `Request::WriteStdin` frames on the shared connection, awaiting
@@ -125,12 +153,20 @@ impl WriteStdinLocks {
 /// `lib.rs`'s `setup()` and **always** registered via `app.manage(...)` — unlike the old design,
 /// `AppState` is never left unmanaged, even when the daemon is down or speaks an incompatible
 /// protocol version (spec §6.2).
+///
+/// `orchd`/`orchd_launchd`/`orchd_status` (S3 T11, spec §9) mirror `client`/`launchd`/`status`
+/// exactly, for the second daemon (`bpa-orchd`) `lib.rs`'s `bring_up_orchd` brings up alongside
+/// `bring_up_daemon` — added now (additively) so the orchd command surface + `orchd_upgrade`
+/// (later tasks) land on an already-locked `AppState` shape rather than reshaping it again.
 pub struct AppState {
     pub client: ClientSlot,
     pub broker: Arc<Broker>,
     pub launchd: Arc<crate::launchd::LaunchdAgent<'static>>,
     pub status: StatusSlot,
     pub write_stdin_locks: Arc<WriteStdinLocks>,
+    pub orchd: OrchdClientSlot,
+    pub orchd_launchd: Arc<crate::launchd::LaunchdAgent<'static>>,
+    pub orchd_status: OrchdStatusSlot,
 }
 
 /// The exact logic behind `AppState::client()`, pulled out as a free function over a bare
@@ -153,6 +189,15 @@ pub(crate) fn read_status(slot: &StatusSlot) -> DaemonStatus {
 
 /// Write a new [`DaemonStatus`] into a bare `StatusSlot`.
 pub(crate) fn write_status(slot: &StatusSlot, status: DaemonStatus) {
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = status;
+}
+
+/// Write a new [`OrchdStatus`] into a bare `OrchdStatusSlot` — mirrors `write_status` exactly, for
+/// the second daemon (S3 T11, spec §9). No `read_orchd_status` counterpart yet: a dedicated
+/// `orchd_status` command (mirroring `daemon_status`) is out of this task's scope — this function
+/// exists because `bring_up_orchd` already needs to WRITE the truth at every connect/reconnect
+/// transition, exactly like `write_status` does for sessiond from day one.
+pub(crate) fn write_orchd_status(slot: &OrchdStatusSlot, status: OrchdStatus) {
     *slot.lock().unwrap_or_else(|e| e.into_inner()) = status;
 }
 
@@ -1109,6 +1154,9 @@ mod tests {
                 "/Applications/Builder Pro AI.app/Contents/MacOS/bpa-sessiond",
             ),
             socket_path: std::path::PathBuf::from("/tmp/bpa-501/d.sock"),
+            label: crate::launchd::LABEL,
+            stdout_log_name: "sessiond.out.log",
+            stderr_log_name: "sessiond.err.log",
         }
     }
 

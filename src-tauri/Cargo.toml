@@ -22,6 +22,7 @@ tauri-plugin-shell = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 bpa-protocol = { workspace = true }
+bpa-orchd-proto = { workspace = true }
 bpa-paths = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

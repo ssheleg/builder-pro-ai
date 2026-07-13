@@ -451,6 +451,7 @@ dependencies = [
 name = "builder-pro-ai"
 version = "0.1.0"
 dependencies = [
+ "bpa-orchd-proto",
  "bpa-paths",
  "bpa-protocol",
  "ignore",

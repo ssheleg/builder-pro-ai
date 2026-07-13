@@ -38,12 +38,28 @@
 //! `setup()` itself never panics and never hangs the window open — all of the above happens inside
 //! `bring_up_daemon`, spawned on `tauri::async_runtime` so the window opens immediately regardless
 //! of how long the daemon bring-up takes.
+//!
+//! ## `bpa-orchd` bring-up (spec §9, S3 T11)
+//!
+//! `bring_up_orchd` mirrors every part of the above for the SECOND daemon, `bpa-orchd`: same
+//! three-outcome shape (connected / `IncompatibleOrchd` / other-error), same honest-degradation
+//! discipline (`orchd://down` / `orchd://incompatible` rather than a silent hang). It is spawned
+//! as its own `tauri::async_runtime` task alongside `bring_up_daemon`, not nested inside it — the
+//! two daemons come up concurrently and independently. Because only `bring_up_daemon` calls
+//! `app.manage(AppState { .. })`, `setup()` pre-creates the orchd client/status slots (and
+//! resolves the orchd launchd agent) BEFORE spawning either task and hands the SAME `Arc`s to
+//! both: `bring_up_daemon` embeds them into `AppState` unconditionally (so `AppState.orchd`/
+//! `orchd_status` exist and are valid from the instant `AppState` becomes managed), and
+//! `bring_up_orchd` only ever writes into those same `Arc`s — it never fetches `State<AppState>`
+//! itself, so it has no ordering dependency on which of the two tasks finishes its own bring-up
+//! first.
 
 pub mod broker;
 pub mod commands;
 pub mod fs_explorer;
 pub mod fs_watcher;
 pub mod launchd;
+pub mod orchd_client;
 pub mod paths;
 pub mod socket_client;
 
@@ -54,8 +70,12 @@ use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
 
 use crate::broker::{register, Broker};
-use crate::commands::{AppState, DaemonStatus, StatusSlot};
+use crate::commands::{AppState, DaemonStatus, OrchdStatus, OrchdStatusSlot, StatusSlot};
 use crate::launchd::{LaunchdAgent, LaunchdError, RealLaunchctl};
+use crate::orchd_client::{
+    resolve_orchd_socket_path, ConnState as OrchdConnState, OrchdClient, OrchdClientError,
+    OrchdClientSlot,
+};
 use crate::socket_client::{resolve_socket_path, ClientError, ConnState, DaemonClient};
 
 /// Emitted (no payload) when the core loses — or never establishes — the daemon socket (spec
@@ -65,6 +85,18 @@ pub const DAEMON_DISCONNECTED_EVENT: &str = broker::EV_DAEMON_DISCONNECTED;
 /// Emitted (no payload) when the core establishes (or re-establishes) the daemon socket (spec
 /// §6.3, §13). Mirrors [`broker::EV_DAEMON_RECONNECTED`] byte-for-byte.
 pub const DAEMON_RECONNECTED_EVENT: &str = broker::EV_DAEMON_RECONNECTED;
+
+/// Emitted (no payload) when the core loses — or never establishes — the `bpa-orchd` socket
+/// (spec §9). A `broker::EV_ORCHD_DOWN` constant matching this exact string, plus the full
+/// orchd push→event dispatch table, land in a later task (T12) — this constant is defined HERE,
+/// not there, purely because that table doesn't exist yet; `bring_up_orchd` must still emit an
+/// honest signal from day one (spec §13) rather than silently swallowing a boot failure until
+/// T12 lands.
+pub const ORCHD_DOWN_EVENT: &str = "orchd://down";
+/// Emitted (no payload) when the handshake preamble finds `bpa-orchd`'s protocol range
+/// incompatible with this client build (spec §9's locked event name). See
+/// [`ORCHD_DOWN_EVENT`]'s doc for why this is defined here rather than in `broker.rs` yet.
+pub const ORCHD_INCOMPATIBLE_EVENT: &str = "orchd://incompatible";
 
 /// Trivial invoke smoke command; proves the JS<->Rust IPC round-trip works (Task 1).
 #[tauri::command]
@@ -135,13 +167,25 @@ async fn connect_with_retry(
     DaemonClient::connect_with_retry(client_build, attempts, delay).await
 }
 
+/// Thin delegate to [`OrchdClient::connect_with_retry`] — mirrors [`connect_with_retry`] exactly,
+/// for `bpa-orchd` (spec §9). Kept as its own function (rather than inlined into
+/// `bring_up_orchd`) for the identical reason `connect_with_retry` is: unit-testable without a
+/// Tauri runtime.
+async fn connect_orchd_with_retry(
+    client_build: String,
+    attempts: u32,
+    delay: Duration,
+) -> Result<OrchdClient, OrchdClientError> {
+    OrchdClient::connect_with_retry(client_build, attempts, delay).await
+}
+
 /// Build a [`LaunchdAgent`] for the current user against the real `launchctl` (production only;
 /// tests exercise `LaunchdAgent` directly against a mock runner in `launchd.rs`). Resolves the
 /// bundled daemon path via [`LaunchdAgent::resolve_daemon_path`] and the socket path via
 /// [`resolve_socket_path`] (spec §8.1/§8.3 — the core is the source of truth both `launchd.rs` and
 /// the daemon must agree with).
 fn build_launchd_agent(app: &tauri::AppHandle) -> Result<LaunchdAgent<'static>, LaunchdError> {
-    let daemon_path = LaunchdAgent::resolve_daemon_path()?;
+    let daemon_path = LaunchdAgent::resolve_daemon_path("bpa-sessiond")?;
     let socket_path = resolve_socket_path();
     let home = app
         .path()
@@ -164,6 +208,41 @@ fn build_launchd_agent(app: &tauri::AppHandle) -> Result<LaunchdAgent<'static>, 
         app_support_dir,
         daemon_path,
         socket_path,
+        label: crate::launchd::LABEL,
+        stdout_log_name: "sessiond.out.log",
+        stderr_log_name: "sessiond.err.log",
+    })
+}
+
+/// Build a [`LaunchdAgent`] for `bpa-orchd` (spec §9, S3 T11) — mirrors [`build_launchd_agent`]
+/// exactly, substituting the orchd identity: label [`crate::launchd::ORCHD_LABEL`], bundled
+/// binary `"bpa-orchd"`, log names `"orchd.out.log"`/`"orchd.err.log"`, and the orchd socket path
+/// via [`resolve_orchd_socket_path`].
+fn build_orchd_launchd_agent(
+    app: &tauri::AppHandle,
+) -> Result<LaunchdAgent<'static>, LaunchdError> {
+    let daemon_path = LaunchdAgent::resolve_daemon_path("bpa-orchd")?;
+    let socket_path = resolve_orchd_socket_path();
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| LaunchdError::DaemonPath(format!("cannot resolve home dir: {e}")))?;
+    let app_support_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| LaunchdError::DaemonPath(format!("cannot resolve app data dir: {e}")))?;
+    let uid = unsafe { libc::geteuid() };
+
+    Ok(LaunchdAgent {
+        runner: Box::leak(Box::new(RealLaunchctl)),
+        uid,
+        launch_agents_dir: home.join("Library").join("LaunchAgents"),
+        app_support_dir,
+        daemon_path,
+        socket_path,
+        label: crate::launchd::ORCHD_LABEL,
+        stdout_log_name: "orchd.out.log",
+        stderr_log_name: "orchd.err.log",
     })
 }
 
@@ -196,6 +275,24 @@ fn emit_incompatible(app: &tauri::AppHandle) {
     warn!("emitting daemon://incompatible");
     if let Err(e) = app.emit(broker::EV_DAEMON_INCOMPATIBLE, ()) {
         error!(error = %e, "failed to emit daemon://incompatible");
+    }
+}
+
+/// Emit the no-payload `orchd://down` banner event (spec §9), mirroring [`emit_disconnected`]
+/// exactly for the second daemon.
+fn emit_orchd_down(app: &tauri::AppHandle, reason: &str) {
+    warn!(reason, "emitting orchd://down");
+    if let Err(e) = app.emit(ORCHD_DOWN_EVENT, ()) {
+        error!(error = %e, "failed to emit orchd://down");
+    }
+}
+
+/// Emit the no-payload `orchd://incompatible` banner event (spec §9), mirroring
+/// [`emit_incompatible`] exactly for the second daemon.
+fn emit_orchd_incompatible(app: &tauri::AppHandle) {
+    warn!("emitting orchd://incompatible");
+    if let Err(e) = app.emit(ORCHD_INCOMPATIBLE_EVENT, ()) {
+        error!(error = %e, "failed to emit orchd://incompatible");
     }
 }
 
@@ -238,6 +335,39 @@ fn status_for_conn_state(state: ConnState) -> DaemonStatus {
     }
 }
 
+/// Pure mapping from an `OrchdClient::connect`/`connect_with_retry` outcome to the
+/// [`OrchdStatus`] `AppState.orchd_status` should report — mirrors [`status_for_connect_result`]
+/// exactly, for the second daemon (spec §9).
+fn status_for_orchd_connect_result(result: &Result<OrchdClient, OrchdClientError>) -> OrchdStatus {
+    match result {
+        Ok(_) => OrchdStatus::Connected,
+        Err(OrchdClientError::IncompatibleOrchd {
+            daemon_min,
+            daemon_max,
+        }) => OrchdStatus::Incompatible {
+            daemon_min: *daemon_min,
+            daemon_max: *daemon_max,
+        },
+        Err(_) => OrchdStatus::Disconnected,
+    }
+}
+
+/// Pure mapping from a mid-session `orchd_client::ConnState` transition to the [`OrchdStatus`]
+/// `AppState.orchd_status` should report — mirrors [`status_for_conn_state`] exactly.
+fn status_for_orchd_conn_state(state: OrchdConnState) -> OrchdStatus {
+    match state {
+        OrchdConnState::Connected => OrchdStatus::Connected,
+        OrchdConnState::Disconnected => OrchdStatus::Disconnected,
+        OrchdConnState::Incompatible {
+            daemon_min,
+            daemon_max,
+        } => OrchdStatus::Incompatible {
+            daemon_min,
+            daemon_max,
+        },
+    }
+}
+
 /// Bring up the daemon (launchd install+bootstrap+kickstart) and connect to it, wiring the
 /// [`Broker`] into the resulting [`DaemonClient`]'s push/conn callbacks (spec §8.3, §13, §6.2).
 /// `AppState` is `manage`d **unconditionally** before the connect result is known, with an empty
@@ -246,7 +376,20 @@ fn status_for_conn_state(state: ConnState) -> DaemonStatus {
 /// incompatible. Split out of the `setup()` closure so the orchestration itself doesn't need to
 /// live inside a non-`async` closure body: `setup()` spawns this on `tauri::async_runtime` and
 /// returns `Ok(())` immediately so the window still opens while this runs in the background.
-async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
+///
+/// `orchd_slot`/`orchd_launchd`/`orchd_status` (S3 T11, spec §9) are pre-built by `setup()` and
+/// simply MOVED into whichever of the three `app.manage(AppState { .. })` calls below actually
+/// executes — this function never reads from or writes into them itself; [`bring_up_orchd`]
+/// (spawned independently, alongside this function) owns writing into the SAME underlying `Arc`s.
+/// See the module doc's "`bpa-orchd` bring-up" section for why they are threaded through as params
+/// rather than fetched via `State<AppState>` from inside `bring_up_orchd`.
+async fn bring_up_daemon(
+    app: tauri::AppHandle,
+    broker: Arc<Broker>,
+    orchd_slot: OrchdClientSlot,
+    orchd_launchd: Arc<LaunchdAgent<'static>>,
+    orchd_status: OrchdStatusSlot,
+) {
     let slot: commands::ClientSlot = Arc::new(std::sync::RwLock::new(None));
     // Created BEFORE any `app.manage(...)` call (finding [12]): every branch below needs to write
     // into this same slot, and the mid-session `on_conn` callback registered after a successful
@@ -270,9 +413,12 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
                 // (e.g. `bpa-sessiond` missing from the bundle in dev), so `upgrade_daemon` would
                 // surface an honest `UpgradeFailed` if invoked in this state, rather than the app
                 // never managing `AppState` at all.
-                launchd: Arc::new(unreachable_launchd_agent()),
+                launchd: Arc::new(unreachable_launchd_agent(crate::launchd::LABEL)),
                 status,
                 write_stdin_locks,
+                orchd: orchd_slot,
+                orchd_launchd,
+                orchd_status,
             });
             emit_disconnected(&app, "could not resolve the background service binary");
             return;
@@ -287,6 +433,9 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
             launchd: agent,
             status,
             write_stdin_locks,
+            orchd: orchd_slot,
+            orchd_launchd,
+            orchd_status,
         });
         emit_disconnected(&app, "could not start background service");
         return;
@@ -316,6 +465,9 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
         launchd: agent,
         status: status.clone(),
         write_stdin_locks: write_stdin_locks.clone(),
+        orchd: orchd_slot,
+        orchd_launchd,
+        orchd_status,
     });
 
     match connect_result {
@@ -359,12 +511,86 @@ async fn bring_up_daemon(app: tauri::AppHandle, broker: Arc<Broker>) {
     }
 }
 
+/// Bring up `bpa-orchd` (launchd install+bootstrap+kickstart) and connect to it (spec §9, S3
+/// T11) — mirrors [`bring_up_daemon`] EXACTLY in shape: install+bootstrap+kickstart
+/// unconditionally, then a bounded-retry connect resolving to one of the same three outcomes
+/// (connected / `IncompatibleOrchd` / other-error), each with an honest signal (spec §13).
+///
+/// Spawned as its OWN `tauri::async_runtime` task alongside `bring_up_daemon` (not nested inside
+/// it) — see the module doc's "`bpa-orchd` bring-up" section for why `slot`/`status` are passed
+/// in already-built rather than fetched via `State<AppState>`: this function only ever WRITES
+/// into them, so it has no ordering dependency on when `bring_up_daemon` calls `app.manage(...)`.
+///
+/// Push wiring: no orchd push→event dispatch table exists yet (spec §9's `broker.rs` consts land
+/// in T12) — every `OrchdPush` is logged via `tracing::debug!` for now rather than dropped
+/// silently, so nothing observable is lost once the real dispatch lands. `on_conn` already keeps
+/// `status` live and correct from THIS task onward (finding [12]'s pull-fallback pattern, applied
+/// to orchd from day one).
+async fn bring_up_orchd(
+    app: tauri::AppHandle,
+    agent: Arc<LaunchdAgent<'static>>,
+    slot: OrchdClientSlot,
+    status: OrchdStatusSlot,
+) {
+    if let Err(e) = ensure_daemon_running(&agent) {
+        error!(error = %e, "failed to bring up the launchd-managed orchd daemon");
+        commands::write_orchd_status(&status, OrchdStatus::Disconnected);
+        emit_orchd_down(&app, "could not start orchd background service");
+        return;
+    }
+
+    // Same bounded-retry budget/backoff shape as `bring_up_daemon` (BOOT_CONNECT_ATTEMPTS x
+    // 500ms = up to ~4s), via the orchd-specific NAMED const so the HANDSHAKE_SUSPECT_CAP
+    // coupling stays enforced (see `orchd_client::BOOT_CONNECT_ATTEMPTS`'s doc).
+    let connect_result = connect_orchd_with_retry(
+        client_build(),
+        crate::orchd_client::BOOT_CONNECT_ATTEMPTS,
+        Duration::from_millis(500),
+    )
+    .await;
+    commands::write_orchd_status(&status, status_for_orchd_connect_result(&connect_result));
+
+    match connect_result {
+        Ok(client) => {
+            let client = Arc::new(client);
+            client.on_push(|push| {
+                tracing::debug!(
+                    ?push,
+                    "orchd push received (broker push->event wiring lands in a later task)"
+                );
+            });
+            let status_for_conn = status.clone();
+            client.on_conn(move |state| {
+                commands::write_orchd_status(&status_for_conn, status_for_orchd_conn_state(state));
+            });
+            slot.write().unwrap().replace(client);
+            info!("orchd connected; AppState.orchd populated");
+        }
+        Err(OrchdClientError::IncompatibleOrchd {
+            daemon_min,
+            daemon_max,
+        }) => {
+            error!(
+                daemon_min,
+                daemon_max, "orchd speaks an incompatible protocol version"
+            );
+            emit_orchd_incompatible(&app);
+        }
+        Err(e) => {
+            error!(error = %e, "orchd connect failed after bounded retry");
+            emit_orchd_down(&app, "orchd unreachable");
+        }
+    }
+}
+
 /// A `LaunchdAgent` whose every `launchctl` call fails (never touches the real service DB): used
-/// only as `AppState.launchd`'s value when `build_launchd_agent` itself already failed (no
-/// resolvable daemon path/dirs), so `AppState` can still be `manage`d unconditionally. Any
-/// subsequent `upgrade_daemon` call in this state surfaces an honest `CommandError::UpgradeFailed`
-/// rather than panicking on a missing field.
-fn unreachable_launchd_agent() -> LaunchdAgent<'static> {
+/// only as `AppState.launchd`'s/`AppState.orchd_launchd`'s value when `build_launchd_agent`/
+/// `build_orchd_launchd_agent` itself already failed (no resolvable daemon path/dirs), so
+/// `AppState` can still be `manage`d unconditionally. Any subsequent `upgrade_daemon` call in this
+/// state surfaces an honest `CommandError::UpgradeFailed` rather than panicking on a missing
+/// field. `label` (S3 T11, additive param) is the ONLY thing that varies between the sessiond and
+/// orchd fallback — every path/runner in this always-failing stub is already daemon-agnostic.
+fn unreachable_launchd_agent(label: &'static str) -> LaunchdAgent<'static> {
     struct AlwaysFail;
     impl crate::launchd::LaunchctlRunner for AlwaysFail {
         fn run(&self, _args: &[&str]) -> std::io::Result<crate::launchd::LaunchctlOutput> {
@@ -380,6 +606,9 @@ fn unreachable_launchd_agent() -> LaunchdAgent<'static> {
         app_support_dir: std::env::temp_dir(),
         daemon_path: std::env::temp_dir(),
         socket_path: std::env::temp_dir(),
+        label,
+        stdout_log_name: "unreachable.out.log",
+        stderr_log_name: "unreachable.err.log",
     }
 }
 
@@ -439,11 +668,47 @@ pub fn run() {
             // the async daemon-connect task below needs it.
             let broker = Arc::new(Broker::new(handle.clone()));
 
+            // Pre-create the orchd client/status slots + resolve its launchd agent BEFORE
+            // spawning either bring-up task (spec §9, S3 T11) — see the module doc's "`bpa-orchd`
+            // bring-up" section: `bring_up_daemon` is the only one of the two that calls
+            // `app.manage(AppState { .. })`, so these same `Arc`s must already exist and be
+            // handed to BOTH tasks up front, rather than `bring_up_orchd` trying to fetch
+            // `State<AppState>` itself (which would race whichever of the two tasks reaches its
+            // own connect attempt first). Resolving the agent here is cheap/synchronous (path
+            // resolution only — no launchctl/network I/O yet), so it doesn't block `setup()`.
+            let orchd_slot: OrchdClientSlot = Arc::new(std::sync::RwLock::new(None));
+            let orchd_status: OrchdStatusSlot =
+                Arc::new(std::sync::Mutex::new(OrchdStatus::Disconnected));
+            let orchd_agent = Arc::new(match build_orchd_launchd_agent(&handle) {
+                Ok(agent) => agent,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "failed to resolve the orchd launchd agent (bundled daemon path/dirs)"
+                    );
+                    unreachable_launchd_agent(crate::launchd::ORCHD_LABEL)
+                }
+            });
+
             // Never block `setup()` on launchd/network I/O: spawn the whole bring-up sequence and
             // return Ok(()) immediately so the window opens right away. Honest degradation (spec
-            // §13) happens inside `bring_up_daemon` via `daemon://disconnected`; nothing here can
-            // panic the app.
-            tauri::async_runtime::spawn(bring_up_daemon(handle, broker));
+            // §13) happens inside `bring_up_daemon`/`bring_up_orchd` via `daemon://disconnected`/
+            // `orchd://down`; nothing here can panic the app. The two daemons come up
+            // concurrently and independently — spawned as two separate tasks, not one nested
+            // inside the other.
+            tauri::async_runtime::spawn(bring_up_daemon(
+                handle.clone(),
+                broker,
+                orchd_slot.clone(),
+                orchd_agent.clone(),
+                orchd_status.clone(),
+            ));
+            tauri::async_runtime::spawn(bring_up_orchd(
+                handle,
+                orchd_agent,
+                orchd_slot,
+                orchd_status,
+            ));
 
             Ok(())
         })
@@ -522,6 +787,71 @@ mod tests {
                 daemon_max: 3
             }
         );
+    }
+
+    // ── OrchdStatus pull-fallback mapping (S3 T11, spec §9 — mirrors the DaemonStatus block
+    // ── above exactly) ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn status_for_orchd_connect_result_maps_incompatible_orchd() {
+        let result: Result<OrchdClient, OrchdClientError> =
+            Err(OrchdClientError::IncompatibleOrchd {
+                daemon_min: 5,
+                daemon_max: 6,
+            });
+        assert_eq!(
+            status_for_orchd_connect_result(&result),
+            OrchdStatus::Incompatible {
+                daemon_min: 5,
+                daemon_max: 6
+            }
+        );
+    }
+
+    #[test]
+    fn status_for_orchd_connect_result_maps_other_errors_to_disconnected() {
+        let result: Result<OrchdClient, OrchdClientError> = Err(OrchdClientError::Disconnected);
+        assert_eq!(
+            status_for_orchd_connect_result(&result),
+            OrchdStatus::Disconnected
+        );
+
+        let result2: Result<OrchdClient, OrchdClientError> = Err(OrchdClientError::Daemon {
+            code: "X".into(),
+            message: "Y".into(),
+        });
+        assert_eq!(
+            status_for_orchd_connect_result(&result2),
+            OrchdStatus::Disconnected
+        );
+    }
+
+    #[test]
+    fn status_for_orchd_conn_state_maps_every_variant() {
+        assert_eq!(
+            status_for_orchd_conn_state(OrchdConnState::Connected),
+            OrchdStatus::Connected
+        );
+        assert_eq!(
+            status_for_orchd_conn_state(OrchdConnState::Disconnected),
+            OrchdStatus::Disconnected
+        );
+        assert_eq!(
+            status_for_orchd_conn_state(OrchdConnState::Incompatible {
+                daemon_min: 2,
+                daemon_max: 3
+            }),
+            OrchdStatus::Incompatible {
+                daemon_min: 2,
+                daemon_max: 3
+            }
+        );
+    }
+
+    #[test]
+    fn orchd_event_names_are_locked() {
+        assert_eq!(ORCHD_DOWN_EVENT, "orchd://down");
+        assert_eq!(ORCHD_INCOMPATIBLE_EVENT, "orchd://incompatible");
     }
 
     #[test]
@@ -616,6 +946,9 @@ mod tests {
                 "/Applications/Builder Pro AI.app/Contents/MacOS/bpa-sessiond",
             ),
             socket_path: std::path::PathBuf::from("/tmp/bpa-501/d.sock"),
+            label: crate::launchd::LABEL,
+            stdout_log_name: "sessiond.out.log",
+            stderr_log_name: "sessiond.err.log",
         };
 
         ensure_daemon_running(&agent).expect("boot path must succeed against a scripted-ok mock");
@@ -945,5 +1278,167 @@ mod tests {
                  reachable, got {other:?}"
             ),
         }
+    }
+
+    // ── connect_orchd_with_retry (S3 T11, spec §9 — mirrors the connect_with_retry block above
+    // ── for the second daemon) ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn connect_orchd_with_retry_gives_up_after_bounded_attempts_without_panicking() {
+        // No orchd daemon is listening anywhere near this path — exercises the give-up branch
+        // deterministically and quickly (clamped up to HANDSHAKE_SUSPECT_CAP = 8 by the same H3
+        // guard `orchd_client::connect_with_retry` applies).
+        let started = std::time::Instant::now();
+        let result =
+            connect_orchd_with_retry("test-build".to_string(), 3, Duration::from_millis(5)).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected connect_orchd_with_retry to give up and return Err"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect_orchd_with_retry took {elapsed:?}; expected a bounded, prompt failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_orchd_with_retry_does_not_retry_incompatible() {
+        use bpa_protocol::preamble::{decode_client_preamble, encode_daemon_reply, DaemonReply};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("orchd.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        // Always replies Incompatible — if connect_orchd_with_retry incorrectly retried, this
+        // stub would serve every retry the same fatal reply and the wall-clock bound below would
+        // catch it.
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut header = [0u8; 10];
+                if stream.read_exact(&mut header).await.is_err() {
+                    continue;
+                }
+                let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
+                let mut buf = header.to_vec();
+                if build_len > 0 {
+                    let mut build = vec![0u8; build_len];
+                    if stream.read_exact(&mut build).await.is_err() {
+                        continue;
+                    }
+                    buf.extend_from_slice(&build);
+                }
+                let _ = decode_client_preamble(&buf);
+                let reply = encode_daemon_reply(&DaemonReply::Incompatible { min: 5, max: 6 });
+                let _ = stream.write_all(&reply).await;
+                let _ = stream.flush().await;
+            }
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let started = std::time::Instant::now();
+        let result = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            let result =
+                connect_orchd_with_retry("test-build".to_string(), 8, Duration::from_millis(500))
+                    .await;
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            result
+        };
+        let elapsed = started.elapsed();
+        std::mem::forget(dir);
+
+        match result {
+            Err(OrchdClientError::IncompatibleOrchd {
+                daemon_min,
+                daemon_max,
+            }) => {
+                assert_eq!((daemon_min, daemon_max), (5, 6));
+            }
+            other => panic!("expected IncompatibleOrchd, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "connect_orchd_with_retry took {elapsed:?}; IncompatibleOrchd must return promptly \
+             with no retry, not run the full ~3.5s of bounded backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_for_orchd_connect_result_maps_ok_to_connected() {
+        use bpa_protocol::preamble::{encode_daemon_reply, DaemonReply};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bpa_dir = dir.path().join("bpa");
+        std::fs::create_dir_all(&bpa_dir).unwrap();
+        let sock_path = bpa_dir.join("orchd.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready2 = ready.clone();
+        tokio::spawn(async move {
+            ready2.store(true, Ordering::SeqCst);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = [0u8; 10];
+            stream.read_exact(&mut header).await.unwrap();
+            let build_len = u16::from_le_bytes(header[8..10].try_into().unwrap()) as usize;
+            if build_len > 0 {
+                let mut build = vec![0u8; build_len];
+                stream.read_exact(&mut build).await.unwrap();
+            }
+            let reply = encode_daemon_reply(&DaemonReply::Accepted {
+                chosen: bpa_orchd_proto::ORCHD_DAEMON_MAX_VERSION,
+                build: "stub".into(),
+            });
+            stream.write_all(&reply).await.unwrap();
+            stream.flush().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        while !ready.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let client = {
+            let _guard = ENV_TEST_LOCK.lock().await;
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            }
+            let client = OrchdClient::connect("test-build".to_string())
+                .await
+                .unwrap();
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            client
+        };
+        std::mem::forget(dir);
+
+        let result: Result<OrchdClient, OrchdClientError> = Ok(client);
+        assert_eq!(
+            status_for_orchd_connect_result(&result),
+            OrchdStatus::Connected
+        );
     }
 }
