@@ -400,8 +400,9 @@ idea ⇒ `IdeasChanged`; insight ⇒ `InsightsChanged`; task ⇒ `TasksChanged{p
 Failed requests broadcast NOTHING.
 
 `OrchdPersistError → OrchdErrorCode` mapping: `NotFound→NotFound`, `Invariant→Invariant`,
-`Conflict→Conflict`, `Validation→Validation`, `Sql→Io`. Wire error shape `Error{code, message}`
-per D12.
+`Conflict→Conflict`, `Validation→Validation`, `Sql→Io`, `Io(String)→Io` (the non-SQL I/O
+producer — e.g. the §8 export frame-cap guard constructs `OrchdPersistError::Io("export exceeds
+the 16 MiB frame cap")`). Wire error shape `Error{code, message}` per D12.
 
 ## 7. RuleSet file layer (`ruleset_files.rs`)
 
@@ -463,7 +464,8 @@ Round-trip guarantee (DoD): import into an empty store → `ExportAll` equals th
 ## 9. Core integration (src-tauri)
 
 - `orchd_client.rs` — MIRROR of `socket_client.rs` (verified structure): `OrchdClient::connect
-  (client_build: String)` resolving `daemon_core`-style socket name `orchd.sock` internally +
+  (client_build: String)` resolving `orchd.sock` via a LOCAL `socket_dir()` copy exactly as
+  `socket_client.rs:108/:124` does today (src-tauri does NOT gain a `bpa-daemon-core` dep) +
   `connect_with_retry(build, attempts, delay)`; client preamble
   `[ORCHD_CLIENT_MIN_VERSION, ORCHD_CLIENT_MAX_VERSION]`; correlation = `AtomicU64` id +
   `HashMap<u64, oneshot::Sender<…>>` in a single connection task; pushes via callback registry
