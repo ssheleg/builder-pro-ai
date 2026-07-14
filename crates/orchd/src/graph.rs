@@ -444,17 +444,28 @@ impl Db {
         Ok(edge)
     }
 
-    /// `GraphDeleteEdge` (S4 spec §5). Unknown id ⇒ `NotFound`.
+    /// `GraphDeleteEdge` (S4 spec §5). Unknown id ⇒ `NotFound`; archived guard rejects if EITHER
+    /// endpoint's project is archived (`Invariant`) — mirroring `add_edge` and matching the §5
+    /// invariants table ("delete node OR edge on an archived project [either endpoint for edges] ⇒
+    /// Invariant"). The endpoint-project lookup reuses the same JOIN as `edge_endpoint_projects`.
     pub(crate) fn delete_edge(&self, id: &str) -> Result<(), OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
-        let exists: Option<i64> = tx
+        let endpoints: Option<(String, String)> = tx
             .query_row(
-                "SELECT 1 FROM graph_edge WHERE id = ?1",
+                "SELECT sn.project_id, tn.project_id
+                 FROM graph_edge e
+                 JOIN graph_node sn ON sn.id = e.source_node_id
+                 JOIN graph_node tn ON tn.id = e.target_node_id
+                 WHERE e.id = ?1",
                 rusqlite::params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        exists.ok_or(OrchdPersistError::NotFound)?;
+        let (source_project, target_project) = endpoints.ok_or(OrchdPersistError::NotFound)?;
+        ensure_project_active(&tx, &source_project)?;
+        if target_project != source_project {
+            ensure_project_active(&tx, &target_project)?;
+        }
         tx.execute(
             "DELETE FROM graph_edge WHERE id = ?1",
             rusqlite::params![id],
@@ -984,6 +995,30 @@ mod tests {
     }
 
     #[test]
+    fn update_node_on_archived_project_is_invariant() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        db.archive_project(&project_id).unwrap();
+        let err = db
+            .update_node(&node.id, Some("new label"), Some("new body"))
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+
+        // The row must be untouched — the guard rejects BEFORE the UPDATE runs.
+        let (label, body): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT label, body FROM graph_node WHERE id = ?1",
+                rusqlite::params![node.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(label, "orig", "update must not run on an archived project");
+        assert_eq!(body, node.body);
+    }
+
+    #[test]
     fn move_node_updates_position() {
         let db = new_db();
         let project_id = new_project(&db);
@@ -1049,6 +1084,31 @@ mod tests {
         let db = new_db();
         let err = db.delete_node("no-such-node").unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn delete_node_on_archived_project_is_invariant() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        db.archive_project(&project_id).unwrap();
+        let err = db.delete_node(&node.id).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+
+        // The row must still be present — the guard rejects BEFORE the DELETE runs.
+        let still_present: Option<i64> = db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM graph_node WHERE id = ?1",
+                rusqlite::params![node.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            still_present.is_some(),
+            "delete must not run on an archived project"
+        );
     }
 
     // ---- add_edge ----
@@ -1181,6 +1241,41 @@ mod tests {
         let db = new_db();
         let err = db.delete_edge("no-such-edge").unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn delete_edge_on_archived_project_endpoint_is_invariant() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        let a = add_concept(&db, &project_a, "a");
+        let b = add_concept(&db, &project_b, "b");
+        // Cross-project edge; archive ONLY the target endpoint's project.
+        let edge = db
+            .add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+        db.archive_project(&project_b).unwrap();
+
+        let err = db.delete_edge(&edge.id).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "delete_edge with an archived endpoint project must be Invariant, got {err:?}"
+        );
+
+        // The edge row must still exist — the guard rejects BEFORE the DELETE runs.
+        let still_present: Option<i64> = db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM graph_edge WHERE id = ?1",
+                rusqlite::params![edge.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            still_present.is_some(),
+            "delete_edge must not run when an endpoint's project is archived"
+        );
     }
 
     // ---- entityRef soft-ref survival (D3) ----
