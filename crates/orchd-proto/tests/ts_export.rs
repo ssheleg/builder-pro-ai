@@ -46,6 +46,15 @@ fn export_and_read() -> String {
     GraphEdgeKind::export_all_to(types_ts_dir()).expect("export GraphEdgeKind");
     GraphView::export_all_to(types_ts_dir()).expect("export GraphView");
     GraphNeighborhood::export_all_to(types_ts_dir()).expect("export GraphNeighborhood");
+    McpServer::export_all_to(types_ts_dir()).expect("export McpServer");
+    McpTransport::export_all_to(types_ts_dir()).expect("export McpTransport");
+    McpScope::export_all_to(types_ts_dir()).expect("export McpScope");
+    McpAuthKind::export_all_to(types_ts_dir()).expect("export McpAuthKind");
+    McpTool::export_all_to(types_ts_dir()).expect("export McpTool");
+    McpConnectReport::export_all_to(types_ts_dir()).expect("export McpConnectReport");
+    McpCallResult::export_all_to(types_ts_dir()).expect("export McpCallResult");
+    McpInvocation::export_all_to(types_ts_dir()).expect("export McpInvocation");
+    McpArtifact::export_all_to(types_ts_dir()).expect("export McpArtifact");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -214,6 +223,30 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "target_node_id",
         "external_nodes",
         "root_id",
+        "server_id",
+        "tool_name",
+        "input_schema_json",
+        "fetched_at",
+        "timeout_ms",
+        "max_retries",
+        "auth_kind",
+        "secret_ref",
+        "account_id",
+        "protocol_version",
+        "tool_count",
+        "artifact_id",
+        "invocation_id",
+        "content_json",
+        "content_text",
+        "is_untrusted",
+        "is_error",
+        "request_hash",
+        "error_kind",
+        "latency_ms",
+        "cost_usd",
+        "input_tokens",
+        "output_tokens",
+        "started_at",
     ] {
         assert!(
             !ts.contains(snake),
@@ -328,4 +361,77 @@ fn regenerating_is_byte_identical() {
         first, second,
         "regenerating orchd-types.ts must be byte-identical (no nondeterminism)"
     );
+}
+
+// ---- S-EXT MCP entity export tests (task T3) ----
+
+#[test]
+fn mcp_entities_are_present_with_camelcase_fields_and_ts_number_timestamps() {
+    let ts = export_and_read();
+    for expected in [
+        "export type McpServer",
+        "export type McpTool",
+        "export type McpConnectReport",
+        "export type McpCallResult",
+        "export type McpInvocation",
+        "export type McpArtifact",
+    ] {
+        assert!(
+            contains_normalized(&ts, expected),
+            "expected {expected:?} in generated orchd-types.ts; got:\n{ts}"
+        );
+    }
+    assert!(
+        contains_normalized(&ts, "createdAt: number"),
+        "McpServer/McpArtifact.created_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "projectId: string | null"),
+        "McpServer.project_id must serialize as camelCase `projectId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "authKind: McpAuthKind"),
+        "McpServer.auth_kind must serialize as camelCase `authKind`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "toolCount: number"),
+        "McpConnectReport.tool_count (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "artifactId: string"),
+        "McpCallResult.artifact_id must serialize as camelCase `artifactId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "inputTokens: number | null")
+            && contains_normalized(&ts, "outputTokens: number | null"),
+        "McpInvocation.input_tokens/output_tokens (Option<i64>) must be TS `number | null`, \
+         not `bigint | null`; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("bigint"),
+        "generated orchd-types.ts must never contain `bigint`; got:\n{ts}"
+    );
+}
+
+#[test]
+fn mcp_transport_scope_auth_kind_wire_tags_are_camelcase() {
+    let ts = export_and_read();
+    for tag in ["http", "stdio"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "McpTransport must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+    for tag in ["global", "project"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "McpScope must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+    for tag in ["none", "bearer", "oauth"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "McpAuthKind must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
 }

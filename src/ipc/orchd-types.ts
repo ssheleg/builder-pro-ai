@@ -46,6 +46,44 @@ export type Insight = { id: string, projectId: string | null, source: string, ti
 
 export type InsightStatus = "new" | "accepted" | "archived";
 
+/**
+ * Durable tool-call result (spec §4: "untrusted by construction"). The untrusted flag is
+ * always `true` for every artifact this Phase-1 slice creates — the S6b agent-boundary flag
+ * this quarantines against, not something a client can ever clear via the wire.
+ */
+export type McpArtifact = { id: string, invocationId: string, serverId: string, toolName: string, projectId: string | null, contentJson: string, contentText: string | null, isUntrusted: boolean, createdAt: number, };
+
+export type McpAuthKind = "none" | "bearer" | "oauth";
+
+/**
+ * `OrchdRequest::McpCallTool` / `ConnectorInvoke`'s success payload (spec §5); the JSON result
+ * is the tool's full structured output, already persisted as a durable artifact row.
+ */
+export type McpCallResult = { artifactId: string, invocationId: string, contentJson: string, isError: boolean, };
+
+/**
+ * `OrchdRequest::McpConnect`'s success payload (spec §5).
+ */
+export type McpConnectReport = { protocolVersion: string, toolCount: number, };
+
+export type McpInvocation = { id: string, serverId: string, toolName: string, projectId: string | null, 
+/**
+ * sha256 of args, NEVER the args themselves (spec §4: no arg content logged).
+ */
+requestHash: string, ok: boolean, errorKind: string | null, latencyMs: number, costUsd: number | null, inputTokens: number | null, outputTokens: number | null, startedAt: number, };
+
+export type McpScope = "global" | "project";
+
+export type McpServer = { id: string, name: string, transport: McpTransport, url: string | null, command: string | null, args: Array<string>, env: { [key in string]?: string }, scope: McpScope, projectId: string | null, authKind: McpAuthKind, secretRef: string | null, accountId: string | null, enabled: boolean, timeoutMs: number, maxRetries: number, 
+/**
+ * last negotiated MCP protocol version; `null` until first successful `McpConnect`.
+ */
+protocolVersion: string | null, createdAt: number, updatedAt: number, };
+
+export type McpTool = { id: string, serverId: string, name: string, title: string | null, description: string | null, inputSchemaJson: string, enabled: boolean, fetchedAt: number, };
+
+export type McpTransport = "http" | "stdio";
+
 export type OrchdErrorCode = "notFound" | "invariant" | "validation" | "conflict" | "io";
 
 export type PolicyRules = { spendCapUsd: number | null, approvalClasses: Array<string>, pathAllowlist: Array<string>, };

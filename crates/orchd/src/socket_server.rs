@@ -1191,5 +1191,28 @@ async fn dispatch(
                 Err(e) => map_err(e),
             }
         }
+        // S-EXT MCP (spec §5, task T3): wire types landed in `bpa-orchd-proto`, but no dispatch
+        // logic exists here yet — that's T6 (trust choke-point + rmcp client + persistence
+        // wiring). TEMPORARY: this wildcard arm exists ONLY to keep `bpa-orchd` compiling
+        // between T3 and T6; it must be deleted, not extended, when T6 adds the real per-verb
+        // arms above (one arm per variant, mirroring the graph/project/goal/... arms).
+        OrchdRequest::McpAddServer { .. }
+        | OrchdRequest::McpListServers { .. }
+        | OrchdRequest::McpUpdateServer { .. }
+        | OrchdRequest::McpSetServerEnabled { .. }
+        | OrchdRequest::McpDeleteServer { .. }
+        | OrchdRequest::McpSetServerBearer { .. }
+        | OrchdRequest::McpConnect { .. }
+        | OrchdRequest::McpDisconnect { .. }
+        | OrchdRequest::McpListTools { .. }
+        | OrchdRequest::McpSetToolEnabled { .. }
+        | OrchdRequest::McpCallTool { .. }
+        | OrchdRequest::McpListInvocations { .. }
+        | OrchdRequest::McpListArtifacts { .. }
+        | OrchdRequest::McpGetArtifact { .. }
+        | OrchdRequest::TrustGrantConsent { .. } => OrchdResponse::Error {
+            code: OrchdErrorCode::Io,
+            message: "mcp dispatch not yet implemented".into(),
+        },
     }
 }

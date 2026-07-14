@@ -15,6 +15,8 @@
 //! NOT exported to TS — same as `bpa-protocol`'s `Request`/`Response`/`Push`/`Frame` — so their
 //! field names stay plain Rust snake_case on the wire.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -362,6 +364,147 @@ pub struct GraphNeighborhood {
     pub edges: Vec<GraphEdge>,
 }
 
+// ---- S-EXT MCP entities (spec §5, appended — order FROZEN append-only) ----
+// Phase-1 subset: server/tool registry + call results + invocation/artifact history. Field
+// sets mirror the spec §4 `mcp_server`/`mcp_tool`/`mcp_invocation`/`mcp_artifact` DDL columns
+// 1:1 (same field names as `bpa_orchd::mcp::{McpServerRow, McpToolRow}` from T2), with the
+// usual camelCase + ts-rs wire treatment layered on top (mirrors the `GraphNode` entity block
+// byte-for-byte). `secret_ref`/`account_id` are Keychain/account REFERENCES, never the secret
+// value itself (spec §5: "token -> Keychain, ref -> DB; token NEVER logged/echoed").
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct McpServer {
+    pub id: String,
+    pub name: String,
+    pub transport: McpTransport,
+    pub url: Option<String>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub scope: McpScope,
+    pub project_id: Option<String>,
+    pub auth_kind: McpAuthKind,
+    pub secret_ref: Option<String>,
+    pub account_id: Option<String>,
+    pub enabled: bool,
+    #[ts(type = "number")]
+    pub timeout_ms: i64,
+    #[ts(type = "number")]
+    pub max_retries: i64,
+    /// last negotiated MCP protocol version; `null` until first successful `McpConnect`.
+    pub protocol_version: Option<String>,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum McpTransport {
+    Http,
+    Stdio,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum McpScope {
+    Global,
+    Project,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum McpAuthKind {
+    None,
+    Bearer,
+    Oauth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct McpTool {
+    pub id: String,
+    pub server_id: String,
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub input_schema_json: String,
+    pub enabled: bool,
+    #[ts(type = "number")]
+    pub fetched_at: i64,
+}
+
+/// `OrchdRequest::McpConnect`'s success payload (spec §5).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct McpConnectReport {
+    pub protocol_version: String,
+    #[ts(type = "number")]
+    pub tool_count: i64,
+}
+
+/// `OrchdRequest::McpCallTool` / `ConnectorInvoke`'s success payload (spec §5); the JSON result
+/// is the tool's full structured output, already persisted as a durable artifact row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct McpCallResult {
+    pub artifact_id: String,
+    pub invocation_id: String,
+    pub content_json: String,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct McpInvocation {
+    pub id: String,
+    pub server_id: String,
+    pub tool_name: String,
+    pub project_id: Option<String>,
+    /// sha256 of args, NEVER the args themselves (spec §4: no arg content logged).
+    pub request_hash: String,
+    pub ok: bool,
+    pub error_kind: Option<String>,
+    #[ts(type = "number")]
+    pub latency_ms: i64,
+    pub cost_usd: Option<f64>,
+    #[ts(type = "number | null")]
+    pub input_tokens: Option<i64>,
+    #[ts(type = "number | null")]
+    pub output_tokens: Option<i64>,
+    #[ts(type = "number")]
+    pub started_at: i64,
+}
+
+/// Durable tool-call result (spec §4: "untrusted by construction"). The untrusted flag is
+/// always `true` for every artifact this Phase-1 slice creates — the S6b agent-boundary flag
+/// this quarantines against, not something a client can ever clear via the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct McpArtifact {
+    pub id: String,
+    pub invocation_id: String,
+    pub server_id: String,
+    pub tool_name: String,
+    pub project_id: Option<String>,
+    pub content_json: String,
+    pub content_text: Option<String>,
+    pub is_untrusted: bool,
+    #[ts(type = "number")]
+    pub created_at: i64,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -597,6 +740,100 @@ pub enum OrchdRequest {
         query: String,
         project_id: Option<String>,
     },
+    // S-EXT MCP (spec §5, appended — order FROZEN append-only). Phase-1 subset: server/tool
+    // registry, connect/call, invocation/artifact history, trust consent. `McpUpdateServer`
+    // deliberately excludes `transport`/`scope`/`project_id` (fixed at `McpAddServer` time,
+    // load-bearing for the spec §4 CHECK invariants — mirrors `bpa_orchd::mcp::McpServerPatch`).
+    /// → `OrchdResponse::McpServer`.
+    McpAddServer {
+        name: String,
+        transport: McpTransport,
+        url: Option<String>,
+        command: Option<String>,
+        args: Option<Vec<String>>,
+        env: Option<BTreeMap<String, String>>,
+        scope: McpScope,
+        project_id: Option<String>,
+        auth_kind: McpAuthKind,
+        timeout_ms: Option<i64>,
+        max_retries: Option<i64>,
+    },
+    /// → `OrchdResponse::McpServers` (global + the given project's, when `project_id: Some`).
+    McpListServers {
+        project_id: Option<String>,
+    },
+    /// → `OrchdResponse::McpServer`.
+    McpUpdateServer {
+        id: String,
+        name: Option<String>,
+        url: Option<String>,
+        command: Option<String>,
+        args: Option<Vec<String>>,
+        env: Option<BTreeMap<String, String>>,
+        auth_kind: Option<McpAuthKind>,
+        timeout_ms: Option<i64>,
+        max_retries: Option<i64>,
+    },
+    /// → `OrchdResponse::McpServer`.
+    McpSetServerEnabled {
+        id: String,
+        enabled: bool,
+    },
+    /// → `OrchdResponse::Ack`.
+    McpDeleteServer {
+        id: String,
+    },
+    /// → `OrchdResponse::Ack`; `token` -> Keychain, ref -> DB. `token` NEVER logged/echoed.
+    McpSetServerBearer {
+        id: String,
+        token: String,
+    },
+    /// → `OrchdResponse::McpConnectReport`; trust-gated, caches tools, pushes `McpToolsChanged`.
+    McpConnect {
+        id: String,
+    },
+    /// → `OrchdResponse::Ack`.
+    McpDisconnect {
+        id: String,
+    },
+    /// → `OrchdResponse::McpTools` (from cache).
+    McpListTools {
+        server_id: String,
+    },
+    /// → `OrchdResponse::McpTool`; per-tool allowlist toggle.
+    McpSetToolEnabled {
+        tool_id: String,
+        enabled: bool,
+    },
+    /// → `OrchdResponse::McpCallResult`; a disabled tool is rejected with `Error{Io}` before
+    /// dispatch (allowlist enforced in `invoke.rs`, a later task).
+    McpCallTool {
+        server_id: String,
+        tool_name: String,
+        args_json: String,
+        project_id: Option<String>,
+    },
+    /// → `OrchdResponse::McpInvocations`.
+    McpListInvocations {
+        server_id: Option<String>,
+        project_id: Option<String>,
+        limit: Option<i64>,
+    },
+    /// → `OrchdResponse::McpArtifacts`.
+    McpListArtifacts {
+        project_id: Option<String>,
+        server_id: Option<String>,
+        limit: Option<i64>,
+    },
+    /// → `OrchdResponse::McpArtifact`.
+    McpGetArtifact {
+        id: String,
+    },
+    /// → `OrchdResponse::Ack`; `kind` is `'connect'` | `'stdio_exec'` (spec §4 `consent_grant`).
+    TrustGrantConsent {
+        server_id: String,
+        kind: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -633,6 +870,16 @@ pub enum OrchdResponse {
     GraphView(GraphView),
     Neighborhood(GraphNeighborhood),
     GraphNodes(Vec<GraphNode>),
+    // S-EXT MCP (spec §5, appended — order FROZEN append-only)
+    McpServer(McpServer),
+    McpServers(Vec<McpServer>),
+    McpTool(McpTool),
+    McpTools(Vec<McpTool>),
+    McpConnectReport(McpConnectReport),
+    McpCallResult(McpCallResult),
+    McpInvocations(Vec<McpInvocation>),
+    McpArtifacts(Vec<McpArtifact>),
+    McpArtifact(McpArtifact),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -653,6 +900,19 @@ pub enum OrchdPush {
     // S4 knowledge graph (spec §3, appended — order FROZEN append-only)
     GraphChanged {
         project_id: String,
+    },
+    // S-EXT MCP (spec §5, appended — order FROZEN append-only)
+    McpServersChanged {
+        project_id: Option<String>,
+    },
+    McpToolsChanged {
+        server_id: String,
+    },
+    McpArtifactsChanged {
+        project_id: Option<String>,
+    },
+    McpInvocationLogged {
+        server_id: String,
     },
 }
 

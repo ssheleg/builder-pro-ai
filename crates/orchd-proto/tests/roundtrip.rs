@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use bpa_orchd_proto::*;
 
 /// Hop-B framing (`u32`-LE length prefix + CBOR body) must round-trip every `OrchdFrame`
@@ -174,6 +176,89 @@ fn sample_graph_neighborhood() -> GraphNeighborhood {
         root_id: "node-1".into(),
         nodes: vec![sample_graph_node()],
         edges: vec![sample_graph_edge()],
+    }
+}
+
+fn sample_mcp_server() -> McpServer {
+    McpServer {
+        id: "mcp-1".into(),
+        name: "Demo MCP".into(),
+        transport: McpTransport::Http,
+        url: Some("https://example.com/mcp".into()),
+        command: None,
+        args: vec![],
+        env: BTreeMap::new(),
+        scope: McpScope::Global,
+        project_id: None,
+        auth_kind: McpAuthKind::Bearer,
+        secret_ref: Some("mcp-1-bearer".into()),
+        account_id: None,
+        enabled: true,
+        timeout_ms: 30_000,
+        max_retries: 2,
+        protocol_version: Some("2024-11-05".into()),
+        created_at: 1_720_000_000,
+        updated_at: 1_720_000_100,
+    }
+}
+
+fn sample_mcp_tool() -> McpTool {
+    McpTool {
+        id: "tool-1".into(),
+        server_id: "mcp-1".into(),
+        name: "search".into(),
+        title: Some("Search".into()),
+        description: Some("Searches things".into()),
+        input_schema_json: "{}".into(),
+        enabled: true,
+        fetched_at: 1_720_000_000,
+    }
+}
+
+fn sample_mcp_connect_report() -> McpConnectReport {
+    McpConnectReport {
+        protocol_version: "2024-11-05".into(),
+        tool_count: 3,
+    }
+}
+
+fn sample_mcp_call_result() -> McpCallResult {
+    McpCallResult {
+        artifact_id: "artifact-1".into(),
+        invocation_id: "invocation-1".into(),
+        content_json: "{\"ok\":true}".into(),
+        is_error: false,
+    }
+}
+
+fn sample_mcp_invocation() -> McpInvocation {
+    McpInvocation {
+        id: "invocation-1".into(),
+        server_id: "mcp-1".into(),
+        tool_name: "search".into(),
+        project_id: Some("proj-1".into()),
+        request_hash: "deadbeef".into(),
+        ok: true,
+        error_kind: None,
+        latency_ms: 120,
+        cost_usd: Some(0.002),
+        input_tokens: Some(50),
+        output_tokens: Some(20),
+        started_at: 1_720_000_000,
+    }
+}
+
+fn sample_mcp_artifact() -> McpArtifact {
+    McpArtifact {
+        id: "artifact-1".into(),
+        invocation_id: "invocation-1".into(),
+        server_id: "mcp-1".into(),
+        tool_name: "search".into(),
+        project_id: Some("proj-1".into()),
+        content_json: "{\"ok\":true}".into(),
+        content_text: Some("ok".into()),
+        is_untrusted: true,
+        created_at: 1_720_000_000,
     }
 }
 
@@ -368,6 +453,74 @@ fn all_requests() -> Vec<OrchdRequest> {
             query: "concept".into(),
             project_id: Some("proj-1".into()),
         },
+        OrchdRequest::McpAddServer {
+            name: "Demo MCP".into(),
+            transport: McpTransport::Http,
+            url: Some("https://example.com/mcp".into()),
+            command: None,
+            args: None,
+            env: None,
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            timeout_ms: None,
+            max_retries: None,
+        },
+        OrchdRequest::McpListServers {
+            project_id: Some("proj-1".into()),
+        },
+        OrchdRequest::McpUpdateServer {
+            id: "mcp-1".into(),
+            name: Some("Renamed MCP".into()),
+            url: None,
+            command: None,
+            args: Some(vec!["--flag".into()]),
+            env: Some(BTreeMap::from([("KEY".to_string(), "value".to_string())])),
+            auth_kind: Some(McpAuthKind::Bearer),
+            timeout_ms: Some(5_000),
+            max_retries: Some(3),
+        },
+        OrchdRequest::McpSetServerEnabled {
+            id: "mcp-1".into(),
+            enabled: false,
+        },
+        OrchdRequest::McpDeleteServer { id: "mcp-1".into() },
+        OrchdRequest::McpSetServerBearer {
+            id: "mcp-1".into(),
+            token: "secret-token".into(),
+        },
+        OrchdRequest::McpConnect { id: "mcp-1".into() },
+        OrchdRequest::McpDisconnect { id: "mcp-1".into() },
+        OrchdRequest::McpListTools {
+            server_id: "mcp-1".into(),
+        },
+        OrchdRequest::McpSetToolEnabled {
+            tool_id: "tool-1".into(),
+            enabled: false,
+        },
+        OrchdRequest::McpCallTool {
+            server_id: "mcp-1".into(),
+            tool_name: "search".into(),
+            args_json: "{\"q\":\"rust\"}".into(),
+            project_id: Some("proj-1".into()),
+        },
+        OrchdRequest::McpListInvocations {
+            server_id: Some("mcp-1".into()),
+            project_id: None,
+            limit: Some(50),
+        },
+        OrchdRequest::McpListArtifacts {
+            project_id: Some("proj-1".into()),
+            server_id: None,
+            limit: None,
+        },
+        OrchdRequest::McpGetArtifact {
+            id: "artifact-1".into(),
+        },
+        OrchdRequest::TrustGrantConsent {
+            server_id: "mcp-1".into(),
+            kind: "connect".into(),
+        },
     ]
 }
 
@@ -420,6 +573,15 @@ fn all_responses() -> Vec<OrchdResponse> {
         OrchdResponse::GraphView(sample_graph_view()),
         OrchdResponse::Neighborhood(sample_graph_neighborhood()),
         OrchdResponse::GraphNodes(vec![sample_graph_node()]),
+        OrchdResponse::McpServer(sample_mcp_server()),
+        OrchdResponse::McpServers(vec![sample_mcp_server()]),
+        OrchdResponse::McpTool(sample_mcp_tool()),
+        OrchdResponse::McpTools(vec![sample_mcp_tool()]),
+        OrchdResponse::McpConnectReport(sample_mcp_connect_report()),
+        OrchdResponse::McpCallResult(sample_mcp_call_result()),
+        OrchdResponse::McpInvocations(vec![sample_mcp_invocation()]),
+        OrchdResponse::McpArtifacts(vec![sample_mcp_artifact()]),
+        OrchdResponse::McpArtifact(sample_mcp_artifact()),
     ]
 }
 
@@ -444,6 +606,16 @@ fn all_pushes() -> Vec<OrchdPush> {
         },
         OrchdPush::GraphChanged {
             project_id: "proj-1".into(),
+        },
+        OrchdPush::McpServersChanged {
+            project_id: Some("proj-1".into()),
+        },
+        OrchdPush::McpToolsChanged {
+            server_id: "mcp-1".into(),
+        },
+        OrchdPush::McpArtifactsChanged { project_id: None },
+        OrchdPush::McpInvocationLogged {
+            server_id: "mcp-1".into(),
         },
     ]
 }
@@ -614,4 +786,78 @@ fn no_double_option_on_update_verbs() {
         fit_verdict: None,
         fit_reasoning: String::new(),
     };
+    // S-EXT: OrchdRequest::McpUpdateServer follows the same D11 shape.
+    let _ = OrchdRequest::McpUpdateServer {
+        id: "mcp-1".into(),
+        name: None,
+        url: None,
+        command: None,
+        args: None,
+        env: None,
+        auth_kind: None,
+        timeout_ms: None,
+        max_retries: None,
+    };
+}
+
+// ---- S-EXT MCP wire-tag / entity-camelCase / frame-JSON-roundtrip tests (task T3) ----
+
+#[test]
+fn mcp_transport_wire_tags_are_lowercase() {
+    // Discriminating: exact tag equality (a broken `rename_all` producing "Http" fails).
+    assert_serde_tag(&McpTransport::Http, "http");
+    assert_serde_tag(&McpTransport::Stdio, "stdio");
+}
+
+#[test]
+fn mcp_scope_wire_tags_are_lowercase() {
+    assert_serde_tag(&McpScope::Global, "global");
+    assert_serde_tag(&McpScope::Project, "project");
+}
+
+#[test]
+fn mcp_auth_kind_wire_tags_are_lowercase() {
+    assert_serde_tag(&McpAuthKind::None, "none");
+    assert_serde_tag(&McpAuthKind::Bearer, "bearer");
+    assert_serde_tag(&McpAuthKind::Oauth, "oauth");
+}
+
+#[test]
+fn mcp_server_entity_serializes_with_camelcase_keys() {
+    let json = serde_json::to_string(&sample_mcp_server()).expect("serialize McpServer");
+    assert!(
+        json.contains("\"createdAt\""),
+        "McpServer.created_at must serialize as camelCase `createdAt`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"projectId\""),
+        "McpServer.project_id must serialize as camelCase `projectId`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"authKind\""),
+        "McpServer.auth_kind must serialize as camelCase `authKind`; got:\n{json}"
+    );
+    assert!(
+        !json.contains("created_at"),
+        "generated JSON must not contain snake_case `created_at`; got:\n{json}"
+    );
+    assert!(
+        !json.contains("project_id"),
+        "generated JSON must not contain snake_case `project_id`; got:\n{json}"
+    );
+}
+
+#[test]
+fn mcp_servers_response_json_roundtrips() {
+    // Frame round-trip via `serde_json` directly (in addition to the CBOR-wire round-trip
+    // exercised by `every_response_variant_roundtrips`): the frame stays plain snake_case even
+    // though it wraps a camelCase entity.
+    let original = OrchdResponse::McpServers(vec![sample_mcp_server()]);
+    let json = serde_json::to_string(&original).expect("serialize OrchdResponse::McpServers");
+    let decoded: OrchdResponse =
+        serde_json::from_str(&json).expect("deserialize OrchdResponse::McpServers");
+    assert_eq!(
+        decoded, original,
+        "OrchdResponse::McpServers must JSON round-trip byte-for-byte equal"
+    );
 }
