@@ -6,6 +6,7 @@ import type { FsEntry } from "../ipc/fs";
 import type {
   DomainTask,
   Goal,
+  GraphView,
   Idea,
   Insight,
   Project,
@@ -14,6 +15,7 @@ import type {
 } from "../ipc/orchd-types";
 import {
   orchdGetRuleset,
+  orchdGraphListProject,
   orchdListGoals,
   orchdListIdeas,
   orchdListInsights,
@@ -138,6 +140,11 @@ export interface AppState {
    * Mirrors `goalsByProject` exactly — absence means "not yet fetched", replaced per-key by
    * `refreshTasks(projectId)`. */
   tasksByProject: Record<string, DomainTask[]>;
+  /** A project's knowledge graph (S4 §7), keyed by `projectId`. Mirrors `goalsByProject`/
+   * `tasksByProject` exactly — absence means "not yet fetched", replaced wholesale per-key by
+   * `refreshGraph(projectId)`; a `GraphChanged{projectId}` push never touches any OTHER project's
+   * entry. */
+  graphByProject: Record<string, GraphView>;
   /** RuleSet views keyed `` `global` `` (the one global ruleset) or `` `project:${id}` `` (a
    * single project's ruleset) — mirrors `orchd_get_ruleset`'s `(scope, projectId)` pair collapsed
    * into one string key. Replaced per-key by `refreshRuleset(key)`. */
@@ -241,6 +248,9 @@ export interface AppState {
   /** Re-fetch ONE project's task list, replacing only `tasksByProject[projectId]`. Mirrors
    * `refreshGoals` exactly. */
   refreshTasks: (projectId: string) => Promise<void>;
+  /** Re-fetch ONE project's knowledge graph, replacing only `graphByProject[projectId]`. Mirrors
+   * `refreshGoals`/`refreshTasks` exactly. */
+  refreshGraph: (projectId: string) => Promise<void>;
   /** Re-fetch one ruleset by its `rulesets` key (`` `global` `` or `` `project:${id}` `` — see
    * `rulesets`'s doc above), replacing only that key's entry. */
   refreshRuleset: (key: string) => Promise<void>;
@@ -316,6 +326,7 @@ export const useAppStore = create<AppState>((set, get) => {
     ideas: [],
     insights: [],
     tasksByProject: {},
+    graphByProject: {},
     rulesets: {},
     orchdDown: false,
     orchdIncompatible: false,
@@ -499,6 +510,15 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const tasks = await orchdListTasks(projectId);
         set((s) => ({ tasksByProject: { ...s.tasksByProject, [projectId]: tasks } }));
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshGraph: async (projectId) => {
+      try {
+        const graph = await orchdGraphListProject(projectId);
+        set((s) => ({ graphByProject: { ...s.graphByProject, [projectId]: graph } }));
       } catch (e) {
         get().showToast(describeOrchdError(e));
       }

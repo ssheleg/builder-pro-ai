@@ -17,6 +17,7 @@ import {
   onOrchdInsightsChanged,
   onOrchdTasksChanged,
   onOrchdRulesetChanged,
+  onOrchdGraphChanged,
   onOrchdDown,
   onOrchdUp,
   onOrchdIncompatible,
@@ -196,6 +197,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         void useAppStore.getState().refreshRuleset(key);
       }),
     );
+    // Unconditional re-fetch, mirroring `goals-changed`/`tasks-changed` above (audit #5.1): there
+    // is no "graph panel currently open" gating to mirror — none of the S3 precedents this event
+    // was modeled on gate their refresh on view/activeProjectId, so this doesn't invent one either.
+    track(onOrchdGraphChanged((p) => void useAppStore.getState().refreshGraph(p.projectId)));
     // orchd connection state (spec §9): a DIRECT 1:1 mapping (see
     // `broker.rs::map_orchd_conn_state`'s doc) — unlike the sessiond trio there is no
     // reconnect-tracking scheme, `orchd://down`/`orchd://up` just flip `orchdDown`.

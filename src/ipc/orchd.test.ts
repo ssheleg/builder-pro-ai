@@ -39,6 +39,15 @@ import {
   orchdGetRuleset,
   orchdUpsertRuleset,
   orchdAcknowledgeRuleFile,
+  orchdGraphAddNode,
+  orchdGraphUpdateNode,
+  orchdGraphMoveNode,
+  orchdGraphDeleteNode,
+  orchdGraphAddEdge,
+  orchdGraphDeleteEdge,
+  orchdGraphListProject,
+  orchdGraphNeighborhood,
+  orchdGraphSearch,
   orchdExportProject,
   orchdExportAll,
   orchdImportBundle,
@@ -319,6 +328,87 @@ describe("ipc/orchd", () => {
   it("orchdAcknowledgeRuleFile sends id", async () => {
     await orchdAcknowledgeRuleFile("r1");
     expect(invokeMock).toHaveBeenCalledWith("orchd_acknowledge_rule_file", { id: "r1" });
+  });
+
+  // ── graph ──────────────────────────────────────────────────────────────────────────────────
+
+  it("orchdGraphAddNode sends projectId/kind/label/body/posX/posY", async () => {
+    await orchdGraphAddNode("p1", "concept", "Node label", "body", 10, 20);
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_add_node", {
+      projectId: "p1",
+      kind: "concept",
+      label: "Node label",
+      body: "body",
+      posX: 10,
+      posY: 20,
+    });
+  });
+
+  it("orchdGraphUpdateNode sends id/label/body", async () => {
+    await orchdGraphUpdateNode("n1", "New label", null);
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_update_node", {
+      id: "n1",
+      label: "New label",
+      body: null,
+    });
+  });
+
+  it("orchdGraphMoveNode sends id/posX/posY", async () => {
+    await orchdGraphMoveNode("n1", 5, 9);
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_move_node", {
+      id: "n1",
+      posX: 5,
+      posY: 9,
+    });
+  });
+
+  it("orchdGraphDeleteNode sends id", async () => {
+    await orchdGraphDeleteNode("n1");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_delete_node", { id: "n1" });
+  });
+
+  it("orchdGraphAddEdge sends sourceNodeId/targetNodeId/kind/label", async () => {
+    await orchdGraphAddEdge("n1", "n2", "depends", "blocks");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_add_edge", {
+      sourceNodeId: "n1",
+      targetNodeId: "n2",
+      kind: "depends",
+      label: "blocks",
+    });
+  });
+
+  it("orchdGraphDeleteEdge sends id", async () => {
+    await orchdGraphDeleteEdge("e1");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_delete_edge", { id: "e1" });
+  });
+
+  it("orchdGraphListProject sends projectId", async () => {
+    await orchdGraphListProject("p1");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_list_project", { projectId: "p1" });
+  });
+
+  it("orchdGraphNeighborhood sends nodeId/depth", async () => {
+    await orchdGraphNeighborhood("n1", 2);
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_neighborhood", {
+      nodeId: "n1",
+      depth: 2,
+    });
+  });
+
+  it("orchdGraphSearch sends query/projectId", async () => {
+    await orchdGraphSearch("hello", "p1");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_search", {
+      query: "hello",
+      projectId: "p1",
+    });
+  });
+
+  it("orchdGraphSearch sends projectId: null for a workspace-wide search", async () => {
+    await orchdGraphSearch("hello", null);
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_search", {
+      query: "hello",
+      projectId: null,
+    });
   });
 
   // ── export / import ───────────────────────────────────────────────────────────────────────

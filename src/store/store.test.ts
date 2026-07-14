@@ -2,13 +2,22 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
 import type { FsEntry } from "../ipc/fs";
-import type { DomainTask, Goal, Idea, Insight, Project, RuleSetView } from "../ipc/orchd-types";
+import type {
+  DomainTask,
+  Goal,
+  GraphView,
+  Idea,
+  Insight,
+  Project,
+  RuleSetView,
+} from "../ipc/orchd-types";
 
 const orchdListProjectsMock = vi.fn();
 const orchdListGoalsMock = vi.fn();
 const orchdListIdeasMock = vi.fn();
 const orchdListInsightsMock = vi.fn();
 const orchdListTasksMock = vi.fn();
+const orchdGraphListProjectMock = vi.fn();
 const orchdGetRulesetMock = vi.fn();
 vi.mock("../ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
@@ -16,6 +25,7 @@ vi.mock("../ipc/orchd", () => ({
   orchdListIdeas: (...a: unknown[]) => orchdListIdeasMock(...a),
   orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
   orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
+  orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
@@ -46,6 +56,7 @@ describe("useAppStore", () => {
     orchdListIdeasMock.mockReset();
     orchdListInsightsMock.mockReset();
     orchdListTasksMock.mockReset();
+    orchdGraphListProjectMock.mockReset();
     orchdGetRulesetMock.mockReset();
     useAppStore.setState(
       {
@@ -71,6 +82,7 @@ describe("useAppStore", () => {
         ideas: [],
         insights: [],
         tasksByProject: {},
+        graphByProject: {},
         rulesets: {},
         orchdDown: false,
         orchdIncompatible: false,
@@ -578,6 +590,13 @@ describe("useAppStore", () => {
     ...over,
   });
 
+  const graphView = (over: Partial<GraphView> = {}): GraphView => ({
+    nodes: [],
+    edges: [],
+    externalNodes: [],
+    ...over,
+  });
+
   const rulesetView = (over: Partial<RuleSetView> = {}): RuleSetView => ({
     rule: {
       id: "r1",
@@ -602,6 +621,7 @@ describe("useAppStore", () => {
     expect(s.ideas).toEqual([]);
     expect(s.insights).toEqual([]);
     expect(s.tasksByProject).toEqual({});
+    expect(s.graphByProject).toEqual({});
     expect(s.rulesets).toEqual({});
     expect(s.orchdDown).toBe(false);
     expect(s.orchdIncompatible).toBe(false);
@@ -676,6 +696,29 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().tasksByProject["p2"]).toEqual([
       task({ id: "t2", projectId: "p2" }),
     ]);
+  });
+
+  it("refreshGraph(projectId) replaces ONLY the named project's graph, leaving others untouched", async () => {
+    const p2Graph = graphView({ nodes: [{ id: "n2", projectId: "p2", kind: "note", entityType: null, entityId: null, label: "n2", body: "", posX: 0, posY: 0, createdAt: 1, updatedAt: 1, isOrphan: false }] });
+    useAppStore.setState({ graphByProject: { p2: p2Graph } }, false);
+
+    const p1Graph = graphView({ nodes: [{ id: "n1", projectId: "p1", kind: "concept", entityType: null, entityId: null, label: "n1", body: "", posX: 1, posY: 2, createdAt: 1, updatedAt: 1, isOrphan: false }] });
+    orchdGraphListProjectMock.mockResolvedValueOnce(p1Graph);
+    await useAppStore.getState().refreshGraph("p1");
+
+    // graph-changed for project P must re-fetch ONLY P.
+    expect(orchdGraphListProjectMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().graphByProject["p1"]).toEqual(p1Graph);
+    // A DIFFERENT project's entry (p2) must be untouched by a p1 refresh.
+    expect(useAppStore.getState().graphByProject["p2"]).toEqual(p2Graph);
+  });
+
+  it("refreshGraph surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    orchdGraphListProjectMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshGraph("p1");
+    expect(useAppStore.getState().graphByProject["p1"]).toBeUndefined();
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 
   it('refreshRuleset("global") calls orchdGetRuleset("global", null) and keys the result "global"', async () => {

@@ -70,6 +70,10 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdRulesetChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdGraphChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdGraphChanged = cb;
+    return Promise.resolve(unlisten);
+  },
   onOrchdDown: (cb: (p: unknown) => void) => {
     cbs.orchdDown = cb;
     return Promise.resolve(unlisten);
@@ -94,6 +98,7 @@ const orchdListGoalsMock = vi.fn().mockResolvedValue([]);
 const orchdListIdeasMock = vi.fn().mockResolvedValue([]);
 const orchdListInsightsMock = vi.fn().mockResolvedValue([]);
 const orchdListTasksMock = vi.fn().mockResolvedValue([]);
+const orchdGraphListProjectMock = vi.fn().mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
 const orchdGetRulesetMock = vi.fn();
 // T18: ProjectPanel (rendered once view === "project") imports these directly from the same
 // module — mocked here too so a project-view test never hits the real `invoke()`.
@@ -108,6 +113,7 @@ vi.mock("./ipc/orchd", () => ({
   orchdListIdeas: (...a: unknown[]) => orchdListIdeasMock(...a),
   orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
   orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
+  orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
   orchdAddProjectWorkspace: (...a: unknown[]) => orchdAddProjectWorkspaceMock(...a),
   orchdRemoveProjectWorkspace: (...a: unknown[]) => orchdRemoveProjectWorkspaceMock(...a),
@@ -225,6 +231,7 @@ beforeEach(() => {
   orchdListIdeasMock.mockReset().mockResolvedValue([]);
   orchdListInsightsMock.mockReset().mockResolvedValue([]);
   orchdListTasksMock.mockReset().mockResolvedValue([]);
+  orchdGraphListProjectMock.mockReset().mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
   orchdGetRulesetMock.mockReset();
   orchdAddProjectWorkspaceMock.mockReset();
   orchdRemoveProjectWorkspaceMock.mockReset();
@@ -254,6 +261,7 @@ beforeEach(() => {
       ideas: [],
       insights: [],
       tasksByProject: {},
+      graphByProject: {},
       rulesets: {},
       orchdDown: false,
       orchdIncompatible: false,
@@ -264,7 +272,7 @@ beforeEach(() => {
 });
 
 describe("App", () => {
-  it("registers all IPC subscriptions on mount (ten sessiond/fs + nine orchd, S3 T13)", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd, S3 T13 + S4 T6)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -285,6 +293,7 @@ describe("App", () => {
       "orchdInsightsChanged",
       "orchdTasksChanged",
       "orchdRulesetChanged",
+      "orchdGraphChanged",
       "orchdDown",
       "orchdUp",
       "orchdIncompatible",
@@ -1034,6 +1043,28 @@ describe("S3 T13: orchd domain event wiring", () => {
     });
     expect(orchdListTasksMock).toHaveBeenCalledWith("p1");
     expect(useAppStore.getState().tasksByProject["p1"]).toHaveLength(1);
+  });
+
+  it("orchd://graph-changed refreshes ONLY the named project's graph, unconditionally (audit #5.1 — no loaded/active gating)", async () => {
+    orchdGraphListProjectMock.mockResolvedValue({
+      nodes: [
+        { id: "n1", projectId: "p1", kind: "concept", entityType: null, entityId: null,
+          label: "n", body: "", posX: 0, posY: 0, createdAt: 1, updatedAt: 1, isOrphan: false },
+      ],
+      edges: [],
+      externalNodes: [],
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    // No project panel open (activeProjectId stays null) — the refresh must still fire, since
+    // there is no loaded/active gating to mirror (see App.tsx's comment on this listener).
+    expect(useAppStore.getState().activeProjectId).toBeNull();
+    await act(async () => {
+      cbs.orchdGraphChanged({ projectId: "p1" });
+    });
+    expect(orchdGraphListProjectMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().graphByProject["p1"]?.nodes).toHaveLength(1);
   });
 
   it("orchd://ideas-changed and orchd://insights-changed re-fetch their whole-store lists", async () => {

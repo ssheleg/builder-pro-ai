@@ -167,6 +167,21 @@ export function onOrchdRulesetChanged(
   return listen<RulesetChangedPayload>("orchd://ruleset-changed", (e) => cb(e.payload));
 }
 
+/** Payload of `orchd://graph-changed` (S4 §7, T5's `EV_ORCHD_GRAPH_CHANGED`): the ONE project
+ * whose knowledge graph changed — mirrors `GoalsChangedPayload`/`TasksChangedPayload` exactly.
+ * `refreshGraph` (`store.ts`) must re-fetch only that project, never every project's graph. Note a
+ * cross-project edge's `GraphChanged` push fires once per endpoint project (`broker.rs`'s
+ * `map_orchd_push` — "both projects for cross-project edges"), so a single edit can trigger two of
+ * these events; each is still handled the same way, one project at a time. */
+export interface GraphChangedPayload {
+  projectId: string;
+}
+
+/** Subscribe to `orchd://graph-changed` — see `GraphChangedPayload`. */
+export function onOrchdGraphChanged(cb: (p: GraphChangedPayload) => void): Promise<UnlistenFn> {
+  return listen<GraphChangedPayload>("orchd://graph-changed", (e) => cb(e.payload));
+}
+
 /**
  * `orchd://down` carries no payload. Unlike the sessiond `daemon://disconnected`/`reconnected`
  * pair (which tracks "have we seen a disconnect yet" to decide whether a later connect counts as

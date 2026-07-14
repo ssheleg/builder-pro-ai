@@ -28,6 +28,7 @@ import {
   onOrchdInsightsChanged,
   onOrchdTasksChanged,
   onOrchdRulesetChanged,
+  onOrchdGraphChanged,
   onOrchdDown,
   onOrchdUp,
   onOrchdIncompatible,
@@ -41,6 +42,7 @@ import type {
   GoalsChangedPayload,
   TasksChangedPayload,
   RulesetChangedPayload,
+  GraphChangedPayload,
 } from "./events";
 
 describe("ipc/events", () => {
@@ -215,6 +217,15 @@ describe("ipc/events", () => {
     await onOrchdRulesetChanged(cb);
     const p: RulesetChangedPayload = { scope: "global", projectId: null };
     registered.get("orchd://ruleset-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdGraphChanged subscribes to orchd://graph-changed and unwraps {projectId}", async () => {
+    const cb = vi.fn();
+    await onOrchdGraphChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://graph-changed", expect.any(Function));
+    const p: GraphChangedPayload = { projectId: "p1" };
+    registered.get("orchd://graph-changed")!({ payload: p });
     expect(cb).toHaveBeenCalledWith(p);
   });
 

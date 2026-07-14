@@ -6,6 +6,12 @@ import type {
   Goal,
   GoalKind,
   GoalStatus,
+  GraphEdge,
+  GraphEdgeKind,
+  GraphNeighborhood,
+  GraphNode,
+  GraphNodeKind,
+  GraphView,
   Idea,
   IdeaLifecycle,
   Insight,
@@ -279,6 +285,69 @@ export function orchdUpsertRuleset(
 
 export function orchdAcknowledgeRuleFile(id: string): Promise<RuleSetView> {
   return invoke<RuleSetView>("orchd_acknowledge_rule_file", { id });
+}
+
+// ── graph (S4 §7, T5's orchd_graph_* commands) ──────────────────────────────────────────────
+//
+// One thin wrapper per `orchd_graph_*` `#[tauri::command]` (`src-tauri/src/commands.rs`, appended
+// S4 T5), same naming/arg-shape-verbatim convention as every wrapper above. `orchdGraphDeleteNode`/
+// `orchdGraphDeleteEdge` return `void` — they map to `OrchdRequest::GraphDeleteNode`/
+// `GraphDeleteEdge` -> `OrchdResponse::Ack` on the Rust side (`expect_orchd_ack`), mirroring
+// `orchdDeleteGoal`/`orchdDeleteTask` above.
+
+export function orchdGraphAddNode(
+  projectId: string,
+  kind: GraphNodeKind,
+  label: string,
+  body: string,
+  posX: number,
+  posY: number,
+): Promise<GraphNode> {
+  return invoke<GraphNode>("orchd_graph_add_node", { projectId, kind, label, body, posX, posY });
+}
+
+export function orchdGraphUpdateNode(
+  id: string,
+  label: string | null,
+  body: string | null,
+): Promise<GraphNode> {
+  return invoke<GraphNode>("orchd_graph_update_node", { id, label, body });
+}
+
+export function orchdGraphMoveNode(id: string, posX: number, posY: number): Promise<GraphNode> {
+  return invoke<GraphNode>("orchd_graph_move_node", { id, posX, posY });
+}
+
+export function orchdGraphDeleteNode(id: string): Promise<void> {
+  return invoke<void>("orchd_graph_delete_node", { id });
+}
+
+export function orchdGraphAddEdge(
+  sourceNodeId: string,
+  targetNodeId: string,
+  kind: GraphEdgeKind,
+  label: string,
+): Promise<GraphEdge> {
+  return invoke<GraphEdge>("orchd_graph_add_edge", { sourceNodeId, targetNodeId, kind, label });
+}
+
+export function orchdGraphDeleteEdge(id: string): Promise<void> {
+  return invoke<void>("orchd_graph_delete_edge", { id });
+}
+
+export function orchdGraphListProject(projectId: string): Promise<GraphView> {
+  return invoke<GraphView>("orchd_graph_list_project", { projectId });
+}
+
+export function orchdGraphNeighborhood(
+  nodeId: string,
+  depth: number,
+): Promise<GraphNeighborhood> {
+  return invoke<GraphNeighborhood>("orchd_graph_neighborhood", { nodeId, depth });
+}
+
+export function orchdGraphSearch(query: string, projectId: string | null): Promise<GraphNode[]> {
+  return invoke<GraphNode[]>("orchd_graph_search", { query, projectId });
 }
 
 // ── export / import ─────────────────────────────────────────────────────────────────────────
