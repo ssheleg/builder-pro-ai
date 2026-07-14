@@ -15,7 +15,12 @@
 //! `#[cfg(test)]` isn't compiled). Remove this attribute once dispatch wires these in.
 #![allow(dead_code)]
 
-use bpa_orchd_proto::{GraphEdge, GraphEdgeKind, GraphEntityType, GraphNode, GraphNodeKind};
+use std::collections::HashSet;
+
+use bpa_orchd_proto::{
+    GraphEdge, GraphEdgeKind, GraphEntityType, GraphNeighborhood, GraphNode, GraphNodeKind,
+    GraphView,
+};
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -257,6 +262,59 @@ fn map_edge_conflict(
     } else {
         OrchdPersistError::Sql(e)
     }
+}
+
+/// The domain table that owns an `entityRef`'s live label (S4 spec §5 D3): all four have a
+/// `title` column ("all four have `title` — NO ruleset case, `GraphEntityType` has no `Ruleset`
+/// variant per §3's own note that `RuleSet` has no title/label field").
+fn entity_table(t: &GraphEntityType) -> &'static str {
+    match t {
+        GraphEntityType::Goal => "goal",
+        GraphEntityType::Idea => "idea",
+        GraphEntityType::Insight => "insight",
+        GraphEntityType::Task => "task",
+    }
+}
+
+/// Looks up an `entityRef`'s live `title` from its source domain row (S4 spec §5: "resolving an
+/// entityRef's live label happens at read time"). `Ok(None)` means the source row is gone
+/// (deleted) — the caller keeps the node's STORED `label` in that case (D3 soft-ref: the node
+/// persists, the UI flags «источник удалён»); this helper itself does not know or care which
+/// node it's resolving for, it just answers "does entity_id still exist in this domain table,
+/// and if so what's its title".
+fn resolve_entity_label(
+    conn: &Connection,
+    entity_type: &GraphEntityType,
+    entity_id: &str,
+) -> Result<Option<String>, OrchdPersistError> {
+    let table = entity_table(entity_type);
+    let sql = format!("SELECT title FROM {table} WHERE id = ?1");
+    Ok(conn
+        .query_row(&sql, rusqlite::params![entity_id], |r| r.get(0))
+        .optional()?)
+}
+
+/// Re-resolves a [`GraphNode`]'s `label` from its live domain row AT READ TIME when it's an
+/// `entityRef` node (S4 spec §5 `list_project_graph`). Non-`entityRef` nodes pass through
+/// unchanged. An orphaned `entityRef` (source row deleted) keeps its STORED `label` unchanged —
+/// `resolve_entity_label` returning `None` is exactly that "orphan" signal; this function adds no
+/// extra flag field, per the task-3 brief ("the FRONTEND flags «источник удалён»").
+fn resolve_node_label(
+    conn: &Connection,
+    mut node: GraphNode,
+) -> Result<GraphNode, OrchdPersistError> {
+    if node.kind != GraphNodeKind::EntityRef {
+        return Ok(node);
+    }
+    let (Some(entity_type), Some(entity_id)) =
+        (node.entity_type.as_ref(), node.entity_id.as_deref())
+    else {
+        return Ok(node);
+    };
+    if let Some(live_label) = resolve_entity_label(conn, entity_type, entity_id)? {
+        node.label = live_label;
+    }
+    Ok(node)
 }
 
 impl Db {
@@ -526,6 +584,230 @@ impl Db {
             }
         }
         Ok(ids)
+    }
+}
+
+// ---- retrieval (S4 spec §5 / task-3): `list_project_graph`, `neighborhood`, `search_nodes` ----
+
+impl Db {
+    /// `GraphListProject` (S4 spec §5): `nodes` = every `graph_node` row with
+    /// `project_id = project_id`; `edges` = every `graph_edge` incident to any of those nodes
+    /// (source OR target in the set); `external_nodes` = the incident edges' endpoint nodes NOT
+    /// in the project (the cross-project "ghosts"), deduped. `entityRef` node labels (in both
+    /// `nodes` and `external_nodes`) are re-resolved from their live domain row at read time
+    /// (D3, [`resolve_node_label`]) — an orphan (source deleted) keeps its stored label. Unknown
+    /// project ⇒ `NotFound` (mirrors [`Db::list_goals`]'s existence check).
+    pub(crate) fn list_project_graph(
+        &self,
+        project_id: &str,
+    ) -> Result<GraphView, OrchdPersistError> {
+        let conn = self.conn();
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM project WHERE id = ?1",
+                rusqlite::params![project_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(OrchdPersistError::NotFound);
+        }
+
+        let mut node_stmt = conn.prepare(
+            "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+                    created_at, updated_at
+             FROM graph_node WHERE project_id = ?1",
+        )?;
+        let own_rows: Vec<GraphNodeRow> = node_stmt
+            .query_map(rusqlite::params![project_id], GraphNodeRow::from_row)?
+            .collect::<Result<_, _>>()?;
+        let own_ids: HashSet<String> = own_rows.iter().map(|r| r.id.clone()).collect();
+
+        let mut nodes = Vec::with_capacity(own_rows.len());
+        for row in own_rows {
+            nodes.push(resolve_node_label(conn, row.into_node()?)?);
+        }
+
+        let mut edge_stmt = conn.prepare(
+            "SELECT id, source_node_id, target_node_id, kind, label, created_at
+             FROM graph_edge
+             WHERE source_node_id IN (SELECT id FROM graph_node WHERE project_id = ?1)
+                OR target_node_id IN (SELECT id FROM graph_node WHERE project_id = ?1)",
+        )?;
+        let edge_rows: Vec<GraphEdgeRow> = edge_stmt
+            .query_map(rusqlite::params![project_id], GraphEdgeRow::from_row)?
+            .collect::<Result<_, _>>()?;
+
+        let mut external_ids: Vec<String> = Vec::new();
+        for row in &edge_rows {
+            for endpoint in [&row.source_node_id, &row.target_node_id] {
+                if !own_ids.contains(endpoint) && !external_ids.contains(endpoint) {
+                    external_ids.push(endpoint.clone());
+                }
+            }
+        }
+        let edges: Vec<GraphEdge> = edge_rows
+            .into_iter()
+            .map(GraphEdgeRow::into_edge)
+            .collect::<Result<_, _>>()?;
+
+        let mut external_nodes = Vec::with_capacity(external_ids.len());
+        for id in external_ids {
+            external_nodes.push(resolve_node_label(conn, load_node(conn, &id)?)?);
+        }
+
+        Ok(GraphView {
+            nodes,
+            edges,
+            external_nodes,
+        })
+    }
+
+    /// `GraphNeighborhood` (S4 spec §5, the agent retrieval query, `<100 ms` DoD): a recursive
+    /// CTE walk from `node_id` following `graph_edge` in BOTH directions up to `depth` hops,
+    /// cross-project (no project filter — D5: the retrieval API is workspace-wide). `depth` is
+    /// clamped to ≤6 (spec §5 invariants table: "not an error"). Indexed on
+    /// `graph_edge(source_node_id)`/`(target_node_id)` (spec §4). The recursive walk itself runs
+    /// EXACTLY ONCE (collecting only the reachable `node_id`s); node/edge details are then
+    /// fetched via plain indexed `IN (...)` lookups against that fixed id set — re-running the
+    /// full recursive CTE a second time (once per detail query) roughly doubled the measured cost
+    /// in this module's perf-DoD test, so this shape is deliberate, not an equivalent rewrite.
+    /// Unknown `node_id` ⇒ `NotFound`.
+    pub(crate) fn neighborhood(
+        &self,
+        node_id: &str,
+        depth: u32,
+    ) -> Result<GraphNeighborhood, OrchdPersistError> {
+        let conn = self.conn();
+        // Confirm the root exists before spending a recursive-CTE pass on a dangling id.
+        node_project_id(conn, node_id)?;
+        let depth = depth.min(6);
+
+        // `UNION` (not `UNION ALL`) — SQLite's recursive-CTE dedup drops any `(node_id, hop)` row
+        // that already exists in the accumulated result, so a node can appear at most `depth + 1`
+        // times (once per hop level) even across a cyclic/dense graph: growth is bounded by
+        // `node_count * (depth + 1)`, not exponential in edge fan-out. Two separate recursive
+        // terms (one per direction) rather than one term with `source = ? OR target = ?` — SQLite
+        // can drive each term off its own single-column index
+        // (`graph_edge_by_source`/`graph_edge_by_target`, spec §4) directly, where the `OR` form
+        // forced a full-table scan per queue item in this module's perf-DoD test.
+        let mut reach_stmt = conn.prepare(
+            "WITH RECURSIVE reach(node_id, hop) AS (
+                SELECT ?1, 0
+                UNION
+                SELECT e.target_node_id, r.hop + 1
+                  FROM reach r JOIN graph_edge e ON e.source_node_id = r.node_id
+                 WHERE r.hop < ?2
+                UNION
+                SELECT e.source_node_id, r.hop + 1
+                  FROM reach r JOIN graph_edge e ON e.target_node_id = r.node_id
+                 WHERE r.hop < ?2
+             )
+             SELECT DISTINCT node_id FROM reach",
+        )?;
+        let reach_ids: Vec<String> = reach_stmt
+            .query_map(rusqlite::params![node_id, depth], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        // Unreachable in practice — `node_id` itself is always in `reach` at hop 0, and its
+        // existence was already confirmed above — but keeps this function total rather than
+        // panicking on an empty `IN ()` clause if that ever changed.
+        if reach_ids.is_empty() {
+            return Ok(GraphNeighborhood {
+                root_id: node_id.to_string(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            });
+        }
+
+        let placeholders = reach_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let id_params: Vec<&dyn rusqlite::ToSql> = reach_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+
+        let mut node_stmt = conn.prepare(&format!(
+            "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+                    created_at, updated_at
+             FROM graph_node WHERE id IN ({placeholders})"
+        ))?;
+        let nodes: Vec<GraphNode> = node_stmt
+            .query_map(id_params.as_slice(), GraphNodeRow::from_row)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(GraphNodeRow::into_node)
+            .collect::<Result<_, _>>()?;
+
+        let mut edge_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(reach_ids.len() * 2);
+        edge_params.extend(id_params.iter().copied());
+        edge_params.extend(id_params.iter().copied());
+        let mut edge_stmt = conn.prepare(&format!(
+            "SELECT id, source_node_id, target_node_id, kind, label, created_at
+             FROM graph_edge
+             WHERE source_node_id IN ({placeholders}) AND target_node_id IN ({placeholders})"
+        ))?;
+        let edges: Vec<GraphEdge> = edge_stmt
+            .query_map(edge_params.as_slice(), GraphEdgeRow::from_row)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(GraphEdgeRow::into_edge)
+            .collect::<Result<_, _>>()?;
+
+        Ok(GraphNeighborhood {
+            root_id: node_id.to_string(),
+            nodes,
+            edges,
+        })
+    }
+
+    /// `GraphSearch` (S4 spec §5): `label` OR `body` `LIKE '%query%'` — SQLite's `LIKE` is
+    /// case-insensitive for ASCII by default (no `COLLATE NOCASE` needed, and the DB's default
+    /// collation is already `BINARY`/case-sensitive equality elsewhere, so this stays scoped to
+    /// `LIKE`'s own built-in ASCII case-folding). `project_id: None` ⇒ workspace-wide (every
+    /// project); `Some(pid)` ⇒ that project only. `ORDER BY updated_at DESC, id` (the `id`
+    /// tiebreak makes ties deterministic, mirroring [`Db::list_ideas`]'s
+    /// `ORDER BY created_at DESC, id`), capped at 200 rows. `entityRef` label resolution is NOT
+    /// applied here (spec §5: "the stored label is fine for search").
+    pub(crate) fn search_nodes(
+        &self,
+        query: &str,
+        project_id: Option<&str>,
+    ) -> Result<Vec<GraphNode>, OrchdPersistError> {
+        let conn = self.conn();
+        let pattern = format!("%{query}%");
+        let rows: Vec<GraphNodeRow> = match project_id {
+            Some(pid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x,
+                            pos_y, created_at, updated_at
+                     FROM graph_node
+                     WHERE (label LIKE ?1 OR body LIKE ?1) AND project_id = ?2
+                     ORDER BY updated_at DESC, id
+                     LIMIT 200",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![pattern, pid], GraphNodeRow::from_row)?
+                    .collect::<Result<_, _>>()?;
+                rows
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x,
+                            pos_y, created_at, updated_at
+                     FROM graph_node
+                     WHERE (label LIKE ?1 OR body LIKE ?1)
+                     ORDER BY updated_at DESC, id
+                     LIMIT 200",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![pattern], GraphNodeRow::from_row)?
+                    .collect::<Result<_, _>>()?;
+                rows
+            }
+        };
+        rows.into_iter()
+            .map(GraphNodeRow::into_node)
+            .collect::<Result<_, _>>()
     }
 }
 
@@ -1379,5 +1661,557 @@ mod tests {
         let db = new_db();
         let err = db.node_project_ids_reachable("no-such-node").unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    // ==================== retrieval (task-3): list_project_graph ====================
+
+    #[test]
+    fn list_project_graph_unknown_project_is_not_found() {
+        let db = new_db();
+        let err = db.list_project_graph("no-such-project").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn list_project_graph_includes_own_nodes_edges_and_cross_project_external_ghost() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        let a1 = add_concept(&db, &project_a, "a1");
+        let a2 = add_concept(&db, &project_a, "a2");
+        let b1 = add_concept(&db, &project_b, "b1");
+
+        let inner_edge = db
+            .add_edge(&a1.id, &a2.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+        let cross_edge = db
+            .add_edge(&a1.id, &b1.id, GraphEdgeKind::Depends, "")
+            .unwrap();
+
+        let view = db.list_project_graph(&project_a).unwrap();
+
+        // 2 own concept nodes + the D6-seeded strategic-goal entityRef node.
+        assert_eq!(view.nodes.len(), 3);
+        let node_ids: Vec<&str> = view.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(node_ids.contains(&a1.id.as_str()));
+        assert!(node_ids.contains(&a2.id.as_str()));
+        assert!(
+            !node_ids.contains(&b1.id.as_str()),
+            "a foreign node must NOT appear in `nodes`"
+        );
+
+        let edge_ids: Vec<&str> = view.edges.iter().map(|e| e.id.as_str()).collect();
+        assert!(edge_ids.contains(&inner_edge.id.as_str()));
+        assert!(
+            edge_ids.contains(&cross_edge.id.as_str()),
+            "an edge incident to an own node must be included even if its other endpoint is foreign"
+        );
+
+        assert_eq!(
+            view.external_nodes.len(),
+            1,
+            "the foreign endpoint, deduped"
+        );
+        assert_eq!(view.external_nodes[0].id, b1.id);
+        assert_eq!(view.external_nodes[0].project_id, project_b);
+    }
+
+    #[test]
+    fn list_project_graph_dedupes_external_ghost_reached_by_multiple_edges() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        let a1 = add_concept(&db, &project_a, "a1");
+        let a2 = add_concept(&db, &project_a, "a2");
+        let b1 = add_concept(&db, &project_b, "b1");
+        db.add_edge(&a1.id, &b1.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+        db.add_edge(&a2.id, &b1.id, GraphEdgeKind::Depends, "")
+            .unwrap();
+
+        let view = db.list_project_graph(&project_a).unwrap();
+        assert_eq!(
+            view.external_nodes.len(),
+            1,
+            "b1 is reached by two edges but must appear only once in external_nodes"
+        );
+        assert_eq!(view.edges.len(), 2);
+    }
+
+    #[test]
+    fn list_project_graph_resolves_entity_ref_label_from_renamed_source_at_read_time() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let idea = db
+            .create_idea(Some(project_id.as_str()), "Old title", "")
+            .unwrap();
+        let node = db
+            .add_entity_ref_node(
+                &project_id,
+                GraphEntityType::Idea,
+                &idea.id,
+                "Old title",
+                0.0,
+                0.0,
+            )
+            .unwrap();
+
+        db.update_idea(&idea.id, Some("New title"), None).unwrap();
+
+        let view = db.list_project_graph(&project_id).unwrap();
+        let resolved = view
+            .nodes
+            .iter()
+            .find(|n| n.id == node.id)
+            .expect("entityRef node must be present");
+        assert_eq!(
+            resolved.label, "New title",
+            "entityRef label must be re-resolved from the live domain row at read time"
+        );
+    }
+
+    #[test]
+    fn list_project_graph_keeps_stored_label_when_entity_ref_source_is_deleted() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let idea = db
+            .create_idea(Some(project_id.as_str()), "Doomed idea", "")
+            .unwrap();
+        let node = db
+            .add_entity_ref_node(
+                &project_id,
+                GraphEntityType::Idea,
+                &idea.id,
+                "Doomed idea",
+                0.0,
+                0.0,
+            )
+            .unwrap();
+
+        db.delete_idea(&idea.id).unwrap();
+
+        let view = db.list_project_graph(&project_id).unwrap();
+        let orphan = view
+            .nodes
+            .iter()
+            .find(|n| n.id == node.id)
+            .expect("an orphaned entityRef node must still be present (D3 soft-ref)");
+        assert_eq!(
+            orphan.label, "Doomed idea",
+            "orphaned entityRef must keep its stored label when the source row is gone"
+        );
+    }
+
+    #[test]
+    fn list_project_graph_resolves_entity_ref_label_in_external_nodes_too() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        let idea = db
+            .create_idea(Some(project_b.as_str()), "B-side idea", "")
+            .unwrap();
+        let ghost_node = db
+            .add_entity_ref_node(
+                &project_b,
+                GraphEntityType::Idea,
+                &idea.id,
+                "B-side idea",
+                0.0,
+                0.0,
+            )
+            .unwrap();
+        let a1 = add_concept(&db, &project_a, "a1");
+        db.add_edge(&a1.id, &ghost_node.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+
+        db.update_idea(&idea.id, Some("B-side idea renamed"), None)
+            .unwrap();
+
+        let view = db.list_project_graph(&project_a).unwrap();
+        let ghost = view
+            .external_nodes
+            .iter()
+            .find(|n| n.id == ghost_node.id)
+            .expect("cross-project entityRef ghost must be present");
+        assert_eq!(ghost.label, "B-side idea renamed");
+    }
+
+    // ==================== retrieval (task-3): neighborhood ====================
+
+    #[test]
+    fn neighborhood_unknown_node_id_is_not_found() {
+        let db = new_db();
+        let err = db.neighborhood("no-such-node", 2).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn neighborhood_depth_2_returns_exact_2hop_reachable_set_across_cross_project_edge() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        let n0 = add_concept(&db, &project_a, "n0"); // root
+        let n1 = add_concept(&db, &project_a, "n1"); // hop 1, same project
+        let n2 = add_concept(&db, &project_b, "n2"); // hop 2, cross-project via n1
+        let n3 = add_concept(&db, &project_b, "n3"); // hop 3, must NOT be reached at depth 2
+        let unrelated = add_concept(&db, &project_a, "unrelated");
+
+        db.add_edge(&n0.id, &n1.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+        db.add_edge(&n1.id, &n2.id, GraphEdgeKind::Relates, "")
+            .unwrap(); // cross-project edge
+        db.add_edge(&n2.id, &n3.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+
+        let nb = db.neighborhood(&n0.id, 2).unwrap();
+        assert_eq!(nb.root_id, n0.id);
+
+        let mut ids: Vec<&str> = nb.nodes.iter().map(|n| n.id.as_str()).collect();
+        ids.sort();
+        let mut expected = vec![n0.id.as_str(), n1.id.as_str(), n2.id.as_str()];
+        expected.sort();
+        assert_eq!(
+            ids, expected,
+            "exactly the 2-hop reachable set, including the cross-project node"
+        );
+        assert!(
+            !nb.nodes.iter().any(|n| n.id == n3.id),
+            "the 3-hop node must not appear at depth 2"
+        );
+        assert!(!nb.nodes.iter().any(|n| n.id == unrelated.id));
+
+        assert_eq!(
+            nb.edges.len(),
+            2,
+            "only the n0-n1 and n1-n2 edges have both endpoints in the 2-hop reachable set"
+        );
+    }
+
+    #[test]
+    fn neighborhood_depth_over_6_is_clamped_to_6() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        // A 7-hop chain: n0-n1-...-n7 (8 nodes, 7 edges). n7 is exactly 7 hops from n0.
+        let chain: Vec<GraphNode> = (0..8)
+            .map(|i| add_concept(&db, &project_id, &format!("n{i}")))
+            .collect();
+        for i in 0..7 {
+            db.add_edge(&chain[i].id, &chain[i + 1].id, GraphEdgeKind::Relates, "")
+                .unwrap();
+        }
+
+        let nb = db.neighborhood(&chain[0].id, 99).unwrap();
+        let ids: HashSet<&str> = nb.nodes.iter().map(|n| n.id.as_str()).collect();
+
+        for node in chain.iter().take(7) {
+            assert!(
+                ids.contains(node.id.as_str()),
+                "{} must be within the clamped depth-6 reach",
+                node.label
+            );
+        }
+        assert!(
+            !ids.contains(chain[7].id.as_str()),
+            "n7 is 7 hops away — depth 99 clamped to 6 must NOT reach it"
+        );
+        assert_eq!(nb.nodes.len(), 7, "exactly n0..n6 (depth <= 6)");
+    }
+
+    #[test]
+    fn neighborhood_traverses_edges_in_both_directions() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let a = add_concept(&db, &project_id, "a");
+        let b = add_concept(&db, &project_id, "b");
+        // a -> b as source->target; querying FROM b must still reach a (bidirectional).
+        db.add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+
+        let nb = db.neighborhood(&b.id, 1).unwrap();
+        let ids: HashSet<&str> = nb.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(a.id.as_str()));
+        assert!(ids.contains(b.id.as_str()));
+    }
+
+    // ==================== retrieval (task-3): search_nodes ====================
+
+    #[test]
+    fn search_nodes_none_project_spans_workspace() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        db.add_node(
+            &project_a,
+            GraphNodeKind::Concept,
+            "Widget alpha",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        db.add_node(
+            &project_b,
+            GraphNodeKind::Concept,
+            "Widget beta",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        db.add_node(
+            &project_a,
+            GraphNodeKind::Concept,
+            "Unrelated",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+
+        let results = db.search_nodes("widget", None).unwrap();
+        let labels: Vec<&str> = results.iter().map(|n| n.label.as_str()).collect();
+        assert!(labels.contains(&"Widget alpha"));
+        assert!(labels.contains(&"Widget beta"));
+        assert!(!labels.contains(&"Unrelated"));
+    }
+
+    #[test]
+    fn search_nodes_some_project_scopes_to_that_project() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        db.add_node(
+            &project_a,
+            GraphNodeKind::Concept,
+            "Widget alpha",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        db.add_node(
+            &project_b,
+            GraphNodeKind::Concept,
+            "Widget beta",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+
+        let results = db.search_nodes("widget", Some(&project_a)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].label, "Widget alpha");
+    }
+
+    #[test]
+    fn search_nodes_matches_body_too() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        db.add_node(
+            &project_id,
+            GraphNodeKind::Concept,
+            "Label only",
+            "mentions gizmo in the body",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+
+        let results = db.search_nodes("gizmo", None).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_nodes_is_case_insensitive() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        db.add_node(
+            &project_id,
+            GraphNodeKind::Concept,
+            "MixedCase Widget",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+
+        let results = db.search_nodes("WIDGET", None).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_nodes_orders_by_updated_at_desc() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let older = db
+            .add_node(
+                &project_id,
+                GraphNodeKind::Concept,
+                "Match one",
+                "",
+                0.0,
+                0.0,
+            )
+            .unwrap();
+        let newer = db
+            .add_node(
+                &project_id,
+                GraphNodeKind::Concept,
+                "Match two",
+                "",
+                0.0,
+                0.0,
+            )
+            .unwrap();
+        // Force distinct timestamps regardless of clock resolution (mirrors the codebase's
+        // `list_ideas_orders_created_at_desc` convention), so DESC order is unambiguous.
+        db.conn()
+            .execute(
+                "UPDATE graph_node SET updated_at = 1000 WHERE id = ?1",
+                rusqlite::params![older.id],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE graph_node SET updated_at = 2000 WHERE id = ?1",
+                rusqlite::params![newer.id],
+            )
+            .unwrap();
+
+        let results = db.search_nodes("match", None).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].id, newer.id,
+            "most recently updated match sorts first"
+        );
+        assert_eq!(results[1].id, older.id);
+    }
+
+    #[test]
+    fn search_nodes_caps_at_200_rows() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        for i in 0..205 {
+            db.add_node(
+                &project_id,
+                GraphNodeKind::Concept,
+                &format!("cap-match-{i}"),
+                "",
+                0.0,
+                0.0,
+            )
+            .unwrap();
+        }
+
+        let results = db.search_nodes("cap-match", None).unwrap();
+        assert_eq!(results.len(), 200);
+    }
+
+    // ==================== perf DoD: "a goal's subgraph <100 ms" (S4 roadmap DoD) ====================
+
+    #[test]
+    fn neighborhood_depth_3_on_500_node_1000_edge_graph_is_under_100ms_rooted_at_goal_node() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let goal_node_id: String = db
+            .conn()
+            .query_row(
+                "SELECT id FROM graph_node WHERE project_id = ?1 AND kind = 'entity_ref'
+                   AND entity_type = 'goal'",
+                rusqlite::params![project_id],
+                |r| r.get(0),
+            )
+            .expect("the D6 seed must have created a strategic-goal entityRef node");
+
+        // Build 499 more nodes (500 total incl. the goal node) as a 3-layer tree rooted at the
+        // goal node: layer1 = 10 direct children, layer2 = 100 grandchildren (round-robin under
+        // layer1), layer3 = 389 great-grandchildren (round-robin under layer2). Every node ends
+        // up within EXACTLY 3 hops of the goal node — a "rich" neighborhood by construction, with
+        // a trivial closed-form expected reachable count (all 500 nodes).
+        let mut node_ids: Vec<String> = vec![goal_node_id.clone()];
+        for i in 0..499 {
+            let n = db
+                .add_node(
+                    &project_id,
+                    GraphNodeKind::Concept,
+                    &format!("n{i}"),
+                    "",
+                    0.0,
+                    0.0,
+                )
+                .unwrap();
+            node_ids.push(n.id);
+        }
+        let layer1 = node_ids[1..11].to_vec();
+        let layer2 = node_ids[11..111].to_vec();
+        let layer3 = node_ids[111..500].to_vec();
+        assert_eq!(1 + layer1.len() + layer2.len() + layer3.len(), 500);
+
+        for child in &layer1 {
+            db.add_edge(&goal_node_id, child, GraphEdgeKind::Relates, "")
+                .unwrap();
+        }
+        for (i, child) in layer2.iter().enumerate() {
+            db.add_edge(&layer1[i % layer1.len()], child, GraphEdgeKind::Relates, "")
+                .unwrap();
+        }
+        for (i, child) in layer3.iter().enumerate() {
+            db.add_edge(&layer2[i % layer2.len()], child, GraphEdgeKind::Relates, "")
+                .unwrap();
+        }
+        // 10 + 100 + 389 = 499 tree edges so far.
+
+        // Pad to 1000 edges with extra chord edges among already-existing nodes — this does NOT
+        // shrink the depth-3 reachable set (every node is already reachable via its tree-parent
+        // path) but exercises the CTE against a denser edge set, matching the roadmap DoD's
+        // "500-node/1000-edge" scale.
+        let mut extra = 0usize;
+        'outer: for offset in [137usize, 271, 359, 443, 91, 211] {
+            for i in 0..500usize {
+                if extra >= 501 {
+                    break 'outer;
+                }
+                let b = (i + offset) % 500;
+                if i == b {
+                    continue;
+                }
+                match db.add_edge(&node_ids[i], &node_ids[b], GraphEdgeKind::Relates, "") {
+                    Ok(_) => extra += 1,
+                    Err(OrchdPersistError::Conflict(_)) => continue,
+                    Err(e) => panic!("unexpected error building the perf-test graph: {e:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            extra, 501,
+            "must have built exactly 501 chord edges (499 tree + 501 = 1000 total)"
+        );
+
+        let total_nodes: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM graph_node", [], |r| r.get(0))
+            .unwrap();
+        let total_edges: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM graph_edge", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total_nodes, 500);
+        assert_eq!(total_edges, 1000);
+
+        let start = std::time::Instant::now();
+        let neighborhood = db.neighborhood(&goal_node_id, 3).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(neighborhood.root_id, goal_node_id);
+        assert_eq!(
+            neighborhood.nodes.len(),
+            500,
+            "every node in the synthetic 3-layer tree is within 3 hops of the goal node"
+        );
+        assert!(
+            elapsed.as_millis() < 100,
+            "neighborhood(depth 3) on a 500-node/1000-edge graph took {elapsed:?}; DoD is <100ms"
+        );
     }
 }
