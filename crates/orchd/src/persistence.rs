@@ -8,6 +8,12 @@
 //! Schema v2 (S4 spec §4, LOCKED DDL) appends the knowledge-graph `graph_node`/`graph_edge`
 //! tables as `Migration { upto: 2 }`, additive-forward-only per D1 — the graph persistence itself
 //! (invariants, enum⇄TEXT mapping) lives in the sibling `crate::graph` module.
+//! Schema v3 (S-EXT spec §4, LOCKED DDL) appends ALL nine MCP/connectors/skills/trust tables
+//! (`mcp_server`, `mcp_tool`, `account`, `mcp_invocation`, `mcp_artifact`, `skill`,
+//! `consent_grant`, `policy`, `audit_log`) as ONE `Migration { upto: 3 }` step, purely additive
+//! (no backfill — new subsystem) — the `mcp_server`/`mcp_tool` persistence this task (S-EXT T2)
+//! actually implements lives in the sibling `crate::mcp::registry` module; the other seven
+//! tables' CRUD lands in later S-EXT tasks.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,8 +28,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Current schema/migration version stored in `PRAGMA user_version` (spec §5.1; S4 spec §4 D1
-/// bumps this 1→2 for the additive knowledge-graph tables).
-pub const SCHEMA_VERSION: i64 = 2;
+/// bumps this 1→2 for the additive knowledge-graph tables; S-EXT spec §4 bumps this 2→3 for the
+/// additive MCP/connectors/skills/trust tables).
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -201,6 +208,10 @@ impl Db {
                 upto: 2,
                 apply: migrate_v2,
             },
+            bpa_daemon_core::migrate::Migration {
+                upto: 3,
+                apply: migrate_v3,
+            },
         ];
         bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
             .map_err(|e| match e {
@@ -348,6 +359,158 @@ pub(crate) fn migrate_v2(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
         crate::graph::seed_strategic_entity_ref(tx, &project_id, &goal_id, &title)?;
     }
     Ok(())
+}
+
+/// v2 -> v3: MCP server/tool registry + connectors/skills/trust tables (S-EXT spec §4, LOCKED
+/// DDL — transcribed verbatim, including the spec's own inline comments, so this body and the
+/// spec text can be diffed directly). Purely additive, no backfill (spec §4 "Idempotent-migration
+/// note": "a v2→v3 upgrade of an existing `orchd.db` with live projects creates the tables and
+/// seeds nothing — new subsystem"). This task (S-EXT T2) implements CRUD for `mcp_server`/
+/// `mcp_tool` only (`crate::mcp::registry`); the other seven tables (`account`, `mcp_invocation`,
+/// `mcp_artifact`, `skill`, `consent_grant`, `policy`, `audit_log`) land in the schema HERE, in
+/// this same additive step, so every later S-EXT task builds on it — their CRUD lands in later
+/// tasks.
+pub(crate) fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        r#"-- MCP servers registry
+         CREATE TABLE mcp_server (
+           id             TEXT PRIMARY KEY,             -- uuid v4
+           name           TEXT NOT NULL,
+           transport      TEXT NOT NULL,                -- 'http' | 'stdio'
+           url            TEXT,                          -- http: endpoint (…/mcp); null for stdio
+           command        TEXT,                          -- stdio: executable; null for http
+           args_json      TEXT NOT NULL DEFAULT '[]',    -- stdio: JSON array of args
+           env_json       TEXT NOT NULL DEFAULT '{}',    -- stdio: JSON object (allowlisted at spawn)
+           scope          TEXT NOT NULL,                 -- 'global' | 'project'
+           project_id     TEXT,                          -- non-null iff scope='project'; FK -> project(id) ON DELETE CASCADE
+           auth_kind      TEXT NOT NULL DEFAULT 'none',  -- 'none' | 'bearer' | 'oauth'
+           secret_ref     TEXT,                          -- Keychain account key for bearer; null otherwise
+           account_id     TEXT,                          -- FK -> account(id) for oauth; null otherwise
+           enabled        INTEGER NOT NULL DEFAULT 1,
+           timeout_ms     INTEGER NOT NULL DEFAULT 30000,
+           max_retries    INTEGER NOT NULL DEFAULT 2,
+           protocol_version TEXT,                         -- last negotiated; null until first connect
+           created_at     INTEGER NOT NULL,
+           updated_at     INTEGER NOT NULL,
+           FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE,
+           CHECK ( (scope='project') = (project_id IS NOT NULL) ),
+           CHECK ( transport IN ('http','stdio') ),
+           CHECK ( (transport='http') = (url IS NOT NULL) )
+         );
+         CREATE INDEX mcp_server_by_project ON mcp_server(project_id);
+
+         -- Cached tool descriptors (refreshed on connect + tools/list_changed)
+         CREATE TABLE mcp_tool (
+           id             TEXT PRIMARY KEY,             -- uuid v4
+           server_id      TEXT NOT NULL,
+           name           TEXT NOT NULL,
+           title          TEXT,
+           description    TEXT,
+           input_schema_json TEXT NOT NULL DEFAULT '{}',
+           enabled        INTEGER NOT NULL DEFAULT 1,   -- per-tool allowlist (S0/S1 §16: "enabled tools are an explicit per-server allowlist"); default on-fetch
+           fetched_at     INTEGER NOT NULL,
+           FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
+           UNIQUE(server_id, name)
+         );
+         CREATE INDEX mcp_tool_by_server ON mcp_tool(server_id);
+
+         -- External OAuth accounts (connectors); token bytes in Keychain, only refs here
+         CREATE TABLE account (
+           id             TEXT PRIMARY KEY,             -- uuid v4
+           provider       TEXT NOT NULL,                -- e.g. 'prowl','x','linkedin','generic-oauth'
+           label          TEXT NOT NULL,                -- owner-facing name
+           auth_kind      TEXT NOT NULL,                -- 'oauth' | 'apikey'
+           secret_ref     TEXT NOT NULL,                -- Keychain account key (token/apikey lives there)
+           scopes_json    TEXT NOT NULL DEFAULT '[]',
+           expires_at     INTEGER,                       -- access-token expiry epoch ms; null if none
+           refresh_ref    TEXT,                          -- Keychain key for refresh token; null if none
+           created_at     INTEGER NOT NULL,
+           updated_at     INTEGER NOT NULL
+         );
+
+         -- Per-call invocation records (cost/latency from call #1)
+         CREATE TABLE mcp_invocation (
+           id             TEXT PRIMARY KEY,             -- uuid v4
+           server_id      TEXT NOT NULL,
+           tool_name      TEXT NOT NULL,
+           project_id     TEXT,                          -- context if called within a project
+           request_hash   TEXT NOT NULL,                 -- sha256 of args (NOT the args themselves)
+           ok             INTEGER NOT NULL,
+           error_kind     TEXT,                          -- null on ok
+           latency_ms     INTEGER NOT NULL,
+           cost_usd       REAL,                          -- null unless server reports usage
+           input_tokens   INTEGER,
+           output_tokens  INTEGER,
+           started_at     INTEGER NOT NULL,
+           FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE
+         );
+         CREATE INDEX mcp_invocation_by_server ON mcp_invocation(server_id, started_at);
+
+         -- Durable artifacts (tool results); untrusted by construction
+         CREATE TABLE mcp_artifact (
+           id             TEXT PRIMARY KEY,             -- uuid v4
+           invocation_id  TEXT NOT NULL,
+           server_id      TEXT NOT NULL,
+           tool_name      TEXT NOT NULL,
+           project_id     TEXT,
+           content_json   TEXT NOT NULL,                 -- full structured result
+           content_text   TEXT,                          -- flattened text for preview/search
+           is_untrusted   INTEGER NOT NULL DEFAULT 1,    -- always 1 for external output (S6b mediation flag)
+           created_at     INTEGER NOT NULL,
+           FOREIGN KEY(invocation_id) REFERENCES mcp_invocation(id) ON DELETE CASCADE
+         );
+         CREATE INDEX mcp_artifact_by_project ON mcp_artifact(project_id, created_at);
+
+         -- Skills registry (SKILL.md format; files-as-truth)
+         CREATE TABLE skill (
+           id             TEXT PRIMARY KEY,             -- uuid v4
+           name           TEXT NOT NULL,
+           description    TEXT NOT NULL,
+           md_path        TEXT NOT NULL,                 -- absolute path to SKILL.md (validated within an allowed root)
+           md_hash        TEXT NOT NULL,                 -- sha256 of file at register time
+           scope          TEXT NOT NULL,                 -- 'global' | 'project'
+           project_id     TEXT,
+           created_at     INTEGER NOT NULL,
+           updated_at     INTEGER NOT NULL,
+           FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE,
+           CHECK ( (scope='project') = (project_id IS NOT NULL) )
+         );
+
+         -- Trust: persisted consent grants + policy caps + append-only audit
+         CREATE TABLE consent_grant (
+           id             TEXT PRIMARY KEY,
+           kind           TEXT NOT NULL,                 -- 'connect' | 'stdio_exec'
+           server_id      TEXT NOT NULL,
+           fingerprint    TEXT NOT NULL,                 -- url (http) or command+hash (stdio) at grant time
+           granted_at     INTEGER NOT NULL,
+           FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
+           UNIQUE(server_id, kind)
+         );
+         CREATE TABLE policy (
+           id             TEXT PRIMARY KEY,
+           scope          TEXT NOT NULL,                 -- 'global' | 'project' | 'server'
+           ref_id         TEXT,                          -- project_id or server_id per scope; null for global
+           spend_cap_usd  REAL,                          -- null = unlimited
+           rate_per_min   INTEGER,                       -- null = unlimited
+           created_at     INTEGER NOT NULL,
+           updated_at     INTEGER NOT NULL
+         );
+         CREATE TABLE audit_log (
+           id             TEXT PRIMARY KEY,
+           at             INTEGER NOT NULL,
+           action         TEXT NOT NULL,                 -- 'connect'|'disconnect'|'stdio_spawn'|'tool_call'|'connector_invoke'|'consent_grant'|'policy_deny'
+           server_id      TEXT,
+           tool_name      TEXT,
+           project_id     TEXT,
+           decision       TEXT NOT NULL,                 -- 'allow'|'deny'
+           reason         TEXT,                          -- e.g. 'spend_cap_exceeded'; NEVER secret/arg content
+           invocation_id  TEXT
+         );
+         CREATE INDEX audit_log_by_at ON audit_log(at);
+         -- additive only; a v2->v3 upgrade of an existing orchd.db with live projects creates
+         -- these tables and seeds nothing (no backfill needed — new subsystem).
+         -- user_version → 3"#,
+    )
 }
 
 // ================================================================================
@@ -2596,6 +2759,16 @@ mod tests {
         // S4 spec §4 (schema v2, additive): knowledge-graph tables.
         "graph_node",
         "graph_edge",
+        // S-EXT spec §4 (schema v3, additive): MCP/connectors/skills/trust tables.
+        "mcp_server",
+        "mcp_tool",
+        "account",
+        "mcp_invocation",
+        "mcp_artifact",
+        "skill",
+        "consent_grant",
+        "policy",
+        "audit_log",
     ];
 
     fn table_exists(conn: &Connection, name: &str) -> bool {
@@ -2613,20 +2786,20 @@ mod tests {
     }
 
     #[test]
-    fn open_in_memory_creates_schema_v2_with_every_table() {
+    fn open_in_memory_creates_schema_v3_with_every_table() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(user_version(db.conn()), 2);
+        assert_eq!(user_version(db.conn()), 3);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
     }
 
     #[test]
-    fn open_on_disk_creates_schema_v2_with_every_table() {
+    fn open_on_disk_creates_schema_v3_with_every_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orchd.db");
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(db.conn()), 2);
+        assert_eq!(user_version(db.conn()), 3);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
@@ -2653,7 +2826,7 @@ mod tests {
         std::fs::write(&path, b"not a sqlite database").unwrap();
 
         let db = Db::open(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 2);
+        assert_eq!(user_version(db.conn()), 3);
 
         let found = std::fs::read_dir(dir.path()).unwrap().any(|e| {
             e.unwrap()

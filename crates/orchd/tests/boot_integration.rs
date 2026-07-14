@@ -218,7 +218,7 @@ async fn second_instance_flock_refusal() {
 }
 
 #[tokio::test]
-async fn fresh_boot_creates_schema_v2_and_global_ruleset() {
+async fn fresh_boot_creates_schema_v3_and_global_ruleset() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
     let home_dir = tempfile::tempdir().unwrap();
@@ -249,7 +249,7 @@ async fn fresh_boot_creates_schema_v2_and_global_ruleset() {
         .conn()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 2);
+    assert_eq!(user_version, 3);
 
     for table in [
         "project",
@@ -261,6 +261,16 @@ async fn fresh_boot_creates_schema_v2_and_global_ruleset() {
         "ruleset",
         "graph_node",
         "graph_edge",
+        // S-EXT spec §4 (schema v3, additive): MCP/connectors/skills/trust tables.
+        "mcp_server",
+        "mcp_tool",
+        "account",
+        "mcp_invocation",
+        "mcp_artifact",
+        "skill",
+        "consent_grant",
+        "policy",
+        "audit_log",
     ] {
         let exists: bool = db
             .conn()

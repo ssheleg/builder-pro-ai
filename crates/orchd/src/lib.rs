@@ -11,6 +11,11 @@ pub mod export;
 pub mod persistence;
 pub mod socket_server;
 
+/// MCP server/tool registry persistence (S-EXT spec §4 schema v3). `pub` (unlike `mod graph;`
+/// below) — see `mcp`'s own module doc comment for why: no `bpa_orchd_proto` wire types exist for
+/// MCP yet (T3), so this module's row/enum types need to stay independently nameable.
+pub mod mcp;
+
 mod boot;
 /// Knowledge-graph node/edge persistence (S4 spec §4 schema v2, §5 persistence + invariants).
 /// Crate-private — `persistence::Db`'s CRUD/getter surface (`conn()`, `ensure_project_active`,
