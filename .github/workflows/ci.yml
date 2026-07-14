@@ -46,10 +46,15 @@ jobs:
         run: |
           cargo test -p bpa-protocol --test ts_export
           git diff --exit-code -- src/ipc/types.ts
+          cargo test -p bpa-orchd-proto --test ts_export
+          git diff --exit-code -- src/ipc/orchd-types.ts
       - name: e2e survive-restart
         run: |
           cargo build -p bpa-sessiond
+          cargo build -p bpa-orchd
           npm run e2e:survive
+      - name: e2e orchd survive+roundtrip
+        run: npm run e2e:orchd
 
   coverage:
     runs-on: macos-15
@@ -63,5 +68,5 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      - name: coverage gate (sessiond >= 80%)
+      - name: coverage gate (sessiond + orchd >= 80%)
         run: bash scripts/coverage-gate.sh

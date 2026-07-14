@@ -127,7 +127,7 @@ function readExactly(sock, n, timeoutMs, state) {
 }
 
 /**
- * Perform the v2 preamble handshake on a freshly-connected, not-yet-framed socket: write the
+ * Perform the preamble handshake on a freshly-connected, not-yet-framed socket: write the
  * client preamble, then read+decode the daemon's reply per
  * `crates/protocol/src/preamble.rs::decode_daemon_reply`:
  *   9-byte header `magic:u32-LE | result:u8 | a:u16-LE | b:u16-LE`, then:
@@ -136,13 +136,23 @@ function readExactly(sock, n, timeoutMs, state) {
  * Throws loudly (wrong magic / result / chosen version / short read) — self-checking, matching
  * the old `Welcome` roundtrip's fail-fast contract.
  *
+ * `clientMin`/`clientMax` default to sessiond's `CLIENT_MIN/MAX_VERSION` ([3, 3]) so every
+ * existing caller (`survive-restart.mjs`) is unaffected. `bpa-orchd` (S3, spec §4.1/§4.2) reuses
+ * this SAME codec-agnostic preamble (`BPAA` magic, same 9-byte header shape) with its own
+ * independent version space `[1, 1]` — daemons are distinguished by socket path, not by a
+ * preamble-carried single-daemon assumption — so `tests/e2e/orchd-survive.mjs` passes
+ * `{ clientMin: 1, clientMax: 1 }` here instead of touching this function's defaults.
+ *
  * Returns `{ chosen, daemonBuild, leftover }`: `leftover` is any bytes read past the preamble reply
  * in the same chunk(s) (the daemon is free to pipeline the start of the CBOR frame stream right
  * after its preamble reply, and a single `data` event can legitimately contain both) — the caller
  * MUST prepend `leftover` to its own frame-stream buffer rather than discarding it.
  */
-export async function preambleHandshake(sock, { timeoutMs = 5000 } = {}) {
-  sock.write(encodeClientPreamble(CLIENT_MIN_VERSION, CLIENT_MAX_VERSION, CLIENT_BUILD));
+export async function preambleHandshake(
+  sock,
+  { timeoutMs = 5000, clientMin = CLIENT_MIN_VERSION, clientMax = CLIENT_MAX_VERSION } = {},
+) {
+  sock.write(encodeClientPreamble(clientMin, clientMax, CLIENT_BUILD));
 
   // Shared read cursor spanning BOTH reads below (header, then trailing build bytes) — see the
   // `readExactly` doc comment for why a single shared buffer replaces a `sock.unshift()`-based
@@ -161,7 +171,7 @@ export async function preambleHandshake(sock, { timeoutMs = 5000 } = {}) {
   const b = header.readUInt16LE(7);
 
   if (result === 0) {
-    throw new Error(`daemon reported Incompatible: daemon supports [${a}, ${b}], client wanted [${CLIENT_MIN_VERSION}, ${CLIENT_MAX_VERSION}]`);
+    throw new Error(`daemon reported Incompatible: daemon supports [${a}, ${b}], client wanted [${clientMin}, ${clientMax}]`);
   }
   if (result !== 1) {
     throw new Error(`preamble reply unknown result byte: ${result}`);
@@ -169,8 +179,18 @@ export async function preambleHandshake(sock, { timeoutMs = 5000 } = {}) {
 
   const chosen = a;
   const buildLen = b;
-  if (chosen !== 3) {
-    throw new Error(`preamble negotiated unexpected version: chosen=${chosen} (expected 3)`);
+  // Self-check (belt-and-suspenders, mirrors the old harness's fail-fast contract): the daemon is
+  // only ever allowed to choose a version inside the range WE just offered — `negotiate()`
+  // (`crates/protocol/src/preamble.rs`) computes `chosen = min(client_max, daemon_max)`, so a
+  // `chosen` outside `[clientMin, clientMax]` means the daemon (or this decode) is broken. Bounds-
+  // checked against the caller-supplied range rather than a hardcoded `3` so this function stays
+  // correct for BOTH sessiond's `[3, 3]` and orchd's `[1, 1]` version spaces; each caller (this
+  // module's own `connect()`, `survive-restart.mjs`, `orchd-survive.mjs`) additionally asserts its
+  // own expected exact `chosen` value on the returned `conn.chosenVersion`.
+  if (chosen < clientMin || chosen > clientMax) {
+    throw new Error(
+      `preamble negotiated unexpected version: chosen=${chosen} (outside offered range [${clientMin}, ${clientMax}])`,
+    );
   }
   const buildBytes = buildLen > 0 ? await readExactly(sock, buildLen, timeoutMs, state) : Buffer.alloc(0);
   const daemonBuild = buildBytes.toString("utf8");
@@ -179,9 +199,12 @@ export async function preambleHandshake(sock, { timeoutMs = 5000 } = {}) {
 
 // ============================================================================
 // Minimal standard CBOR (RFC 8949) encoder/decoder — hand-rolled, no dependency.
-// Covers exactly: unsigned/negative ints, text strings, bool, null, arrays (definite-length),
-// maps (definite-length, text-string keys). That is everything `Frame`/`Request`/`Response`/
-// `Push` + nested `SessionMeta`/`Workspace`/`SessionLifecycle` need.
+// Covers exactly: unsigned/negative ints, IEEE-754 floats (half/single/double precision, decode
+// only — see `encodeValue`'s non-integer-`number` branch for why encode always emits double),
+// text strings, bool, null, arrays (definite-length), maps (definite-length, text-string keys).
+// That is everything `Frame`/`Request`/`Response`/`Push` + nested `SessionMeta`/`Workspace`/
+// `SessionLifecycle` (sessiond) AND `OrchdFrame`/`OrchdRequest`/`OrchdResponse`/`OrchdPush` +
+// nested `DomainTask.rank`/`PolicyRules.spend_cap_usd` (orchd, `f64` fields — spec §4.2) need.
 // ============================================================================
 
 const MT_UINT = 0, MT_NEGINT = 1, MT_TEXT = 3, MT_ARRAY = 4, MT_MAP = 5, MT_SIMPLE = 7;
@@ -242,7 +265,16 @@ function encodeValue(out, value) {
   }
   if (typeof value === "number") {
     if (!Number.isInteger(value)) {
-      throw new Error(`cborEncode: non-integer numbers not supported (got ${value})`);
+      // IEEE-754 double precision (major type 7, additional info 27) — always the full 8-byte
+      // width for simplicity. RFC 8949 requires every decoder to accept any float width, so this
+      // is valid CBOR even though ciborium's own encoder shrinks an `f64` to a shorter width
+      // (half/single precision) when the value round-trips losslessly at that width — exactly
+      // why `decodeValue`'s `MT_SIMPLE` branch below decodes all three IEEE-754 widths.
+      out.push((MT_SIMPLE << 5) | 27);
+      const buf = Buffer.alloc(8);
+      buf.writeDoubleBE(value, 0);
+      for (const b of buf) out.push(b);
+      return;
     }
     if (value >= 0) {
       cborWriteHead(out, MT_UINT, value);
@@ -272,6 +304,21 @@ function encodeValue(out, value) {
     return;
   }
   throw new Error(`cborEncode: unsupported value type ${typeof value}`);
+}
+
+/** IEEE-754 half-precision (16-bit) float -> JS `number` (always a double internally). Standard
+ * bit layout: 1 sign bit, 5 exponent bits (bias 15), 10 fraction bits (RFC 8949 §3.3). */
+function decodeHalfFloat(bits) {
+  const sign = bits & 0x8000 ? -1 : 1;
+  const exponent = (bits >> 10) & 0x1f;
+  const fraction = bits & 0x3ff;
+  if (exponent === 0) {
+    return sign * fraction * 2 ** -24; // subnormal (or zero, when fraction is also 0)
+  }
+  if (exponent === 0x1f) {
+    return fraction === 0 ? sign * Infinity : NaN;
+  }
+  return sign * (1 + fraction / 1024) * 2 ** (exponent - 15);
 }
 
 /** Decode a single CBOR value from `buf` starting at `offset`. Returns `[value, nextOffset]`.
@@ -350,6 +397,21 @@ function decodeValue(buf, offset) {
       if (infoBits === 21) return [true, o];
       if (infoBits === 22) return [null, o];
       if (infoBits === 23) return [undefined, o];
+      // IEEE-754 floats (additional info 25/26/27 = half/single/double precision, RFC 8949
+      // §3.3): `bpa-orchd-proto`'s `f64` fields (`DomainTask.rank`/`rank_agent`,
+      // `PolicyRules.spend_cap_usd`, spec §4.2) are the first payloads this harness decodes that
+      // need these — ciborium's CBOR writer shrinks an `f64` to the shortest width that
+      // round-trips it losslessly (so a value like `0.0` or a small integer-valued rank commonly
+      // arrives as a 2-byte half-float, not the full 8-byte double `cborEncode` always emits).
+      if (infoBits === 25) {
+        return [decodeHalfFloat(buf.readUInt16BE(o)), o + 2];
+      }
+      if (infoBits === 26) {
+        return [buf.readFloatBE(o), o + 4];
+      }
+      if (infoBits === 27) {
+        return [buf.readDoubleBE(o), o + 8];
+      }
       throw new Error(`CBOR decode: unsupported simple value ${infoBits} at offset ${offset}`);
     }
     default:
@@ -586,19 +648,28 @@ export function resolveSocketPath() {
 // ---- socket connection: preamble handshake, then length-prefixed CBOR framing ----
 
 /**
- * Connect to `sockPath`, perform the v2 preamble handshake, then install the CBOR frame-stream
+ * Connect to `sockPath`, perform the preamble handshake, then install the CBOR frame-stream
  * reader for the remainder of the connection's life. Resolves with a `conn` object once the
  * handshake has completed (`conn.daemonBuild`/`conn.chosenVersion` carry the negotiated reply) —
  * mirroring the old harness's `connect()` + separate `hello()` step, but folded into one function
  * since the preamble is no longer a framed `Request`/`Response` round-trip (it precedes framing
  * entirely, per Pv2 §4.2).
+ *
+ * `opts.clientMin`/`opts.clientMax` default to `CLIENT_MIN/MAX_VERSION` (sessiond's `[3, 3]`) so
+ * `survive-restart.mjs` needs no change. This function's own `decodeFrame`/`encodeFrame` frame
+ * bodies (installed below and used by `request()`) are still sessiond's `Frame`/`Request`/
+ * `Response`/`Push` shapes — orchd speaks a DIFFERENT frame contract
+ * (`bpa-orchd-proto::OrchdFrame`), so `tests/e2e/orchd-survive.mjs` only reuses this module's
+ * codec-agnostic preamble/CBOR primitives (`preambleHandshake`, `cborEncode`/`cborDecode`,
+ * `resolveSocketPath`-style helpers) and does NOT call this `connect()`/`request()` pair.
  */
-export function connect(sockPath) {
+export function connect(sockPath, opts = {}) {
+  const { clientMin = CLIENT_MIN_VERSION, clientMax = CLIENT_MAX_VERSION } = opts;
   return new Promise((resolve, reject) => {
     const sock = net.connect(sockPath);
     sock.once("connect", async () => {
       try {
-        const { chosen, daemonBuild, leftover } = await preambleHandshake(sock);
+        const { chosen, daemonBuild, leftover } = await preambleHandshake(sock, { clientMin, clientMax });
         const conn = {
           sock,
           // Seed the frame-stream buffer with any bytes read past the preamble reply in the same

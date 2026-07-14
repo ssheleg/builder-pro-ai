@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "tauri",
-    "e2e:survive": "node tests/e2e/survive-restart.mjs"
+    "e2e:survive": "node tests/e2e/survive-restart.mjs",
+    "e2e:orchd": "node tests/e2e/orchd-survive.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -22,10 +22,11 @@ One command gates the whole Definition of Done:
 bash scripts/final-suite.sh
 ```
 
-Its 8 stages, in order: Rust workspace tests · clippy `-D warnings` · `cargo fmt --check` ·
+Its 9 stages, in order: Rust workspace tests · clippy `-D warnings` · `cargo fmt --check` ·
 TypeScript tests (vitest) · `tsc --noEmit` · ts-rs type parity (regenerate + diff
-`src/ipc/types.ts`) · daemon coverage gate (≥ 80 % line coverage on `bpa-sessiond`) ·
-e2e survive-restart.
+`src/ipc/types.ts` and `src/ipc/orchd-types.ts`) · daemon coverage gate (≥ 80 % line coverage on
+`bpa-sessiond` and `bpa-orchd`) · e2e survive-restart · e2e orchd survive-restart +
+export/import round-trip.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same set on every push/PR.
 **Local and CI gates must never diverge** — if you change one, change both in the same commit.
