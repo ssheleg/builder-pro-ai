@@ -298,6 +298,10 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
   const moveBufferRef = useRef<GraphNodeMove[]>([]);
   const moveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Monotonic search request id (T7 review #2): bumped on every dispatched search AND on every
+  // clear, so an OLDER `orchdGraphSearch` promise resolving after a NEWER one can never overwrite
+  // `matchIds` with stale highlights — only the latest request's result is applied.
+  const searchRequestIdRef = useRef(0);
 
   // Mount-fetch (T6 review must-not-drop item (a)): unconditional, mirrors RulesetPanel's "always
   // re-Get on mount/scope change" discipline (never a cache-hit short-circuit for this tab).
@@ -329,14 +333,24 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     }
     const q = searchQuery.trim();
     if (q === "") {
+      // Invalidate any in-flight search too — a stale resolution must not re-highlight after a clear.
+      searchRequestIdRef.current += 1;
       setMatchIds(new Set());
       return;
     }
     searchTimerRef.current = setTimeout(() => {
       searchTimerRef.current = undefined;
+      const requestId = (searchRequestIdRef.current += 1);
       orchdGraphSearch(q, projectId)
-        .then((results) => setMatchIds(new Set(results.map((n) => n.id))))
-        .catch((e) => showToast(describeOrchdError(e)));
+        .then((results) => {
+          // Drop a stale response: a newer search (or a clear) has superseded this one.
+          if (requestId !== searchRequestIdRef.current) return;
+          setMatchIds(new Set(results.map((n) => n.id)));
+        })
+        .catch((e) => {
+          if (requestId !== searchRequestIdRef.current) return;
+          showToast(describeOrchdError(e));
+        });
     }, SEARCH_DEBOUNCE_MS);
     return () => {
       if (searchTimerRef.current !== undefined) clearTimeout(searchTimerRef.current);
@@ -429,9 +443,14 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     try {
       for (const id of selectedNodeIds) await orchdGraphDeleteNode(id);
       for (const id of selectedEdgeIds) await orchdGraphDeleteEdge(id);
-      await refreshGraph(projectId);
     } catch (e) {
       showToast(describeOrchdError(e));
+    } finally {
+      // Reconcile the canvas to server truth whether the loop completed fully OR aborted on a
+      // partial failure (T7 review #3): the ids already deleted before a mid-loop rejection must
+      // not linger on the canvas until some later unrelated refresh. `refreshGraph` swallows its
+      // own errors into a toast, so awaiting it here can't throw past this handler.
+      await refreshGraph(projectId);
     }
   }
 

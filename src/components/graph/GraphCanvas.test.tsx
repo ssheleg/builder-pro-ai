@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { mockReactFlow } from "./mockReactFlow";
 
@@ -63,11 +63,24 @@ vi.mock("@xyflow/react", async (importOriginal) => {
         >
           stub-select-n1
         </button>
+        <button
+          type="button"
+          data-testid="stub-select-both"
+          onClick={() =>
+            props.onNodesChange?.([
+              { type: "select", id: "n1", selected: true },
+              { type: "select", id: "n2", selected: true },
+            ])
+          }
+        >
+          stub-select-both
+        </button>
         {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
         {(props.nodes ?? []).map((n: any) => (
           <div
             key={n.id}
             data-testid={`stub-node-${n.id}`}
+            data-match={String(Boolean(n.data?.isMatch))}
             onClick={(e) => props.onNodeClick?.(e, n)}
           >
             {n.data?.label}
@@ -85,6 +98,12 @@ const orchdGraphDeleteNodeMock = vi.fn();
 const orchdGraphAddEdgeMock = vi.fn();
 const orchdGraphDeleteEdgeMock = vi.fn();
 const orchdGraphSearchMock = vi.fn();
+// The store's real `refreshGraph` (which the component calls on mount) invokes this — mocking the
+// module WITHOUT it would make the store's mount refresh THROW (undefined is not a function),
+// catch, and set the exact "оркестратор: ошибка" toast BEFORE any test acts, silently
+// pre-populating the very toast the error-toast test asserts (T7 review #1). It's stubbed here for
+// defense-in-depth even though `beforeEach` also swaps the store's `refreshGraph` for a no-op.
+const orchdGraphListProjectMock = vi.fn();
 const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
 
 vi.mock("../../ipc/orchd", () => ({
@@ -94,6 +113,7 @@ vi.mock("../../ipc/orchd", () => ({
   orchdGraphDeleteNode: (...a: unknown[]) => orchdGraphDeleteNodeMock(...a),
   orchdGraphAddEdge: (...a: unknown[]) => orchdGraphAddEdgeMock(...a),
   orchdGraphDeleteEdge: (...a: unknown[]) => orchdGraphDeleteEdgeMock(...a),
+  orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGraphSearch: (...a: unknown[]) => orchdGraphSearchMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
 }));
@@ -167,6 +187,7 @@ beforeEach(() => {
   orchdGraphDeleteNodeMock.mockReset().mockResolvedValue(undefined);
   orchdGraphAddEdgeMock.mockReset().mockResolvedValue({});
   orchdGraphDeleteEdgeMock.mockReset().mockResolvedValue(undefined);
+  orchdGraphListProjectMock.mockReset().mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
   orchdGraphSearchMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
 
@@ -175,6 +196,11 @@ beforeEach(() => {
       graphByProject: { p1: view },
       orchdDown: false,
       toast: null,
+      // Swap the store's real `refreshGraph` for a stable no-op in EVERY test (T7 review #1): the
+      // component calls it on mount, and the real one would (via the mocked module) touch
+      // orchd wrappers and could pre-populate a toast. Tests that need to ASSERT on the refresh
+      // (mount, delete) override this with their own spy.
+      refreshGraph: vi.fn().mockResolvedValue(undefined),
     },
     false,
   );
@@ -245,6 +271,21 @@ describe("GraphCanvas", () => {
       render(<GraphCanvas projectId="p1" />);
 
       fireEvent.click(screen.getByTestId("stub-move-a"));
+      await vi.advanceTimersByTimeAsync(400);
+
+      expect(orchdGraphMoveNodeMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a move debounce armed before unmount does NOT fire orchdGraphMoveNode after unmount (T7 review #4 — cleanup clears the timer)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { unmount } = render(<GraphCanvas projectId="p1" />);
+
+      fireEvent.click(screen.getByTestId("stub-move-a")); // arms the 400ms debounce
+      unmount();
       await vi.advanceTimersByTimeAsync(400);
 
       expect(orchdGraphMoveNodeMock).not.toHaveBeenCalled();
@@ -353,6 +394,29 @@ describe("GraphCanvas", () => {
     confirmSpy.mockRestore();
   });
 
+  it("a partial multi-delete (2nd id rejects) still deletes the 1st, toasts, AND reconciles via refreshGraph (T7 review #3)", async () => {
+    const refreshGraphMock = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ refreshGraph: refreshGraphMock }, false);
+    orchdGraphDeleteNodeMock
+      .mockReset()
+      .mockResolvedValueOnce(undefined) // n1 deletes
+      .mockRejectedValueOnce({ kind: "daemon", code: "Invariant", message: "boom" }); // n2 fails
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<GraphCanvas projectId="p1" />);
+    fireEvent.click(screen.getByTestId("stub-select-both"));
+    fireEvent.click(screen.getByTestId("graph-delete-selected-button"));
+
+    await waitFor(() => {
+      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n1"); // 1st delete happened
+      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n2"); // 2nd attempted (rejected)
+      expect(useAppStore.getState().toast).toBe("оркестратор: ошибка"); // failure toasted
+      expect(refreshGraphMock).toHaveBeenCalledWith("p1"); // canvas reconciled to server truth
+    });
+
+    confirmSpy.mockRestore();
+  });
+
   it("a search query debounces then calls orchdGraphSearch(query, projectId)", async () => {
     vi.useFakeTimers();
     try {
@@ -372,7 +436,43 @@ describe("GraphCanvas", () => {
     }
   });
 
-  it("a failed orchdGraphAddEdge call shows the mapped error via a toast", async () => {
+  it("ignores a STALE search response: fire A then B, resolve B then A (A last) -> matches reflect B, not A (T7 review #2)", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveA!: (v: { id: string }[]) => void;
+      let resolveB!: (v: { id: string }[]) => void;
+      orchdGraphSearchMock
+        .mockReset()
+        .mockReturnValueOnce(new Promise((r) => { resolveA = r; }))
+        .mockReturnValueOnce(new Promise((r) => { resolveB = r; }));
+
+      render(<GraphCanvas projectId="p1" />);
+      const input = screen.getByTestId("graph-search-input");
+
+      // Dispatch search "A" (request id 1).
+      fireEvent.change(input, { target: { value: "A" } });
+      await vi.advanceTimersByTimeAsync(400);
+      // Dispatch search "B" (request id 2).
+      fireEvent.change(input, { target: { value: "B" } });
+      await vi.advanceTimersByTimeAsync(400);
+
+      expect(orchdGraphSearchMock).toHaveBeenCalledTimes(2);
+
+      // B (newer) resolves FIRST, A (older) resolves LAST — the race the guard must survive.
+      await act(async () => {
+        resolveB([{ id: "n2" }]);
+        resolveA([{ id: "n1" }]);
+      });
+
+      // matchIds must reflect B's result (n2 highlighted), NOT the stale A (n1) that resolved last.
+      expect(screen.getByTestId("stub-node-n2").getAttribute("data-match")).toBe("true");
+      expect(screen.getByTestId("stub-node-n1").getAttribute("data-match")).toBe("false");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a failed orchdGraphAddEdge call shows the mapped error via a toast (genuine — mount refresh is a no-op, see beforeEach)", async () => {
     orchdGraphAddEdgeMock.mockRejectedValue({ kind: "daemon", code: "Invariant", message: "boom" });
     render(<GraphCanvas projectId="p1" />);
 
