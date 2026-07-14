@@ -2,6 +2,79 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.4.0] — 2026-07-14
+
+### Added
+- **`bpa-orchd`, the second launchd daemon:** a per-user LaunchAgent
+  (`ai.builderpro.desktop.orchd`) hosting the app-domain store — projects, goals, ideas, insights,
+  tasks, rulesets. Reuses `bpa-sessiond`'s patterns verbatim: fail-closed forward-only migrations,
+  flock single-instance, peer-cred (`getpeereid`) refusal, drain/consent upgrade choreography. Its
+  own Hop-B socket (`orchd.sock`/`orchd.lock`), own SQLite DB (`orchd.db`), own logs
+  (`orchd.tracing.log`/`orchd.out.log`/`orchd.err.log`), own independent wire version space
+  `[1,1]` (same `BPAA` preamble magic as sessiond — daemons distinguished by socket path, not by
+  preamble content). Ops runbook: `docs/runbook-orchd.md`.
+- **`bpa-daemon-core` extraction:** six shared modules (`dirs`, `singleton`, `logging`, `migrate`,
+  `handshake`, `broadcast`) factored out of `bpa-sessiond` FIRST, then `bpa-sessiond` re-seated on
+  them with behavior byte-identical (on-disk socket/lock/plist paths asserted unchanged by test)
+  before `bpa-orchd` was built on the same foundation — final architecture immediately, no
+  "duplicate now, refactor later".
+- **Domain schema v1 + full CRUD for six entity families:** Project (workspace links, archive),
+  Goal (full tree — exactly one `strategic` root per project, `additional` subgoals at arbitrary
+  depth via `parent_id`, move/reorder, delete-subtree cascade), Idea (lifecycle
+  captured→researching→specced→in-dev→shipped→archived, nullable `project_id` for orphan/inbox
+  ideas, `SetIdeaProject` to attach/detach), Insight (fit-verdict fit/no-fit/unknown vs
+  goals/metrics, owner override via `SetInsightFitVerdict`, archive requires non-empty
+  `resolutionReasoning`), Task/Subtask (unified model — kanban is a future VIEW over it — status
+  groups backlog/todo/waiting/progress/testing/done, `rank` reordering via midpoint math), RuleSet
+  (global + per-project). Every create/update/delete replies the updated entity (or `Ack`) AND
+  broadcasts a coarse `orchd://*-changed` push ONLY on success — failed requests broadcast
+  nothing.
+- **RuleSet markdown files — the source of truth (D4):** DB stores `md_path` + `md_hash`
+  (sha256); files are atomic-written (tmp+rename); external edits/deletions surface honestly
+  (`Ok` / `ExternallyModified` / `Missing`) instead of silently overwriting or hiding drift. A
+  deliberate NARROW exception to "orchd gets its own file API in S9" (architecture.md amended) —
+  this is the ONLY file I/O anywhere in the `bpa-orchd` crate, not a general file API.
+- **Export / import:** per-project and whole-store JSON bundles (`bundleFormat: 1`), every row
+  field preserved verbatim on import (ids, `created_at`/`updated_at`, `rank`, `md_hash` — never
+  re-stamped), id collisions rejected as a typed `Conflict` with the whole transaction rolled
+  back, round-trip proven (import into an empty store → re-export equals the original modulo
+  `exportedAt`). A 16 MiB frame-cap guard answers a typed `Io` error instead of attempting a
+  doomed oversized send (chunked export tracked as a backlog row).
+- **Frontend — project management UI:** left-rail project groups (project header + nested
+  workspace rows, «Без проекта» group, create-project dialog); a tabbed `ProjectPanel` (Обзор ·
+  Цели `GoalTree` · Идеи `IdeasList` · Задачи `TasksList` · Инсайты `InsightsList` · Правила
+  `RulesetPanel`); ⌘K quick-capture (`QuickCapture`) — global overlay, title/body/project select,
+  `CreateIdea` on Enter, disabled with an honest inline note while orchd is down; `HomeGoals`
+  mounted below the S2 attention sections (the amber «Нужен ты» block keeps its pinned-top spot)
+  showing each active project's strategic goal + direct children with status chips.
+- **Honest degradation for the second daemon:** `orchd://down` → shared banner + [Повторить]
+  (`orchd_reconnect`) on every domain surface, mutating controls disabled; `orchd://incompatible`
+  → the existing `UpgradeDialog` generalized to read both daemons' flag pairs, rendering one
+  dialog at a time (sessiond first if both are incompatible — no combined choreography); orchd's
+  own upgrade copy is honest that no live session is at risk (no PTYs to lose).
+- New design-system atoms: Tree row, Lifecycle chip, Policy form, File-state banner, Project group
+  row, Quick-capture overlay (`docs/design-system.md` §5).
+- **E2E (`npm run e2e:orchd`, `tests/e2e/orchd-survive.mjs`):** boot on a temp HOME → handshake
+  `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch
+  → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) →
+  `ImportBundle` → re-export equals the original modulo `exportedAt` — the roadmap DoD proof
+  (goals+ideas+tasks CRUD survive restart; export/import round-trips).
+
+### Changed
+- **Gate: 8 stages → 9.** `scripts/final-suite.sh` adds `bpa-orchd` to the ts-rs type-parity diff
+  (`src/ipc/orchd-types.ts`) and the coverage gate (`cargo llvm-cov --package bpa-orchd
+  --fail-under-lines 80`, alongside `bpa-sessiond`'s existing gate), and a new stage 9
+  `npm run e2e:orchd`. `.github/workflows/ci.yml` updated in lockstep.
+- `src-tauri/src/launchd.rs`'s `LaunchdAgent` parameterized ADDITIVELY (`label`,
+  `stdout_log_name`, `stderr_log_name` fields) so the same install/bootstrap/kickstart machinery
+  renders either daemon's plist; sessiond call sites pass the pre-existing values byte-identically
+  (asserted by test), orchd call sites pass its own identity.
+
+### Fixed
+- `crates/orchd/src/socket_server.rs`'s module doc overclaimed it was the only place in the crate
+  calling `SystemTime::now()` — `persistence.rs` also does, for row `created_at`/`updated_at`.
+  Reworded to scope the claim to the `exported_at` stamp specifically (T10 Minor).
+
 ## [0.3.0] — 2026-07-09
 
 ### Added

@@ -24,7 +24,11 @@
 //! a write failure there is logged and swallowed rather than rolling back the committed project).
 //! `ExportProject`/`ExportAll`/`ImportBundle` read `bpa_daemon_core::dirs::app_support_dir()` and
 //! (export only) the wall clock — this module is the ONE place in the crate allowed to call
-//! `SystemTime::now()` (library code, `export.rs`/`persistence.rs`, never does; see [`now_ms`]).
+//! `SystemTime::now()` for the `exported_at` stamp (`export.rs` itself never does — it takes
+//! `exported_at` as a parameter; see [`now_ms`]). `persistence.rs` has its own, separate
+//! `now_ms`/`now_secs` for row `created_at`/`updated_at` timestamps and DB-quarantine filenames —
+//! this module is not the only `SystemTime::now()` caller in the crate, only the only one for
+//! the export stamp.
 
 use std::path::Path;
 use std::sync::Arc;

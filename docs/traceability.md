@@ -94,12 +94,82 @@ attention-first Home, an OSC-133 command strip, and terminal file links — ship
 | `CommandStrip`: ✓/✗ chips from `command_events`, running-dot for an unmatched `started`, newest-first pairing, empty is calm (not an error), fetch failure toasts + renders nothing, refetches on lifecycle/exit change scoped to its own session (§6.3) | `npx vitest run src/components/CommandStrip.test.tsx` (10 tests) |
 | Terminal file links: lexical token patterns (absolute/dot-relative/extensioned-relative), `:line[:col]` suffix stripped from the path but kept in the span, `~/` detected-then-skipped, prose/bare-word rejected, `endCol` xterm-inclusive conversion (§6.5, D9) | `npx vitest run src/terminal/link-provider.test.ts` (18 tests) |
 
+## S3 contract rows (`docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md`)
+
+The second launchd daemon `bpa-orchd` + the app-domain foundation (six entity families, RuleSet
+markdown files, export/import, project management UI) — shipped `[0.4.0]`.
+
+| Contract (S3 spec §) | Test (command) |
+|---|---|
+| `bpa-daemon-core` extraction: shared migration runner (whole-chain, skip-below-`from`, mid-chain rollback, `VersionTooNew`) (§3, D2) | `cargo test -p bpa-daemon-core --lib migrate::tests::whole_chain_success_applies_every_step_and_reaches_target migrate::tests::steps_at_or_below_from_version_are_skipped migrate::tests::mid_chain_failure_rolls_back_the_whole_chain_not_just_the_failing_step migrate::tests::version_too_new_is_rejected_without_touching_the_db migrate::tests::empty_steps_with_from_equal_target_zero_is_ok migrate::tests::version_too_new_message_matches_expected_wire_text` |
+| `bpa-daemon-core` extraction: shared codec-agnostic preamble accept/negotiate (accept/incompatible/garbage/timeout) (§3, D2) | `cargo test -p bpa-daemon-core --lib handshake::tests::compatible_versions_accept_and_echo_the_passed_build handshake::tests::disjoint_ranges_are_incompatible_and_daemon_range_is_reported handshake::tests::garbage_magic_returns_err handshake::tests::stalled_client_times_out_with_err_within_preamble_timeout` |
+| `bpa-daemon-core` extraction: generic `Broadcaster<F>` client-push registry (both daemons instantiate the SAME generic type) (§3, D2) | `cargo test -p bpa-daemon-core --lib broadcast::tests::two_registered_receivers_both_get_the_broadcast_value broadcast::tests::full_receiver_queue_is_skipped_without_blocking_other_receivers broadcast::tests::deregistered_receiver_gets_nothing broadcast::tests::clone_shares_the_same_registry` |
+| `bpa-daemon-core` extraction: shared singleton (flock, socket path `$XDG_RUNTIME_DIR/bpa` else `/tmp/bpa-{uid}`, dir/socket perms, peer-cred) (§3, D2) | `cargo test -p bpa-daemon-core --lib singleton::tests::resolve_socket_path_and_lockfile_end_with_given_names_under_xdg_runtime_dir singleton::tests::resolve_socket_path_falls_back_to_tmp_with_uid_when_xdg_unset singleton::tests::socket_path_len_under_104_passes_and_over_fails singleton::tests::ensure_dir_creates_with_0700 singleton::tests::ensure_dir_refuses_world_writable_squat singleton::tests::second_acquire_lock_at_on_same_path_would_block singleton::tests::lockfile_created_mode_0600 singleton::tests::peer_cred_accepts_same_uid_over_socketpair singleton::tests::peer_cred_rejects_foreign_uid_simulated` |
+| `bpa-sessiond` re-seated on daemon-core: on-disk socket/lock/plist paths byte-identical, whole sessiond regression net still green (Phase-1 regression net, §12) | `cargo test -p bpa-sessiond --lib` (155 tests, all pass post-extraction) + `cargo test -p builder-pro-ai --lib launchd::tests::` (sessiond plist bytes asserted identical pre/post extraction) |
+| `bpa-orchd-proto` CBOR round-trip, every `OrchdFrame`/`OrchdRequest`/`OrchdResponse`/`OrchdPush`/entity-struct variant; version consts locked at `1` (§4.2, D8) | `cargo test -p bpa-orchd-proto --test roundtrip` (8 tests) |
+| `bpa-orchd-proto` ⇄ TS parity (`orchd-types.ts` generated, camelCase, entity shapes) (§4.2) | `cargo test -p bpa-orchd-proto --test ts_export` (11 tests) then `git diff --exit-code -- src/ipc/orchd-types.ts` (wired into `scripts/final-suite.sh` stage 6/9) |
+| orchd schema v1: every table created, FK enforcement, corrupt-DB quarantine + recreate (`orchd.db.corrupt-<ts>`), WAL checkpoint no-op-safe (§5.1) | `cargo test -p bpa-orchd --lib persistence::tests::open_in_memory_creates_schema_v1_with_every_table persistence::tests::open_on_disk_creates_schema_v1_with_every_table persistence::tests::foreign_keys_are_enforced persistence::tests::corrupt_db_is_quarantined_and_recreated persistence::tests::checkpoint_on_disk_db_does_not_error persistence::tests::checkpoint_on_in_memory_db_does_not_error` |
+| Project CRUD + invariants: `CreateProject` auto-creates strategic goal + ruleset row, empty-workspace-ids/cross-project-link/duplicate-in-call invariants, archive blocks every mutating child verb (§5.2) | `cargo test -p bpa-orchd --lib persistence::tests::create_project_creates_strategic_goal_and_ruleset_row persistence::tests::create_project_empty_workspace_ids_is_invariant persistence::tests::create_project_workspace_linked_to_another_project_is_conflict persistence::tests::archive_project_sets_status_archived persistence::tests::archived_project_blocks_update_project persistence::tests::archived_project_blocks_create_goal persistence::tests::archived_project_blocks_create_idea persistence::tests::archived_project_blocks_create_insight persistence::tests::archived_project_list_goals_still_works persistence::tests::add_project_workspace_appends_and_conflicts_when_linked_elsewhere persistence::tests::remove_project_workspace_last_link_is_invariant` |
+| Goal tree CRUD + invariants: exactly one `strategic` root, arbitrary-depth `additional` via `parent_id`, move/cycle-guard, delete-subtree cascade, parents-before-children ordering (§5.2, D5) | `cargo test -p bpa-orchd --lib persistence::tests::create_goal_second_strategic_is_invariant persistence::tests::create_goal_additional_without_parent_is_invariant persistence::tests::create_goal_cross_project_parent_is_invariant persistence::tests::create_goal_ord_increments_per_sibling_group persistence::tests::move_goal_strategic_root_is_invariant persistence::tests::move_goal_under_own_descendant_or_self_is_cycle_invariant persistence::tests::move_goal_updates_parent_and_ord persistence::tests::delete_goal_strategic_is_invariant persistence::tests::delete_goal_cascades_subtree persistence::tests::list_goals_parents_before_children_then_ord` |
+| Idea CRUD + lifecycle + `SetIdeaProject` (nullable `project_id`, orphan ideas mutable, attach/detach) (§5.2, D3/D11) | `cargo test -p bpa-orchd --lib persistence::tests::create_idea_defaults_lifecycle_captured_orphan_by_default persistence::tests::list_ideas_none_includes_orphans_but_project_filter_excludes_them persistence::tests::orphan_idea_remains_mutable_with_no_project persistence::tests::set_idea_project_none_detaches persistence::tests::set_idea_project_attaches_orphan_to_a_project persistence::tests::set_idea_project_blocked_when_target_project_archived persistence::tests::set_idea_lifecycle_persists_snake_case_db_literal persistence::tests::delete_idea_removes_row` |
+| Insight CRUD + fit-verdict override + archive-requires-reasoning (§5.2) | `cargo test -p bpa-orchd --lib persistence::tests::create_insight_defaults_status_new_orphan_by_default persistence::tests::set_insight_fit_verdict_stores_verdict_and_reasoning persistence::tests::set_insight_fit_verdict_none_clears_verdict_but_keeps_reasoning persistence::tests::set_insight_status_updates_status_and_resolution_reasoning persistence::tests::set_insight_status_none_reasoning_leaves_it_unchanged persistence::tests::orphan_insight_remains_mutable_with_no_project` |
+| Task/Subtask CRUD + `rank` midpoint reordering (§5.2) | `cargo test -p bpa-orchd --lib persistence::tests::create_task_rank_sequence_1024_2048_3072` (+ the full `persistence::tests::` task/rank suite — `cargo test -p bpa-orchd --lib persistence::tests::` lists every `*_task_*`/`*_rank_*` name) |
+| RuleSet DB row CRUD + `PolicyRules` strict-validation (unknown key rejected, round-trips through the wire type) (§5.2, §7) | `cargo test -p bpa-orchd --lib persistence::tests::` (`validate_policy_rejects_an_unknown_json_key` and the `ruleset`/`policy`-prefixed tests in that module) |
+| RuleSet files: atomic write (tmp+rename, no leftover tmp, parent dirs created), fresh-read-on-Get state machine (`Ok`/`ExternallyModified`/`Missing`) (§7, D4) | `cargo test -p bpa-orchd --lib ruleset_files::tests::write_atomic_creates_parent_dirs_and_returns_the_exact_content_hash ruleset_files::tests::write_atomic_leaves_no_tmp_file_behind ruleset_files::tests::write_atomic_overwrites_an_existing_file ruleset_files::tests::read_state_missing_file_is_missing_with_no_content ruleset_files::tests::read_state_matching_hash_is_ok_with_content ruleset_files::tests::read_state_mismatched_hash_is_externally_modified_with_the_new_content ruleset_files::tests::read_state_unreadable_path_is_missing` |
+| Export/import: round-trip identical modulo `exportedAt`, field-verbatim preservation (`updated_at`/`rank` never re-stamped), id collision → `Conflict` + full rollback, 16 MiB frame-cap guard, ruleset md path containment (rejects `..`/path-separator, repoints outside-app-support imports) (§8, D7) | `cargo test -p bpa-orchd --lib export::tests::export_import_round_trip_is_semantically_identical_modulo_exported_at export::tests::import_preserves_updated_at_and_rank_verbatim_not_freshly_stamped export::tests::import_task_id_collision_is_conflict_and_rolls_back_everything export::tests::export_project_over_16_mib_is_an_io_frame_cap_error export::tests::export_all_over_16_mib_is_an_io_frame_cap_error export::tests::export_project_ruleset_with_a_missing_file_has_null_md_content export::tests::export_project_ruleset_with_an_empty_file_has_empty_string_md_content_not_null export::tests::import_repoints_a_foreign_ruleset_md_path_under_the_given_app_support export::tests::import_rejects_a_ruleset_md_path_with_dotdot_traversal_and_writes_nothing_outside export::tests::import_rejects_a_ruleset_project_id_with_a_path_separator export::tests::import_into_a_boot_seeded_store_reconciles_the_global_ruleset` |
+| Socket dispatch, end-to-end over a real Unix socket: mutate → response + a SECOND connection receives the matching `orchd://*-changed` push; failed mutate broadcasts nothing (§4.2, §5, §6, §7) | `cargo test -p bpa-orchd --test dispatch_integration` (7 tests: `create_project_returns_project_broadcasts_projects_changed_and_writes_ruleset_file`, `create_goal_broadcasts_goals_changed_with_correct_project_id`, `remove_last_project_workspace_is_invariant_and_broadcasts_nothing`, `get_ruleset_ok_then_externally_modified_after_on_disk_edit`, `set_idea_project_none_detaches`, `import_bundle_happy_path_returns_report_and_broadcasts_family_pushes`, `unknown_id_delete_task_is_not_found`) |
+| Daemon boot: bind → wire deps → serve → drain; global ruleset row + `rules/global.md` ensured idempotently at every boot; second-instance flock refusal (§5, §9) | `cargo test -p bpa-orchd --test boot_integration` (4 tests: `boot_handshake_ping_pong_and_clean_shutdown`, `second_instance_flock_refusal`, `fresh_boot_creates_schema_v1_and_global_ruleset`, `double_boot_does_not_duplicate_global_ruleset_row`) |
+| No-secrets-in-logs, orchd (§13, §16) | `cargo test -p bpa-orchd --test no_secrets_in_logs planted_ruleset_secrets_never_appear_in_logs` |
+| Core: `OrchdClient`/error mapping, `orchd_*` commands over a stub daemon (real socket, `ENV_TEST_LOCK` discipline, version consts not literals), upgrade/reconnect choreography (§9) | `cargo test -p builder-pro-ai --lib commands::` (`orchd_client_error_disconnected_maps_to_command_error_disconnected`, `orchd_client_error_daemon_maps_to_command_error_daemon`, `orchd_client_error_incompatible_orchd_maps_to_command_error_incompatible_orchd`, `orchd_upgrade_core_drains_then_kickstarts`, `orchd_upgrade_core_without_client_still_kickstarts`, `orchd_create_project_round_trips_through_real_orchd_client`, `orchd_invariant_error_response_becomes_command_error_daemon_invariant_end_to_end`, `orchd_reveal_rules_file_core_uses_the_get_rule_set_returned_path`, `orchd_export_to_file_all_export_writes_json_named_store`, `orchd_export_to_file_project_export_uses_sanitized_project_name`, `orchd_import_from_file_reads_file_and_round_trips_through_stub`, `orchd_import_from_file_refuses_a_file_over_the_10_mib_cap`) |
+| Core: `map_orchd_push` — one test per `OrchdPush` variant → the matching `orchd://*-changed` `Emit` action, correct camelCase payload; `map_orchd_conn_state` — every variant (§9, D6, D10) | `cargo test -p builder-pro-ai --lib broker::tests::orchd_projects_changed_maps_to_emit_with_null_payload broker::tests::orchd_goals_changed_maps_to_emit_with_camel_case_project_id_payload broker::tests::orchd_ideas_changed_maps_to_emit_with_null_payload broker::tests::orchd_insights_changed_maps_to_emit_with_null_payload broker::tests::orchd_tasks_changed_maps_to_emit_with_camel_case_project_id_payload broker::tests::orchd_ruleset_changed_maps_to_emit_with_scope_and_project_id_payload broker::tests::orchd_ruleset_changed_global_scope_has_null_project_id broker::tests::map_orchd_conn_state_maps_every_variant` |
+| `bring_up_orchd`: bounded-retry connect, `IncompatibleOrchd` never retried, status transitions (§9) | `cargo test -p builder-pro-ai --lib lib::tests::connect_orchd_with_retry_gives_up_after_bounded_attempts_without_panicking lib::tests::connect_orchd_with_retry_does_not_retry_incompatible lib::tests::status_for_orchd_connect_result_maps_incompatible_orchd lib::tests::status_for_orchd_connect_result_maps_ok_to_connected lib::tests::status_for_orchd_conn_state_maps_every_variant lib::tests::orchd_event_names_are_locked` |
+| `launchd.rs`: orchd identity (`ORCHD_LABEL`, `orchd.out.log`/`orchd.err.log`) rendered into its OWN plist/service-target, sessiond's stays byte-identical (§9) | `cargo test -p builder-pro-ai --lib launchd::tests::render_plist_and_service_target_use_orchd_identity_for_orchd_agent` (+ the pre-existing sessiond-identity plist tests, unchanged, proving no cross-contamination) |
+| Frontend `domainSlice` + IPC wrappers (`orchd.ts`, `onOrchd*` events) (§10) | `npx vitest run src/store/store.test.ts src/ipc/orchd.test.ts src/ipc/events.test.ts` (52 + 52 + 20 tests) |
+| `ProjectPanel` (tabs) / `GoalTree` / `IdeasList` / `TasksList` / `InsightsList` / `RulesetPanel` / `CreateProjectDialog` / left-rail project groups (§10) | `npx vitest run src/components/ProjectPanel.test.tsx src/components/GoalTree.test.tsx src/components/IdeasList.test.tsx src/components/TasksList.test.tsx src/components/InsightsList.test.tsx src/components/RulesetPanel.test.tsx src/components/CreateProjectDialog.test.tsx src/components/WorkspaceSidebar.test.tsx` (10 + 9 + 10 + 12 + 7 + 12 + 11 + 11 tests) |
+| `QuickCapture` (⌘K overlay, disabled honestly while `orchdDown`), `HomeGoals` (mounted below the amber attention block), `OrchdDownBanner` / dual-daemon `UpgradeDialog` generalization (§10, §11) | `npx vitest run src/components/QuickCapture.test.tsx src/components/HomeGoals.test.tsx src/components/OrchdDownBanner.test.tsx src/components/UpgradeDialog.test.tsx` (13 + 8 + 2 + 16 tests) |
+| E2E orchd survive-restart + export/import round-trip: boot → handshake `[1,1]` → create project+goals+idea+task → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → wipe `orchd.db*` → relaunch fresh v1 → `ImportBundle` → re-export equals the original modulo `exportedAt` (§12 — the roadmap DoD proof) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phases 0-4, log format `[e2e-orchd] phaseN OK: …` / `[e2e-orchd] ALL PHASES PASSED`) |
+
 ## Uncovered rows
 
 None. Every §14.2 row above resolves to at least one real, currently-passing test. Same for every
-S2 contract row above.
+S2 and S3 contract row above.
 
-## Test totals — current (S2, `[0.3.0]`, 2026-07-09)
+## Test totals — current (S3, `[0.4.0]`, 2026-07-14)
+
+- Rust workspace (`cargo test --workspace`): **655 tests**, 0 failed (re-measured T21; per-binary
+  breakdown from the same run: `bpa-daemon-core` lib 29; `bpa-orchd` lib 158 + `boot_integration`
+  4 + `dispatch_integration` 7 + `no_secrets_in_logs` 1; `bpa-orchd-proto` `roundtrip` 8 +
+  `ts_export` 11; `bpa-paths` lib 18; `bpa-protocol` lib 1 + `cbor_frame_generic` 7 + `framing` 7 +
+  `preamble` 7 + `roundtrip` 8 + `ts_export` 7; `bpa-sessiond` lib 155 + `boot_integration` 4 +
+  `no_secrets_in_logs` 1 + `rehydrate_attach` 1 + `skeleton` 1; `builder-pro-ai` lib 214 +
+  `capabilities` 5 + `invoke_smoke` 1; every `main.rs`/doc-test binary 0). Delta vs. the prior S2
+  pass (384): the S3 daemon-core extraction adds `bpa-daemon-core` (+29, new crate); `bpa-sessiond`
+  lib is 155 post-extraction (vs. 167 pre-extraction — the six extracted modules' own unit tests
+  MOVED to `bpa-daemon-core`, not lost: daemon-core's 29 + sessiond's 155 together still cover
+  every behavior the pre-extraction 167 did, proven by the Phase-1 regression net, S3 spec §12);
+  `bpa-orchd`/`bpa-orchd-proto` are wholly new crates (+158+4+7+1+8+11 = +189); `builder-pro-ai`
+  lib grew 165 → 214 (+49: `orchd_client.rs`'s error-mapping tests, every `orchd_*` command's
+  stub-daemon tests in `commands.rs`, `broker.rs`'s `map_orchd_push`/`map_orchd_conn_state` tests,
+  `lib.rs`'s `bring_up_orchd`/status-mapping tests, and `launchd.rs`'s orchd-identity plist test,
+  S3 §9). Re-run `cargo test --workspace -- --list` yourself for the exact current per-crate
+  breakdown — the paragraphs below are kept for history and no longer reflect current totals.
+- TypeScript (`npx vitest run`): **502 tests**, 33 test files, 0 failed (re-measured T21). Delta
+  vs. the prior S2 pass (297, 22 files): S3 added 11 new test files — `components/
+  ProjectPanel.test.tsx` (10), `components/GoalTree.test.tsx` (9), `components/
+  IdeasList.test.tsx` (10), `components/TasksList.test.tsx` (12), `components/
+  InsightsList.test.tsx` (7), `components/RulesetPanel.test.tsx` (12), `components/
+  CreateProjectDialog.test.tsx` (11), `components/QuickCapture.test.tsx` (13), `components/
+  HomeGoals.test.tsx` (8), `components/OrchdDownBanner.test.tsx` (2), `ipc/orchd.test.ts` (52) —
+  plus growth in `store/store.test.ts`, `ipc/events.test.ts`, `components/
+  WorkspaceSidebar.test.tsx`, `components/UpgradeDialog.test.tsx`, and `App.test.tsx` for the
+  `domainSlice`, `orchd://*` events, project-group rail rows, and dual-daemon upgrade dialog
+  (S3 §10-§11).
+- E2E: `npm run e2e:survive` green, unchanged by S3 (still 6 phases, 0–5, socket-harness variant —
+  the sessiond wire is untouched); `npm run e2e:orchd` green, **NEW this cycle** (5 phases, 0-4:
+  boot+handshake → create+2goals+idea+task → drain-restart+rehydrate → export → wipe+reimport+
+  re-export-equals, `tests/e2e/orchd-survive.mjs`, S3 spec §12 — the roadmap DoD proof).
+
+## Test totals — historical (S2, `[0.3.0]`, 2026-07-09) — superseded above
 
 - Rust workspace (`cargo test --workspace`): **384 tests**, 0 failed. Delta vs. the prior Pv2 pass
   (238): `bpa-paths` grew 7→18 (+11: `validate_path_within`/`validate_parent_within` and their
@@ -172,32 +242,63 @@ S2 contract row above.
 
 ## Coverage
 
-`scripts/coverage-gate.sh` runs `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` — a
-real, enforcing gate (non-zero exit below 80%). **Measured (2026-07-09, S2/`[0.3.0]` cycle):
-`bpa-sessiond` line coverage = 89.16 %** (functions 89.28 %, regions 90.25 %; 12632 regions/1369
-missed, 653 functions/70 missed, 7960 lines/776 missed) — the gate passes with headroom.
-*(Historical: 2026-07-07, Pv2/`[0.2.0]` cycle measured 89.58 % line / 88.17 % functions / 88.65 %
-regions; 2026-07-05, docs-truth/CI cycle measured 88.06 % line / 86.70 % functions / 89.20 %
-regions — S2 added the schema-v3 multi-root migration, Add/RemoveWorkspaceRoot,
-GetCommandEvents handlers to the daemon crate, all TDD-covered, which is why the number moved
-again; the small dip vs. Pv2's 89.58 % is new surface area landing slightly denser than its own
-tests in a couple of branch-heavy spots, still comfortably above the 80 % floor.)* The gate now
-runs in two enforced places:
+`scripts/coverage-gate.sh` runs `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND
+(as of S3, `[0.4.0]`) `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — two real,
+enforcing gates (either one failing below 80% fails the script).
 
-- locally as `scripts/final-suite.sh` stage 7/8 (requires
+**`bpa-orchd` — measured (2026-07-14, T21 gate-verification run): line coverage = 87.90 %**
+(regions 85.53 %, functions 88.22 %; 9403 regions/1361 missed, 467 functions/55 missed, 5100
+lines/617 missed. Per-module lines: `boot.rs` 81.65 %, `export.rs` 93.01 %, `persistence.rs`
+95.65 %, `ruleset_files.rs` 97.56 %, `socket_server.rs` 50.32 %, `main.rs` 0 % — the process-
+concerns entrypoint, never unit-tested, same shape as sessiond's own `main.rs`; the crate TOTAL
+clears the 80% gate with no new tests needed). `socket_server.rs`'s lower per-file number is
+expected — its dispatch arms are exercised by `dispatch_integration.rs`'s real-socket integration
+tests (counted separately by `cargo llvm-cov`, not folded into the unit-test-only per-file number
+above) rather than by `--lib` unit tests. *(Task 20's own report, commit `e640a84`, quoted "85.52%
+total lines" for this same measurement — that figure is this run's REGION coverage (85.53%, one
+percentage point apart from measurement-to-measurement noise), not line coverage; the number this
+doc now records, 87.90% line coverage, is `cargo llvm-cov`'s actual `--fail-under-lines`-gated
+metric, independently re-measured in this pass.)*
+
+**`bpa-sessiond` — measured (2026-07-14, T21 gate-verification run, post-S3-extraction): line
+coverage = 90.39 %** (regions 89.31 %, functions 90.79 %; 12086 regions/1292 missed, 608
+functions/56 missed, 7659 lines/736 missed — the gate passes with headroom). Per-module lines:
+`attach.rs` 88.80 %, `boot.rs` 77.24 %, `live_grid.rs` 93.33 %, `main.rs` 0 % (entrypoint, never
+unit-tested), `osc_parser.rs` 94.82 %, `persistence.rs` 94.44 %, `pty_supervisor.rs` 91.46 %,
+`scrollback.rs` 93.12 %, `shell_integration/mod.rs` 92.51 %, `singleton.rs` 70.83 % (now a thin
+wrapper over `bpa-daemon-core::singleton` — most of its former logic, and former coverage,
+belongs to daemon-core's own package total now), `socket_server.rs` 90.79 %. This number is HIGHER
+than S2's 89.16 % despite (or rather partly because of) the S3 daemon-core extraction: six modules'
+thinner-tested infrastructure code moved OUT to `bpa-daemon-core` (which has its own separate,
+un-gated coverage — the coverage-gate.sh script only enforces `bpa-sessiond`/`bpa-orchd`, not
+`bpa-daemon-core`, an honest gap noted here rather than silently assumed-covered), leaving the
+remaining sessiond-crate code proportionally better covered by its own still-green 155-test suite.
+*(Historical, pre-extraction: 2026-07-09, S2/`[0.3.0]` cycle measured 89.16 % line / 89.28 %
+functions / 90.25 % regions; 2026-07-07, Pv2/`[0.2.0]` cycle measured 89.58 % line / 88.17 %
+functions / 88.65 % regions; 2026-07-05, docs-truth/CI cycle measured 88.06 % line / 86.70 %
+functions / 89.20 % regions.)*
+
+The gate runs in two enforced places:
+
+- locally as `scripts/final-suite.sh` stage 7/9 (requires
   `rustup component add llvm-tools-preview && cargo install cargo-llvm-cov`);
-- in CI as the blocking `coverage` job of `.github/workflows/ci.yml` (see `docs/backlog.md`
-  BL-17 — added and verified green this cycle).
+- in CI as the blocking `coverage` job of `.github/workflows/ci.yml`, step renamed
+  `coverage gate (sessiond + orchd >= 80%)` (see `docs/backlog.md` BL-17 — added and verified
+  green in the S2 cycle, now covering both daemon crates).
 
-The evidence base behind the number: `bpa-sessiond --lib` grew to 167 tests this cycle (covering
-every module: `attach`, `boot`, `live_grid`, `logging`, `osc_parser`, `persistence`,
-`pty_supervisor`, `scrollback`, `shell_integration`, `singleton`, `socket_server` — `persistence`
-and `socket_server` gained the S2 schema-v3/multi-root/GetCommandEvents coverage) plus 3
-`boot_integration` + 1 `no_secrets_in_logs` + 1 `rehydrate_attach` + 1 `skeleton` integration tests
-exercising the full boot→serve→drain (and cold-rehydrate→attach) lifecycle over the real wire
-protocol. (134 → 167 reflects S2's new daemon-crate coverage: schema v3 migration, multi-root
-persistence, Add/RemoveWorkspaceRoot, GetCommandEvents.)
+The evidence base behind `bpa-sessiond`'s number: `bpa-sessiond --lib` was 167 tests at S2
+measurement time (covering every module: `attach`, `boot`, `live_grid`, `logging`, `osc_parser`,
+`persistence`, `pty_supervisor`, `scrollback`, `shell_integration`, `singleton`, `socket_server`)
+plus 3 `boot_integration` + 1 `no_secrets_in_logs` + 1 `rehydrate_attach` + 1 `skeleton`
+integration tests exercising the full boot→serve→drain (and cold-rehydrate→attach) lifecycle over
+the real wire protocol; post-S3-extraction it is 155 lib tests (the six daemon-core modules' own
+unit tests moved to `bpa-daemon-core`'s 29, not lost — see "Test totals" above) plus the same 4
+integration-test files. The evidence base behind `bpa-orchd`'s number: 158 `--lib` unit tests
+(covering `boot`, `export`, `persistence`, `ruleset_files`, `socket_server`) plus 4
+`boot_integration` + 7 `dispatch_integration` + 1 `no_secrets_in_logs` integration tests exercising
+dispatch over a real Unix socket end-to-end.
 
 *(History: at S0+S1 completion this gate was documented but not executed — the authoring
 environment lacked the ~3–5 GB the instrumented build needs. That gap was closed by the
-docs-truth/CI cycle; the paragraph above records the first real measurement.)*
+docs-truth/CI cycle; the S2 paragraph above records the first real sessiond measurement, and the
+S3 paragraph above records the first real orchd measurement.)*

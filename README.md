@@ -11,20 +11,25 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI). Ships as a universal m
 
 ## Status
 
-**S0+S1+Pv2+S2 implemented.** The foundation slice, the terminal core (daemon-owned PTYs,
+**S0+S1+Pv2+S2+S3 implemented.** The foundation slice, the terminal core (daemon-owned PTYs,
 OSC-driven status, sanitized scrollback replay, SQLite persistence, launchd-supervised survival),
-Protocol v2 (CBOR wire, version negotiation, multi-subscriber attach), and S2 (multi-root
+Protocol v2 (CBOR wire, version negotiation, multi-subscriber attach), S2 (multi-root
 workspaces, a core-owned file explorer + read-only preview + live watch, an attention-first Home,
-an OSC-133 command strip, terminal file links) are done, tested, and documented. See
+an OSC-133 command strip, terminal file links), and S3 (a SECOND launchd daemon `bpa-orchd`
+hosting the app-domain store — projects, goals, ideas, insights, tasks, rulesets — with full CRUD,
+export/import, and an owner-facing UI) are done, tested, and documented. See
 [`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this implementation is derived
 from and [`docs/traceability.md`](docs/traceability.md) for the contract → test matrix.
 
 - **Platform overview & roadmap:** [`2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md)
 - **S0+S1 spec:** [`2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
 - **S2 spec (workspace multi-root + file explorer + attention-first Home):** [`2026-07-08-s2-workspace-explorer-home-design.md`](docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md)
+- **S3 spec (`bpa-orchd` + app-domain foundation):** [`2026-07-13-s3-orchd-domain-foundation-design.md`](docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md)
 - **Architecture summary:** [`docs/architecture.md`](docs/architecture.md)
 - **Contract → test traceability:** [`docs/traceability.md`](docs/traceability.md)
 - **Release build/sign/notarize runbook:** [`docs/build-macos.md`](docs/build-macos.md)
+- **Daemon ops runbooks:** [`docs/runbook-daemon.md`](docs/runbook-daemon.md) (`bpa-sessiond`) ·
+  [`docs/runbook-orchd.md`](docs/runbook-orchd.md) (`bpa-orchd`)
 
 ### Features shipped so far
 
@@ -50,6 +55,19 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
 - **Terminal file links (S2):** click a path printed in terminal output to open it in the
   right-rail preview (regex detection + OSC-8 hyperlinks; validated against the workspace's roots
   on click, never a silent no-op on a miss).
+- **`bpa-orchd`, the second daemon (S3):** a launchd-supervised app-domain daemon, independent of
+  `bpa-sessiond`, with its own SQLite store (`orchd.db`), its own Hop-B socket + version space
+  (`[1,1]`), and the same fail-closed migrations / drain-and-consent upgrade patterns sessiond
+  proved out (`docs/runbook-orchd.md`).
+- **Six domain entity families (S3):** Project (⇄ Workspace links), Goal (full tree — one
+  strategic root per project + arbitrary-depth additional subgoals), Idea (lifecycle
+  captured→…→shipped/archived, nullable project — quick-capture inbox), Insight (fit-verdict vs
+  goals), Task/Subtask (unified model, kanban is a future view), RuleSet (global + per-project;
+  markdown is the source of truth, DB stores `md_path`+`md_hash`) — full CRUD, invariants, and
+  cascades, plus per-project/whole-store JSON export/import with field-verbatim round-trips.
+- **Project management UI (S3):** left-rail project groups, a tabbed `ProjectPanel` (Обзор · Цели
+  · Идеи · Задачи · Инсайты · Правила), ⌘K quick-capture for ideas, and a `HomeGoals` panel (below
+  the S2 attention queue) showing each active project's strategic goal + children.
 
 ## Principles
 
@@ -60,10 +78,14 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
 
 ## Architecture
 
-Two OS processes, two IPC hops. The daemon owns every PTY so the GUI can close, crash, or restart
-without killing a running shell (tmux/re-attach model). File I/O + live watch (S2) live in the
-Tauri core instead — GUI-lifetime, never over Hop-B, so the daemon's charter stays terminal-domain
-only — full detail (incl. the three-rail UI) in [`docs/architecture.md`](docs/architecture.md).
+**Three OS processes, two independent Hop-B connections** (as of S3, `[0.4.0]`): the GUI app and
+TWO launchd-supervised daemons — `bpa-sessiond` (terminal domain) and `bpa-orchd` (app domain:
+projects/goals/ideas/insights/tasks/rulesets). The diagram below shows the terminal-domain half
+only (`bpa-sessiond`'s daemon owns every PTY so the GUI can close, crash, or restart without
+killing a running shell — tmux/re-attach model; File I/O + live watch (S2) live in the Tauri core
+instead — GUI-lifetime, never over Hop-B, so the daemon's charter stays terminal-domain only) —
+full detail on BOTH daemons (incl. the three-rail UI and the two-daemon topology) in
+[`docs/architecture.md`](docs/architecture.md).
 
 ```
 ┌──────────────────────── Builder Pro AI.app ────────────────────────┐
@@ -101,19 +123,23 @@ actual process. The GUI only ever holds a socket connection to it, never a proce
 
 ## Survival truth table (spec §13)
 
-| Event | Sessions |
+| Event | Sessions (`bpa-sessiond`) |
 |---|---|
 | GUI close / crash / restart | Live shells **keep running** (daemon-owned) — reattach + scrollback replay |
 | Daemon restart / upgrade / crash | Live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
 | **macOS logout** | Sessions **die** — the per-user LaunchAgent is torn down with the login session |
+| **`bpa-orchd` restart / upgrade (S3, `[0.4.0]`)** | Domain data (projects/goals/ideas/insights/tasks/rules) **fully survives** — it's all SQLite (`orchd.db`); there is no live runtime state to lose in S3 (no scheduler/workflow/agent runtime yet — those are roadmap, SW1/SW2/S6b+), so a restart is a non-event beyond a brief `orchd://down` banner while it reconnects |
 
 This is an honest boundary, not a bug: any daemon stop (restart, upgrade, or crash) takes its live
 child processes down with it, and logging out tears down every per-user LaunchAgent along with
-everything it supervises. What *does* survive — GUI restart with live shells, and daemon restart
-for records + scrollback (rehydrated as inactive) — is stated in the table above.
-`npm run e2e:survive` proves both halves end-to-end: phases 0-4 the client-restart half, phase 5
-the daemon-restart half (SIGTERM-equivalent drain → relaunch → rehydrated inactive + scrollback
-intact — Pv2 §9.8, closes BL-7 in [`docs/backlog.md`](docs/backlog.md)).
+everything it supervises. What *does* survive — GUI restart with live shells, daemon restart for
+records + scrollback (rehydrated as inactive), and `bpa-orchd` restart for every domain row — is
+stated in the table above.
+`npm run e2e:survive` proves the sessiond half end-to-end: phases 0-4 the client-restart half,
+phase 5 the daemon-restart half (SIGTERM-equivalent drain → relaunch → rehydrated inactive +
+scrollback intact — Pv2 §9.8, closes BL-7 in [`docs/backlog.md`](docs/backlog.md)).
+`npm run e2e:orchd` proves the orchd half: create data → drain-restart → data intact →
+export → wipe the DB → re-import → re-export equals the original (S3 spec §12).
 
 ## Quickstart
 
@@ -123,11 +149,13 @@ npm install
 export PATH="$HOME/.cargo/bin:$PATH"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-# Build the daemon first — dev mode looks for bpa-sessiond BESIDE the app binary
-# (target/debug/) and fails with an actionable error if it's missing. The Tauri
-# build script ALSO requires the sidecar staged under src-tauri/binaries/ (with
-# the target-triple suffix) in any fresh checkout:
-cargo build -p bpa-sessiond
+# Build BOTH daemons first — dev mode (`npm run tauri dev`) resolves each daemon binary as a
+# sibling of the running core binary (target/debug/), so building each with `cargo build -p`
+# is enough for dev; it fails with an actionable error if either is missing:
+cargo build -p bpa-sessiond -p bpa-orchd
+
+# bpa-sessiond ALSO needs staging under src-tauri/binaries/ (target-triple suffix) for the
+# Tauri bundler's `externalBin` mechanism, even in a fresh checkout used only for `tauri dev`:
 mkdir -p src-tauri/binaries
 cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$(rustc -vV | sed -n 's/host: //p')"
 
@@ -137,7 +165,11 @@ npm run tauri dev
 # Run the full test + traceability + coverage + e2e gate (spec §14.3 Definition of Done)
 bash scripts/final-suite.sh
 
-# Build a signed, notarized, universal release .app (see docs/build-macos.md for credentials)
+# Build a signed, notarized, universal release .app (see docs/build-macos.md for credentials).
+# KNOWN GAP (BL-53, docs/backlog.md): this currently packages bpa-sessiond only — bpa-orchd is
+# NOT YET in tauri.conf.json's externalBin / scripts/build-universal.sh, so a release .app built
+# today ships without the second daemon. Fine for `npm run tauri dev` (sibling-binary resolution
+# off target/debug/ finds it either way); not yet fine for a real signed/notarized release.
 bash scripts/build-universal.sh
 ```
 
@@ -145,11 +177,12 @@ bash scripts/build-universal.sh
 
 | Suite | Command | What it covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | daemon (`bpa-sessiond`), shared protocol (`bpa-protocol`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — 384 tests as of the last full run (S2, `[0.3.0]`) |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store, terminal-manager (attach state machine), IPC wrappers, components — 297 tests, 22 files (S2, `[0.3.0]`) |
-| End-to-end | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
-| Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` — a real, enforcing ≥80% line-coverage gate on the daemon crate (requires `cargo install cargo-llvm-cov`) |
-| Everything, in order | `bash scripts/final-suite.sh` | 8 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff → coverage gate → e2e; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) |
+| Rust workspace | `cargo test --workspace` | two daemons (`bpa-sessiond`, `bpa-orchd`), shared daemon infra (`bpa-daemon-core`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **655 tests** as of the last full run (S3, `[0.4.0]`) |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`) — **502 tests, 33 files** (S3, `[0.4.0]`) |
+| End-to-end (sessiond) | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
+| End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof) |
+| Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — real, enforcing ≥80% line-coverage gates on BOTH daemon crates (requires `cargo install cargo-llvm-cov`) |
+| Everything, in order | `bash scripts/final-suite.sh` | 9 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff (`bpa-protocol` + `bpa-orchd-proto`) → coverage gate (both daemons) → e2e:survive → e2e:orchd; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) / [`docs/runbook-orchd.md`](docs/runbook-orchd.md) |
 
 See [`docs/traceability.md`](docs/traceability.md) for the full contract → test matrix (every
 locked spec §14.2 contract mapped to the concrete test(s) proving it), and
