@@ -9,7 +9,8 @@ document is a navigable summary; if it ever drifts from the spec, the spec wins.
 Builder Pro AI is split into **three OS processes**: the GUI app (webview + Rust core) and TWO
 independently `launchd`-supervised daemons — `bpa-sessiond` (terminal domain: PTYs, scrollback,
 `command_events`) and `bpa-orchd` (app domain: projects/goals/ideas/insights/tasks/rulesets,
-shipped S3, `[0.4.0]`). Closing (or crashing) the GUI never kills a running shell or loses domain
+shipped S3, `[0.4.0]`; plus a knowledge graph — nodes/edges + a workspace-wide retrieval API,
+shipped S4, `[0.5.0]`). Closing (or crashing) the GUI never kills a running shell or loses domain
 data — each daemon owns its own durable state and survives independently of the app AND of the
 other daemon, supervised by `launchd`, not by the app. The core holds one socket connection to
 EACH daemon; a failure of either degrades only that daemon's own panels (see "Honest-degradation"
@@ -224,12 +225,17 @@ crates/orchd/src/                 # NEW (S3, bpa-orchd): the app-domain daemon b
 │                                  # mirrors sessiond's main.rs shape exactly, on daemon-core
 ├─ boot.rs                        # testable boot core: bind → wire deps → serve → drain; ensures
 │                                  # the global ruleset row + rules/global.md at every boot
-├─ persistence.rs                 # rusqlite (WAL), orchd.db schema v1, CRUD × 6 entity families,
-│                                  # every invariant/cascade, migration runner (daemon-core)
-├─ socket_server.rs               # tokio UnixListener; dispatch every OrchdRequest verb; peer-cred;
-│                                  # bounded outq; Broadcaster<OrchdFrame> push fan-out
+├─ persistence.rs                 # rusqlite (WAL), orchd.db schema v1 (S4: v2, additive), CRUD ×
+│                                  # 6 entity families, every invariant/cascade, migration runner
+│                                  # (daemon-core)
+├─ socket_server.rs               # tokio UnixListener; dispatch every OrchdRequest verb (S4: the 9
+│                                  # graph verbs too); peer-cred; bounded outq; Broadcaster<OrchdFrame>
+│                                  # push fan-out (S4: GraphChanged to every affected project, deduped)
 ├─ ruleset_files.rs                # the ONE file family orchd touches (D4, narrow exception) —
 │                                  # atomic-write (tmp+rename) + sha256 hash + fresh-read-on-Get
+├─ graph.rs                       # NEW (S4): graph_node/graph_edge CRUD + the workspace-wide
+│                                  # retrieval API (list_project_graph/neighborhood/search_nodes) —
+│                                  # see "Knowledge graph" below
 └─ export.rs                      # per-project + whole-store JSON export/import, bundleFormat: 1,
                                    # field-verbatim preservation, 16 MiB frame-cap guard (spec §8)
 ```
@@ -339,6 +345,57 @@ themselves. Until those land, `bpa-orchd` has no live runtime state of its own t
 (see the survival-truth-table row in `README.md`/platform overview §2) — every row it owns is
 already durable SQLite.
 
+## Knowledge graph — SHIPPED in S4 (`[0.5.0]`)
+
+S4 (`docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md`) adds a knowledge graph to
+the `bpa-orchd` store — `orchd.db` schema v2 (additive, forward-only migration from v1) adds two
+tables: `graph_node` (typed `kind`: `concept | fact | artifact | decision | note | entity_ref`)
+and `graph_edge` (typed `kind`: `relates | depends | derives | supports | contradicts | parent`),
+both owned entirely by `crates/orchd/src/graph.rs` (new module, no new crate). No sessiond change.
+
+- **`entityRef` nodes are soft-refs (D3):** an `entityRef` node stores `entity_type` +
+  `entity_id` (goal/idea/insight/task) with NO foreign key into the domain tables. Deleting the
+  referenced goal/idea/insight/task does not delete or corrupt the graph node — the node
+  persists and a read-time resolver looks up the live domain row's title on every
+  `list_project_graph`/`neighborhood` call; if the row is gone, the node keeps its last-known
+  stored `label` and the UI renders it with `isOrphan: true` («источник удалён»). Exactly one
+  `entityRef` node exists per `(entity_type, entity_id)` (partial unique index). A strategic-goal
+  `entityRef` node is auto-seeded in the same transaction as `CreateProject` (D6), so a project's
+  graph is never empty; the schema-v2 migration backfills one for every pre-S4 project on upgrade.
+- **Cross-project edges (D4):** a `graph_edge` may link nodes belonging to different projects —
+  legal because both live in the one `orchd.db` store, with `ON DELETE CASCADE` removing a node's
+  incident edges automatically. A cross-project edge survives BOTH projects' daemon restarts (S4
+  spec DoD; proven by `tests/e2e/orchd-survive.mjs` phase 5).
+- **Workspace-wide retrieval API (D5 — the S6-agent contract):** three read verbs, none scoped to
+  a single project — this is the interface future S6 agents call to read across the whole
+  workspace, not just their own project:
+  - `GraphListProject { project_id }` → the project's own nodes + every edge incident to them +
+    the foreign endpoint nodes of any cross-project edge as read-only `external_nodes` "ghosts".
+  - `GraphNeighborhood { node_id, depth }` → a bidirectional recursive-CTE traversal up to `depth`
+    hops (clamped to 6), crossing project boundaries freely. This is the `<100 ms` DoD query: a
+    depth-3 neighborhood rooted at a project's strategic-goal node on a synthetic 500-node/
+    1000-edge graph measures ~51 ms (`cargo test -p bpa-orchd --lib
+    graph::tests::neighborhood_depth_3_on_500_node_1000_edge_graph_is_under_100ms_rooted_at_goal_node`).
+  - `GraphSearch { query, project_id: Option<..> }` → `label`/`body` substring search,
+    workspace-wide when `project_id` is `None`, capped at 200 rows.
+  Every mutating graph verb honors the S3 archived-project guard (either endpoint's project
+  archived ⇒ `Invariant`) and broadcasts a coarse `orchd://graph-changed { projectId }` push to
+  **every project the change actually touches** — a cross-project edge mutation pushes to BOTH
+  endpoint projects, not just the mutated row's own project, so a stale `external_nodes` ghost
+  elsewhere is never left un-invalidated.
+- **UI:** a 7th `ProjectPanel` tab, «Граф», renders an editable `@xyflow/react` canvas
+  (`src/components/graph/GraphCanvas.tsx`) — drag moves a node (debounced `GraphMoveNode`),
+  connecting two nodes adds an edge, a toolbar adds/deletes nodes and searches (match ⇒ accent
+  ring), and every mutating control is `disabled` while `orchd://down`. Clicking a cross-project
+  ghost node navigates to its own project (`openProject`); clicking a LOCAL `entityRef` node is
+  currently an honest no-op — the panel has no deep-link seam yet from the graph tab into a
+  specific goal/idea/insight/task row in another tab, so S4 does not fake a navigation that
+  wouldn't actually land on the referenced entity (tracked as follow-up, not silently dropped).
+- **Out of scope in S4 (by design, D12):** no agent runtime uses this API yet (S6 is what
+  hard-blocks on it existing); no auto-population of the graph beyond the D6 strategic seed;
+  retrieval is structural + `LIKE`-text only, no embeddings/semantic search (see
+  `docs/backlog.md`).
+
 ## Resource envelope (per session)
 
 Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live
@@ -363,5 +420,7 @@ sessions; a configurable cap + typed `SessionLimitReached` error is planned (BL-
 - `docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md` — the locked S3 spec
   (`bpa-orchd` + app-domain foundation) the "Two-daemon topology" and module-map sections above
   summarize.
+- `docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md` — the locked S4 spec (knowledge
+  graph + workspace-wide retrieval API) the "Knowledge graph" section above summarizes.
 - `tests/e2e/README.md` — the three ways to exercise the survive-restart property (socket harness,
   launchd-managed variant, full-GUI manual/CI confirmation).

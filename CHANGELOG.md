@@ -2,6 +2,105 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.5.0] — 2026-07-14
+
+### Added
+- **Knowledge graph — `orchd.db` schema v2:** two new tables, `graph_node` (typed `kind`:
+  concept/fact/artifact/decision/note/`entityRef`) and `graph_edge` (typed `kind`:
+  relates/depends/derives/supports/contradicts/parent), added by an additive forward-only
+  migration (`SCHEMA_VERSION` 1→2) — a pre-S4 `orchd.db` upgrades on first boot with no data loss;
+  sessiond's `bpa.db` is untouched. All persistence + retrieval logic lives in one new module,
+  `crates/orchd/src/graph.rs` — no new crate.
+- **`entityRef` nodes are soft-refs, not foreign keys (D3):** an `entityRef` node stores
+  `entity_type` + `entity_id` (goal/idea/insight/task) with NO DB-enforced link to the domain
+  row it names. Deleting the referenced goal/idea/insight/task never deletes or corrupts the
+  graph node — the node persists, and a read-time resolver looks up the live domain row's title
+  on every read; when the row is gone the node keeps its last-known stored label and the UI
+  renders `isOrphan: true` («источник удалён»). Exactly one `entityRef` node exists per
+  `(entity_type, entity_id)` (partial unique index; a second attempt is a typed `Conflict`). A
+  strategic-goal `entityRef` node is auto-seeded inside `CreateProject`'s own transaction (D6) —
+  a project's graph is never empty — and the schema-v2 migration backfills one for every project
+  that predates S4.
+- **Cross-project edges:** a `graph_edge` may connect nodes belonging to two DIFFERENT projects —
+  legal because both live in the one `orchd.db` store (`ON DELETE CASCADE` removes a node's
+  incident edges automatically on delete). A cross-project edge survives BOTH projects' daemon
+  restarts (S4 spec §8 DoD; proven by `tests/e2e/orchd-survive.mjs` phase 5: create two projects,
+  add a node to each, link them, restart the daemon, assert the edge and the foreign node both
+  reappear).
+- **Workspace-wide graph retrieval API — the S6-agent contract, read AND write, NOT
+  project-scoped (D5):**
+  - `GraphListProject { project_id }` → the project's own nodes + every edge incident to them +
+    the foreign endpoint nodes of any cross-project edge, returned as read-only `external_nodes`
+    ghosts.
+  - `GraphNeighborhood { node_id, depth }` → a bidirectional recursive-CTE traversal up to `depth`
+    hops (clamped to 6), crossing project boundaries freely — the `<100 ms` DoD query: a depth-3
+    neighborhood rooted at a project's strategic-goal node, on a synthetic 500-node/1000-edge
+    graph, measures ~51 ms.
+  - `GraphSearch { query, project_id: Option<..> }` → case-insensitive `label`/`body` substring
+    search, workspace-wide when `project_id` is `None`, capped at 200 rows, newest-updated first.
+  Plus the mutating verbs: `GraphAddNode`/`GraphUpdateNode`/`GraphMoveNode`/`GraphDeleteNode`/
+  `GraphAddEdge`/`GraphDeleteEdge` — 9 graph verbs total, appended to the END of `OrchdRequest`/
+  `OrchdResponse` (orchd-proto's frozen append-only wire discipline, unchanged version `[1,1]`).
+  Every mutating verb honors the S3 archived-project guard (either endpoint's project archived ⇒
+  `Invariant`); a self-loop edge is `Invariant`; a duplicate `(source, target, kind)` edge is
+  `Conflict`.
+- **`orchd://graph-changed` push, fanned out to every affected project (deduped):** a coarse
+  `GraphChanged { projectId }` push (mirrors S3's other `orchd://*-changed` pushes) broadcasts on
+  every successful mutation — not just to the mutated row's own project. A cross-project edge
+  mutation pushes to BOTH endpoint projects; a node update/move/delete pushes to its own project
+  PLUS every foreign project that has it as an `external_nodes` ghost — so a stale cross-project
+  ghost is never left un-invalidated. Read verbs and failed mutations broadcast nothing (S3 §6
+  discipline, unchanged).
+- **Core:** 9 `orchd_graph_*` Tauri commands (thin wrappers over the new `OrchdClient` verbs, one
+  per wire verb) and the `orchd://graph-changed` event, wired through `broker.rs`'s
+  `map_orchd_push` exactly like every other `orchd://*-changed` push.
+- **Frontend — graph canvas, a 7th `ProjectPanel` tab «Граф»:** an editable `@xyflow/react` (v12)
+  canvas (`src/components/graph/GraphCanvas.tsx`), controlled via two pure, fully-unit-tested
+  mapping helpers (`src/components/graph/graphMapping.ts`: `toFlowNodes`/`toFlowEdges`/
+  `flowPositionChangeToMove`/`dedupeMovesById`, zero `@xyflow/react`/React imports — trivially
+  testable under plain `node`). Dragging a node debounces (400 ms) into `GraphMoveNode`;
+  connecting two nodes calls `GraphAddEdge`; a toolbar adds a node of a chosen kind, deletes the
+  canvas's own multi-selection, and searches (a match gets a 2px accent outer ring — never a fill
+  change). Every mutating control is `disabled` while `orchd://down` (mirrors `RulesetPanel`'s
+  degradation contract); the search input stays live (it's a read). Clicking a cross-project
+  ghost node navigates to its own project (`openProject`); clicking a LOCAL `entityRef` node is
+  currently an honest no-op — the panel has no deep-link seam yet from the graph tab into a
+  specific goal/idea/insight/task row on another tab, so this stays a no-op rather than faking a
+  navigation that wouldn't actually land on the referenced entity (tracked as follow-up work, not
+  silently dropped).
+- **`@xyflow/react`** — the one new frontend dependency this cycle (Context7-verified v12
+  controlled-component API: `nodes`/`edges` props, `onNodesChange`/`onConnect`,
+  `ReactFlowProvider`).
+- New design-system atoms: Graph node card (external ghosts dimmed/dashed, orphaned nodes get a
+  `statusExited` border, a search match gets the accent ring), Graph toolbar (kind select + add +
+  delete-selected + debounced search, mutating controls disabled while `orchdDown`)
+  (`docs/design-system.md` §5).
+- **E2E (`npm run e2e:orchd`, extended):** a new phase 5 — create two projects, add one node to
+  each, add a CROSS-PROJECT edge, `OrchdShutdown{drain:true}` → relaunch → `GraphListProject`
+  still shows the edge with the foreign node as an `external_nodes` ghost. This is the S4 spec §8
+  DoD proof ("a cross-project link survives BOTH projects' restarts"). Existing phases 0-4
+  (project/goal/idea/task CRUD survival + export/import round-trip) stay green, unchanged.
+- **Rust:** `graph.rs` unit tests for every persistence/retrieval method and invariant (incl.
+  `add_node{kind:EntityRef}` rejected as `Validation` — `entityRef` nodes are created only via the
+  internal `add_entity_ref_node`, never the generic wire verb; entityRef soft-ref survival across
+  a non-strategic domain-entity delete; the v1→v2 migration backfill from a real v1 fixture; the
+  `<100 ms` perf assertion above); orchd-proto CBOR round-trip + ts-rs parity for every new
+  variant; socket-dispatch tests over a real Unix socket (mutate → response + the correct
+  `GraphChanged` push(es); cross-project edge/node mutations → push for the foreign project too;
+  read verbs → no push; archived-project guard).
+
+### Changed
+- **`orchd.db` `SCHEMA_VERSION` 1 → 2** (additive, forward-only — see "Added" above).
+- `crates/orchd/src/socket_server.rs` dispatch grows the 9 graph verb arms; `bpa-orchd`'s
+  `Broadcaster<OrchdFrame>` fan-out gains the "broadcast once per distinct affected project"
+  helper the graph pushes share with future multi-project push needs.
+- Gate: still 9 stages (`scripts/final-suite.sh`) — no new stage. Stage 6 (ts-rs type-parity diff)
+  now also covers the graph entities/verbs in `src/ipc/orchd-types.ts`; the orchd coverage gate
+  (stage 7) and `npm run e2e:orchd` (stage 9) both now exercise the graph module.
+- Test totals grew with the new module: Rust workspace 655 → **726 tests**; TypeScript
+  502 → **559 tests**, 33 → **35 files** (re-measured this pass — see `README.md`/
+  `docs/traceability.md`).
+
 ## [0.4.0] — 2026-07-14
 
 ### Added

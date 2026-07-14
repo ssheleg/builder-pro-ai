@@ -129,12 +129,91 @@ markdown files, export/import, project management UI) — shipped `[0.4.0]`.
 | `QuickCapture` (⌘K overlay, disabled honestly while `orchdDown`), `HomeGoals` (mounted below the amber attention block), `OrchdDownBanner` / dual-daemon `UpgradeDialog` generalization (§10, §11) | `npx vitest run src/components/QuickCapture.test.tsx src/components/HomeGoals.test.tsx src/components/OrchdDownBanner.test.tsx src/components/UpgradeDialog.test.tsx` (13 + 8 + 2 + 16 tests) |
 | E2E orchd survive-restart + export/import round-trip: boot → handshake `[1,1]` → create project+goals+idea+task → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → wipe `orchd.db*` → relaunch fresh v1 → `ImportBundle` → re-export equals the original modulo `exportedAt` (§12 — the roadmap DoD proof) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phases 0-4, log format `[e2e-orchd] phaseN OK: …` / `[e2e-orchd] ALL PHASES PASSED`) |
 
+## S4 contract rows (`docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md`)
+
+The knowledge graph (`orchd.db` schema v2, `graph_node`/`graph_edge`), the workspace-wide agent
+retrieval API, and the `@xyflow/react` graph canvas — shipped `[0.5.0]`.
+
+| Contract (S4 spec §) | Test (command) |
+|---|---|
+| Schema v2: fresh DB has both tables + all 5 indexes; v1→v2 migration backfills a strategic-goal `entityRef` node per pre-S4 project (single- and multi-project fixtures) (§4) | `cargo test -p bpa-orchd --lib graph::tests::fresh_db_is_schema_v2_with_graph_tables_and_all_five_indexes graph::tests::v1_fixture_migrates_to_v2_and_backfills_strategic_entity_ref graph::tests::v1_fixture_with_multiple_projects_backfills_each_independently graph::tests::create_project_auto_seeds_strategic_entity_ref_node` |
+| Node CRUD + invariants: `add_node` happy path, `EntityRef` kind rejected as `Validation` (entityRef only via the internal seeder), unknown/archived-project guards, `add_entity_ref_node` + duplicate-`(entity_type,entity_id)`→`Conflict`, update/move/delete + their archived guards, delete cascades incident edges (§5) | `cargo test -p bpa-orchd --lib graph::tests::add_node_happy_path_creates_concept_node graph::tests::add_node_rejects_entity_ref_kind_with_validation graph::tests::add_node_unknown_project_is_not_found graph::tests::add_node_on_archived_project_is_invariant graph::tests::add_entity_ref_node_happy_path graph::tests::add_entity_ref_node_duplicate_type_and_id_is_conflict graph::tests::add_entity_ref_node_on_archived_project_is_invariant graph::tests::update_node_updates_label_and_body_independently graph::tests::update_node_unknown_id_is_not_found graph::tests::update_node_on_archived_project_is_invariant graph::tests::move_node_updates_position graph::tests::move_node_on_archived_project_is_invariant graph::tests::delete_node_cascades_incident_edges graph::tests::delete_node_unknown_id_is_not_found graph::tests::delete_node_on_archived_project_is_invariant` |
+| Edge CRUD + invariants: cross-project create, self-loop→`Invariant`, duplicate `(source,target,kind)`→`Conflict`, unknown endpoint→`NotFound`, archived guard on EITHER endpoint, delete + its archived guard (§5) | `cargo test -p bpa-orchd --lib graph::tests::add_edge_cross_project_ok graph::tests::add_edge_self_loop_is_invariant graph::tests::add_edge_duplicate_source_target_kind_is_conflict graph::tests::add_edge_unknown_endpoint_is_not_found graph::tests::add_edge_blocked_when_source_project_archived graph::tests::add_edge_blocked_when_target_project_archived graph::tests::delete_edge_removes_row graph::tests::delete_edge_unknown_id_is_not_found graph::tests::delete_edge_on_archived_project_endpoint_is_invariant` |
+| `entityRef` soft-ref survival across a non-strategic domain-entity delete (D3 — the node persists, no FK); `edge_endpoint_projects`/`node_project_ids_reachable` helpers (used by dispatch to fan out `GraphChanged`) (§5, §6) | `cargo test -p bpa-orchd --lib graph::tests::entity_ref_node_survives_deletion_of_its_non_strategic_source_idea graph::tests::edge_endpoint_projects_returns_both_projects graph::tests::edge_endpoint_projects_unknown_edge_is_not_found graph::tests::node_project_ids_reachable_returns_own_and_foreign_projects graph::tests::node_project_ids_reachable_returns_only_own_when_no_edges graph::tests::node_project_ids_reachable_unknown_node_is_not_found` |
+| `list_project_graph`: own nodes + incident edges + cross-project `external_nodes` ghosts (deduped across multiple edges to the same foreign node), read-time `entityRef` label resolution (a renamed source's live title, and the stored label kept + orphan-flagged when the source is deleted — in BOTH `nodes` and `external_nodes`) (§5) | `cargo test -p bpa-orchd --lib graph::tests::list_project_graph_unknown_project_is_not_found graph::tests::list_project_graph_includes_own_nodes_edges_and_cross_project_external_ghost graph::tests::list_project_graph_dedupes_external_ghost_reached_by_multiple_edges graph::tests::list_project_graph_resolves_entity_ref_label_from_renamed_source_at_read_time graph::tests::list_project_graph_keeps_stored_label_when_entity_ref_source_is_deleted graph::tests::list_project_graph_resolves_entity_ref_label_in_external_nodes_too` |
+| `neighborhood`: unknown root→`NotFound`, exact N-hop reachable set across a cross-project edge, depth clamped at 6, both-direction traversal; **Perf DoD:** depth-3 neighborhood rooted at the D6-seeded strategic-goal node on a synthetic 500-node/1000-edge graph is `<100 ms` (measured ~51 ms locally) (§5, §8) | `cargo test -p bpa-orchd --lib graph::tests::neighborhood_unknown_node_id_is_not_found graph::tests::neighborhood_depth_2_returns_exact_2hop_reachable_set_across_cross_project_edge graph::tests::neighborhood_depth_over_6_is_clamped_to_6 graph::tests::neighborhood_traverses_edges_in_both_directions graph::tests::neighborhood_depth_3_on_500_node_1000_edge_graph_is_under_100ms_rooted_at_goal_node` |
+| `search_nodes`: workspace-wide (`project_id: None`) vs. project-scoped, matches `label` and `body`, case-insensitive, `updated_at DESC` ordering, capped at 200 rows (§5) | `cargo test -p bpa-orchd --lib graph::tests::search_nodes_none_project_spans_workspace graph::tests::search_nodes_some_project_scopes_to_that_project graph::tests::search_nodes_matches_body_too graph::tests::search_nodes_is_case_insensitive graph::tests::search_nodes_orders_by_updated_at_desc graph::tests::search_nodes_caps_at_200_rows` |
+| Socket dispatch over a real Unix socket: mutate → response + the correct `GraphChanged` push(es) — same-project edge dedups to exactly ONE push, a cross-project edge/node update/move/delete pushes BOTH affected projects; read verbs (`GraphListProject`/`GraphNeighborhood`/`GraphSearch`) broadcast nothing; a failed mutation (self-loop) broadcasts nothing (§6) | `cargo test -p bpa-orchd --test dispatch_integration graph_add_node_returns_node_and_broadcasts_graph_changed_to_its_project graph_add_edge_cross_project_broadcasts_graph_changed_for_both_endpoint_projects graph_add_edge_same_project_broadcasts_exactly_one_graph_changed graph_delete_node_cross_project_broadcasts_graph_changed_for_foreign_project_too graph_update_node_and_move_node_cross_project_broadcast_foreign_project_too graph_delete_edge_cross_project_broadcasts_graph_changed_for_both_endpoint_projects graph_list_project_returns_view_and_broadcasts_nothing graph_add_edge_self_loop_is_invariant_and_broadcasts_nothing graph_neighborhood_returns_correct_subgraph graph_search_returns_matching_nodes_workspace_wide_and_broadcasts_nothing` |
+| `bpa-orchd-proto`: every graph `OrchdRequest`/`OrchdResponse`/`OrchdPush` variant CBOR round-trips (incl. every `GraphNodeKind`/`GraphEdgeKind`/`GraphEntityType` wire-tag literal); `orchd-types.ts` parity (camelCase fields, `i64` timestamps exported as `number`) (§3) | `cargo test -p bpa-orchd-proto --test roundtrip` (`every_request_variant_roundtrips`, `every_response_variant_roundtrips`, `every_push_variant_roundtrips`, `graph_node_kind_entity_ref_serializes_as_camelcase_on_the_wire`, `graph_edge_kind_contradicts_serializes_lowercase_on_the_wire`, `graph_entity_type_task_serializes_lowercase_on_the_wire`) + `cargo test -p bpa-orchd-proto --test ts_export` (`graph_node_and_edge_use_camelcase_fields_and_ts_number_timestamps`, `graph_node_kind_and_edge_kind_and_entity_type_wire_tags_are_camelcase`) then `git diff --exit-code -- src/ipc/orchd-types.ts` |
+| Core: 9 `orchd_graph_*` commands over a stub daemon (real socket), invariant-error mapping; `map_orchd_push` for `OrchdPush::GraphChanged` → `orchd://graph-changed` with a camelCase `{projectId}` payload (§7) | `cargo test -p builder-pro-ai --lib commands::orchd_graph_add_node_round_trips_through_real_orchd_client commands::orchd_graph_add_node_invariant_error_response_becomes_command_error_daemon_invariant` + `cargo test -p builder-pro-ai --lib broker::tests::orchd_graph_changed_maps_to_emit_with_camel_case_project_id_payload` |
+| `graphMapping.ts` (PURE, no xyflow/React import): `toFlowNodes`/`toFlowEdges` incl. ghost (`isExternal`)/orphan (`isOrphan`) flags + position mapping, `flowPositionChangeToMove` (position vs. non-position changes), `dedupeMovesById` debounce-collapse contract (§7, D10) | `npx vitest run src/components/graph/graphMapping.test.ts` (12 tests) |
+| `GraphCanvas` (rendered under `// @vitest-environment jsdom` + the `mockReactFlow()` shim, D10): mount-refresh, `onConnect`→`orchdGraphAddEdge`, a position `onNodesChange` debounces (400 ms) + dedupes to ONE `orchdGraphMoveNode` call, toolbar add/delete(+confirm)/search (incl. a stale-response search-race guard and a partial-multi-delete reconcile-via-`refreshGraph`), ghost-node click→`openProject`, a LOCAL `entityRef` node click is a documented no-op, every mutating control `disabled` while `orchdDown`, a failed mutation surfaces via toast (§7, D10) | `npx vitest run src/components/graph/GraphCanvas.test.tsx` (19 tests) |
+| `ProjectPanel`'s 7th tab «Граф» renders `GraphCanvas` (mocked, as every other tab child) and selects correctly (§7) | `npx vitest run src/components/ProjectPanel.test.tsx` |
+| Store `graphByProject` slice: `refreshGraph(projectId)` replaces only that project's entry, a rejection surfaces via toast; `orchd.ts` graph wrapper name/arg parity; `onOrchdGraphChanged` binds unconditionally to `refreshGraph` (App mount effect, no loaded/active gating — matches the other `orchd://*-changed` bindings) (§7) | `npx vitest run src/store/store.test.ts src/ipc/orchd.test.ts src/ipc/events.test.ts` |
+| E2E — cross-project edge survives BOTH projects' daemon restarts (the S4 spec §8 DoD proof): create 2 projects, 1 node each, a cross-project edge, `OrchdShutdown{drain:true}` → relaunch → `GraphListProject` on EITHER project still shows the edge + the foreign node as an `external_nodes` ghost (§8) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 5, log prefix `[e2e-orchd] phase5 …`) |
+
+**Known gap (honestly flagged, not silently dropped):** the S4 spec §8 also called for extending
+orchd's `no_secrets_in_logs` test to plant a marker in a graph node's `label`/`body` and assert it
+never reaches the tracing log ("extend orchd's `no_secrets_in_logs` test (or its graph-covering
+sibling)"). That extension was **not** made — `crates/orchd/tests/no_secrets_in_logs.rs` still only
+covers RuleSet markdown content (`planted_ruleset_secrets_never_appear_in_logs`), unchanged since
+S3. Manual review of `graph.rs`/`socket_server.rs`'s graph dispatch arms finds no code path that
+logs a node's `label`/`body` today (the one `tracing::error!` in the `GraphAddEdge` handler logs
+only `edge_id`/`error`, never edge content), so there is no known live leak — but the discipline is
+untested for this surface, unlike every other content-bearing table. Tracked as `docs/backlog.md`
+BL-62.
+
 ## Uncovered rows
 
-None. Every §14.2 row above resolves to at least one real, currently-passing test. Same for every
-S2 and S3 contract row above.
+None in the S0+S1/S2/S3 rows above — every §14.2 row (and every S2/S3 contract row) resolves to at
+least one real, currently-passing test. **One row is open in the S4 section above:** the graph
+no-secrets-in-logs coverage (BL-62, "Known gap" note directly above) — every OTHER S4 contract row
+is covered.
 
-## Test totals — current (S3, `[0.4.0]`, 2026-07-14)
+## Test totals — current (S4, `[0.5.0]`, 2026-07-14)
+
+- Rust workspace (`cargo test --workspace`): **726 tests**, 0 failed (re-measured this pass;
+  per-binary breakdown from the same run: `bpa-daemon-core` lib 29 [unchanged — S4 does not touch
+  daemon-core]; `bpa-orchd` lib 211 + `boot_integration` 4 + `dispatch_integration` 17 +
+  `no_secrets_in_logs` 1; `bpa-orchd-proto` `roundtrip` 11 + `ts_export` 13; `bpa-paths` lib 18
+  [unchanged]; `bpa-protocol` lib 1 + `cbor_frame_generic` 7 + `framing` 7 + `preamble` 7 +
+  `roundtrip` 8 + `ts_export` 7 [unchanged — S4 touches no sessiond/protocol code]; `bpa-sessiond`
+  lib 155 + `boot_integration` 4 + `no_secrets_in_logs` 1 + `rehydrate_attach` 1 + `skeleton` 1
+  [unchanged — S4 spec §2 "NO sessiond change", confirmed by this identical count]; `builder-pro-ai`
+  lib 217 + `capabilities` 5 + `invoke_smoke` 1; every `main.rs`/doc-test binary 0). Delta vs. the
+  prior S3 pass (655): **+71**, entirely inside the orchd family — `bpa-orchd` lib 158→211 (+53:
+  `graph.rs`'s unit tests, every persistence/retrieval method + invariant), `bpa-orchd`
+  `dispatch_integration` 7→17 (+10: the 9 graph verbs' socket-dispatch + push-fan-out tests),
+  `bpa-orchd-proto` `roundtrip` 8→11 (+3) and `ts_export` 11→13 (+2) (the new graph entities/verbs'
+  CBOR round-trip + ts-rs parity), `builder-pro-ai` lib 214→217 (+3: the `orchd_graph_*`
+  stub-daemon command test + `broker.rs`'s `map_orchd_push` test for `GraphChanged`). One test run
+  during this measurement pass hit a transient PTY-resource flake in
+  `bpa-sessiond`'s `attach::tests::remove_session_lets_forwarder_drain_then_terminate`
+  (`openpty` returned `Os { code: -6 }` under full-workspace parallel test execution — the same
+  known category as the documented `natural_exit_final_output_…` PTY flake, BL-40); a clean re-run
+  passed all 726 with 0 failures, and this is the number recorded above. Re-run
+  `cargo test --workspace -- --list` yourself for the exact current per-crate breakdown — the
+  paragraphs below are kept for history and no longer reflect current totals.
+- TypeScript (`npx vitest run`): **559 tests**, 35 test files, 0 failed (re-measured this pass).
+  Delta vs. the prior S3 pass (502, 33 files): S4 added 2 new test files —
+  `components/graph/graphMapping.test.ts` (12 — the pure domain→xyflow mapping helpers, node
+  environment, no renderer) and `components/graph/GraphCanvas.test.tsx` (19 — rendered under
+  `// @vitest-environment jsdom` + a local `mockReactFlow()` shim, D10) — plus growth in
+  `store/store.test.ts` (52→54, `graphByProject`/`refreshGraph`), `ipc/orchd.test.ts` (52→62, the
+  9 graph wrapper functions), `ipc/events.test.ts` (20→21, `onOrchdGraphChanged`),
+  `components/ProjectPanel.test.tsx` (10→13, the «Граф» 7th tab), and `App.test.tsx` (the
+  unconditional `orchd://graph-changed` → `refreshGraph` binding) for the S4 knowledge graph
+  (spec §7).
+- E2E: `npm run e2e:survive` green, unchanged by S4 (still 6 phases, 0–5, socket-harness variant —
+  the sessiond wire is untouched, confirmed above); `npm run e2e:orchd` green, **extended this
+  cycle** with a new phase 5 (2×`CreateProject` + 2×`GraphAddNode` + a cross-project `GraphAddEdge`
+  → `OrchdShutdown{drain:true}` → relaunch → `GraphListProject` on either project still shows the
+  edge + the foreign node as an `external_nodes` ghost — `tests/e2e/orchd-survive.mjs`, S4 spec §8
+  — the roadmap DoD proof "a cross-project link survives BOTH projects' restarts"). Phases 0-4
+  (project/goal/idea/task CRUD survival + export/import round-trip, S3 spec §12) stay green,
+  unchanged.
+
+## Test totals — historical (S3, `[0.4.0]`, 2026-07-14) — superseded above
 
 - Rust workspace (`cargo test --workspace`): **655 tests**, 0 failed (re-measured T21; per-binary
   breakdown from the same run: `bpa-daemon-core` lib 29; `bpa-orchd` lib 158 + `boot_integration`
@@ -243,40 +322,39 @@ S2 and S3 contract row above.
 ## Coverage
 
 `scripts/coverage-gate.sh` runs `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND
-(as of S3, `[0.4.0]`) `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — two real,
-enforcing gates (either one failing below 80% fails the script).
+(as of S3, `[0.4.0]`; unchanged interface as of S4) `cargo llvm-cov --package bpa-orchd
+--fail-under-lines 80` — two real, enforcing gates (either one failing below 80% fails the script).
 
-**`bpa-orchd` — measured (2026-07-14, T21 gate-verification run): line coverage = 87.90 %**
-(regions 85.53 %, functions 88.22 %; 9403 regions/1361 missed, 467 functions/55 missed, 5100
-lines/617 missed. Per-module lines: `boot.rs` 81.65 %, `export.rs` 93.01 %, `persistence.rs`
-95.65 %, `ruleset_files.rs` 97.56 %, `socket_server.rs` 50.32 %, `main.rs` 0 % — the process-
-concerns entrypoint, never unit-tested, same shape as sessiond's own `main.rs`; the crate TOTAL
-clears the 80% gate with no new tests needed). `socket_server.rs`'s lower per-file number is
-expected — its dispatch arms are exercised by `dispatch_integration.rs`'s real-socket integration
-tests (counted separately by `cargo llvm-cov`, not folded into the unit-test-only per-file number
-above) rather than by `--lib` unit tests. *(Task 20's own report, commit `e640a84`, quoted "85.52%
-total lines" for this same measurement — that figure is this run's REGION coverage (85.53%, one
-percentage point apart from measurement-to-measurement noise), not line coverage; the number this
-doc now records, 87.90% line coverage, is `cargo llvm-cov`'s actual `--fail-under-lines`-gated
-metric, independently re-measured in this pass.)*
+**`bpa-orchd` — measured (2026-07-14, S4 Task 9 docs-truth gate run): line coverage = 89.74 %**
+(regions 87.21 %, functions 90.28 %; 12688 regions/1623 missed, 607 functions/59 missed, 6959
+lines/714 missed — up from S3's 87.90 % line coverage, driven by the new `graph.rs` module's own
+thoroughly-unit-tested surface). Per-module lines: `boot.rs` 81.65 %, `export.rs` 93.01 %,
+`graph.rs` 95.47 % (**new this cycle** — 2940 regions/212 missed, 133 functions/3 missed, 1654
+lines/75 missed), `persistence.rs` 95.70 %, `ruleset_files.rs` 97.56 %, `socket_server.rs`
+54.53 %, `main.rs` 0 % — the process-concerns entrypoint, never unit-tested, same shape as
+sessiond's own `main.rs`; the crate TOTAL clears the 80% gate with headroom, no new tests needed
+beyond what S4 already shipped). `socket_server.rs`'s lower per-file number is expected — its
+dispatch arms (including the 9 new graph verb arms) are exercised by `dispatch_integration.rs`'s
+real-socket integration tests (counted separately by `cargo llvm-cov`, not folded into the
+unit-test-only per-file number above) rather than by `--lib` unit tests. *(Historical: the S3/T21
+gate-verification run measured 87.90 % line / 85.53 % region / 88.22 % function coverage on the
+pre-S4 crate — `boot.rs` 81.65 %, `export.rs` 93.01 %, `persistence.rs` 95.65 %,
+`ruleset_files.rs` 97.56 %, `socket_server.rs` 50.32 %, `main.rs` 0 %.)*
 
-**`bpa-sessiond` — measured (2026-07-14, T21 gate-verification run, post-S3-extraction): line
-coverage = 90.39 %** (regions 89.31 %, functions 90.79 %; 12086 regions/1292 missed, 608
-functions/56 missed, 7659 lines/736 missed — the gate passes with headroom). Per-module lines:
+**`bpa-sessiond` — measured (2026-07-14, S4 Task 9 docs-truth gate run): line coverage = 90.39 %**
+(regions 89.31 %, functions 90.79 %; 12086 regions/1292 missed, 608 functions/56 missed, 7659
+lines/736 missed — the gate passes with headroom). This is the EXACT SAME measurement as the prior
+S3/T21 run, region-for-region and line-for-line — expected and confirms the S4 spec §2 claim "NO
+sessiond change" at the coverage-tooling level, not just by source diff. Per-module lines:
 `attach.rs` 88.80 %, `boot.rs` 77.24 %, `live_grid.rs` 93.33 %, `main.rs` 0 % (entrypoint, never
 unit-tested), `osc_parser.rs` 94.82 %, `persistence.rs` 94.44 %, `pty_supervisor.rs` 91.46 %,
-`scrollback.rs` 93.12 %, `shell_integration/mod.rs` 92.51 %, `singleton.rs` 70.83 % (now a thin
+`scrollback.rs` 93.12 %, `shell_integration/mod.rs` 92.51 %, `singleton.rs` 70.83 % (a thin
 wrapper over `bpa-daemon-core::singleton` — most of its former logic, and former coverage,
-belongs to daemon-core's own package total now), `socket_server.rs` 90.79 %. This number is HIGHER
-than S2's 89.16 % despite (or rather partly because of) the S3 daemon-core extraction: six modules'
-thinner-tested infrastructure code moved OUT to `bpa-daemon-core` (which has its own separate,
-un-gated coverage — the coverage-gate.sh script only enforces `bpa-sessiond`/`bpa-orchd`, not
-`bpa-daemon-core`, an honest gap noted here rather than silently assumed-covered), leaving the
-remaining sessiond-crate code proportionally better covered by its own still-green 155-test suite.
-*(Historical, pre-extraction: 2026-07-09, S2/`[0.3.0]` cycle measured 89.16 % line / 89.28 %
-functions / 90.25 % regions; 2026-07-07, Pv2/`[0.2.0]` cycle measured 89.58 % line / 88.17 %
-functions / 88.65 % regions; 2026-07-05, docs-truth/CI cycle measured 88.06 % line / 86.70 %
-functions / 89.20 % regions.)*
+belongs to daemon-core's own package total now), `socket_server.rs` 90.79 %.
+*(Historical, pre-S4: 2026-07-09, S2/`[0.3.0]` cycle measured 89.16 % line / 89.28 % functions /
+90.25 % regions; 2026-07-07, Pv2/`[0.2.0]` cycle measured 89.58 % line / 88.17 % functions /
+88.65 % regions; 2026-07-05, docs-truth/CI cycle measured 88.06 % line / 86.70 % functions /
+89.20 % regions.)*
 
 The gate runs in two enforced places:
 
@@ -291,12 +369,12 @@ measurement time (covering every module: `attach`, `boot`, `live_grid`, `logging
 `persistence`, `pty_supervisor`, `scrollback`, `shell_integration`, `singleton`, `socket_server`)
 plus 3 `boot_integration` + 1 `no_secrets_in_logs` + 1 `rehydrate_attach` + 1 `skeleton`
 integration tests exercising the full boot→serve→drain (and cold-rehydrate→attach) lifecycle over
-the real wire protocol; post-S3-extraction it is 155 lib tests (the six daemon-core modules' own
-unit tests moved to `bpa-daemon-core`'s 29, not lost — see "Test totals" above) plus the same 4
-integration-test files. The evidence base behind `bpa-orchd`'s number: 158 `--lib` unit tests
-(covering `boot`, `export`, `persistence`, `ruleset_files`, `socket_server`) plus 4
-`boot_integration` + 7 `dispatch_integration` + 1 `no_secrets_in_logs` integration tests exercising
-dispatch over a real Unix socket end-to-end.
+the real wire protocol; post-S3-extraction (unchanged through S4) it is 155 lib tests (the six
+daemon-core modules' own unit tests moved to `bpa-daemon-core`'s 29, not lost — see "Test totals"
+above) plus the same 4 integration-test files. The evidence base behind `bpa-orchd`'s number: 211
+`--lib` unit tests (covering `boot`, `export`, `graph` [new, S4], `persistence`, `ruleset_files`,
+`socket_server`) plus 4 `boot_integration` + 17 `dispatch_integration` + 1 `no_secrets_in_logs`
+integration tests exercising dispatch over a real Unix socket end-to-end.
 
 *(History: at S0+S1 completion this gate was documented but not executed — the authoring
 environment lacked the ~3–5 GB the instrumented build needs. That gap was closed by the

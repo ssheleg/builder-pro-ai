@@ -11,13 +11,15 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI). Ships as a universal m
 
 ## Status
 
-**S0+S1+Pv2+S2+S3 implemented.** The foundation slice, the terminal core (daemon-owned PTYs,
+**S0+S1+Pv2+S2+S3+S4 implemented.** The foundation slice, the terminal core (daemon-owned PTYs,
 OSC-driven status, sanitized scrollback replay, SQLite persistence, launchd-supervised survival),
 Protocol v2 (CBOR wire, version negotiation, multi-subscriber attach), S2 (multi-root
 workspaces, a core-owned file explorer + read-only preview + live watch, an attention-first Home,
-an OSC-133 command strip, terminal file links), and S3 (a SECOND launchd daemon `bpa-orchd`
+an OSC-133 command strip, terminal file links), S3 (a SECOND launchd daemon `bpa-orchd`
 hosting the app-domain store — projects, goals, ideas, insights, tasks, rulesets — with full CRUD,
-export/import, and an owner-facing UI) are done, tested, and documented. See
+export/import, and an owner-facing UI), and S4 (a knowledge graph in that same `bpa-orchd` store —
+typed nodes/edges, cross-project links, a workspace-wide agent retrieval API, and an editable
+`@xyflow/react` graph canvas) are done, tested, and documented. See
 [`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this implementation is derived
 from and [`docs/traceability.md`](docs/traceability.md) for the contract → test matrix.
 
@@ -25,6 +27,7 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
 - **S0+S1 spec:** [`2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
 - **S2 spec (workspace multi-root + file explorer + attention-first Home):** [`2026-07-08-s2-workspace-explorer-home-design.md`](docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md)
 - **S3 spec (`bpa-orchd` + app-domain foundation):** [`2026-07-13-s3-orchd-domain-foundation-design.md`](docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md)
+- **S4 spec (knowledge graph + workspace-wide retrieval API):** [`2026-07-14-s4-knowledge-graph-design.md`](docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md)
 - **Architecture summary:** [`docs/architecture.md`](docs/architecture.md)
 - **Contract → test traceability:** [`docs/traceability.md`](docs/traceability.md)
 - **Release build/sign/notarize runbook:** [`docs/build-macos.md`](docs/build-macos.md)
@@ -68,6 +71,25 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
 - **Project management UI (S3):** left-rail project groups, a tabbed `ProjectPanel` (Обзор · Цели
   · Идеи · Задачи · Инсайты · Правила), ⌘K quick-capture for ideas, and a `HomeGoals` panel (below
   the S2 attention queue) showing each active project's strategic goal + children.
+- **Knowledge graph (S4):** `orchd.db` schema v2 adds `graph_node`/`graph_edge` — typed nodes
+  (concept/fact/artifact/decision/note + `entityRef` soft-refs onto a goal/idea/insight/task, no
+  FK — a deleted domain entity leaves its node behind flagged `isOrphan`, rendered «источник
+  удалён») and typed edges that may link nodes across DIFFERENT projects (a cross-project edge
+  survives BOTH projects' daemon restarts). A strategic-goal `entityRef` node is auto-seeded for
+  every project.
+- **Workspace-wide graph retrieval API (S4):** the S6-agent contract — `list_project_graph` (a
+  project's own nodes + incident edges + cross-project "ghost" endpoints, read-time entityRef
+  label resolution), `neighborhood` (bidirectional recursive-CTE traversal, cross-project, depth
+  capped at 6), and `search_nodes` (workspace-wide or per-project, capped at 200 rows) — NOT
+  project-scoped, so an agent working project A can query project B's knowledge. A depth-3
+  neighborhood rooted at a project's strategic goal on a synthetic 500-node/1000-edge graph
+  measures ~51 ms (DoD: <100 ms).
+- **Graph canvas (S4):** a 7th `ProjectPanel` tab, «Граф», an editable `@xyflow/react` canvas —
+  drag debounced-persists a node's position, connecting two nodes adds an edge, a toolbar
+  adds/deletes nodes and searches (a match gets an accent ring), every mutating control disabled
+  while `orchd://down`. A cross-project ghost node click navigates to its own project; a local
+  `entityRef` node click is currently an honest no-op (no deep-link seam yet into a specific
+  goal/idea/insight/task row in another tab).
 
 ## Principles
 
@@ -78,10 +100,11 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
 
 ## Architecture
 
-**Three OS processes, two independent Hop-B connections** (as of S3, `[0.4.0]`): the GUI app and
+**Three OS processes, two independent Hop-B connections** (as of S4, `[0.5.0]`): the GUI app and
 TWO launchd-supervised daemons — `bpa-sessiond` (terminal domain) and `bpa-orchd` (app domain:
-projects/goals/ideas/insights/tasks/rulesets). The diagram below shows the terminal-domain half
-only (`bpa-sessiond`'s daemon owns every PTY so the GUI can close, crash, or restart without
+projects/goals/ideas/insights/tasks/rulesets, plus a knowledge graph as of S4). The diagram below
+shows the terminal-domain half only (`bpa-sessiond`'s daemon owns every PTY so the GUI can close,
+crash, or restart without
 killing a running shell — tmux/re-attach model; File I/O + live watch (S2) live in the Tauri core
 instead — GUI-lifetime, never over Hop-B, so the daemon's charter stays terminal-domain only) —
 full detail on BOTH daemons (incl. the three-rail UI and the two-daemon topology) in
@@ -129,18 +152,20 @@ to each, never a process handle.
 | GUI close / crash / restart | Live shells **keep running** (daemon-owned) — reattach + scrollback replay |
 | Daemon restart / upgrade / crash | Live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
 | **macOS logout** | Sessions **die** — the per-user LaunchAgent is torn down with the login session |
-| **`bpa-orchd` restart / upgrade (S3, `[0.4.0]`)** | Domain data (projects/goals/ideas/insights/tasks/rules) **fully survives** — it's all SQLite (`orchd.db`); there is no live runtime state to lose in S3 (no scheduler/workflow/agent runtime yet — those are roadmap, SW1/SW2/S6b+), so a restart is a non-event beyond a brief `orchd://down` banner while it reconnects |
+| **`bpa-orchd` restart / upgrade (S3, `[0.4.0]`; graph added S4, `[0.5.0]`)** | Domain data (projects/goals/ideas/insights/tasks/rules) **fully survives** — it's all SQLite (`orchd.db`); there is no live runtime state to lose in S3/S4 (no scheduler/workflow/agent runtime yet — those are roadmap, SW1/SW2/S6b+), so a restart is a non-event beyond a brief `orchd://down` banner while it reconnects. The S4 knowledge graph is the same durable-store guarantee: a graph edge that links nodes in TWO DIFFERENT projects survives a restart intact on BOTH sides (proven by `npm run e2e:orchd` phase 5 below) |
 
 This is an honest boundary, not a bug: any daemon stop (restart, upgrade, or crash) takes its live
 child processes down with it, and logging out tears down every per-user LaunchAgent along with
 everything it supervises. What *does* survive — GUI restart with live shells, daemon restart for
-records + scrollback (rehydrated as inactive), and `bpa-orchd` restart for every domain row — is
-stated in the table above.
+records + scrollback (rehydrated as inactive), and `bpa-orchd` restart for every domain row
+(incl. the graph) — is stated in the table above.
 `npm run e2e:survive` proves the sessiond half end-to-end: phases 0-4 the client-restart half,
 phase 5 the daemon-restart half (SIGTERM-equivalent drain → relaunch → rehydrated inactive +
 scrollback intact — Pv2 §9.8, closes BL-7 in [`docs/backlog.md`](docs/backlog.md)).
 `npm run e2e:orchd` proves the orchd half: create data → drain-restart → data intact →
-export → wipe the DB → re-import → re-export equals the original (S3 spec §12).
+export → wipe the DB → re-import → re-export equals the original (S3 spec §12); phase 5 (S4)
+creates a cross-project graph edge, restarts the daemon, and asserts it survives on both projects'
+sides — the S4 spec §8 DoD proof.
 
 ## Quickstart
 
@@ -179,10 +204,10 @@ bash scripts/build-universal.sh
 
 | Suite | Command | What it covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | two daemons (`bpa-sessiond`, `bpa-orchd`), shared daemon infra (`bpa-daemon-core`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **655 tests** as of the last full run (S3, `[0.4.0]`) |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`) — **502 tests, 33 files** (S3, `[0.4.0]`) |
+| Rust workspace | `cargo test --workspace` | two daemons (`bpa-sessiond`, `bpa-orchd`), shared daemon infra (`bpa-daemon-core`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **726 tests** as of the last full run (S4, `[0.5.0]`) |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`) — **559 tests, 35 files** (S4, `[0.5.0]`) |
 | End-to-end (sessiond) | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
-| End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof) |
+| End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof); phase 5 creates two projects + a cross-project graph edge, restarts the daemon, and asserts the edge survives on both projects' sides (S4 spec §8 DoD proof) |
 | Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — real, enforcing ≥80% line-coverage gates on BOTH daemon crates (requires `cargo install cargo-llvm-cov`) |
 | Everything, in order | `bash scripts/final-suite.sh` | 9 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff (`bpa-protocol` + `bpa-orchd-proto`) → coverage gate (both daemons) → e2e:survive → e2e:orchd; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) / [`docs/runbook-orchd.md`](docs/runbook-orchd.md) |
 
