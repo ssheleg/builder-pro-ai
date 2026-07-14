@@ -774,6 +774,52 @@ async fn graph_add_edge_cross_project_broadcasts_graph_changed_for_both_endpoint
 }
 
 #[tokio::test]
+async fn graph_add_edge_same_project_broadcasts_exactly_one_graph_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project = create_project(&mut c1, "Proj").await;
+    // Both endpoints in ONE project: `edge_endpoint_projects` returns (P, P), so the two ids are
+    // identical and `broadcast_graph_changed`'s HashSet dedup must collapse them to a SINGLE push.
+    let node_a = add_node(&mut c1, &project.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project.id, "Node B").await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let edge = expect_graph_edge(
+        c1.request(OrchdRequest::GraphAddEdge {
+            source_node_id: node_a.id.clone(),
+            target_node_id: node_b.id.clone(),
+            kind: GraphEdgeKind::Relates,
+            label: String::new(),
+        })
+        .await,
+    );
+    assert_eq!(edge.source_node_id, node_a.id);
+    assert_eq!(edge.target_node_id, node_b.id);
+
+    match c2.recv_push().await {
+        OrchdPush::GraphChanged { project_id } => assert_eq!(project_id, project.id),
+        other => panic!("expected GraphChanged, got {other:?}"),
+    }
+    // The dedup guard: a same-project edge must NOT emit a second (duplicate) GraphChanged.
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(300))
+            .await
+            .is_none(),
+        "a same-project GraphAddEdge must broadcast exactly ONE GraphChanged, not two"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
 async fn graph_delete_node_cross_project_broadcasts_graph_changed_for_foreign_project_too() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
@@ -868,6 +914,15 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
         }),
         "missing GraphChanged for the FOREIGN project after update in {seen_update:?}"
     );
+    // GraphUpdateNode must broadcast EXACTLY those two — a stray third push here would otherwise
+    // leak forward into the MoveNode phase's `collect_pushes(&mut c2, 2)` below and let that
+    // phase pass spuriously.
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a cross-project GraphUpdateNode must broadcast exactly two GraphChanged pushes"
+    );
 
     // GraphMoveNode on the same cross-project node must ALSO invalidate project B.
     let moved = expect_graph_node(
@@ -893,6 +948,12 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
             project_id: project_b.id.clone()
         }),
         "missing GraphChanged for the FOREIGN project after move in {seen_move:?}"
+    );
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a cross-project GraphMoveNode must broadcast exactly two GraphChanged pushes"
     );
 
     c1.shutdown(boot).await;
@@ -1038,6 +1099,11 @@ async fn graph_neighborhood_returns_correct_subgraph() {
     let edge_ab = add_edge(&mut c1, &node_a.id, &node_b.id).await;
     add_edge(&mut c1, &node_b.id, &node_c.id).await;
 
+    // A second listener, synchronized via Ping/Pong, so the "read verb broadcasts nothing"
+    // assertion below has a registered client that WOULD observe any stray push.
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
     // Depth 1 rooted at A: A is directly connected to B only (the A-B edge), NOT to C (that's
     // two hops away via B) — a genuine, non-trivial subgraph check.
     let neighborhood = expect_neighborhood(
@@ -1057,6 +1123,13 @@ async fn graph_neighborhood_returns_correct_subgraph() {
     );
     assert_eq!(neighborhood.edges.len(), 1);
     assert_eq!(neighborhood.edges[0].id, edge_ab.id);
+
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(300))
+            .await
+            .is_none(),
+        "GraphNeighborhood is a read verb and must broadcast nothing"
+    );
 
     c1.shutdown(boot).await;
 }
