@@ -12,3 +12,6 @@ path = "src/lib.rs"
 serde = { workspace = true }
 bpa-protocol = { workspace = true }
 ts-rs = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

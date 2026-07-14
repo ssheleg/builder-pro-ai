@@ -505,8 +505,26 @@ fn fit_verdict_no_fit_serializes_as_camelcase_on_the_wire() {
     assert_wire_contains(&frame, "noFit");
 }
 
+/// Assert a bare enum value serializes to *exactly* the given camelCase tag (a JSON string
+/// literal). Serde's tag string is codec-independent — the same derived `Serialize` impl
+/// backs both this `serde_json` output and the CBOR wire — so exact equality here proves the
+/// `rename_all = "camelCase"` tag that also goes over the wire. Unlike a substring check
+/// against a whole frame, this can never be satisfied tautologically by an unrelated field
+/// value (e.g. an `entity_id` of `"task-1"` that happens to contain the substring `"task"`).
+fn assert_serde_tag<T: serde::Serialize>(value: &T, expected_tag: &str) {
+    let json = serde_json::to_string(value).expect("serialize enum value to JSON");
+    assert_eq!(
+        json,
+        format!("\"{expected_tag}\""),
+        "enum value must serialize to exactly the tag {expected_tag:?}; got {json}"
+    );
+}
+
 #[test]
 fn graph_node_kind_entity_ref_serializes_as_camelcase_on_the_wire() {
+    // Discriminating: exact tag equality (a broken `rename_all` producing "EntityRef" fails).
+    assert_serde_tag(&GraphNodeKind::EntityRef, "entityRef");
+    // And prove the tag literally reaches the CBOR wire (no field here contains "entityRef").
     let frame = OrchdFrame::Request {
         id: 1,
         req: OrchdRequest::GraphAddNode {
@@ -523,6 +541,9 @@ fn graph_node_kind_entity_ref_serializes_as_camelcase_on_the_wire() {
 
 #[test]
 fn graph_edge_kind_contradicts_serializes_lowercase_on_the_wire() {
+    // Discriminating: exact tag equality (a broken `rename_all` producing "Contradicts" fails).
+    assert_serde_tag(&GraphEdgeKind::Contradicts, "contradicts");
+    // And prove the tag literally reaches the CBOR wire (no field here contains "contradicts").
     let frame = OrchdFrame::Request {
         id: 1,
         req: OrchdRequest::GraphAddEdge {
@@ -537,9 +558,27 @@ fn graph_edge_kind_contradicts_serializes_lowercase_on_the_wire() {
 
 #[test]
 fn graph_entity_type_task_serializes_lowercase_on_the_wire() {
+    // Discriminating: exact tag equality (a broken `rename_all` producing "Task" fails). A
+    // substring check against a frame is NOT enough here — `sample_graph_node()` carries
+    // `entity_id: Some("task-1")`, which trivially contains the substring "task".
+    assert_serde_tag(&GraphEntityType::Task, "task");
+    // And prove the tag literally reaches the CBOR wire from a node whose OTHER fields carry
+    // no "task" substring, so the only source of "task" in the bytes is the serialized tag.
     let frame = OrchdFrame::Response {
         id: 1,
-        res: OrchdResponse::GraphNode(sample_graph_node()),
+        res: OrchdResponse::GraphNode(GraphNode {
+            id: "n-1".into(),
+            project_id: "p-1".into(),
+            kind: GraphNodeKind::EntityRef,
+            entity_type: Some(GraphEntityType::Task),
+            entity_id: Some("e-1".into()),
+            label: "label".into(),
+            body: "body".into(),
+            pos_x: 0.0,
+            pos_y: 0.0,
+            created_at: 1,
+            updated_at: 2,
+        }),
     };
     assert_wire_contains(&frame, "task");
 }
