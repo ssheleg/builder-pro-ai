@@ -136,6 +136,39 @@ describe("CreateProjectDialog", () => {
     expect(useAppStore.getState().toast).toBe("оркестратор: ошибка");
   });
 
+  it("a failed create renders an in-dialog role=alert with the mapped message AND stays open", async () => {
+    orchdCreateProjectMock.mockRejectedValue({ kind: "daemon", code: "Validation", message: "bad" });
+    describeOrchdErrorMock.mockReturnValue("неверные данные: bad");
+    const onClose = vi.fn();
+    render(<CreateProjectDialog onClose={onClose} />);
+
+    fireEvent.change(screen.getByTestId("create-project-name"), { target: { value: "New Proj" } });
+    fireEvent.click(screen.getByTestId("create-project-ws-w2"));
+    fireEvent.click(screen.getByTestId("create-project-submit"));
+
+    // Load-bearing surface: an in-dialog error line, visible while the dialog is still open, so a
+    // concurrent toast clobbering the global queue-of-one never hides the failure.
+    const alert = await screen.findByTestId("create-project-error");
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toContain("неверные данные: bad");
+    // The dialog itself must still be on screen (not close-and-toast-into-the-void).
+    expect(screen.getByTestId("create-project-dialog")).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("focuses the name input when the dialog opens (dialog-atom initial focus)", () => {
+    render(<CreateProjectDialog onClose={() => {}} />);
+    expect(document.activeElement).toBe(screen.getByTestId("create-project-name"));
+  });
+
+  it("Escape fires the cancel/close path (same as the Cancel button)", () => {
+    const onClose = vi.fn();
+    render(<CreateProjectDialog onClose={onClose} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+    expect(orchdCreateProjectMock).not.toHaveBeenCalled();
+  });
+
   it("renders as a labelled dialog", () => {
     render(<CreateProjectDialog onClose={() => {}} />);
     const dialog = within(screen.getByTestId("create-project-dialog"));

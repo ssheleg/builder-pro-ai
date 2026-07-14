@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type JSX } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../store/store";
 import { orchdCreateProject, describeOrchdError } from "../ipc/orchd";
 import { pickFolder, createWorkspace } from "../ipc/commands";
@@ -137,6 +137,16 @@ const errorTextStyle: CSSProperties = {
   color: theme.colors.statusExited,
 };
 
+/** In-dialog failure line (design-system.md dialog atom: red statusExited text + left-edge accent,
+ * distinct from the amber trigger-condition marker). Mirrors `UpgradeDialog`'s in-dialog error. */
+const inlineErrorStyle: CSSProperties = {
+  fontSize: 13,
+  lineHeight: 1.5,
+  color: theme.colors.statusExited,
+  borderLeft: `3px solid ${theme.colors.statusExited}`,
+  paddingLeft: 8,
+};
+
 /**
  * «+ проект» dialog (S3 spec §10, task-18 brief). Design-system "Dialog / modal overlay" atom:
  * fixed dim backdrop + centered `bgElevated` card, `role="dialog"` + `aria-modal` + labelled
@@ -152,10 +162,18 @@ const errorTextStyle: CSSProperties = {
  *
  * Submit is BLOCKED at 0 selected workspaces (D7-adjacent invariant mirror of
  * `CreateProject requires >=1 workspace_ids`, spec §5.2) — both a disabled primary button AND an
- * honest inline reason, never a doomed round-trip. A create failure surfaces via `showToast`
- * (spec §7) and leaves the dialog open so the owner can fix the input and retry; the sessiond
- * `createWorkspace` failure path (not an `orchd_*` call) gets a lighter, non-`describeOrchdError`
- * fallback message since that helper is documented as orchd-specific.
+ * honest inline reason, never a doomed round-trip.
+ *
+ * Dialog-atom parity with `UpgradeDialog` (design-system.md "Dialog / modal overlay"): focuses the
+ * name input on open and closes on `Escape` (same cancel path as the Cancel button). A create
+ * failure is surfaced by an IN-DIALOG `role="alert"` line (the load-bearing failure surface —
+ * `describeOrchdError(e)`) rather than only the global queue-of-one toast, which a concurrent toast
+ * could clobber while the dialog is still open; the dialog STAYS open on failure so the owner can
+ * fix the input and retry, mirroring `UpgradeDialog`'s "stays open so the primary button can be
+ * retried" contract. The toast is still fired too (belt-and-suspenders), but the inline alert is
+ * the one that must never vanish. The sessiond `createWorkspace` failure path (not an `orchd_*`
+ * call) reuses the same inline-alert surface with a lighter, non-`describeOrchdError` message since
+ * that helper is documented as orchd-specific.
  */
 export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element {
   const { onClose } = props;
@@ -168,12 +186,28 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [selectedIds, setSelectedIds] = useState<WorkspaceId[]>([]);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const nameRef = useRef<HTMLInputElement>(null);
 
   const linkedIds = linkedWorkspaceIds(projects);
   const unlinked = Object.values(workspaces)
     .filter((w) => !linkedIds.has(w.id))
     .sort((a, b) => a.name.localeCompare(b.name));
   const blocked = selectedIds.length === 0;
+
+  // Initial focus + Escape-to-cancel (dialog-atom parity, mirrors UpgradeDialog's effect): focus
+  // the name input (the first thing the owner types) on open, and let Escape run the SAME cancel
+  // path as the Cancel button. Mounted once — the dialog is only ever rendered while open (its
+  // parent gates it), so there is no open/closed toggle to depend on here.
+  useEffect(() => {
+    nameRef.current?.focus();
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
   function toggleWorkspace(id: WorkspaceId): void {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -187,18 +221,23 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
       upsertWorkspace(ws);
       setSelectedIds((prev) => (prev.includes(ws.id) ? prev : [...prev, ws.id]));
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "не удалось создать workspace");
+      const message = e instanceof Error ? e.message : "не удалось создать workspace";
+      setCreateError(message);
+      showToast(message);
     }
   }
 
   async function handleSubmit(): Promise<void> {
     if (blocked || name.trim() === "") return;
+    setCreateError(null); // clear any stale failure before a fresh attempt (UpgradeDialog parity)
     try {
       await orchdCreateProject(name.trim(), description, selectedIds);
       showToast("Проект создан");
       onClose();
     } catch (e) {
-      showToast(describeOrchdError(e));
+      const message = describeOrchdError(e);
+      setCreateError(message);
+      showToast(message);
     }
   }
 
@@ -218,6 +257,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
         <label style={fieldLabelStyle}>
           Название
           <input
+            ref={nameRef}
             data-testid="create-project-name"
             aria-label="Название проекта"
             required
@@ -271,6 +311,17 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
         {blocked && (
           <div data-testid="create-project-blocked" role="alert" style={errorTextStyle}>
             {BLOCKED_TEXT}
+          </div>
+        )}
+
+        {createError !== null && (
+          // In-dialog failure surface (design-system.md "Dialog / modal overlay" atom: an action
+          // the user just took failed → role="alert", statusExited red + left-edge, distinct from
+          // the trigger-condition amber). This is the LOAD-BEARING failure indicator — it survives
+          // a concurrent toast clobbering the global queue-of-one, and the dialog stays open so the
+          // owner can fix the input and retry (mirrors UpgradeDialog's retry-in-place behavior).
+          <div data-testid="create-project-error" role="alert" style={inlineErrorStyle}>
+            {createError}
           </div>
         )}
 
