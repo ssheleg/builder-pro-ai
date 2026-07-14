@@ -32,6 +32,8 @@ import { TerminalPane } from "./components/TerminalPane";
 import { CommandStrip } from "./components/CommandStrip";
 import { DaemonBanner } from "./components/DaemonBanner";
 import { UpgradeDialog } from "./components/UpgradeDialog";
+import { OrchdDownBanner } from "./components/OrchdDownBanner";
+import { QuickCapture } from "./components/QuickCapture";
 import { FilesRail } from "./components/FilesRail";
 import { HomeView } from "./components/HomeView";
 import { ProjectPanel } from "./components/ProjectPanel";
@@ -100,6 +102,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   const workspaces = useAppStore((s) => s.workspaces);
   const view = useAppStore((s) => s.view);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
+  const orchdDown = useAppStore((s) => s.orchdDown);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<WorkspaceId | null>(null);
 
   useEffect(() => {
@@ -223,10 +226,18 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       }),
     );
     // FATAL (Pv2 §6.2, mirrors `onDaemonIncompatible` above): the orchd client's connection task
-    // has exited and will not reconnect on its own. The upgrade dialog itself is T19's job (spec
-    // §10: the generalized `UpgradeDialog` reads both daemons' flag pairs) — this task only owns
-    // the flag.
-    track(onOrchdIncompatible(() => useAppStore.getState().setOrchdIncompatible(true)));
+    // has exited and will not reconnect on its own. The generalized `UpgradeDialog` (T19, spec
+    // §10) reads both daemons' flag pairs and renders whichever is relevant (sessiond wins if
+    // both are set) — so, exactly like `onDaemonIncompatible` above, set BOTH the fatal flag AND
+    // the dialog's own visibility flag here; `orchdIncompatible` outlives Cancel even if the user
+    // dismisses the dialog.
+    track(
+      onOrchdIncompatible(() => {
+        const s = useAppStore.getState();
+        s.setOrchdIncompatible(true);
+        s.setOrchdUpgradeDialogOpen(true);
+      }),
+    );
 
     /**
      * `list_workspaces`/`list_sessions` reject while the core hasn't finished connecting to
@@ -375,7 +386,15 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       }}
     >
       <DaemonBanner />
+      {/* Shared orchd connectivity banner (spec §10/§11): "every domain surface" is satisfied by
+          mounting it once, globally, next to the sessiond equivalent above — it is purely
+          presentational (`OrchdDownBanner.tsx`), so this is the one place that reads `orchdDown`
+          and decides whether to render it at all. */}
+      {orchdDown && <OrchdDownBanner />}
       <UpgradeDialog />
+      {/* Global ⌘K idea-capture overlay (spec §10, task-19): mounted exactly ONCE, app-wide, so
+          its internal keydown listener is live regardless of which view is showing. */}
+      <QuickCapture />
       <Toast />
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <WorkspaceSidebar

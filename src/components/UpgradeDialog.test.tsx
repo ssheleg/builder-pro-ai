@@ -7,6 +7,11 @@ vi.mock("../ipc/commands", () => ({
   upgradeDaemon: (...a: unknown[]) => upgradeDaemonMock(...a),
 }));
 
+const orchdUpgradeMock = vi.fn();
+vi.mock("../ipc/orchd", () => ({
+  orchdUpgrade: (...a: unknown[]) => orchdUpgradeMock(...a),
+}));
+
 import { UpgradeDialog } from "./UpgradeDialog";
 import { useAppStore } from "../store/store";
 import type { SessionMeta } from "../ipc/types";
@@ -30,6 +35,8 @@ afterEach(cleanup);
 beforeEach(() => {
   upgradeDaemonMock.mockReset();
   upgradeDaemonMock.mockReturnValue(new Promise(() => {})); // never resolves, like the real command
+  orchdUpgradeMock.mockReset();
+  orchdUpgradeMock.mockReturnValue(new Promise(() => {})); // never resolves, mirrors upgradeDaemon
   useAppStore.setState(
     {
       sessions: {},
@@ -40,6 +47,8 @@ beforeEach(() => {
       upgradeDialogOpen: false,
       upgradeError: null,
       hydrated: false,
+      orchdIncompatible: false,
+      orchdUpgradeDialogOpen: false,
     },
     false,
   );
@@ -205,6 +214,110 @@ describe("UpgradeDialog", () => {
         useAppStore.getState().setUpgradeDialogOpen(true);
       });
       expect(useAppStore.getState().upgradeError).toBeNull();
+    });
+  });
+
+  describe("S3 T19: dual-daemon generalization (spec §10/§11)", () => {
+    it("renders nothing when orchdIncompatible and orchdUpgradeDialogOpen are not both true", () => {
+      useAppStore.setState({ orchdIncompatible: false, orchdUpgradeDialogOpen: false }, false);
+      const { container: c1 } = render(<UpgradeDialog />);
+      expect(c1.firstChild).toBeNull();
+      cleanup();
+
+      useAppStore.setState({ orchdIncompatible: true, orchdUpgradeDialogOpen: false }, false);
+      const { container: c2 } = render(<UpgradeDialog />);
+      expect(c2.firstChild).toBeNull();
+    });
+
+    it("orchd-incompatible ALONE renders the orchd copy (no live-session warning) and confirm calls orchdUpgrade()", () => {
+      useAppStore.setState({ orchdIncompatible: true, orchdUpgradeDialogOpen: true }, false);
+      render(<UpgradeDialog />);
+
+      expect(screen.getByTestId("orchd-upgrade-dialog")).toBeTruthy();
+      expect(
+        screen.getByText(
+          "Обновить фоновый сервис оркестратора — записи (проекты, цели, задачи) сохранены",
+        ),
+      ).toBeTruthy();
+      // no sessiond live-session copy leaks into the orchd variant
+      expect(screen.queryByText(/живых сессий/)).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+      expect(orchdUpgradeMock).toHaveBeenCalledTimes(1);
+      expect(orchdUpgradeMock).toHaveBeenCalledWith();
+      expect(upgradeDaemonMock).not.toHaveBeenCalled();
+    });
+
+    it("both daemons incompatible at once renders the SESSIOND copy (precedence), never the orchd one", () => {
+      useAppStore.setState(
+        {
+          daemonIncompatible: true,
+          upgradeDialogOpen: true,
+          orchdIncompatible: true,
+          orchdUpgradeDialogOpen: true,
+          hydrated: false,
+        },
+        false,
+      );
+      render(<UpgradeDialog />);
+
+      expect(screen.queryByTestId("orchd-upgrade-dialog")).toBeNull();
+      expect(
+        screen.getByText(
+          "Обновить фоновый сервис — все его живые сессии завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.",
+        ),
+      ).toBeTruthy();
+      // exactly ONE dialog rendered, not two
+      expect(screen.getAllByRole("dialog")).toHaveLength(1);
+
+      fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+      expect(upgradeDaemonMock).toHaveBeenCalledTimes(1);
+      expect(orchdUpgradeMock).not.toHaveBeenCalled();
+    });
+
+    it('"Отмена" on the orchd variant closes it but does NOT clear orchdIncompatible (honesty invariant)', () => {
+      useAppStore.setState({ orchdIncompatible: true, orchdUpgradeDialogOpen: true }, false);
+      render(<UpgradeDialog />);
+      fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+      expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(false);
+      expect(useAppStore.getState().orchdIncompatible).toBe(true);
+    });
+
+    it("a rejected orchdUpgrade renders an honest error line on the orchd variant, dialog stays open", async () => {
+      orchdUpgradeMock.mockReset();
+      orchdUpgradeMock.mockRejectedValue({ kind: "upgradeFailed", reason: "Operation not permitted" });
+      useAppStore.setState({ orchdIncompatible: true, orchdUpgradeDialogOpen: true }, false);
+      render(<UpgradeDialog />);
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(screen.getByText(/Operation not permitted/)).toBeTruthy();
+      expect(screen.getByTestId("orchd-upgrade-dialog")).toBeTruthy();
+      expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(true);
+    });
+
+    it("once the sessiond dialog is dismissed (Cancel), a still-pending orchd incompatibility shows its own dialog next", () => {
+      useAppStore.setState(
+        {
+          daemonIncompatible: true,
+          upgradeDialogOpen: true,
+          orchdIncompatible: true,
+          orchdUpgradeDialogOpen: true,
+        },
+        false,
+      );
+      render(<UpgradeDialog />);
+      expect(screen.queryByTestId("orchd-upgrade-dialog")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+
+      expect(screen.getByTestId("orchd-upgrade-dialog")).toBeTruthy();
+      // sessiond's own honesty invariant still holds — Cancel never clears daemonIncompatible
+      expect(useAppStore.getState().daemonIncompatible).toBe(true);
     });
   });
 });

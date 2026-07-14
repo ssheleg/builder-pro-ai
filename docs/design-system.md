@@ -95,6 +95,7 @@ defect. New tokens are added to `theme.ts` first, doc second, usage third.
 | **Policy form** | numeric cap (empty=∞), chip inputs for classes/allowlist; client mirrors server validation |
 | **File-state banner** | info banner (не amber): ExternallyModified → [Принять]; Missing → [Создать заново] |
 | **Project group row** | bold project header + nested workspace rows; «Без проекта» group last |
+| **Quick-capture overlay** | ⌘K portal; title+body+project select; Enter submits; Esc closes |
 
 Buttons: primary = accent fill (one per view maximum), secondary = 1px border ghost; destructive
 = red border ghost with confirm. Toggles, not checkboxes, for enable/disable.

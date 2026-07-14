@@ -37,6 +37,11 @@ beforeEach(() => {
       workspaces: {},
       activeSessionId: null,
       view: "home",
+      // Reset the S3 domain slice too (task-19: HomeView now also mounts <HomeGoals/>) — keeps
+      // every pre-existing test in this file isolated from the new DOM-order test below, which is
+      // the only one that populates these.
+      projects: [],
+      goalsByProject: {},
     },
     false,
   );
@@ -269,5 +274,63 @@ describe("HomeView", () => {
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
     expect(screen.queryByRole("region", { name: "Нужен ты" })).toBeNull();
     expect(screen.queryByText("Нужен ты")).toBeNull();
+  });
+
+  it("task-19: HomeGoals renders BELOW all three attention sections — the amber «Нужен ты» block keeps its pinned-top position", () => {
+    useAppStore.setState({
+      workspaces: { w1: wsA },
+      sessions: {
+        s1: meta({ id: "s1", workspaceId: "w1", waitingForInput: true, lifecycle: { kind: "running" } }),
+        s2: meta({ id: "s2", workspaceId: "w1", isActive: true, waitingForInput: false, lifecycle: { kind: "running" } }),
+        s3: meta({
+          id: "s3",
+          workspaceId: "w1",
+          isActive: false,
+          waitingForInput: false,
+          lifecycle: { kind: "exited", code: 0, signal: null },
+        }),
+      },
+      projects: [
+        {
+          id: "p1",
+          name: "Proj",
+          description: "",
+          status: "active",
+          workspaceIds: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      goalsByProject: {
+        p1: [
+          {
+            id: "g1",
+            projectId: "p1",
+            parentId: null,
+            kind: "strategic",
+            title: "Ship v1",
+            body: "",
+            ord: 0,
+            status: "active",
+            metricRefs: [],
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+      },
+    });
+    render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
+
+    const goalsSection = screen.getByTestId("home-goals");
+    const waitingHeading = screen.getByText("Нужен ты");
+    const runningHeading = screen.getByText("Работают");
+    const exitedHeading = screen.getByText("Завершились недавно");
+
+    // DOCUMENT_POSITION_FOLLOWING on the LEFT-hand node means the left node comes BEFORE the
+    // right node in document order — every attention section must precede the goals panel.
+    for (const heading of [waitingHeading, runningHeading, exitedHeading]) {
+      const position = heading.compareDocumentPosition(goalsSection);
+      expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
   });
 });

@@ -4,6 +4,7 @@ import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
 import { StatusDot } from "./StatusDot";
+import { HomeGoals } from "./HomeGoals";
 import { theme } from "../theme";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
@@ -365,6 +366,15 @@ export function HomeView(props: {
           )}
         </>
       )}
+
+      {/* Home goals panel (spec §10, task-19): mounts BELOW the three attention sections above —
+          the amber "Нужен ты" block keeps its pinned-top position (S2 §6.2 rule wins over goals
+          prominence, spec §10 verbatim). Renders unconditionally here (outside the `all.length`
+          empty-state branch above) — an empty terminal store has nothing to say about whether the
+          owner has active projects with goals, so goals visibility is independent of session
+          count; `HomeGoals` itself is the one that decides to render nothing when there are no
+          active projects. */}
+      <HomeGoals />
     </div>
   );
 }
