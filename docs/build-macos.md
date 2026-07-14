@@ -143,17 +143,19 @@ What each step does:
    - Checks prereqs (`rustup`, `cargo`, `npm`, both darwin targets installed); run
      `bash scripts/build-universal.sh --check-prereqs` on its own any time to just
      run this check without building anything.
-   - `cargo build -p bpa-sessiond --release --target aarch64-apple-darwin`
-   - `cargo build -p bpa-sessiond --release --target x86_64-apple-darwin`
-   - Copies the two resulting binaries into `src-tauri/binaries/` with Tauri's
+   - Builds BOTH daemons for BOTH arches (S3):
+     `cargo build -p bpa-sessiond --release --target {aarch64,x86_64}-apple-darwin`
+     and `cargo build -p bpa-orchd --release --target {aarch64,x86_64}-apple-darwin`.
+   - Copies the four resulting binaries into `src-tauri/binaries/` with Tauri's
      required target-triple-suffixed names:
-     `bpa-sessiond-aarch64-apple-darwin`, `bpa-sessiond-x86_64-apple-darwin`
-     (`tauri.conf.json`'s `bundle.externalBin` references the un-suffixed
-     `binaries/bpa-sessiond` — Tauri appends the triple itself when it looks up
-     which file to embed for the arch it's building).
+     `bpa-sessiond-{aarch64,x86_64}-apple-darwin` and
+     `bpa-orchd-{aarch64,x86_64}-apple-darwin` (`tauri.conf.json`'s
+     `bundle.externalBin` references the un-suffixed `binaries/bpa-sessiond` and
+     `binaries/bpa-orchd` — Tauri appends the triple itself when it looks up which
+     file to embed for the arch it's building).
    - Runs `npm run tauri -- build --target universal-apple-darwin`, which:
-     - `lipo`-merges the two sidecar binaries and the app's own Rust binary into a
-       single universal Mach-O per binary,
+     - `lipo`-merges each of the two sidecar binaries (per daemon) and the app's own
+       Rust binary into a single universal Mach-O per binary,
      - produces `.app` and `.dmg` bundles (per `tauri.conf.json`'s
        `bundle.targets`),
      - deep-signs everything with `APPLE_SIGNING_IDENTITY` (hardened runtime +

@@ -117,9 +117,10 @@ full detail on BOTH daemons (incl. the three-rail UI and the two-daemon topology
                           └────────────────────────┘
 ```
 
-`launchd` — not Tauri — owns the daemon's lifecycle: the app bundles `bpa-sessiond` as a signed
-`externalBin` sidecar, and a per-user `LaunchAgent` (`KeepAlive.Crashed = true`) supervises the
-actual process. The GUI only ever holds a socket connection to it, never a process handle.
+`launchd` — not Tauri — owns each daemon's lifecycle: the app bundles `bpa-sessiond` AND
+`bpa-orchd` (S3) as signed `externalBin` sidecars, and a per-user `LaunchAgent`
+(`KeepAlive.Crashed = true`) supervises each process. The GUI only ever holds a socket connection
+to each, never a process handle.
 
 ## Survival truth table (spec §13)
 
@@ -154,10 +155,13 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 # is enough for dev; it fails with an actionable error if either is missing:
 cargo build -p bpa-sessiond -p bpa-orchd
 
-# bpa-sessiond ALSO needs staging under src-tauri/binaries/ (target-triple suffix) for the
-# Tauri bundler's `externalBin` mechanism, even in a fresh checkout used only for `tauri dev`:
+# BOTH daemons are declared in tauri.conf.json's `externalBin`, so Tauri's build.rs requires
+# BOTH staged under src-tauri/binaries/ (target-triple suffix) even for `tauri dev` in a fresh
+# checkout — stage each one:
 mkdir -p src-tauri/binaries
-cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$(rustc -vV | sed -n 's/host: //p')"
+TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
+cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$TRIPLE"
+cp target/debug/bpa-orchd "src-tauri/binaries/bpa-orchd-$TRIPLE"
 
 # Run the app in dev mode
 npm run tauri dev
@@ -166,10 +170,8 @@ npm run tauri dev
 bash scripts/final-suite.sh
 
 # Build a signed, notarized, universal release .app (see docs/build-macos.md for credentials).
-# KNOWN GAP (BL-53, docs/backlog.md): this currently packages bpa-sessiond only — bpa-orchd is
-# NOT YET in tauri.conf.json's externalBin / scripts/build-universal.sh, so a release .app built
-# today ships without the second daemon. Fine for `npm run tauri dev` (sibling-binary resolution
-# off target/debug/ finds it either way); not yet fine for a real signed/notarized release.
+# BOTH daemons ship in the bundle: `scripts/build-universal.sh` builds bpa-sessiond AND bpa-orchd
+# for arm64 + x86_64, lipo-merges each, and Tauri embeds both signed sidecars (BL-59, closed).
 bash scripts/build-universal.sh
 ```
 

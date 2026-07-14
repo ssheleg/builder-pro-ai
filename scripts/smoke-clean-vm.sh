@@ -19,7 +19,9 @@
 #      notarized) still shows the "cannot be opened" dialog on `open` and this script will then
 #      correctly fail at the "daemon did not start" check below.
 #   3. Launch the app once — this exercises the LaunchAgent bootstrap path (`launchd.rs`).
-#   4. Wait for `bpa-sessiond` to appear as a running process (proves launchd started it).
+#   4. Wait for BOTH daemons (`bpa-sessiond` AND `bpa-orchd`, S3) to appear as running processes
+#      (proves launchd started each embedded, signed sidecar — the whole point of BL-59's fix is
+#      that the release bundle actually SHIPS the second daemon, so the smoke must see it run).
 #   5. Hand off to the T23 E2E harness in its launchd-managed variant
 #      (`BPA_E2E_EXTERNAL_DAEMON=1 node tests/e2e/survive-restart.mjs`), which drives the actual
 #      create-terminal -> run-command -> observe-OSC-status -> "quit" (hard-close the client
@@ -36,6 +38,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="${1:-/Applications/Builder Pro AI.app}"
 LABEL="ai.builderpro.desktop.sessiond"
+ORCHD_LABEL="ai.builderpro.desktop.orchd"
 
 log()  { echo "[smoke-clean-vm] $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -54,17 +57,23 @@ xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 log "launching $APP (first run — installs + bootstraps the LaunchAgent per launchd.rs)"
 open "$APP"
 
-log "waiting up to 30s for bpa-sessiond to start under launchd..."
-started=0
-for _ in $(seq 1 30); do
-  if pgrep -x bpa-sessiond >/dev/null 2>&1; then
-    started=1
-    break
-  fi
-  sleep 1
-done
-[ "$started" -eq 1 ] || fail "daemon (bpa-sessiond) did not start within 30s of first launch — check Gatekeeper acceptance (Console.app), and 'launchctl print gui/\$(id -u)/$LABEL'"
-log "OK: daemon running after first launch"
+log "waiting up to 30s for BOTH daemons (bpa-sessiond + bpa-orchd) to start under launchd..."
+wait_for_daemon() {
+  local proc="$1" started=0
+  for _ in $(seq 1 30); do
+    if pgrep -x "$proc" >/dev/null 2>&1; then
+      started=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$started" -eq 1 ] || return 1
+}
+wait_for_daemon bpa-sessiond \
+  || fail "daemon (bpa-sessiond) did not start within 30s of first launch — check Gatekeeper acceptance (Console.app), and 'launchctl print gui/\$(id -u)/$LABEL'"
+wait_for_daemon bpa-orchd \
+  || fail "daemon (bpa-orchd) did not start within 30s of first launch — the embedded orchd sidecar may be missing/unsigned; check Gatekeeper acceptance (Console.app), and 'launchctl print gui/\$(id -u)/$ORCHD_LABEL'"
+log "OK: both daemons running after first launch"
 
 log "handing off to the T23 E2E harness (launchd-managed variant)"
 log "  BPA_E2E_EXTERNAL_DAEMON=1 node tests/e2e/survive-restart.mjs"

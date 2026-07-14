@@ -3,11 +3,12 @@
 # (Task 24; spec §14.3 DoD packaging gate).
 #
 # Three checks, in order:
-#   1. `codesign --verify --deep --strict` on the .app — the whole bundle, including the
-#      embedded bpa-sessiond sidecar, must carry a valid, complete signature.
-#   2. The embedded sidecar's OWN signature is checked directly (belt-and-suspenders: `--deep`
-#      above already covers it, but a standalone check gives a clearer failure message
-#      pinpointing the sidecar specifically if something in the deep-sign step is broken).
+#   1. `codesign --verify --deep --strict` on the .app — the whole bundle, including BOTH
+#      embedded daemon sidecars (bpa-sessiond AND bpa-orchd, S3), must carry a valid, complete
+#      signature.
+#   2. Each embedded sidecar's OWN signature is checked directly (belt-and-suspenders: `--deep`
+#      above already covers them, but a standalone check gives a clearer failure message
+#      pinpointing the specific sidecar if something in the deep-sign step is broken).
 #   3. `spctl --assess --type execute` — the real Gatekeeper policy check. This is the one that
 #      actually distinguishes "signed" from "signed AND notarized": a dev-signed (or ad-hoc)
 #      build fails this even though codesign --verify passes, because spctl also requires a
@@ -34,14 +35,16 @@ codesign --verify --deep --strict --verbose=2 "$APP" \
   || fail "deep signature verification failed on: $APP"
 log "OK: codesign --verify --deep --strict passed"
 
-echo "== embedded sidecar signature =="
-SIDECAR="$APP/Contents/MacOS/bpa-sessiond"
-if [ ! -f "$SIDECAR" ]; then
-  SIDECAR="$(/usr/bin/find "$APP/Contents" -name 'bpa-sessiond*' -type f | head -1)"
-fi
-[ -n "${SIDECAR:-}" ] && [ -f "$SIDECAR" ] || fail "embedded bpa-sessiond not found anywhere under $APP/Contents"
-codesign --verify --strict --verbose=2 "$SIDECAR" || fail "sidecar at $SIDECAR is not signed / signature invalid"
-log "OK: sidecar signed at $SIDECAR"
+echo "== embedded sidecar signatures =="
+for daemon in bpa-sessiond bpa-orchd; do
+  SIDECAR="$APP/Contents/MacOS/$daemon"
+  if [ ! -f "$SIDECAR" ]; then
+    SIDECAR="$(/usr/bin/find "$APP/Contents" -name "$daemon*" -type f | head -1)"
+  fi
+  [ -n "${SIDECAR:-}" ] && [ -f "$SIDECAR" ] || fail "embedded $daemon not found anywhere under $APP/Contents"
+  codesign --verify --strict --verbose=2 "$SIDECAR" || fail "sidecar at $SIDECAR is not signed / signature invalid"
+  log "OK: sidecar signed at $SIDECAR"
+done
 
 echo "== spctl --assess (Gatekeeper) =="
 SPCTL_OK=0

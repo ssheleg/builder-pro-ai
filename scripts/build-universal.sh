@@ -2,10 +2,10 @@
 # scripts/build-universal.sh — macOS universal build + deep-sign + notarize (Task 24).
 #
 # Pipeline (spec §14.3 DoD packaging gate, §8.3 sidecar bundling, §15.5/§16 deep-signing):
-#   1. Build the `bpa-sessiond` daemon for BOTH Apple Silicon and Intel, stage them under
-#      `src-tauri/binaries/` with Tauri's required target-triple-suffixed names.
+#   1. Build BOTH daemons (`bpa-sessiond` AND `bpa-orchd`, S3) for Apple Silicon and Intel, stage
+#      them under `src-tauri/binaries/` with Tauri's required target-triple-suffixed names.
 #   2. Run `tauri build --target universal-apple-darwin`, which lipo-merges the frontend app
-#      binary AND the two staged sidecars into a single universal `.app`/`.dmg`.
+#      binary AND all four staged sidecars into a single universal `.app`/`.dmg`.
 #   3. Deep-sign + notarize: Tauri's bundler does this itself, driven entirely by environment
 #      variables (see the "Env-var contract" section below) — this script does not shell out to
 #      `codesign`/`xcrun notarytool` directly, it just makes sure the right env vars reach
@@ -53,6 +53,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$REPO/src-tauri/binaries"
 AARCH="$BIN_DIR/bpa-sessiond-aarch64-apple-darwin"
 XARCH="$BIN_DIR/bpa-sessiond-x86_64-apple-darwin"
+ORCHD_AARCH="$BIN_DIR/bpa-orchd-aarch64-apple-darwin"
+ORCHD_XARCH="$BIN_DIR/bpa-orchd-x86_64-apple-darwin"
 
 log()  { echo "[build-universal] $*"; }
 warn() { echo "WARNING: $*" >&2; }
@@ -69,11 +71,11 @@ check_prereqs() {
   log "OK: prereqs (rustup, cargo, npm, both darwin targets)"
 }
 
-# Build the daemon for both architectures and stage them under src-tauri/binaries/ using
+# Build both daemons for both architectures and stage them under src-tauri/binaries/ using
 # Tauri's required naming convention: "<name>-<target-triple>" (spec §8.3, confirmed against
 # Tauri v2 docs "Embedding External Binaries" — externalBin references the UNsuffixed
-# "binaries/bpa-sessiond" in tauri.conf.json, but the files on disk MUST carry the triple
-# suffix or the bundler silently fails to find them for that arch).
+# "binaries/bpa-sessiond" / "binaries/bpa-orchd" in tauri.conf.json, but the files on disk MUST
+# carry the triple suffix or the bundler silently fails to find them for that arch).
 build_sidecars() {
   mkdir -p "$BIN_DIR"
 
@@ -83,17 +85,26 @@ build_sidecars() {
   log "building bpa-sessiond for x86_64-apple-darwin (release)"
   ( cd "$REPO" && cargo build -p bpa-sessiond --release --target x86_64-apple-darwin )
 
+  log "building bpa-orchd for aarch64-apple-darwin (release)"
+  ( cd "$REPO" && cargo build -p bpa-orchd --release --target aarch64-apple-darwin )
+
+  log "building bpa-orchd for x86_64-apple-darwin (release)"
+  ( cd "$REPO" && cargo build -p bpa-orchd --release --target x86_64-apple-darwin )
+
   cp "$REPO/target/aarch64-apple-darwin/release/bpa-sessiond" "$AARCH"
   cp "$REPO/target/x86_64-apple-darwin/release/bpa-sessiond"  "$XARCH"
+  cp "$REPO/target/aarch64-apple-darwin/release/bpa-orchd"    "$ORCHD_AARCH"
+  cp "$REPO/target/x86_64-apple-darwin/release/bpa-orchd"     "$ORCHD_XARCH"
 
-  [ -f "$AARCH" ] && [ -f "$XARCH" ] || fail "missing per-arch sidecar binary after build/copy"
+  [ -f "$AARCH" ] && [ -f "$XARCH" ] && [ -f "$ORCHD_AARCH" ] && [ -f "$ORCHD_XARCH" ] \
+    || fail "missing per-arch sidecar binary after build/copy"
   # Refuse to proceed against the S0 scaffold placeholder stub (a `sh` script) — the same
   # sanity check the T23 E2E harness applies, so a stale stub can never masquerade as a real
   # signed daemon inside a shipped bundle.
-  for f in "$AARCH" "$XARCH"; do
+  for f in "$AARCH" "$XARCH" "$ORCHD_AARCH" "$ORCHD_XARCH"; do
     head -c 15 "$f" | grep -q '^#!/bin/sh$' && fail "$f is still the placeholder stub — real cargo build did not overwrite it"
   done
-  log "OK: both per-arch sidecars present at $BIN_DIR"
+  log "OK: all four per-arch sidecars present at $BIN_DIR"
 }
 
 build_app() {
