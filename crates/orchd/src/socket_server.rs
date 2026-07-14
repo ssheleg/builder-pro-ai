@@ -1020,5 +1020,24 @@ async fn dispatch(
                 Err(e) => map_err(e),
             }
         }
+
+        // ---- Knowledge graph (S4 spec §6) — DISPATCH NOT YET WIRED ----
+        // T1 (commit 42fb846) appended these `OrchdRequest`/`OrchdResponse` variants to the wire
+        // protocol; this task (S4 T2) adds the `graph::` persistence layer they'll call into.
+        // Real per-verb dispatch (with the cross-project `GraphChanged` push fan-out spec §6
+        // requires) lands in the graph-dispatch task. This wildcard exists ONLY to keep `match
+        // req` exhaustive in the meantime — replace it with real arms there, don't extend it.
+        OrchdRequest::GraphAddNode { .. }
+        | OrchdRequest::GraphUpdateNode { .. }
+        | OrchdRequest::GraphMoveNode { .. }
+        | OrchdRequest::GraphDeleteNode { .. }
+        | OrchdRequest::GraphAddEdge { .. }
+        | OrchdRequest::GraphDeleteEdge { .. }
+        | OrchdRequest::GraphListProject { .. }
+        | OrchdRequest::GraphNeighborhood { .. }
+        | OrchdRequest::GraphSearch { .. } => OrchdResponse::Error {
+            code: OrchdErrorCode::Io,
+            message: "graph dispatch not yet implemented".to_string(),
+        },
     }
 }

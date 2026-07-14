@@ -5,6 +5,9 @@
 //!
 //! Schema v1 (spec §5.1, LOCKED DDL) is applied as a single `Migration { upto: 1 }` step; every
 //! later domain migration (T10+) appends further steps to the same table, never mutates this one.
+//! Schema v2 (S4 spec §4, LOCKED DDL) appends the knowledge-graph `graph_node`/`graph_edge`
+//! tables as `Migration { upto: 2 }`, additive-forward-only per D1 — the graph persistence itself
+//! (invariants, enum⇄TEXT mapping) lives in the sibling `crate::graph` module.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -18,8 +21,9 @@ use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Current schema/migration version stored in `PRAGMA user_version` (spec §5.1).
-pub const SCHEMA_VERSION: i64 = 1;
+/// Current schema/migration version stored in `PRAGMA user_version` (spec §5.1; S4 spec §4 D1
+/// bumps this 1→2 for the additive knowledge-graph tables).
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -188,11 +192,16 @@ impl Db {
     /// (typed error) on any error — never panics. Thin wrapper over
     /// `bpa_daemon_core::migrate::run_migrations` (S3 phase 1 extraction, spec §3).
     fn migrate(&self, from_version: i64) -> Result<(), PersistError> {
-        const STEPS: &[bpa_daemon_core::migrate::Migration] =
-            &[bpa_daemon_core::migrate::Migration {
+        const STEPS: &[bpa_daemon_core::migrate::Migration] = &[
+            bpa_daemon_core::migrate::Migration {
                 upto: 1,
                 apply: migrate_v1,
-            }];
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 2,
+                apply: migrate_v2,
+            },
+        ];
         bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
             .map_err(|e| match e {
                 bpa_daemon_core::migrate::MigrateError::VersionTooNew { found, supported } => {
@@ -209,7 +218,9 @@ impl Db {
 
 /// v0 -> v1: `orchd.db` schema v1 (spec §5.1, LOCKED DDL — transcribed verbatim, including the
 /// spec's own inline comments, so this body and the spec text can be diffed directly).
-fn migrate_v1(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+/// `pub(crate)`: `crate::graph`'s test module builds a REAL v1 fixture directly on top of this
+/// step (apply v1 alone, insert legacy rows, THEN apply [`migrate_v2`]) to prove the backfill.
+pub(crate) fn migrate_v1(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     tx.execute_batch(
         "CREATE TABLE project (
            id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
@@ -282,13 +293,71 @@ fn migrate_v1(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     )
 }
 
+/// v1 -> v2: knowledge-graph tables (S4 spec §4, LOCKED DDL — transcribed verbatim, including the
+/// spec's own inline comments) PLUS an idempotent backfill: for every existing project's
+/// strategic goal that has no `entity_ref` node yet, seed one via [`crate::graph`]'s
+/// `seed_strategic_entity_ref` (the exact same insert `create_project` uses for NEW projects,
+/// D6) — so a pre-S4 `orchd.db` gets a non-empty graph on upgrade too. `pub(crate)`: reused
+/// directly (not just via `run_migrations`) by `crate::graph`'s own migration-backfill tests.
+pub(crate) fn migrate_v2(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE graph_node (
+           id TEXT PRIMARY KEY,
+           project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+           kind TEXT NOT NULL CHECK (kind IN ('concept','fact','artifact','decision','note','entity_ref')),
+           entity_type TEXT CHECK (entity_type IN ('goal','idea','insight','task')),
+           entity_id TEXT,
+           label TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+           pos_x REAL NOT NULL DEFAULT 0, pos_y REAL NOT NULL DEFAULT 0,
+           created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+           CHECK ((kind = 'entity_ref') = (entity_type IS NOT NULL AND entity_id IS NOT NULL))
+         );
+         CREATE INDEX graph_node_by_project ON graph_node(project_id);
+         CREATE UNIQUE INDEX graph_node_one_per_entity
+           ON graph_node(entity_type, entity_id) WHERE kind = 'entity_ref';
+         CREATE TABLE graph_edge (
+           id TEXT PRIMARY KEY,
+           source_node_id TEXT NOT NULL REFERENCES graph_node(id) ON DELETE CASCADE,
+           target_node_id TEXT NOT NULL REFERENCES graph_node(id) ON DELETE CASCADE,
+           kind TEXT NOT NULL CHECK (kind IN ('relates','depends','derives','supports','contradicts','parent')),
+           label TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+           CHECK (source_node_id <> target_node_id)
+         );
+         CREATE INDEX graph_edge_by_source ON graph_edge(source_node_id);
+         CREATE INDEX graph_edge_by_target ON graph_edge(target_node_id);
+         CREATE UNIQUE INDEX graph_edge_uniq ON graph_edge(source_node_id, target_node_id, kind);
+         -- migration also runs, ONCE, an idempotent backfill: for every existing project's strategic goal
+         -- that has no entityRef node, INSERT one (so pre-S4 projects get a seeded graph on upgrade).
+         -- user_version → 2",
+    )?;
+
+    let mut stmt = tx.prepare(
+        "SELECT g.id, g.project_id, g.title
+         FROM goal g
+         WHERE g.kind = 'strategic'
+           AND NOT EXISTS (
+             SELECT 1 FROM graph_node n
+             WHERE n.kind = 'entity_ref' AND n.entity_type = 'goal' AND n.entity_id = g.id
+           )",
+    )?;
+    let pending: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    for (goal_id, project_id, title) in pending {
+        crate::graph::seed_strategic_entity_ref(tx, &project_id, &goal_id, &title)?;
+    }
+    Ok(())
+}
+
 // ================================================================================
 // ---- domain persistence (spec §5.2): project + project_workspace + goal CRUD ----
 // ================================================================================
 
 /// Title of the strategic goal auto-created with every project (spec §5.2; the owner edits it
-/// afterwards, it is never auto-changed again and never deletable).
-const STRATEGIC_GOAL_TITLE: &str = "Стратегическая цель";
+/// afterwards, it is never auto-changed again and never deletable). `pub(crate)`: `crate::graph`'s
+/// tests reuse this literal rather than duplicating it (drift-proof).
+pub(crate) const STRATEGIC_GOAL_TITLE: &str = "Стратегическая цель";
 
 /// Domain persistence error (spec §5.2, §6 wire mapping: `NotFound→NotFound`,
 /// `Invariant→Invariant`, `Conflict→Conflict`, `Validation→Validation`, `Sql→Io`,
@@ -332,8 +401,9 @@ impl From<rusqlite::Error> for OrchdPersistError {
 /// already validated every OTHER constraint on the row it's inserting (FK target exists via an
 /// explicit prior lookup, NOT NULL columns populated, CHECK-legal literals), so a
 /// `ConstraintViolation` at that point can only be the UNIQUE/PK collision it's guarding
-/// against.
-fn is_constraint_violation(e: &rusqlite::Error) -> bool {
+/// against. `pub(crate)`: `crate::graph` reuses this for its own dup-`(source,target,kind)` edge
+/// and dup-`(entity_type,entity_id)` entityRef conflict mapping.
+pub(crate) fn is_constraint_violation(e: &rusqlite::Error) -> bool {
     use rusqlite::ffi::ErrorCode;
     if let rusqlite::Error::SqliteFailure(err, _) = e {
         matches!(err.code, ErrorCode::ConstraintViolation)
@@ -357,7 +427,8 @@ fn map_workspace_conflict(e: rusqlite::Error, workspace_id: &str) -> OrchdPersis
 
 /// Domain-row timestamp clock (spec §5.1: "Timestamps unix-ms"). Distinct from [`now_secs`]
 /// above, which is seconds-resolution and only used for the corrupt-DB quarantine suffix.
-fn now_ms() -> i64 {
+/// `pub(crate)`: `crate::graph` shares this clock for `graph_node`/`graph_edge` timestamps.
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -562,8 +633,12 @@ fn decode_tags(s: &str) -> Result<Vec<String>, OrchdPersistError> {
 /// `project.status` guard shared by every mutator (spec §5.2: "EVERY mutating verb touching
 /// [an archived project] or its children ⇒ `Invariant`"). Takes `&Connection` so it works both
 /// directly against `&self.conn` and — via `rusqlite::Transaction`'s
-/// `Deref<Target = Connection>` — against an in-flight `&Transaction`.
-fn ensure_project_active(conn: &Connection, project_id: &str) -> Result<(), OrchdPersistError> {
+/// `Deref<Target = Connection>` — against an in-flight `&Transaction`. `pub(crate)`:
+/// `crate::graph` reuses this exact guard (S4 spec §5 D11: every graph mutator honors it too).
+pub(crate) fn ensure_project_active(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<(), OrchdPersistError> {
     let status: Option<String> = conn
         .query_row(
             "SELECT status FROM project WHERE id = ?1",
@@ -946,10 +1021,12 @@ fn task_ancestor_chain_contains(
 impl Db {
     /// `CreateProject` (spec §5.2): ONE transaction inserts the `project` row, its
     /// `project_workspace` links (`ord` 0..), the auto-created strategic `goal`
-    /// (`title: "Стратегическая цель"`, empty body — owner edits it, never deletable) AND the
-    /// project's `ruleset` DB row (`scope='project'`, default `md_path`, `md_hash=''`,
-    /// `policy='{}'`; the FILE itself is written later by the T10 dispatch handler, not here).
-    /// `workspace_ids` empty ⇒ `Invariant`; a `workspace_id` already linked to ANY project (the
+    /// (`title: "Стратегическая цель"`, empty body — owner edits it, never deletable), its
+    /// `entity_ref` graph node (S4 spec §5 D6: `crate::graph::seed_strategic_entity_ref`, same
+    /// tx — a project's graph is never empty) AND the project's `ruleset` DB row
+    /// (`scope='project'`, default `md_path`, `md_hash=''`, `policy='{}'`; the FILE itself is
+    /// written later by the T10 dispatch handler, not here). `workspace_ids` empty ⇒
+    /// `Invariant`; a `workspace_id` already linked to ANY project (the
     /// `project_workspace.workspace_id` UNIQUE index — including a duplicate within
     /// `workspace_ids` itself) ⇒ `Conflict`, rolling back the whole transaction.
     pub fn create_project(
@@ -982,12 +1059,21 @@ impl Db {
             .map_err(|e| map_workspace_conflict(e, workspace_id))?;
         }
 
+        let strategic_goal_id = Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO goal
                (id, project_id, parent_id, kind, title, body, ord, status, metric_refs,
                 created_at, updated_at)
              VALUES (?1, ?2, NULL, 'strategic', ?3, '', 0, 'active', '[]', ?4, ?4)",
-            rusqlite::params![Uuid::new_v4().to_string(), id, STRATEGIC_GOAL_TITLE, now],
+            rusqlite::params![strategic_goal_id, id, STRATEGIC_GOAL_TITLE, now],
+        )?;
+        // D6: seed the strategic-goal entityRef node in the SAME tx (S4 spec §5) — a project's
+        // graph is never empty.
+        crate::graph::seed_strategic_entity_ref(
+            &tx,
+            &id,
+            &strategic_goal_id,
+            STRATEGIC_GOAL_TITLE,
         )?;
 
         tx.execute(
@@ -2507,6 +2593,9 @@ mod tests {
         "insight",
         "task",
         "ruleset",
+        // S4 spec §4 (schema v2, additive): knowledge-graph tables.
+        "graph_node",
+        "graph_edge",
     ];
 
     fn table_exists(conn: &Connection, name: &str) -> bool {
@@ -2524,20 +2613,20 @@ mod tests {
     }
 
     #[test]
-    fn open_in_memory_creates_schema_v1_with_every_table() {
+    fn open_in_memory_creates_schema_v2_with_every_table() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(user_version(db.conn()), 1);
+        assert_eq!(user_version(db.conn()), 2);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
     }
 
     #[test]
-    fn open_on_disk_creates_schema_v1_with_every_table() {
+    fn open_on_disk_creates_schema_v2_with_every_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orchd.db");
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(db.conn()), 1);
+        assert_eq!(user_version(db.conn()), 2);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
@@ -2564,7 +2653,7 @@ mod tests {
         std::fs::write(&path, b"not a sqlite database").unwrap();
 
         let db = Db::open(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 1);
+        assert_eq!(user_version(db.conn()), 2);
 
         let found = std::fs::read_dir(dir.path()).unwrap().any(|e| {
             e.unwrap()

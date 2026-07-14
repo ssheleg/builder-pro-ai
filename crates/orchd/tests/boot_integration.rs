@@ -218,7 +218,7 @@ async fn second_instance_flock_refusal() {
 }
 
 #[tokio::test]
-async fn fresh_boot_creates_schema_v1_and_global_ruleset() {
+async fn fresh_boot_creates_schema_v2_and_global_ruleset() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
     let home_dir = tempfile::tempdir().unwrap();
@@ -249,7 +249,7 @@ async fn fresh_boot_creates_schema_v1_and_global_ruleset() {
         .conn()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, 2);
 
     for table in [
         "project",
@@ -259,6 +259,8 @@ async fn fresh_boot_creates_schema_v1_and_global_ruleset() {
         "insight",
         "task",
         "ruleset",
+        "graph_node",
+        "graph_edge",
     ] {
         let exists: bool = db
             .conn()

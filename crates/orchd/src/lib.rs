@@ -12,6 +12,11 @@ pub mod persistence;
 pub mod socket_server;
 
 mod boot;
+/// Knowledge-graph node/edge persistence (S4 spec §4 schema v2, §5 persistence + invariants).
+/// Crate-private — `persistence::Db`'s CRUD/getter surface (`conn()`, `ensure_project_active`,
+/// `now_ms`, `is_constraint_violation`) is the seam this module builds on, mirroring how
+/// `ruleset_files` builds on `persistence::Db`'s ruleset methods.
+mod graph;
 /// RuleSet markdown FILE layer (spec §7, D4): atomic writes + read-fresh state classification.
 /// Crate-private — `persistence::Db`'s ruleset methods are the public surface that builds on it.
 mod ruleset_files;
