@@ -1,0 +1,31 @@
+[package]
+name = "bpa-mcp"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+name = "bpa_mcp"
+path = "src/lib.rs"
+
+[features]
+# Exposes `connect_duplex` — an in-memory `tokio::io::duplex()` entry point used only by this
+# crate's own stub-server tests (tests/stub.rs). Never enabled for a normal build: orchd talks
+# to MCP servers exclusively through `connect`/`TransportConfig::Http`.
+test-support = []
+
+[dependencies]
+rmcp = { version = "2.2", features = ["client", "transport-streamable-http-client-reqwest"] }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Self dev-dependency so `cargo test`/`cargo clippy --all-targets` build this crate's lib with
+# `test-support` active (the standard trick for gating a test-only public surface behind a
+# feature that integration tests, which link the lib as an external crate, can still reach).
+bpa-mcp = { path = ".", features = ["test-support"] }
+rmcp = { version = "2.2", features = ["client", "server", "transport-streamable-http-client-reqwest"] }
+schemars = "1"
+serde = { workspace = true }
