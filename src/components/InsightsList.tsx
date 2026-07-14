@@ -1,7 +1,6 @@
 import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../store/store";
 import {
-  orchdCreateInsight,
   orchdSetInsightFitVerdict,
   orchdSetInsightStatus,
   describeOrchdError,
@@ -119,13 +118,6 @@ const textButtonStyle: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
-};
-
 const errorTextStyle: CSSProperties = {
   fontSize: 11,
   color: theme.colors.statusExited,
@@ -138,17 +130,8 @@ const rowGroupStyle: CSSProperties = {
   flexWrap: "wrap",
 };
 
-const createFormStyle: CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 6,
-  padding: "8px 12px",
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
-};
-
 function fitBadgeText(v: FitVerdict | null): string {
-  return v === null ? "—" : v;
+  return v === null ? "—" : FIT_VERDICT_LABEL[v];
 }
 
 interface InsightRowProps {
@@ -308,22 +291,19 @@ function InsightRow(props: InsightRowProps): JSX.Element {
  * project's own insights — `insights.filter(i => i.projectId === projectId)` handles both
  * uniformly, mirroring `IdeasList`.
  *
- * Field-level mutations (verdict override, status change) rely on the shared
- * `orchd://insights-changed` → `refreshInsights` pipe wired in App.tsx, same as `GoalTree`'s
- * title/status edits. The create form is structural (a new row must appear in THIS view) so it
- * explicitly `refreshInsights()` after a successful round-trip. Every mutating call is wrapped in
- * try/catch → `showToast(describeOrchdError(e))` (spec §7 honest error surface).
+ * All mutations here are field-level (verdict override, status change) — there is deliberately NO
+ * insight-create form: insights are populated by the S-IDEA research pipeline / agents in a later
+ * slice, and spec §10's QuickCapture wires only `CreateIdea`, never `CreateInsight`. So this
+ * component relies entirely on the shared `orchd://insights-changed` → `refreshInsights` pipe
+ * wired in App.tsx (same as `GoalTree`'s title/status edits) for reconciliation; it never calls
+ * `refreshInsights` itself. Every mutating call is wrapped in try/catch →
+ * `showToast(describeOrchdError(e))` (spec §7 honest error surface).
  */
 export function InsightsList(props: { projectId: string | null }): JSX.Element {
   const { projectId } = props;
 
   const insights = useAppStore((s) => s.insights);
-  const refreshInsights = useAppStore((s) => s.refreshInsights);
   const showToast = useAppStore((s) => s.showToast);
-
-  const [createSource, setCreateSource] = useState("");
-  const [createTitle, setCreateTitle] = useState("");
-  const [createBody, setCreateBody] = useState("");
 
   const rows = insights
     .filter((i) => i.projectId === projectId)
@@ -355,59 +335,8 @@ export function InsightsList(props: { projectId: string | null }): JSX.Element {
     }
   }
 
-  async function handleCreate(): Promise<void> {
-    const title = createTitle.trim();
-    if (title === "") return;
-    try {
-      await orchdCreateInsight(projectId, createSource, title, createBody);
-      setCreateSource("");
-      setCreateTitle("");
-      setCreateBody("");
-      await refreshInsights();
-    } catch (e) {
-      showToast(describeOrchdError(e));
-    }
-  }
-
   return (
     <div data-testid="insights-list" style={listStyle}>
-      <div style={createFormStyle}>
-        <input
-          data-testid="insight-create-source"
-          aria-label="Источник нового инсайта"
-          placeholder="источник"
-          value={createSource}
-          onChange={(e) => setCreateSource(e.target.value)}
-          style={inputStyle}
-        />
-        <input
-          data-testid="insight-create-title"
-          aria-label="Название нового инсайта"
-          placeholder="название инсайта"
-          value={createTitle}
-          onChange={(e) => setCreateTitle(e.target.value)}
-          style={inputStyle}
-        />
-        <textarea
-          data-testid="insight-create-body"
-          aria-label="Описание нового инсайта"
-          placeholder="описание (необязательно)"
-          value={createBody}
-          onChange={(e) => setCreateBody(e.target.value)}
-          rows={2}
-          style={{ ...inputStyle, flex: "1 1 100%", resize: "vertical" }}
-        />
-        <button
-          type="button"
-          data-testid="insight-create-submit"
-          disabled={createTitle.trim() === ""}
-          onClick={() => void handleCreate()}
-          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
-        >
-          + инсайт
-        </button>
-      </div>
-
       {rows.length === 0 ? (
         <div
           data-testid="insights-list-empty"

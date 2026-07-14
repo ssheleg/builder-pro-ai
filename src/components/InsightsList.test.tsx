@@ -2,14 +2,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 
-const orchdCreateInsightMock = vi.fn();
 const orchdSetInsightFitVerdictMock = vi.fn();
 const orchdSetInsightStatusMock = vi.fn();
 const orchdListInsightsMock = vi.fn();
 const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
 
 vi.mock("../ipc/orchd", () => ({
-  orchdCreateInsight: (...a: unknown[]) => orchdCreateInsightMock(...a),
   orchdSetInsightFitVerdict: (...a: unknown[]) => orchdSetInsightFitVerdictMock(...a),
   orchdSetInsightStatus: (...a: unknown[]) => orchdSetInsightStatusMock(...a),
   orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
@@ -41,7 +39,6 @@ function makeInsight(over: Partial<Insight> & { id: string }): Insight {
 afterEach(cleanup);
 
 beforeEach(() => {
-  orchdCreateInsightMock.mockReset().mockResolvedValue(makeInsight({ id: "new-insight" }));
   orchdSetInsightFitVerdictMock.mockReset().mockResolvedValue(makeInsight({ id: "in1" }));
   orchdSetInsightStatusMock.mockReset().mockResolvedValue(makeInsight({ id: "in1" }));
   orchdListInsightsMock.mockReset().mockResolvedValue([]);
@@ -63,7 +60,8 @@ describe("InsightsList", () => {
     );
     expect(rows).toEqual(["insight-row-new", "insight-row-old"]);
 
-    expect(screen.getByTestId("insight-fit-badge-old").textContent).toContain("fit");
+    // localized: fitVerdict "fit" → «подходит» (badge reuses FIT_VERDICT_LABEL); null → «—»
+    expect(screen.getByTestId("insight-fit-badge-old").textContent).toBe("подходит");
     expect(screen.getByTestId("insight-fit-badge-new").textContent).toBe("—");
     expect(screen.getByTestId("insight-source-new").textContent).toContain("issledovanie");
   });
@@ -141,39 +139,6 @@ describe("InsightsList", () => {
       expect(orchdSetInsightStatusMock).toHaveBeenCalledWith("in1", "archived", "устарело"),
     );
     expect(screen.queryByTestId("insight-archive-error-in1")).toBeNull();
-  });
-
-  it("the create form calls orchdCreateInsight with the current projectId, source, title and body, then refreshes", async () => {
-    render(<InsightsList projectId={projectId} />);
-
-    fireEvent.change(screen.getByTestId("insight-create-source"), {
-      target: { value: "прод-лог" },
-    });
-    fireEvent.change(screen.getByTestId("insight-create-title"), {
-      target: { value: "Новый инсайт" },
-    });
-    fireEvent.change(screen.getByTestId("insight-create-body"), {
-      target: { value: "Описание" },
-    });
-    fireEvent.click(screen.getByTestId("insight-create-submit"));
-
-    await waitFor(() =>
-      expect(orchdCreateInsightMock).toHaveBeenCalledWith(
-        projectId,
-        "прод-лог",
-        "Новый инсайт",
-        "Описание",
-      ),
-    );
-    await waitFor(() => expect(orchdListInsightsMock).toHaveBeenCalledWith(null));
-  });
-
-  it("the create form is a no-op with an empty title", () => {
-    render(<InsightsList projectId={projectId} />);
-
-    fireEvent.click(screen.getByTestId("insight-create-submit"));
-
-    expect(orchdCreateInsightMock).not.toHaveBeenCalled();
   });
 
   it("an error from a mutating call surfaces via showToast", async () => {
