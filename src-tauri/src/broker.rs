@@ -62,6 +62,8 @@ pub const EV_ORCHD_INSIGHTS_CHANGED: &str = "orchd://insights-changed";
 pub const EV_ORCHD_TASKS_CHANGED: &str = "orchd://tasks-changed";
 /// Payload `{ scope, projectId? }`.
 pub const EV_ORCHD_RULESET_CHANGED: &str = "orchd://ruleset-changed";
+/// S4 knowledge graph (spec §3, appended — order FROZEN append-only). Payload `{ projectId }`.
+pub const EV_ORCHD_GRAPH_CHANGED: &str = "orchd://graph-changed";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -209,6 +211,10 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
         OrchdPush::RuleSetChanged { scope, project_id } => BrokerAction::Emit(
             EV_ORCHD_RULESET_CHANGED,
             serde_json::json!({ "scope": scope, "projectId": project_id }),
+        ),
+        OrchdPush::GraphChanged { project_id } => BrokerAction::Emit(
+            EV_ORCHD_GRAPH_CHANGED,
+            serde_json::json!({ "projectId": project_id }),
         ),
     }
 }
@@ -724,6 +730,22 @@ mod tests {
                 assert_eq!(event, EV_ORCHD_RULESET_CHANGED);
                 assert_eq!(payload["scope"], "global");
                 assert!(payload["projectId"].is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_graph_changed_maps_to_emit_with_camel_case_project_id_payload() {
+        let action = map_orchd_push(OrchdPush::GraphChanged {
+            project_id: "proj-1".to_string(),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_GRAPH_CHANGED);
+                assert_eq!(payload["projectId"], "proj-1");
+                // snake_case key must NOT leak through.
+                assert!(payload.get("project_id").is_none());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

@@ -26,7 +26,8 @@
 use std::sync::Arc;
 
 use bpa_orchd_proto::{
-    DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
+    DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEdge, GraphEdgeKind,
+    GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle, Insight,
     InsightStatus, OrchdRequest, OrchdResponse, PolicyRules, Project, RuleScope, RuleSetView,
     TaskSource, TaskStatus,
 };
@@ -687,6 +688,44 @@ fn expect_import_report(res: OrchdResponse) -> Result<ImportReport, CommandError
 fn expect_orchd_ack(res: OrchdResponse) -> Result<(), CommandError> {
     match res {
         OrchdResponse::Ack => Ok(()),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+// ── S4 knowledge-graph orchd response unwrappers (spec §3, appended) — mirrors the block above
+// exactly, one unwrapper per `OrchdResponse::Graph*`/`Neighborhood`/`GraphNodes` variant ─────────
+
+fn expect_graph_node(res: OrchdResponse) -> Result<GraphNode, CommandError> {
+    match res {
+        OrchdResponse::GraphNode(n) => Ok(n),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_graph_edge(res: OrchdResponse) -> Result<GraphEdge, CommandError> {
+    match res {
+        OrchdResponse::GraphEdge(e) => Ok(e),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_graph_view(res: OrchdResponse) -> Result<GraphView, CommandError> {
+    match res {
+        OrchdResponse::GraphView(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_neighborhood(res: OrchdResponse) -> Result<GraphNeighborhood, CommandError> {
+    match res {
+        OrchdResponse::Neighborhood(n) => Ok(n),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_graph_nodes(res: OrchdResponse) -> Result<Vec<GraphNode>, CommandError> {
+    match res {
+        OrchdResponse::GraphNodes(v) => Ok(v),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -1741,6 +1780,155 @@ pub async fn orchd_upgrade(state: State<'_, AppState>, app: AppHandle) -> Result
     let client = state.orchd.read().unwrap().clone();
     orchd_upgrade_core(client, &state.orchd_launchd).await?;
     app.restart();
+}
+
+// ── S4 knowledge-graph orchd #[tauri::command] surface (spec §3, appended — S4 T5) ────────────
+//
+// Same one-thin-command-per-verb shape as the block above, over the S4 `OrchdRequest::Graph*`
+// verbs (spec §3's frozen-append-only wire additions). `OrchdRequest::GraphDeleteNode`/
+// `GraphDeleteEdge` -> `OrchdResponse::Ack` mirror `orchd_delete_goal`'s `expect_orchd_ack` shape.
+
+#[tauri::command]
+pub async fn orchd_graph_add_node(
+    state: State<'_, AppState>,
+    project_id: String,
+    kind: GraphNodeKind,
+    label: String,
+    body: String,
+    pos_x: f64,
+    pos_y: f64,
+) -> Result<GraphNode, CommandError> {
+    expect_graph_node(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphAddNode {
+                project_id,
+                kind,
+                label,
+                body,
+                pos_x,
+                pos_y,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_update_node(
+    state: State<'_, AppState>,
+    id: String,
+    label: Option<String>,
+    body: Option<String>,
+) -> Result<GraphNode, CommandError> {
+    expect_graph_node(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphUpdateNode { id, label, body })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_move_node(
+    state: State<'_, AppState>,
+    id: String,
+    pos_x: f64,
+    pos_y: f64,
+) -> Result<GraphNode, CommandError> {
+    expect_graph_node(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphMoveNode { id, pos_x, pos_y })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_delete_node(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphDeleteNode { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_add_edge(
+    state: State<'_, AppState>,
+    source_node_id: String,
+    target_node_id: String,
+    kind: GraphEdgeKind,
+    label: String,
+) -> Result<GraphEdge, CommandError> {
+    expect_graph_edge(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphAddEdge {
+                source_node_id,
+                target_node_id,
+                kind,
+                label,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_delete_edge(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphDeleteEdge { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_list_project(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<GraphView, CommandError> {
+    expect_graph_view(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphListProject { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_neighborhood(
+    state: State<'_, AppState>,
+    node_id: String,
+    depth: u32,
+) -> Result<GraphNeighborhood, CommandError> {
+    expect_neighborhood(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphNeighborhood { node_id, depth })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_graph_search(
+    state: State<'_, AppState>,
+    query: String,
+    project_id: Option<String>,
+) -> Result<Vec<GraphNode>, CommandError> {
+    expect_graph_nodes(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphSearch { query, project_id })
+            .await?,
+    )
 }
 
 #[cfg(test)]
@@ -3729,5 +3917,93 @@ pub(crate) mod orchd_commands_over_stub_daemon {
 
         let read = super::read_import_file(file_path.to_str().unwrap()).unwrap();
         assert_eq!(read.len(), super::IMPORT_FILE_READ_CAP as usize);
+    }
+
+    // ── S4 knowledge-graph orchd_graph_* commands (spec §3, S4 T5) ─────────────────────────────
+    //
+    // Same rationale as `orchd_create_project_round_trips_through_real_orchd_client` /
+    // `orchd_invariant_error_response_becomes_command_error_daemon_invariant_end_to_end` above: the
+    // `#[tauri::command]` fns need a live `State<AppState>` (out of scope for a unit test), but each
+    // one's entire body is `expect_*(client.request(req).await?)` — these drive that exact shape
+    // directly against a real `OrchdClient` + stub daemon. `orchd_graph_add_node` stands in for all
+    // nine (identical shape); the `Invariant` error mapping is proven once, generically, exactly as
+    // the sessiond-domain test above proves it once via `ListProjects`.
+
+    #[tokio::test]
+    async fn orchd_graph_add_node_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::GraphAddNode {
+                project_id,
+                kind,
+                label,
+                body,
+                pos_x,
+                pos_y,
+            } => OrchdResponse::GraphNode(bpa_orchd_proto::GraphNode {
+                id: "node-1".into(),
+                project_id,
+                kind,
+                entity_type: None,
+                entity_id: None,
+                label,
+                body,
+                pos_x,
+                pos_y,
+                created_at: 0,
+                updated_at: 0,
+            }),
+            other => panic!("expected GraphAddNode, got {other:?}"),
+        })
+        .await;
+
+        let req = OrchdRequest::GraphAddNode {
+            project_id: "proj-1".into(),
+            kind: bpa_orchd_proto::GraphNodeKind::Concept,
+            label: "Label".into(),
+            body: "Body".into(),
+            pos_x: 10.0,
+            pos_y: 20.0,
+        };
+        let res = client.request(req).await.unwrap();
+        let node = expect_graph_node(res).unwrap();
+        assert_eq!(node.id, "node-1");
+        assert_eq!(node.project_id, "proj-1");
+        assert_eq!(node.label, "Label");
+        assert_eq!(node.body, "Body");
+        assert_eq!(node.pos_x, 10.0);
+        assert_eq!(node.pos_y, 20.0);
+        assert_eq!(node.kind, bpa_orchd_proto::GraphNodeKind::Concept);
+    }
+
+    #[tokio::test]
+    async fn orchd_graph_add_node_invariant_error_response_becomes_command_error_daemon_invariant()
+    {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Invariant,
+            message: "node label must not be empty".into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::GraphAddNode {
+                project_id: "proj-1".into(),
+                kind: bpa_orchd_proto::GraphNodeKind::Concept,
+                label: String::new(),
+                body: String::new(),
+                pos_x: 0.0,
+                pos_y: 0.0,
+            })
+            .await;
+        // OrchdClientError::Daemon is raised directly by OrchdClient::request (mirrors the
+        // sessiond-domain Invariant test above) — confirm the `From` impl reshapes it to
+        // `Daemon { code: "Invariant", .. }`, the spec §9-locked shape, for the S4 graph verbs too.
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Invariant");
+                assert_eq!(message, "node label must not be empty");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
     }
 }
