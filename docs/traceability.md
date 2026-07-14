@@ -151,31 +151,24 @@ retrieval API, and the `@xyflow/react` graph canvas — shipped `[0.5.0]`.
 | `ProjectPanel`'s 7th tab «Граф» renders `GraphCanvas` (mocked, as every other tab child) and selects correctly (§7) | `npx vitest run src/components/ProjectPanel.test.tsx` |
 | Store `graphByProject` slice: `refreshGraph(projectId)` replaces only that project's entry, a rejection surfaces via toast; `orchd.ts` graph wrapper name/arg parity; `onOrchdGraphChanged` binds unconditionally to `refreshGraph` (App mount effect, no loaded/active gating — matches the other `orchd://*-changed` bindings) (§7) | `npx vitest run src/store/store.test.ts src/ipc/orchd.test.ts src/ipc/events.test.ts` |
 | E2E — cross-project edge survives BOTH projects' daemon restarts (the S4 spec §8 DoD proof): create 2 projects, 1 node each, a cross-project edge, `OrchdShutdown{drain:true}` → relaunch → `GraphListProject` on EITHER project still shows the edge + the foreign node as an `external_nodes` ghost (§8) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 5, log prefix `[e2e-orchd] phase5 …`) |
-
-**Known gap (honestly flagged, not silently dropped):** the S4 spec §8 also called for extending
-orchd's `no_secrets_in_logs` test to plant a marker in a graph node's `label`/`body` and assert it
-never reaches the tracing log ("extend orchd's `no_secrets_in_logs` test (or its graph-covering
-sibling)"). That extension was **not** made — `crates/orchd/tests/no_secrets_in_logs.rs` still only
-covers RuleSet markdown content (`planted_ruleset_secrets_never_appear_in_logs`), unchanged since
-S3. Manual review of `graph.rs`/`socket_server.rs`'s graph dispatch arms finds no code path that
-logs a node's `label`/`body` today (the one `tracing::error!` in the `GraphAddEdge` handler logs
-only `edge_id`/`error`, never edge content), so there is no known live leak — but the discipline is
-untested for this surface, unlike every other content-bearing table. Tracked as `docs/backlog.md`
-BL-62.
+| No-secrets-in-logs: a graph node's `label`/`body` never reach the tracing log sink (§8 — the extension the spec called for "extend orchd's `no_secrets_in_logs` test (or its graph-covering sibling)"). Plants two distinct secret markers (one per field) on a real on-disk `Db`, drives `create_project` → `add_node` → `update_node` → `add_edge` → a duplicate `add_edge` (`Conflict`) → a self-loop `add_edge` on the same node (`Invariant`) → `delete_node`, flushes the real sink, asserts neither marker appears in the log file. RED-proven (BL-62 closure): a temporary deliberate leak inserted into the test driver made the assertion fail before removal, confirming the test genuinely catches a leak (§8) | `cargo test -p bpa-orchd --test no_secrets_in_logs_graph planted_graph_node_secrets_never_appear_in_logs` |
 
 ## Uncovered rows
 
 None in the S0+S1/S2/S3 rows above — every §14.2 row (and every S2/S3 contract row) resolves to at
-least one real, currently-passing test. **One row is open in the S4 section above:** the graph
-no-secrets-in-logs coverage (BL-62, "Known gap" note directly above) — every OTHER S4 contract row
-is covered.
+least one real, currently-passing test. **None in the S4 section above either:** the graph
+no-secrets-in-logs coverage (formerly BL-62, "Known gap") is now covered by the row directly above
+— every S4 contract row resolves to at least one real, currently-passing test.
 
 ## Test totals — current (S4, `[0.5.0]`, 2026-07-14)
 
-- Rust workspace (`cargo test --workspace`): **726 tests**, 0 failed (re-measured this pass;
-  per-binary breakdown from the same run: `bpa-daemon-core` lib 29 [unchanged — S4 does not touch
+- Rust workspace (`cargo test --workspace`): **727 tests**, 0 failed (BL-62 follow-up: +1 vs. the
+  726 recorded below at S4's `[0.5.0]` release — the new `bpa-orchd` `no_secrets_in_logs_graph`
+  binary, `planted_graph_node_secrets_never_appear_in_logs`; every other per-crate count below is
+  unchanged by that follow-up. Original per-binary breakdown from the `[0.5.0]` measurement pass:
+  `bpa-daemon-core` lib 29 [unchanged — S4 does not touch
   daemon-core]; `bpa-orchd` lib 211 + `boot_integration` 4 + `dispatch_integration` 17 +
-  `no_secrets_in_logs` 1; `bpa-orchd-proto` `roundtrip` 11 + `ts_export` 13; `bpa-paths` lib 18
+  `no_secrets_in_logs` 1 (+ `no_secrets_in_logs_graph` 1 as of the BL-62 follow-up); `bpa-orchd-proto` `roundtrip` 11 + `ts_export` 13; `bpa-paths` lib 18
   [unchanged]; `bpa-protocol` lib 1 + `cbor_frame_generic` 7 + `framing` 7 + `preamble` 7 +
   `roundtrip` 8 + `ts_export` 7 [unchanged — S4 touches no sessiond/protocol code]; `bpa-sessiond`
   lib 155 + `boot_integration` 4 + `no_secrets_in_logs` 1 + `rehydrate_attach` 1 + `skeleton` 1

@@ -331,7 +331,14 @@ impl Db {
     /// DDL's atomic `(kind='entity_ref') = (entity_type/entity_id set)` CHECK from firing as a
     /// raw SQL error for a caller that forgot to also supply `entity_type`/`entity_id`). Archived
     /// project ⇒ `Invariant`; unknown project ⇒ `NotFound`.
-    pub(crate) fn add_node(
+    ///
+    /// `pub` (bumped from `pub(crate)` closing BL-62, S4 §8): the wire dispatch in
+    /// `socket_server.rs` has exposed this verb over the socket since T10 anyway, so the
+    /// crate-private restriction was never a real security boundary; the bump lets
+    /// `tests/no_secrets_in_logs_graph.rs` drive it directly, mirroring how
+    /// `persistence::Db`'s ruleset/project methods are already `pub` for the identical
+    /// no-secrets-in-logs test-support reason.
+    pub fn add_node(
         &self,
         project_id: &str,
         kind: GraphNodeKind,
@@ -411,7 +418,9 @@ impl Db {
 
     /// `GraphUpdateNode` (S4 spec §5): `label`/`body` left untouched when `None`. Unknown id ⇒
     /// `NotFound`; archived project (via the node's own project) ⇒ `Invariant`.
-    pub(crate) fn update_node(
+    ///
+    /// `pub` (bumped from `pub(crate)` closing BL-62, S4 §8) — see [`Db::add_node`]'s note.
+    pub fn update_node(
         &self,
         id: &str,
         label: Option<&str>,
@@ -457,7 +466,9 @@ impl Db {
 
     /// `GraphDeleteNode` (S4 spec §5): FK `ON DELETE CASCADE` removes incident edges
     /// automatically (D4). Unknown id ⇒ `NotFound`; archived project ⇒ `Invariant`.
-    pub(crate) fn delete_node(&self, id: &str) -> Result<(), OrchdPersistError> {
+    ///
+    /// `pub` (bumped from `pub(crate)` closing BL-62, S4 §8) — see [`Db::add_node`]'s note.
+    pub fn delete_node(&self, id: &str) -> Result<(), OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
         let project_id = node_project_id(&tx, id)?;
         ensure_project_active(&tx, &project_id)?;
@@ -473,7 +484,9 @@ impl Db {
     /// `Conflict` (unique index `graph_edge_uniq`); unknown endpoint ⇒ `NotFound`; archived guard
     /// rejects if EITHER endpoint's project is archived (`Invariant`) — cross-project edges are
     /// otherwise allowed (D4).
-    pub(crate) fn add_edge(
+    ///
+    /// `pub` (bumped from `pub(crate)` closing BL-62, S4 §8) — see [`Db::add_node`]'s note.
+    pub fn add_edge(
         &self,
         source_node_id: &str,
         target_node_id: &str,
