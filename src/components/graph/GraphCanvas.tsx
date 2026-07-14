@@ -206,8 +206,14 @@ function nodeCardStyle(data: GraphNodeData, selected: boolean | undefined): CSSP
 /** Renderer for every non-`entityRef` `GraphNodeKind` (concept/fact/artifact/decision/note) —
  * `graphMapping.ts`'s module doc documents this exact split ("T7 registers an entityRef-specific
  * xyflow node renderer... while every other kind falls through to a shared 'domain node'
- * renderer"). */
-function DomainNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.Element {
+ * renderer").
+ *
+ * `export`ed (final review, S4 D3/D10) purely so `nodeRenderers.test.tsx` can mount it directly
+ * through a REAL (unmocked) `<ReactFlow nodeTypes={{...}}>` — this file's own `GraphCanvas.test.tsx`
+ * stubs `<ReactFlow>` wholesale and therefore never exercises `nodeTypes`, leaving the
+ * match-highlight/orphan/ghost render output untested. Pure presentational component: no closure
+ * over `GraphCanvas`'s local state, so exporting it is a plain visibility change, not a refactor. */
+export function DomainNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.Element {
   return (
     <div style={nodeCardStyle(data, selected)}>
       <Handle type="target" position={Position.Top} />
@@ -220,8 +226,10 @@ function DomainNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.Element {
 
 /** Renderer for `entityRef` nodes: a soft reference to a goal/idea/insight/task. An orphaned
  * reference (D3 — `data.isOrphan`, set by the server's read-time resolver) renders the locked
- * «источник удалён» copy instead of the (now meaningless) stale label. */
-function EntityRefNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.Element {
+ * «источник удалён» copy instead of the (now meaningless) stale label.
+ *
+ * `export`ed — see [`DomainNode`]'s doc comment above for why. */
+export function EntityRefNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.Element {
   return (
     <div style={nodeCardStyle(data, selected)}>
       <Handle type="target" position={Position.Top} />

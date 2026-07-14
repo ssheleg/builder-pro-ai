@@ -23,8 +23,23 @@ class MockResizeObserver {
     // Real ResizeObserver reports asynchronously — xyflow's own recipe defers via a macrotask so
     // effects that read the just-observed size on the next tick see a value, mirroring real
     // browser timing closely enough for xyflow's internal measurement effects to settle.
+    //
+    // `contentRect` (final review, S4 D3/D10): added because `nodeRenderers.test.tsx` is the
+    // first consumer of this shim to mount a REAL (unmocked) `<ReactFlow>` — `GraphCanvas.test.tsx`
+    // stubs `<ReactFlow>` entirely, so xyflow's own internal `XYPanZoom` extent-tracking
+    // `ResizeObserver` (which reads `entry.contentRect.width/height` to cache the pane's zoom
+    // extent, `@xyflow/system`'s `XYPanZoom`) never actually ran against this mock before. Without
+    // `contentRect` here that internal observer's callback throws
+    // ("Cannot read properties of undefined (reading 'width')") on the deferred macrotask, which
+    // vitest reports as an unhandled exception. `target.getBoundingClientRect()` is what real
+    // `ResizeObserverEntry.contentRect` is derived from; jsdom returns an all-zero `DOMRect` (no
+    // layout engine) but with every property defined, which is all xyflow's internal code needs.
     setTimeout(() => {
-      this.callback([{ target } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      const contentRect = target.getBoundingClientRect();
+      this.callback(
+        [{ target, contentRect } as unknown as ResizeObserverEntry],
+        this as unknown as ResizeObserver,
+      );
     }, 0);
   }
 
