@@ -227,6 +227,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           void s.refreshIdeas();
           void s.refreshInsights();
           void s.refreshRuleset(`project:${projectId}`);
+          // S4 §7 T7 (T6 review must-not-drop item (b)): the graph tab mirrors every sibling
+          // domain surface's reconnect-refresh exactly — an open project panel's Граф tab must
+          // not stay stale after an orchd reconnect any more than Цели/Задачи/Идеи/Инсайты do.
+          void s.refreshGraph(projectId);
         }
       }),
     );

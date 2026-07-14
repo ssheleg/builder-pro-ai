@@ -17,11 +17,12 @@ import { TasksList } from "./TasksList";
 import { InsightsList } from "./InsightsList";
 import { RulesetPanel } from "./RulesetPanel";
 import { OrchdDownBanner } from "./OrchdDownBanner";
+import { GraphCanvas } from "./graph/GraphCanvas";
 import { theme } from "../theme";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
-type TabKey = "overview" | "goals" | "ideas" | "tasks" | "insights" | "rules";
+type TabKey = "overview" | "goals" | "ideas" | "tasks" | "insights" | "rules" | "graph";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "overview", label: "Обзор" },
@@ -30,6 +31,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "tasks", label: "Задачи" },
   { key: "insights", label: "Инсайты" },
   { key: "rules", label: "Правила" },
+  { key: "graph", label: "Граф" },
 ];
 
 const panelStyle: CSSProperties = {
@@ -110,7 +112,8 @@ function linkedWorkspaceIds(projects: { workspaceIds: string[] }[]): Set<string>
 }
 
 /**
- * Project workspace/detail panel (S3 spec §10, task-18). Six tabs; ONE is mounted at a time
+ * Project workspace/detail panel (S3 spec §10, task-18; S4 §7 T7 added the 7th «Граф» tab). Seven
+ * tabs; ONE is mounted at a time
  * (unmounting the others, not just hiding them — cheapest way to keep each T14-T17 component's own
  * mount-fetch effect honest about "did I already load this project's data").
  *
@@ -136,9 +139,9 @@ function linkedWorkspaceIds(projects: { workspaceIds: string[] }[]): Set<string>
  *
  * Honest degradation (spec §10): the shared `<OrchdDownBanner/>` renders above the tab bar
  * whenever the store's `orchdDown` is `true` — this is the panel-level half of "every domain
- * surface shows the banner"; each of the five tab bodies (`GoalTree`/`IdeasList`/`TasksList`/
- * `InsightsList`/`RulesetPanel`) independently disables its own mutating controls off the same
- * flag.
+ * surface shows the banner"; each of the six tab bodies (`GoalTree`/`IdeasList`/`TasksList`/
+ * `InsightsList`/`RulesetPanel`/`GraphCanvas`) independently disables its own mutating controls
+ * off the same flag.
  */
 export function ProjectPanel(props: { projectId: string }): JSX.Element {
   const { projectId } = props;
@@ -422,6 +425,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
         {activeTab === "tasks" && <TasksList projectId={projectId} />}
         {activeTab === "insights" && <InsightsList projectId={projectId} />}
         {activeTab === "rules" && <RulesetPanel scope="project" projectId={projectId} />}
+        {activeTab === "graph" && <GraphCanvas projectId={projectId} />}
       </div>
     </div>
   );

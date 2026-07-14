@@ -21,6 +21,9 @@ vi.mock("./RulesetPanel", () => ({
     <div data-testid="marker-rules">{`${props.scope}:${String(props.projectId)}`}</div>
   ),
 }));
+vi.mock("./graph/GraphCanvas", () => ({
+  GraphCanvas: (props: { projectId: string }) => <div data-testid="marker-graph">{props.projectId}</div>,
+}));
 
 const orchdListGoalsMock = vi.fn();
 const orchdListTasksMock = vi.fn();
@@ -213,9 +216,24 @@ describe("ProjectPanel", () => {
     expect(screen.getByTestId("marker-rules").textContent).toBe("project:p1");
     expect(screen.queryByTestId("marker-insights")).toBeNull();
 
+    fireEvent.click(screen.getByTestId("project-tab-graph"));
+    expect(screen.getByTestId("marker-graph").textContent).toBe("p1");
+    expect(screen.queryByTestId("marker-rules")).toBeNull();
+
     fireEvent.click(screen.getByTestId("project-tab-overview"));
     expect(screen.getByTestId("project-overview")).toBeTruthy();
-    expect(screen.queryByTestId("marker-rules")).toBeNull();
+    expect(screen.queryByTestId("marker-graph")).toBeNull();
+  });
+
+  it('renders the «Граф» tab button and selecting it shows the GraphCanvas stub', () => {
+    render(<ProjectPanel projectId="p1" />);
+    const tabButton = screen.getByTestId("project-tab-graph");
+    expect(tabButton.textContent).toBe("Граф");
+    expect(screen.queryByTestId("marker-graph")).toBeNull();
+
+    fireEvent.click(tabButton);
+
+    expect(screen.getByTestId("marker-graph")).toBeTruthy();
   });
 
   it("an unresolvable workspace id renders the «недоступен» chip; Отвязать calls orchdRemoveProjectWorkspace", async () => {

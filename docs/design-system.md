@@ -96,6 +96,8 @@ defect. New tokens are added to `theme.ts` first, doc second, usage third.
 | **File-state banner** | info banner (не amber): ExternallyModified → [Принять]; Missing → [Создать заново] |
 | **Project group row** | bold project header + nested workspace rows; «Без проекта» group last |
 | **Quick-capture overlay** | ⌘K portal; title+body+project select; Enter submits; Esc closes |
+| **Graph node card** | `bgElevated` + 1px `border`, radius 6, mono-uppercase kind label above a 12px body-face title; an `entityRef` node reads «ref · {entityType}» instead of its own kind and shows «источник удалён» in place of the label when orphaned (D3); an `isExternal` (cross-project ghost) node is dimmed (60% opacity) with a dashed border — read-only, click navigates to its own project (`openProject`), never mutated from the panel it's dimmed into; orphaned nodes get a `statusExited` border instead of the default; a search-matched node gets a 2px `accent` outer ring, never a fill change |
+| **Graph toolbar** | one row above the canvas: kind `<select>` (every `GraphNodeKind` except `entityRef` — never hand-created) + [Добавить] primary button; [Удалить выбранное] secondary button acting on the canvas's own multi-select; a right-aligned search `<input>`, debounced, highlighting matches via the match-ring above — never a separate results list; every mutating control (kind select, [Добавить], [Удалить выбранное]) is `disabled` while `orchdDown`, mirroring `RulesetPanel`'s degradation contract exactly — the search input stays live (it's a read) |
 
 Buttons: primary = accent fill (one per view maximum), secondary = 1px border ghost; destructive
 = red border ghost with confirm. Toggles, not checkboxes, for enable/disable.

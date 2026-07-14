@@ -62,6 +62,17 @@ describe("graphMapping", () => {
       expect(flowNodes.find((n) => n.id === "b")?.data.isOrphan).toBe(true);
     });
 
+    it("carries the domain node's own projectId through in data.projectId (T7 ghost-click nav seam)", () => {
+      const view: GraphView = {
+        nodes: [node({ id: "local1", projectId: "p1" })],
+        edges: [],
+        externalNodes: [node({ id: "ext1", projectId: "p-other" })],
+      };
+      const flowNodes = toFlowNodes(view);
+      expect(flowNodes.find((n) => n.id === "local1")?.data.projectId).toBe("p1");
+      expect(flowNodes.find((n) => n.id === "ext1")?.data.projectId).toBe("p-other");
+    });
+
     it("carries entityType/entityId through for an entityRef node, and leaves them undefined otherwise", () => {
       const view: GraphView = {
         ...emptyView,

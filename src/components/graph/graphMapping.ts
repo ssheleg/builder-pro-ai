@@ -35,6 +35,12 @@ export interface FlowNode {
     /** Passthrough of `GraphNode.isOrphan` (D3 soft-ref orphan — set by the read-time resolver,
      * never computed here). */
     isOrphan: boolean;
+    /** Passthrough of `GraphNode.projectId` — the domain node's OWN project, verbatim. For an
+     * `isExternal: true` ghost node this is the FOREIGN project it actually lives in, which is
+     * exactly what T7's ghost-click navigation (`openProject(node.data.projectId)`) needs; a
+     * local node's `projectId` here is simply the panel's own project, carried through for
+     * symmetry even though T7 doesn't need it in that case. */
+    projectId: string;
   };
 }
 
@@ -92,6 +98,7 @@ export function toFlowNodes(view: GraphView): FlowNode[] {
       entityId: node.entityId ?? undefined,
       isExternal,
       isOrphan: node.isOrphan,
+      projectId: node.projectId,
     },
   });
 

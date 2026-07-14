@@ -1159,7 +1159,7 @@ describe("S3 T13: orchd domain event wiring", () => {
     expect(useAppStore.getState().projects).toHaveLength(1);
   });
 
-  it("orchd://up with an open project also refreshes that project's goals/tasks/ideas/insights/ruleset", async () => {
+  it("orchd://up with an open project also refreshes that project's goals/tasks/ideas/insights/ruleset/graph", async () => {
     orchdGetRulesetMock.mockResolvedValue({
       rule: {
         id: "r1", scope: "project", projectId: "p1", mdPath: "/x", mdHash: "h",
@@ -1178,6 +1178,7 @@ describe("S3 T13: orchd domain event wiring", () => {
     orchdListIdeasMock.mockClear();
     orchdListInsightsMock.mockClear();
     orchdGetRulesetMock.mockClear();
+    orchdGraphListProjectMock.mockClear();
 
     await act(async () => {
       cbs.orchdUp(null);
@@ -1188,6 +1189,9 @@ describe("S3 T13: orchd domain event wiring", () => {
     expect(orchdListIdeasMock).toHaveBeenCalledWith(null);
     expect(orchdListInsightsMock).toHaveBeenCalledWith(null);
     expect(orchdGetRulesetMock).toHaveBeenCalledWith("project", "p1");
+    // T6 review must-not-drop item (b): the Граф tab must not stay stale after a reconnect any
+    // more than the sibling domain surfaces above do.
+    expect(orchdGraphListProjectMock).toHaveBeenCalledWith("p1");
   });
 
   it("orchd://up with NO project open refreshes only the project list (no per-project fetches)", async () => {
@@ -1196,6 +1200,7 @@ describe("S3 T13: orchd domain event wiring", () => {
     });
     orchdListGoalsMock.mockClear();
     orchdListTasksMock.mockClear();
+    orchdGraphListProjectMock.mockClear();
 
     await act(async () => {
       cbs.orchdUp(null);
@@ -1203,6 +1208,7 @@ describe("S3 T13: orchd domain event wiring", () => {
 
     expect(orchdListGoalsMock).not.toHaveBeenCalled();
     expect(orchdListTasksMock).not.toHaveBeenCalled();
+    expect(orchdGraphListProjectMock).not.toHaveBeenCalled();
   });
 
   it("orchd://incompatible sets orchdIncompatible (never auto-clears)", async () => {
