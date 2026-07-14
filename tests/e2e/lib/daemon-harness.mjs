@@ -236,10 +236,30 @@ function cborWriteHead(out, majorType, argument) {
   }
 }
 
+/** Sentinel key (a `Symbol`, so it can never collide with a real payload's own string-keyed
+ * fields and is invisible to `Object.keys()`/the generic map-encode branch below) used by
+ * {@link cborFloat} to force a JS number that happens to be mathematically whole (e.g. `0`,
+ * `100`) to still encode as an IEEE-754 double rather than a CBOR integer. */
+const CBOR_FORCE_FLOAT = Symbol("cborForceFloat");
+
+/** Wrap a JS `number` so {@link cborEncode} always emits it as a CBOR float (major type 7),
+ * never as a CBOR integer (major type 0/1) — needed for any Rust `f64` wire field whose test
+ * value happens to be a whole number: plain `encodeValue` picks the CBOR type from
+ * `Number.isInteger(value)`, but `ciborium`'s derived `Deserialize` for `f64` strictly rejects an
+ * integer-typed CBOR value ("invalid type: integer `0`, expected float") — it does NOT coerce.
+ * E.g. `GraphAddNode.pos_x`/`pos_y` (S4 spec §3, `crates/orchd-proto/src/lib.rs`). */
+export function cborFloat(n) {
+  if (typeof n !== "number") {
+    throw new Error(`cborFloat: expected a number, got ${typeof n}`);
+  }
+  return { [CBOR_FORCE_FLOAT]: n };
+}
+
 /** Encode a JS value to CBOR bytes. Supports: number (as uint/negint; use {u64: n|bigint} or
  * {bytesArray: number[]} wrapper types below for disambiguation where needed), string, boolean,
  * null/undefined (-> CBOR null), plain array (-> CBOR array), plain object (-> CBOR map, insertion
- * order, string keys only). */
+ * order, string keys only). A number wrapped via {@link cborFloat} always encodes as an IEEE-754
+ * double, even when mathematically whole. */
 export function cborEncode(value) {
   const out = [];
   encodeValue(out, value);
@@ -261,6 +281,13 @@ function encodeValue(out, value) {
     } else {
       cborWriteHead(out, MT_NEGINT, -value - 1n);
     }
+    return;
+  }
+  if (typeof value === "object" && value !== null && CBOR_FORCE_FLOAT in value) {
+    out.push((MT_SIMPLE << 5) | 27);
+    const buf = Buffer.alloc(8);
+    buf.writeDoubleBE(value[CBOR_FORCE_FLOAT], 0);
+    for (const b of buf) out.push(b);
     return;
   }
   if (typeof value === "number") {

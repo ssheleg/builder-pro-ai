@@ -1,14 +1,18 @@
 #!/usr/bin/env node
-// E2E orchd survive-restart + export/import round-trip harness (S3 spec §12).
+// E2E orchd survive-restart + export/import round-trip + cross-project-graph harness
+// (S3 spec §12, S4 spec §8).
 //
-// Proves the S3 roadmap DoD entirely at the daemon layer, over the real Hop-B `bpa-orchd` wire
+// Proves the S3+S4 roadmap DoD entirely at the daemon layer, over the real Hop-B `bpa-orchd` wire
 // protocol (spec §4.2), without driving the WKWebView / Tauri GUI:
 //
 //   boot orchd on a temp socket -> preamble handshake [1,1] -> create a project + goal tree +
 //   idea + task -> OrchdShutdown{drain:true} -> relaunch the SAME binary against the SAME state
 //   dir -> data intact -> ExportAll -> shutdown -> delete orchd.db* -> relaunch (fresh schema v1)
 //   -> ImportBundle(the earlier export) -> ExportAll again -> re-export equals the original
-//   modulo exportedAt (+ the one documented boot-reseed exception below).
+//   modulo exportedAt (+ the one documented boot-reseed exception below) -> create 2 projects ->
+//   add a node to each -> add a CROSS-PROJECT edge between them -> OrchdShutdown{drain:true} ->
+//   relaunch -> GraphListProject(P1) still shows the edge AND P2's node surfaces as an
+//   `externalNodes` ghost (S4 spec §8 DoD: "a cross-project link survives BOTH projects' restart").
 //
 // Exit code 0 = full pass. Any failed assertion throws, is logged with a diagnostic message, and
 // the process exits non-zero. No phase is skipped or weakened to pass vacuously.
@@ -40,6 +44,7 @@ import {
   preambleHandshake,
   cborEncode,
   cborDecode,
+  cborFloat,
   spawnDaemon,
   pidAlive,
   killProcessGroup,
@@ -147,6 +152,32 @@ function encodeOrchdRequest(req) {
       return { OrchdShutdown: { drain: !!req.drain } };
     case "ImportBundle":
       return { ImportBundle: { json: req.json } };
+    // S4 knowledge graph (spec §3/§8) — only the 3 verbs phase5 actually drives.
+    case "GraphAddNode":
+      return {
+        GraphAddNode: {
+          project_id: req.projectId,
+          kind: req.kind, // already the wire string (e.g. "concept" — see GraphNodeKind)
+          label: req.label,
+          body: req.body,
+          // `pos_x`/`pos_y` are Rust `f64` — `cborFloat` forces a CBOR float encoding even when
+          // the test's coordinate happens to be a whole number (ciborium's `f64` deserialize
+          // rejects a CBOR integer outright rather than coercing it).
+          pos_x: cborFloat(req.posX),
+          pos_y: cborFloat(req.posY),
+        },
+      };
+    case "GraphAddEdge":
+      return {
+        GraphAddEdge: {
+          source_node_id: req.sourceNodeId,
+          target_node_id: req.targetNodeId,
+          kind: req.kind, // already the wire string (e.g. "relates" — see GraphEdgeKind)
+          label: req.label,
+        },
+      };
+    case "GraphListProject":
+      return { GraphListProject: { project_id: req.projectId } };
     default:
       throw new Error(`encodeOrchdRequest: unsupported request type ${req.t}`);
   }
@@ -213,6 +244,13 @@ function decodeOrchdResponse(value) {
     case "Tasks":
     case "RuleSetView":
     case "ExportJson":
+    // S4 knowledge graph (spec §3/§8) — `GraphNode`/`GraphEdge` are newtype variants over
+    // camelCase-serde entity structs (like `Project`/`Goal` above); `GraphView` is a newtype over
+    // `{ nodes, edges, externalNodes }`, same camelCase convention — no extra per-field mapping
+    // needed, `inner` already decodes with those exact JS keys.
+    case "GraphNode":
+    case "GraphEdge":
+    case "GraphView":
       return { t: variant, value: inner };
     case "ImportReport":
       return {
@@ -254,6 +292,10 @@ function decodeOrchdPush(value) {
       return { t: "TasksChanged", projectId: inner.project_id };
     case "RuleSetChanged":
       return { t: "RuleSetChanged", scope: inner.scope, projectId: inner.project_id ?? null };
+    // S4 knowledge graph (spec §3/§8): `GraphChanged { project_id }` — same struct-variant /
+    // snake_case-on-the-wire convention as `GoalsChanged`/`TasksChanged` above.
+    case "GraphChanged":
+      return { t: "GraphChanged", projectId: inner.project_id };
     default:
       throw new Error(`decodeOrchdPush: unknown OrchdPush variant ${variant}`);
   }
@@ -635,6 +677,123 @@ async function main() {
       "exportedAt (+ the documented global-ruleset boot-reseed id/createdAt exception)",
   );
   log("phase4 OK: re-ExportAll deep-equals the original export (modulo exportedAt)");
+
+  // ---- phase 5: cross-project graph edge survives restart (S4 spec §8 DoD) ----
+  // Create two projects P1/P2, add one node to each, add a CROSS-PROJECT edge N1(P1)->N2(P2),
+  // OrchdShutdown{drain:true} -> relaunch (mirrors phase1/phase2's create-then-restart shape, over
+  // the graph verbs instead) -> GraphListProject(P1) must still return the edge, with its
+  // endpoints intact, AND N2 must appear in `externalNodes` — proving the cross-project link
+  // survives BOTH projects' restart, not merely same-project persistence (already proven by
+  // phase2).
+  log(
+    "phase5: 2×CreateProject + 2×GraphAddNode + cross-project GraphAddEdge -> restart -> " +
+      "GraphListProject",
+  );
+
+  const p1Resp = await orchdRequest(conn, {
+    t: "CreateProject",
+    name: "E2E Graph Project 1",
+    description: "created by orchd-survive.mjs (phase5, cross-project graph)",
+    workspaceIds: ["ws-e2e-orchd-graph-1"],
+  });
+  assert.equal(p1Resp.t, "Project", `CreateProject(P1) -> ${JSON.stringify(p1Resp)}`);
+  const p1Id = p1Resp.value.id;
+
+  const p2Resp = await orchdRequest(conn, {
+    t: "CreateProject",
+    name: "E2E Graph Project 2",
+    description: "created by orchd-survive.mjs (phase5, cross-project graph)",
+    workspaceIds: ["ws-e2e-orchd-graph-2"],
+  });
+  assert.equal(p2Resp.t, "Project", `CreateProject(P2) -> ${JSON.stringify(p2Resp)}`);
+  const p2Id = p2Resp.value.id;
+
+  const n1Resp = await orchdRequest(conn, {
+    t: "GraphAddNode",
+    projectId: p1Id,
+    kind: "concept",
+    label: "N1 (P1)",
+    body: "node in project 1, e2e phase5",
+    posX: 0,
+    posY: 0,
+  });
+  assert.equal(n1Resp.t, "GraphNode", `GraphAddNode(P1) -> ${JSON.stringify(n1Resp)}`);
+  const n1Id = n1Resp.value.id;
+  assert.equal(n1Resp.value.projectId, p1Id, "N1 must belong to P1");
+
+  const n2Resp = await orchdRequest(conn, {
+    t: "GraphAddNode",
+    projectId: p2Id,
+    kind: "concept",
+    label: "N2 (P2)",
+    body: "node in project 2, e2e phase5",
+    posX: 100,
+    posY: 100,
+  });
+  assert.equal(n2Resp.t, "GraphNode", `GraphAddNode(P2) -> ${JSON.stringify(n2Resp)}`);
+  const n2Id = n2Resp.value.id;
+  assert.equal(n2Resp.value.projectId, p2Id, "N2 must belong to P2");
+
+  const edgeResp = await orchdRequest(conn, {
+    t: "GraphAddEdge",
+    sourceNodeId: n1Id,
+    targetNodeId: n2Id,
+    kind: "relates",
+    label: "cross-project link (e2e phase5)",
+  });
+  assert.equal(edgeResp.t, "GraphEdge", `GraphAddEdge(N1->N2) -> ${JSON.stringify(edgeResp)}`);
+  const edgeId = edgeResp.value.id;
+  assert.equal(edgeResp.value.sourceNodeId, n1Id, "edge sourceNodeId must be N1");
+  assert.equal(edgeResp.value.targetNodeId, n2Id, "edge targetNodeId must be N2");
+
+  log(
+    `phase5: created P1 ${p1Id}, P2 ${p2Id}, N1 ${n1Id}, N2 ${n2Id}, cross-project edge ${edgeId}`,
+  );
+
+  await shutdownAndWaitExit(conn);
+  log(`phase5 OK: orchd (pid ${cleanup.daemonPid}) process exited (pre-graph-restart)`);
+
+  conn = await bootAndConnect();
+  assert.equal(
+    conn.chosenVersion,
+    1,
+    `post-graph-restart preamble handshake negotiated unexpected version: ${JSON.stringify(conn)}`,
+  );
+
+  const viewResp = await orchdRequest(conn, { t: "GraphListProject", projectId: p1Id });
+  assert.equal(viewResp.t, "GraphView", `GraphListProject(P1) -> ${JSON.stringify(viewResp)}`);
+  const view = viewResp.value;
+
+  const rehydratedN1 = view.nodes.find((n) => n.id === n1Id);
+  assert.ok(
+    rehydratedN1,
+    `N1 ${n1Id} lost from P1's own node list across orchd restart (nodes: ` +
+      `${JSON.stringify(view.nodes.map((n) => n.id))})`,
+  );
+
+  const rehydratedEdge = view.edges.find((e) => e.id === edgeId);
+  assert.ok(
+    rehydratedEdge,
+    `cross-project edge ${edgeId} lost from P1's GraphView across orchd restart (edges: ` +
+      `${JSON.stringify(view.edges.map((e) => e.id))})`,
+  );
+  assert.equal(rehydratedEdge.sourceNodeId, n1Id, "rehydrated edge lost its sourceNodeId (N1)");
+  assert.equal(rehydratedEdge.targetNodeId, n2Id, "rehydrated edge lost its targetNodeId (N2)");
+
+  const rehydratedExternalN2 = view.externalNodes.find((n) => n.id === n2Id);
+  assert.ok(
+    rehydratedExternalN2,
+    `N2 ${n2Id} (P2, the cross-project edge's foreign endpoint) did not surface in P1's ` +
+      `externalNodes across orchd restart (externalNodes: ` +
+      `${JSON.stringify(view.externalNodes.map((n) => n.id))})`,
+  );
+  assert.equal(
+    rehydratedExternalN2.projectId,
+    p2Id,
+    "external ghost node must still report its OWN project id (P2)",
+  );
+
+  log("phase5 OK: cross-project graph edge survived restart");
 
   log("ALL PHASES PASSED");
 }
