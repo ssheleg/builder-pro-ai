@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/protocol", "crates/paths", "crates/daemon-core", "crates/sessiond", "crates/orchd-proto", "crates/orchd"]
+members = ["src-tauri", "crates/protocol", "crates/paths", "crates/daemon-core", "crates/sessiond", "crates/orchd-proto", "crates/orchd", "crates/secrets"]
 
 [workspace.package]
 edition = "2021"
@@ -17,6 +17,7 @@ bpa-protocol = { path = "crates/protocol" }
 bpa-paths = { path = "crates/paths" }
 bpa-daemon-core = { path = "crates/daemon-core" }
 bpa-orchd-proto = { path = "crates/orchd-proto" }
+bpa-secrets = { path = "crates/secrets" }
 
 # Shared pins (spec §3). Owned individually by member crates via `workspace = true`.
 serde = { version = "1", features = ["derive"] }
