@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 
 use bpa_daemon_core::singleton::check_peer_cred;
 use bpa_orchd_proto::{
-    encode_orchd_frame, DomainTask, Goal, Idea, Insight, OrchdErrorCode, OrchdFrame,
+    encode_orchd_frame, DomainTask, Goal, GraphNode, Idea, Insight, OrchdErrorCode, OrchdFrame,
     OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Project, RuleScope, RuleSet,
     RuleSetView, ORCHD_DAEMON_MAX_VERSION, ORCHD_DAEMON_MIN_VERSION,
 };
@@ -497,6 +497,57 @@ fn task_project_id(db: &Db, id: &str) -> Result<String, OrchdPersistError> {
         .optional()
         .map_err(OrchdPersistError::from)?
         .ok_or(OrchdPersistError::NotFound)
+}
+
+/// Broadcasts `GraphChanged` once per DISTINCT project id in `project_ids` (S4 spec §6: "every
+/// affected project, deduped") — the single fan-out point every mutating graph verb's dispatch
+/// arm below funnels through, so the dedup rule lives in exactly one place rather than being
+/// re-implemented per verb.
+fn broadcast_graph_changed(
+    broadcaster: &Broadcaster,
+    project_ids: impl IntoIterator<Item = String>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    for project_id in project_ids {
+        if seen.insert(project_id.clone()) {
+            broadcaster.broadcast(OrchdFrame::Push(OrchdPush::GraphChanged { project_id }));
+        }
+    }
+}
+
+/// Shared reply/push shape for `GraphUpdateNode`/`GraphMoveNode` (S4 spec §6): neither verb
+/// touches the node's incident edges, so the affected-project set is
+/// `node_project_ids_reachable(id)` — the node's own project PLUS every foreign project it's
+/// reachable into via an incident edge (the node shows up there as an `external_nodes` ghost, so
+/// that project's `GraphListProject` view must be invalidated too). Read AFTER the mutation
+/// (unlike the delete verbs, which must read BEFORE) — update/move never changes the node's own
+/// project or its incident edges, so the reachable set is identical either way, and reading here
+/// lets this reuse the SAME `db` guard the mutation itself already holds.
+fn respond_graph_node_reachable(
+    db: &Db,
+    result: Result<GraphNode, OrchdPersistError>,
+    broadcaster: &Broadcaster,
+) -> OrchdResponse {
+    match result {
+        Ok(node) => {
+            let project_ids = db.node_project_ids_reachable(&node.id).unwrap_or_else(|e| {
+                // Unreachable in practice: `node` was JUST successfully mutated under this same
+                // `db` guard, and the single `Arc<Mutex<Db>>` serializes every request, so nothing
+                // could have deleted it in between. Degrade honestly rather than dropping the
+                // whole reply: log and fall back to the node's own project only.
+                tracing::error!(
+                    node_id = %node.id,
+                    error = %e,
+                    "node_project_ids_reachable failed immediately after a successful node \
+                     mutation; falling back to the node's own project only"
+                );
+                vec![node.project_id.clone()]
+            });
+            broadcast_graph_changed(broadcaster, project_ids);
+            OrchdResponse::GraphNode(node)
+        }
+        Err(e) => map_err(e),
+    }
 }
 
 /// True if `v` is present and is a non-empty JSON array — the shared "did this bundle field
@@ -1021,23 +1072,124 @@ async fn dispatch(
             }
         }
 
-        // ---- Knowledge graph (S4 spec §6) — DISPATCH NOT YET WIRED ----
-        // T1 (commit 42fb846) appended these `OrchdRequest`/`OrchdResponse` variants to the wire
-        // protocol; this task (S4 T2) adds the `graph::` persistence layer they'll call into.
-        // Real per-verb dispatch (with the cross-project `GraphChanged` push fan-out spec §6
-        // requires) lands in the graph-dispatch task. This wildcard exists ONLY to keep `match
-        // req` exhaustive in the meantime — replace it with real arms there, don't extend it.
-        OrchdRequest::GraphAddNode { .. }
-        | OrchdRequest::GraphUpdateNode { .. }
-        | OrchdRequest::GraphMoveNode { .. }
-        | OrchdRequest::GraphDeleteNode { .. }
-        | OrchdRequest::GraphAddEdge { .. }
-        | OrchdRequest::GraphDeleteEdge { .. }
-        | OrchdRequest::GraphListProject { .. }
-        | OrchdRequest::GraphNeighborhood { .. }
-        | OrchdRequest::GraphSearch { .. } => OrchdResponse::Error {
-            code: OrchdErrorCode::Io,
-            message: "graph dispatch not yet implemented".to_string(),
-        },
+        // ---- Knowledge graph (S4 spec §6): every mutating verb below broadcasts `GraphChanged`
+        // to every AFFECTED project (not just the mutated row's own), deduped, on success only —
+        // via `broadcast_graph_changed`/[`respond_graph_node_reachable`] — because a cross-project
+        // edge's foreign endpoint appears as an `external_nodes` ghost in that project's
+        // `GraphListProject` view too (D7 "coarse invalidation, zero drift"). Read verbs
+        // (`GraphListProject`/`GraphNeighborhood`/`GraphSearch`) broadcast nothing. ----
+        OrchdRequest::GraphAddNode {
+            project_id,
+            kind,
+            label,
+            body,
+            pos_x,
+            pos_y,
+        } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.add_node(&project_id, kind, &label, &body, pos_x, pos_y)
+            };
+            match result {
+                Ok(node) => {
+                    broadcast_graph_changed(broadcaster, [node.project_id.clone()]);
+                    OrchdResponse::GraphNode(node)
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::GraphUpdateNode { id, label, body } => {
+            let db = deps.db.lock().await;
+            let result = db.update_node(&id, label.as_deref(), body.as_deref());
+            respond_graph_node_reachable(&db, result, broadcaster)
+        }
+        OrchdRequest::GraphMoveNode { id, pos_x, pos_y } => {
+            let db = deps.db.lock().await;
+            let result = db.move_node(&id, pos_x, pos_y);
+            respond_graph_node_reachable(&db, result, broadcaster)
+        }
+        // `node_project_ids_reachable` is resolved BEFORE `delete_node`: the cascade removes the
+        // node's incident cross-project edges, so the foreign endpoints would be unreachable from
+        // it afterward (mirrors `goal_project_id`/`task_project_id`'s pre-delete lookup pattern).
+        OrchdRequest::GraphDeleteNode { id } => {
+            let db = deps.db.lock().await;
+            match db.node_project_ids_reachable(&id) {
+                Ok(project_ids) => match db.delete_node(&id) {
+                    Ok(()) => {
+                        broadcast_graph_changed(broadcaster, project_ids);
+                        OrchdResponse::Ack
+                    }
+                    Err(e) => map_err(e),
+                },
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::GraphAddEdge {
+            source_node_id,
+            target_node_id,
+            kind,
+            label,
+        } => {
+            let db = deps.db.lock().await;
+            match db.add_edge(&source_node_id, &target_node_id, kind, &label) {
+                Ok(edge) => {
+                    match db.edge_endpoint_projects(&edge.id) {
+                        Ok((source_project, target_project)) => {
+                            // Same-project edge ⇒ the two ids are equal ⇒ ONE push
+                            // (`broadcast_graph_changed` dedups).
+                            broadcast_graph_changed(broadcaster, [source_project, target_project]);
+                        }
+                        Err(e) => {
+                            // Unreachable in practice: the edge was JUST inserted referencing
+                            // these exact node ids, under the same serializing `db` guard.
+                            tracing::error!(
+                                edge_id = %edge.id,
+                                error = %e,
+                                "edge_endpoint_projects failed immediately after a successful \
+                                 add_edge; GraphChanged push skipped"
+                            );
+                        }
+                    }
+                    OrchdResponse::GraphEdge(edge)
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        // `edge_endpoint_projects` is resolved BEFORE `delete_edge`: the row (and its endpoint
+        // join) is gone afterward.
+        OrchdRequest::GraphDeleteEdge { id } => {
+            let db = deps.db.lock().await;
+            match db.edge_endpoint_projects(&id) {
+                Ok((source_project, target_project)) => match db.delete_edge(&id) {
+                    Ok(()) => {
+                        broadcast_graph_changed(broadcaster, [source_project, target_project]);
+                        OrchdResponse::Ack
+                    }
+                    Err(e) => map_err(e),
+                },
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::GraphListProject { project_id } => {
+            let db = deps.db.lock().await;
+            match db.list_project_graph(&project_id) {
+                Ok(view) => OrchdResponse::GraphView(view),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::GraphNeighborhood { node_id, depth } => {
+            let db = deps.db.lock().await;
+            match db.neighborhood(&node_id, depth) {
+                Ok(n) => OrchdResponse::Neighborhood(n),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::GraphSearch { query, project_id } => {
+            let db = deps.db.lock().await;
+            match db.search_nodes(&query, project_id.as_deref()) {
+                Ok(nodes) => OrchdResponse::GraphNodes(nodes),
+                Err(e) => map_err(e),
+            }
+        }
     }
 }

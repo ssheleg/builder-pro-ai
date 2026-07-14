@@ -10,8 +10,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, Goal, GoalKind, Idea, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder,
-    OrchdPush, OrchdRequest, OrchdResponse, Project, RuleFileState, RuleScope, RuleSetView,
+    encode_orchd_frame, Goal, GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode,
+    GraphNodeKind, GraphView, Idea, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush,
+    OrchdRequest, OrchdResponse, Project, RuleFileState, RuleScope, RuleSetView,
     ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
@@ -211,6 +212,108 @@ fn expect_ruleset_view(res: OrchdResponse) -> RuleSetView {
         OrchdResponse::RuleSetView(v) => v,
         other => panic!("expected RuleSetView, got {other:?}"),
     }
+}
+
+fn expect_ack(res: OrchdResponse) {
+    match res {
+        OrchdResponse::Ack => {}
+        other => panic!("expected Ack, got {other:?}"),
+    }
+}
+
+fn expect_graph_node(res: OrchdResponse) -> GraphNode {
+    match res {
+        OrchdResponse::GraphNode(n) => n,
+        other => panic!("expected GraphNode, got {other:?}"),
+    }
+}
+
+fn expect_graph_edge(res: OrchdResponse) -> GraphEdge {
+    match res {
+        OrchdResponse::GraphEdge(e) => e,
+        other => panic!("expected GraphEdge, got {other:?}"),
+    }
+}
+
+fn expect_graph_view(res: OrchdResponse) -> GraphView {
+    match res {
+        OrchdResponse::GraphView(v) => v,
+        other => panic!("expected GraphView, got {other:?}"),
+    }
+}
+
+fn expect_neighborhood(res: OrchdResponse) -> GraphNeighborhood {
+    match res {
+        OrchdResponse::Neighborhood(n) => n,
+        other => panic!("expected Neighborhood, got {other:?}"),
+    }
+}
+
+fn expect_graph_nodes(res: OrchdResponse) -> Vec<GraphNode> {
+    match res {
+        OrchdResponse::GraphNodes(v) => v,
+        other => panic!("expected GraphNodes, got {other:?}"),
+    }
+}
+
+/// Test-only convenience: `CreateProject` with a freshly generated (guaranteed-unique)
+/// `workspace_id` — `project_workspace.workspace_id` is UNIQUE table-wide (S3 spec §5.2), so
+/// every project a graph test creates needs its own.
+async fn create_project(c: &mut Client, name: &str) -> Project {
+    expect_project(
+        c.request(OrchdRequest::CreateProject {
+            name: name.to_string(),
+            description: String::new(),
+            workspace_ids: vec![uuid::Uuid::new_v4().to_string()],
+        })
+        .await,
+    )
+}
+
+/// Test-only convenience: `GraphAddNode` with a fixed `Concept` kind / origin position — every
+/// graph dispatch test that needs "a node to exist" and doesn't care about its kind/position uses
+/// this.
+async fn add_node(c: &mut Client, project_id: &str, label: &str) -> GraphNode {
+    expect_graph_node(
+        c.request(OrchdRequest::GraphAddNode {
+            project_id: project_id.to_string(),
+            kind: GraphNodeKind::Concept,
+            label: label.to_string(),
+            body: String::new(),
+            pos_x: 0.0,
+            pos_y: 0.0,
+        })
+        .await,
+    )
+}
+
+/// Test-only convenience: `GraphAddEdge` with a fixed `Relates` kind / empty label.
+async fn add_edge(c: &mut Client, source_node_id: &str, target_node_id: &str) -> GraphEdge {
+    expect_graph_edge(
+        c.request(OrchdRequest::GraphAddEdge {
+            source_node_id: source_node_id.to_string(),
+            target_node_id: target_node_id.to_string(),
+            kind: GraphEdgeKind::Relates,
+            label: String::new(),
+        })
+        .await,
+    )
+}
+
+/// Collects exactly `n` pushes (each bounded by a generous per-push timeout, mirroring
+/// `import_bundle_happy_path_returns_report_and_broadcasts_family_pushes`'s multi-push collection
+/// pattern) — used by the cross-project graph tests, which expect more than one `GraphChanged`
+/// push per mutation.
+async fn collect_pushes(c: &mut Client, n: usize) -> Vec<OrchdPush> {
+    let mut seen = Vec::with_capacity(n);
+    for _ in 0..n {
+        seen.push(
+            c.recv_push_timeout(Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|| panic!("expected {n} pushes, got only {}", seen.len())),
+        );
+    }
+    seen
 }
 
 /// Boots `bpa_orchd::run()` on a fresh temp socket. The caller MUST already hold a `HomeGuard`
@@ -566,6 +669,434 @@ async fn unknown_id_delete_task_is_not_found() {
         OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
         other => panic!("expected Error{{NotFound}}, got {other:?}"),
     }
+
+    c1.shutdown(boot).await;
+}
+
+// ---- S4 knowledge graph dispatch + `GraphChanged` push fan-out (spec §6, S4 task-4 brief) ----
+
+#[tokio::test]
+async fn graph_add_node_returns_node_and_broadcasts_graph_changed_to_its_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project = create_project(&mut c1, "Proj").await;
+
+    // c2 connects only AFTER the project (and its ProjectsChanged push) already landed, so the
+    // only push it can observe below is the one this test is actually proving.
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let node = expect_graph_node(
+        c1.request(OrchdRequest::GraphAddNode {
+            project_id: project.id.clone(),
+            kind: GraphNodeKind::Concept,
+            label: "Idea seed".to_string(),
+            body: "body".to_string(),
+            pos_x: 1.0,
+            pos_y: 2.0,
+        })
+        .await,
+    );
+    assert_eq!(node.project_id, project.id);
+    assert_eq!(node.label, "Idea seed");
+
+    match c2.recv_push().await {
+        OrchdPush::GraphChanged { project_id } => assert_eq!(project_id, project.id),
+        other => panic!("expected GraphChanged, got {other:?}"),
+    }
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a same-project GraphAddNode must broadcast exactly one GraphChanged"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_add_edge_cross_project_broadcasts_graph_changed_for_both_endpoint_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Node B").await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let edge = expect_graph_edge(
+        c1.request(OrchdRequest::GraphAddEdge {
+            source_node_id: node_a.id.clone(),
+            target_node_id: node_b.id.clone(),
+            kind: GraphEdgeKind::Relates,
+            label: "cross".to_string(),
+        })
+        .await,
+    );
+    assert_eq!(edge.source_node_id, node_a.id);
+    assert_eq!(edge.target_node_id, node_b.id);
+
+    let seen = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the source's project in {seen:?}"
+    );
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the target's project in {seen:?}"
+    );
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a cross-project GraphAddEdge must broadcast exactly two GraphChanged pushes"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_delete_node_cross_project_broadcasts_graph_changed_for_foreign_project_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Node B").await;
+    add_edge(&mut c1, &node_a.id, &node_b.id).await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // Deleting node A (in project A) must invalidate project B too — B's `GraphListProject` view
+    // shows A as an `external_nodes` ghost via the incident edge, and that ghost is about to
+    // disappear along with the cascaded edge.
+    expect_ack(
+        c1.request(OrchdRequest::GraphDeleteNode {
+            id: node_a.id.clone(),
+        })
+        .await,
+    );
+
+    let seen = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the node's own project in {seen:?}"
+    );
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the FOREIGN project (reachable via the cascaded edge) in {seen:?}"
+    );
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "expected exactly two GraphChanged pushes, got extra"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Node B").await;
+    add_edge(&mut c1, &node_a.id, &node_b.id).await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // GraphUpdateNode on node A (own project A) must also invalidate project B.
+    let updated = expect_graph_node(
+        c1.request(OrchdRequest::GraphUpdateNode {
+            id: node_a.id.clone(),
+            label: Some("Renamed A".to_string()),
+            body: None,
+        })
+        .await,
+    );
+    assert_eq!(updated.label, "Renamed A");
+
+    let seen_update = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen_update.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the node's own project after update in {seen_update:?}"
+    );
+    assert!(
+        seen_update.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the FOREIGN project after update in {seen_update:?}"
+    );
+
+    // GraphMoveNode on the same cross-project node must ALSO invalidate project B.
+    let moved = expect_graph_node(
+        c1.request(OrchdRequest::GraphMoveNode {
+            id: node_a.id.clone(),
+            pos_x: 10.0,
+            pos_y: 20.0,
+        })
+        .await,
+    );
+    assert_eq!(moved.pos_x, 10.0);
+    assert_eq!(moved.pos_y, 20.0);
+
+    let seen_move = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen_move.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the node's own project after move in {seen_move:?}"
+    );
+    assert!(
+        seen_move.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the FOREIGN project after move in {seen_move:?}"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_delete_edge_cross_project_broadcasts_graph_changed_for_both_endpoint_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Node B").await;
+    let edge = add_edge(&mut c1, &node_a.id, &node_b.id).await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    expect_ack(
+        c1.request(OrchdRequest::GraphDeleteEdge {
+            id: edge.id.clone(),
+        })
+        .await,
+    );
+
+    let seen = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the source endpoint's project in {seen:?}"
+    );
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the target endpoint's project in {seen:?}"
+    );
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "expected exactly two GraphChanged pushes, got extra"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_list_project_returns_view_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project = create_project(&mut c1, "Proj").await;
+    let node = add_node(&mut c1, &project.id, "Solo node").await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let view = expect_graph_view(
+        c1.request(OrchdRequest::GraphListProject {
+            project_id: project.id.clone(),
+        })
+        .await,
+    );
+    assert!(view.nodes.iter().any(|n| n.id == node.id));
+    assert!(view.external_nodes.is_empty());
+
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(300))
+            .await
+            .is_none(),
+        "GraphListProject is a read verb and must broadcast nothing"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_add_edge_self_loop_is_invariant_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project = create_project(&mut c1, "Proj").await;
+    let node = add_node(&mut c1, &project.id, "Solo node").await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let res = c1
+        .request(OrchdRequest::GraphAddEdge {
+            source_node_id: node.id.clone(),
+            target_node_id: node.id.clone(),
+            kind: GraphEdgeKind::Relates,
+            label: String::new(),
+        })
+        .await;
+    match res {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::Invariant),
+        other => panic!("expected Error{{Invariant}}, got {other:?}"),
+    }
+
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(300))
+            .await
+            .is_none(),
+        "a failed (self-loop) GraphAddEdge must broadcast nothing"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_neighborhood_returns_correct_subgraph() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project = create_project(&mut c1, "Proj").await;
+    let node_a = add_node(&mut c1, &project.id, "A").await;
+    let node_b = add_node(&mut c1, &project.id, "B").await;
+    let node_c = add_node(&mut c1, &project.id, "C").await;
+    let edge_ab = add_edge(&mut c1, &node_a.id, &node_b.id).await;
+    add_edge(&mut c1, &node_b.id, &node_c.id).await;
+
+    // Depth 1 rooted at A: A is directly connected to B only (the A-B edge), NOT to C (that's
+    // two hops away via B) — a genuine, non-trivial subgraph check.
+    let neighborhood = expect_neighborhood(
+        c1.request(OrchdRequest::GraphNeighborhood {
+            node_id: node_a.id.clone(),
+            depth: 1,
+        })
+        .await,
+    );
+    assert_eq!(neighborhood.root_id, node_a.id);
+    let node_ids: std::collections::HashSet<String> =
+        neighborhood.nodes.iter().map(|n| n.id.clone()).collect();
+    assert_eq!(
+        node_ids,
+        std::collections::HashSet::from([node_a.id.clone(), node_b.id.clone()]),
+        "depth-1 neighborhood of A must contain exactly {{A, B}}, not C"
+    );
+    assert_eq!(neighborhood.edges.len(), 1);
+    assert_eq!(neighborhood.edges[0].id, edge_ab.id);
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_search_returns_matching_nodes_workspace_wide_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Widget Factory").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Gadget Factory").await;
+    add_node(&mut c1, &project_a.id, "Unrelated").await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let nodes = expect_graph_nodes(
+        c1.request(OrchdRequest::GraphSearch {
+            query: "Factory".to_string(),
+            project_id: None,
+        })
+        .await,
+    );
+    let node_ids: std::collections::HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
+    assert!(node_ids.contains(&node_a.id));
+    assert!(node_ids.contains(&node_b.id));
+
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(300))
+            .await
+            .is_none(),
+        "GraphSearch is a read verb and must broadcast nothing"
+    );
 
     c1.shutdown(boot).await;
 }
