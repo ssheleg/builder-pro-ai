@@ -13,6 +13,23 @@ export type GoalKind = "strategic" | "additional";
 
 export type GoalStatus = "active" | "achieved" | "dropped";
 
+export type GraphEdge = { id: string, sourceNodeId: string, targetNodeId: string, kind: GraphEdgeKind, label: string, createdAt: number, };
+
+export type GraphEdgeKind = "relates" | "depends" | "derives" | "supports" | "contradicts" | "parent";
+
+export type GraphEntityType = "goal" | "idea" | "insight" | "task";
+
+/**
+ * Subgraph within N hops of a start node, cross-project (the agent retrieval query).
+ */
+export type GraphNeighborhood = { rootId: string, nodes: Array<GraphNode>, edges: Array<GraphEdge>, };
+
+export type GraphNode = { id: string, projectId: string, kind: GraphNodeKind, entityType: GraphEntityType | null, entityId: string | null, label: string, body: string, posX: number, posY: number, createdAt: number, updatedAt: number, };
+
+export type GraphNodeKind = "concept" | "fact" | "artifact" | "decision" | "note" | "entityRef";
+
+export type GraphView = { nodes: Array<GraphNode>, edges: Array<GraphEdge>, externalNodes: Array<GraphNode>, };
+
 export type Idea = { id: string, projectId: string | null, title: string, body: string, lifecycle: IdeaLifecycle, createdAt: number, updatedAt: number, };
 
 export type IdeaLifecycle = "captured" | "researching" | "specced" | "inDev" | "shipped" | "archived";

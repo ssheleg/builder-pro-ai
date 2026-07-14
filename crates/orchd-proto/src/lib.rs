@@ -262,6 +262,100 @@ pub enum OrchdErrorCode {
     Io,
 }
 
+// ---- S4 knowledge graph entities (spec §3, appended — order FROZEN append-only) ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct GraphNode {
+    pub id: String,
+    pub project_id: String,
+    pub kind: GraphNodeKind,
+    pub entity_type: Option<GraphEntityType>,
+    pub entity_id: Option<String>,
+    pub label: String,
+    pub body: String,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum GraphNodeKind {
+    Concept,
+    Fact,
+    Artifact,
+    Decision,
+    Note,
+    EntityRef,
+}
+
+// NO ruleset variant here: RuleSet has no title/label field, so an entityRef to it would be
+// unresolvable; nothing in S4 creates one (only the D6 strategic-goal seed).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum GraphEntityType {
+    Goal,
+    Idea,
+    Insight,
+    Task,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct GraphEdge {
+    pub id: String,
+    pub source_node_id: String,
+    pub target_node_id: String,
+    pub kind: GraphEdgeKind,
+    pub label: String,
+    #[ts(type = "number")]
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum GraphEdgeKind {
+    Relates,
+    Depends,
+    Derives,
+    Supports,
+    Contradicts,
+    Parent,
+}
+
+// Retrieval result: the project's own nodes + all incident edges + the foreign endpoints
+// (cross-project "ghosts") so the UI can render boundary edges.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct GraphView {
+    // nodes belonging to the queried project.
+    pub nodes: Vec<GraphNode>,
+    // every edge incident to any of `nodes`.
+    pub edges: Vec<GraphEdge>,
+    // foreign endpoints of cross-project edges (ghosts).
+    pub external_nodes: Vec<GraphNode>,
+}
+
+/// Subgraph within N hops of a start node, cross-project (the agent retrieval query).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct GraphNeighborhood {
+    pub root_id: String,
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -445,6 +539,58 @@ pub enum OrchdRequest {
     OrchdShutdown {
         drain: bool,
     },
+    // S4 knowledge graph (spec §3, appended — order FROZEN append-only)
+    /// → `OrchdResponse::GraphNode`. NO `entity_type`/`entity_id`: entityRef nodes are
+    /// internal-only (created via `add_entity_ref_node`, not this wire verb).
+    GraphAddNode {
+        project_id: String,
+        kind: GraphNodeKind,
+        label: String,
+        body: String,
+        pos_x: f64,
+        pos_y: f64,
+    },
+    /// → `OrchdResponse::GraphNode`.
+    GraphUpdateNode {
+        id: String,
+        label: Option<String>,
+        body: Option<String>,
+    },
+    /// → `OrchdResponse::GraphNode` (frequent).
+    GraphMoveNode {
+        id: String,
+        pos_x: f64,
+        pos_y: f64,
+    },
+    /// → `OrchdResponse::Ack` (cascades edges).
+    GraphDeleteNode {
+        id: String,
+    },
+    /// → `OrchdResponse::GraphEdge`.
+    GraphAddEdge {
+        source_node_id: String,
+        target_node_id: String,
+        kind: GraphEdgeKind,
+        label: String,
+    },
+    /// → `OrchdResponse::Ack`.
+    GraphDeleteEdge {
+        id: String,
+    },
+    /// → `OrchdResponse::GraphView`.
+    GraphListProject {
+        project_id: String,
+    },
+    /// → `OrchdResponse::Neighborhood` (retrieval).
+    GraphNeighborhood {
+        node_id: String,
+        depth: u32,
+    },
+    /// → `OrchdResponse::GraphNodes` (workspace-wide when `project_id: None`).
+    GraphSearch {
+        query: String,
+        project_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -475,6 +621,12 @@ pub enum OrchdResponse {
         code: OrchdErrorCode,
         message: String,
     },
+    // S4 knowledge graph (spec §3, appended — order FROZEN append-only)
+    GraphNode(GraphNode),
+    GraphEdge(GraphEdge),
+    GraphView(GraphView),
+    Neighborhood(GraphNeighborhood),
+    GraphNodes(Vec<GraphNode>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -491,6 +643,10 @@ pub enum OrchdPush {
     RuleSetChanged {
         scope: RuleScope,
         project_id: Option<String>,
+    },
+    // S4 knowledge graph (spec §3, appended — order FROZEN append-only)
+    GraphChanged {
+        project_id: String,
     },
 }
 

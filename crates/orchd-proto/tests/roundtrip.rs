@@ -133,6 +133,49 @@ fn sample_ruleset_view() -> RuleSetView {
     }
 }
 
+fn sample_graph_node() -> GraphNode {
+    GraphNode {
+        id: "node-1".into(),
+        project_id: "proj-1".into(),
+        kind: GraphNodeKind::EntityRef,
+        entity_type: Some(GraphEntityType::Task),
+        entity_id: Some("task-1".into()),
+        label: "Node label".into(),
+        body: "Node body".into(),
+        pos_x: 12.5,
+        pos_y: -3.25,
+        created_at: 1_720_000_000,
+        updated_at: 1_720_000_100,
+    }
+}
+
+fn sample_graph_edge() -> GraphEdge {
+    GraphEdge {
+        id: "edge-1".into(),
+        source_node_id: "node-1".into(),
+        target_node_id: "node-2".into(),
+        kind: GraphEdgeKind::Contradicts,
+        label: "Edge label".into(),
+        created_at: 1_720_000_000,
+    }
+}
+
+fn sample_graph_view() -> GraphView {
+    GraphView {
+        nodes: vec![sample_graph_node()],
+        edges: vec![sample_graph_edge()],
+        external_nodes: vec![sample_graph_node()],
+    }
+}
+
+fn sample_graph_neighborhood() -> GraphNeighborhood {
+    GraphNeighborhood {
+        root_id: "node-1".into(),
+        nodes: vec![sample_graph_node()],
+        edges: vec![sample_graph_edge()],
+    }
+}
+
 fn all_requests() -> Vec<OrchdRequest> {
     vec![
         OrchdRequest::Ping,
@@ -283,6 +326,47 @@ fn all_requests() -> Vec<OrchdRequest> {
         OrchdRequest::ImportBundle { json: "{}".into() },
         OrchdRequest::OrchdShutdown { drain: true },
         OrchdRequest::OrchdShutdown { drain: false },
+        OrchdRequest::GraphAddNode {
+            project_id: "proj-1".into(),
+            kind: GraphNodeKind::Concept,
+            label: "New concept".into(),
+            body: "Concept body".into(),
+            pos_x: 1.0,
+            pos_y: 2.0,
+        },
+        OrchdRequest::GraphUpdateNode {
+            id: "node-1".into(),
+            label: Some("Updated label".into()),
+            body: Some("Updated body".into()),
+        },
+        OrchdRequest::GraphMoveNode {
+            id: "node-1".into(),
+            pos_x: 5.5,
+            pos_y: 6.5,
+        },
+        OrchdRequest::GraphDeleteNode {
+            id: "node-1".into(),
+        },
+        OrchdRequest::GraphAddEdge {
+            source_node_id: "node-1".into(),
+            target_node_id: "node-2".into(),
+            kind: GraphEdgeKind::Depends,
+            label: "depends on".into(),
+        },
+        OrchdRequest::GraphDeleteEdge {
+            id: "edge-1".into(),
+        },
+        OrchdRequest::GraphListProject {
+            project_id: "proj-1".into(),
+        },
+        OrchdRequest::GraphNeighborhood {
+            node_id: "node-1".into(),
+            depth: 3,
+        },
+        OrchdRequest::GraphSearch {
+            query: "concept".into(),
+            project_id: Some("proj-1".into()),
+        },
     ]
 }
 
@@ -330,6 +414,11 @@ fn all_responses() -> Vec<OrchdResponse> {
             code: OrchdErrorCode::Io,
             message: "io".into(),
         },
+        OrchdResponse::GraphNode(sample_graph_node()),
+        OrchdResponse::GraphEdge(sample_graph_edge()),
+        OrchdResponse::GraphView(sample_graph_view()),
+        OrchdResponse::Neighborhood(sample_graph_neighborhood()),
+        OrchdResponse::GraphNodes(vec![sample_graph_node()]),
     ]
 }
 
@@ -351,6 +440,9 @@ fn all_pushes() -> Vec<OrchdPush> {
         OrchdPush::RuleSetChanged {
             scope: RuleScope::Project,
             project_id: Some("proj-1".into()),
+        },
+        OrchdPush::GraphChanged {
+            project_id: "proj-1".into(),
         },
     ]
 }
@@ -411,6 +503,45 @@ fn fit_verdict_no_fit_serializes_as_camelcase_on_the_wire() {
         },
     };
     assert_wire_contains(&frame, "noFit");
+}
+
+#[test]
+fn graph_node_kind_entity_ref_serializes_as_camelcase_on_the_wire() {
+    let frame = OrchdFrame::Request {
+        id: 1,
+        req: OrchdRequest::GraphAddNode {
+            project_id: "proj-1".into(),
+            kind: GraphNodeKind::EntityRef,
+            label: "label".into(),
+            body: "body".into(),
+            pos_x: 0.0,
+            pos_y: 0.0,
+        },
+    };
+    assert_wire_contains(&frame, "entityRef");
+}
+
+#[test]
+fn graph_edge_kind_contradicts_serializes_lowercase_on_the_wire() {
+    let frame = OrchdFrame::Request {
+        id: 1,
+        req: OrchdRequest::GraphAddEdge {
+            source_node_id: "node-1".into(),
+            target_node_id: "node-2".into(),
+            kind: GraphEdgeKind::Contradicts,
+            label: "label".into(),
+        },
+    };
+    assert_wire_contains(&frame, "contradicts");
+}
+
+#[test]
+fn graph_entity_type_task_serializes_lowercase_on_the_wire() {
+    let frame = OrchdFrame::Response {
+        id: 1,
+        res: OrchdResponse::GraphNode(sample_graph_node()),
+    };
+    assert_wire_contains(&frame, "task");
 }
 
 #[test]

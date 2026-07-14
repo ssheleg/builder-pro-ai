@@ -39,6 +39,13 @@ fn export_and_read() -> String {
     RuleFileState::export_all_to(types_ts_dir()).expect("export RuleFileState");
     RuleSetView::export_all_to(types_ts_dir()).expect("export RuleSetView");
     OrchdErrorCode::export_all_to(types_ts_dir()).expect("export OrchdErrorCode");
+    GraphNode::export_all_to(types_ts_dir()).expect("export GraphNode");
+    GraphNodeKind::export_all_to(types_ts_dir()).expect("export GraphNodeKind");
+    GraphEntityType::export_all_to(types_ts_dir()).expect("export GraphEntityType");
+    GraphEdge::export_all_to(types_ts_dir()).expect("export GraphEdge");
+    GraphEdgeKind::export_all_to(types_ts_dir()).expect("export GraphEdgeKind");
+    GraphView::export_all_to(types_ts_dir()).expect("export GraphView");
+    GraphNeighborhood::export_all_to(types_ts_dir()).expect("export GraphNeighborhood");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -199,12 +206,118 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "spend_cap_usd",
         "approval_classes",
         "path_allowlist",
+        "entity_type",
+        "entity_id",
+        "pos_x",
+        "pos_y",
+        "source_node_id",
+        "target_node_id",
+        "external_nodes",
+        "root_id",
     ] {
         assert!(
             !ts.contains(snake),
             "generated orchd-types.ts must not contain snake_case `{snake}`; got:\n{ts}"
         );
     }
+}
+
+#[test]
+fn graph_node_and_edge_use_camelcase_fields_and_ts_number_timestamps() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "export type GraphNode"),
+        "GraphNode type must be present; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "export type GraphEdge"),
+        "GraphEdge type must be present; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "export type GraphView"),
+        "GraphView type must be present; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "export type GraphNeighborhood"),
+        "GraphNeighborhood type must be present; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "projectId: string"),
+        "GraphNode.project_id must serialize as camelCase `projectId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "posX: number") && contains_normalized(&ts, "posY: number"),
+        "GraphNode.pos_x/pos_y must serialize as camelCase `posX`/`posY`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "entityType: GraphEntityType | null"),
+        "GraphNode.entity_type must serialize as camelCase `entityType`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "sourceNodeId: string"),
+        "GraphEdge.source_node_id must serialize as camelCase `sourceNodeId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "externalNodes: Array<GraphNode>"),
+        "GraphView.external_nodes must serialize as camelCase `externalNodes`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "rootId: string"),
+        "GraphNeighborhood.root_id must serialize as camelCase `rootId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "createdAt: number"),
+        "GraphNode/GraphEdge.created_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "updatedAt: number"),
+        "GraphNode.updated_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("bigint"),
+        "generated orchd-types.ts must never contain `bigint`; got:\n{ts}"
+    );
+}
+
+#[test]
+fn graph_node_kind_and_edge_kind_and_entity_type_wire_tags_are_camelcase() {
+    let ts = export_and_read();
+    for tag in [
+        "concept",
+        "fact",
+        "artifact",
+        "decision",
+        "note",
+        "entityRef",
+    ] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "GraphNodeKind must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+    for tag in [
+        "relates",
+        "depends",
+        "derives",
+        "supports",
+        "contradicts",
+        "parent",
+    ] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "GraphEdgeKind must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+    for tag in ["goal", "idea", "insight", "task"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "GraphEntityType must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+    assert!(
+        !ts.contains("entity_ref") && !ts.contains("Ruleset") && !ts.contains("\"ruleset\""),
+        "generated orchd-types.ts must not contain snake_case entity_ref or a Ruleset entity type; got:\n{ts}"
+    );
 }
 
 #[test]
