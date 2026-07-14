@@ -146,6 +146,7 @@ fn sample_graph_node() -> GraphNode {
         pos_y: -3.25,
         created_at: 1_720_000_000,
         updated_at: 1_720_000_100,
+        is_orphan: false,
     }
 }
 
@@ -578,6 +579,7 @@ fn graph_entity_type_task_serializes_lowercase_on_the_wire() {
             pos_y: 0.0,
             created_at: 1,
             updated_at: 2,
+            is_orphan: false,
         }),
     };
     assert_wire_contains(&frame, "task");

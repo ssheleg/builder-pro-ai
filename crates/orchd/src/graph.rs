@@ -155,6 +155,9 @@ impl GraphNodeRow {
             pos_y: self.pos_y,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            // A freshly-read row is not-yet-resolved; `resolve_node_label` (below) is the only
+            // place that flips this to `true`, for an entityRef whose source row is gone.
+            is_orphan: false,
         })
     }
 }
@@ -296,9 +299,10 @@ fn resolve_entity_label(
 
 /// Re-resolves a [`GraphNode`]'s `label` from its live domain row AT READ TIME when it's an
 /// `entityRef` node (S4 spec §5 `list_project_graph`). Non-`entityRef` nodes pass through
-/// unchanged. An orphaned `entityRef` (source row deleted) keeps its STORED `label` unchanged —
-/// `resolve_entity_label` returning `None` is exactly that "orphan" signal; this function adds no
-/// extra flag field, per the task-3 brief ("the FRONTEND flags «источник удалён»").
+/// unchanged (`is_orphan` stays `false`, its `into_node` default). An orphaned `entityRef`
+/// (source row deleted) keeps its STORED `label` unchanged AND has `is_orphan` set `true` —
+/// `resolve_entity_label` returning `None` is exactly that "orphan" signal (D3: the UI flags
+/// «источник удалён» off this wire field).
 fn resolve_node_label(
     conn: &Connection,
     mut node: GraphNode,
@@ -311,8 +315,12 @@ fn resolve_node_label(
     else {
         return Ok(node);
     };
-    if let Some(live_label) = resolve_entity_label(conn, entity_type, entity_id)? {
-        node.label = live_label;
+    match resolve_entity_label(conn, entity_type, entity_id)? {
+        Some(live_label) => {
+            node.label = live_label;
+            node.is_orphan = false;
+        }
+        None => node.is_orphan = true,
     }
     Ok(node)
 }
@@ -595,7 +603,8 @@ impl Db {
     /// (source OR target in the set); `external_nodes` = the incident edges' endpoint nodes NOT
     /// in the project (the cross-project "ghosts"), deduped. `entityRef` node labels (in both
     /// `nodes` and `external_nodes`) are re-resolved from their live domain row at read time
-    /// (D3, [`resolve_node_label`]) — an orphan (source deleted) keeps its stored label. Unknown
+    /// (D3, [`resolve_node_label`]) — an orphan (source deleted) keeps its stored label AND has
+    /// `is_orphan` set `true` on the wire, the signal the UI renders as «источник удалён». Unknown
     /// project ⇒ `NotFound` (mirrors [`Db::list_goals`]'s existence check).
     pub(crate) fn list_project_graph(
         &self,
@@ -1768,6 +1777,10 @@ mod tests {
             resolved.label, "New title",
             "entityRef label must be re-resolved from the live domain row at read time"
         );
+        assert!(
+            !resolved.is_orphan,
+            "a live (resolved) entityRef node must not be flagged orphan"
+        );
     }
 
     #[test]
@@ -1787,6 +1800,7 @@ mod tests {
                 0.0,
             )
             .unwrap();
+        let plain = add_concept(&db, &project_id, "Plain note");
 
         db.delete_idea(&idea.id).unwrap();
 
@@ -1799,6 +1813,20 @@ mod tests {
         assert_eq!(
             orphan.label, "Doomed idea",
             "orphaned entityRef must keep its stored label when the source row is gone"
+        );
+        assert!(
+            orphan.is_orphan,
+            "an entityRef whose source row was deleted must be flagged is_orphan (D3, UI renders «источник удалён»)"
+        );
+
+        let plain_node = view
+            .nodes
+            .iter()
+            .find(|n| n.id == plain.id)
+            .expect("plain (non-entityRef) node must be present");
+        assert!(
+            !plain_node.is_orphan,
+            "a non-entityRef node must never be flagged orphan"
         );
     }
 

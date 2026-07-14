@@ -281,6 +281,12 @@ pub struct GraphNode {
     pub created_at: i64,
     #[ts(type = "number")]
     pub updated_at: i64,
+    /// `true` when this is an `entityRef` node whose referenced domain entity has been deleted
+    /// (D3 soft-ref orphan). Set by the read-time label resolver (`resolve_node_label` in
+    /// `crates/orchd/src/graph.rs`), never by the client — the UI renders an orphaned node with
+    /// «источник удалён». Always `false` for non-`entityRef` nodes and for a still-live
+    /// `entityRef` node.
+    pub is_orphan: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

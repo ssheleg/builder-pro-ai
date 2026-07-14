@@ -3951,6 +3951,7 @@ pub(crate) mod orchd_commands_over_stub_daemon {
                 pos_y,
                 created_at: 0,
                 updated_at: 0,
+                is_orphan: false,
             }),
             other => panic!("expected GraphAddNode, got {other:?}"),
         })

@@ -24,7 +24,15 @@ export type GraphEntityType = "goal" | "idea" | "insight" | "task";
  */
 export type GraphNeighborhood = { rootId: string, nodes: Array<GraphNode>, edges: Array<GraphEdge>, };
 
-export type GraphNode = { id: string, projectId: string, kind: GraphNodeKind, entityType: GraphEntityType | null, entityId: string | null, label: string, body: string, posX: number, posY: number, createdAt: number, updatedAt: number, };
+export type GraphNode = { id: string, projectId: string, kind: GraphNodeKind, entityType: GraphEntityType | null, entityId: string | null, label: string, body: string, posX: number, posY: number, createdAt: number, updatedAt: number, 
+/**
+ * `true` when this is an `entityRef` node whose referenced domain entity has been deleted
+ * (D3 soft-ref orphan). Set by the read-time label resolver (`resolve_node_label` in
+ * `crates/orchd/src/graph.rs`), never by the client — the UI renders an orphaned node with
+ * «источник удалён». Always `false` for non-`entityRef` nodes and for a still-live
+ * `entityRef` node.
+ */
+isOrphan: boolean, };
 
 export type GraphNodeKind = "concept" | "fact" | "artifact" | "decision" | "note" | "entityRef";
 
