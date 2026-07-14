@@ -211,6 +211,9 @@ interface TaskRowProps {
   task: DomainTask;
   canMoveUp: boolean;
   canMoveDown: boolean;
+  /** `orchdDown` (spec §10): while `true`, every mutating control on this row is disabled — see
+   * `TasksList`'s own doc comment. */
+  disabled: boolean;
   onStatusChange: (id: string, status: TaskStatus) => void;
   onMoveUp: (task: DomainTask) => void;
   onMoveDown: (task: DomainTask) => void;
@@ -221,7 +224,8 @@ interface TaskRowProps {
  * — inline title/body editing is out of this task's scope (task-16 brief lists only status
  * select, rank ▲/▼, and delete per row); the create dialog is the only place fields are entered. */
 function TaskRow(props: TaskRowProps): JSX.Element {
-  const { task, canMoveUp, canMoveDown, onStatusChange, onMoveUp, onMoveDown, onDelete } = props;
+  const { task, canMoveUp, canMoveDown, disabled, onStatusChange, onMoveUp, onMoveDown, onDelete } =
+    props;
   const depth = rowDepth(task);
 
   return (
@@ -233,6 +237,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
         data-testid={`task-status-select-${task.id}`}
         aria-label="Статус задачи"
         value={task.status}
+        disabled={disabled}
         onChange={(e) => onStatusChange(task.id, e.target.value as TaskStatus)}
         style={selectStyle}
       >
@@ -246,7 +251,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
         type="button"
         data-testid={`task-move-up-${task.id}`}
         aria-label="Переместить вверх"
-        disabled={!canMoveUp}
+        disabled={disabled || !canMoveUp}
         onClick={() => onMoveUp(task)}
         style={{ ...iconButtonStyle, opacity: canMoveUp ? 1 : 0.35 }}
       >
@@ -256,7 +261,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
         type="button"
         data-testid={`task-move-down-${task.id}`}
         aria-label="Переместить вниз"
-        disabled={!canMoveDown}
+        disabled={disabled || !canMoveDown}
         onClick={() => onMoveDown(task)}
         style={{ ...iconButtonStyle, opacity: canMoveDown ? 1 : 0.35 }}
       >
@@ -265,6 +270,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       <button
         type="button"
         data-testid={`task-delete-${task.id}`}
+        disabled={disabled}
         onClick={() => onDelete(task)}
         style={deleteButtonStyle}
       >
@@ -287,6 +293,12 @@ function TaskRow(props: TaskRowProps): JSX.Element {
  * split between structural and field-level mutations; a status or rank edit relies on the shared
  * `orchd://tasks-changed` → `refreshTasks` pipe wired in App.tsx. Every mutating call is wrapped
  * in try/catch → `showToast(describeOrchdError(e))` (spec §7 honest error surface).
+ *
+ * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every per-row mutating
+ * control (status select, move ▲/▼, Удалить) and the create form's submit button are disabled —
+ * reads (the groups/rows themselves) stay live. `ProjectPanel` owns the shared banner; this
+ * component only owns disabling its own controls, composed with the pre-existing per-row disable
+ * logic (e.g. ▲ on the first row of a group) via `disabled || <existing condition>`.
  */
 export function TasksList(props: { projectId: string }): JSX.Element {
   const { projectId } = props;
@@ -294,6 +306,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
   const tasksByProject = useAppStore((s) => s.tasksByProject);
   const refreshTasks = useAppStore((s) => s.refreshTasks);
   const showToast = useAppStore((s) => s.showToast);
+  const orchdDown = useAppStore((s) => s.orchdDown);
 
   const tasks = tasksByProject[projectId] ?? [];
 
@@ -447,7 +460,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         <button
           type="button"
           data-testid="task-create-submit"
-          disabled={createTitle.trim() === ""}
+          disabled={orchdDown || createTitle.trim() === ""}
           onClick={() => void handleCreate()}
           style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
         >
@@ -476,6 +489,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
                   task={task}
                   canMoveUp={idx > 0}
                   canMoveDown={idx < group.length - 1}
+                  disabled={orchdDown}
                   onStatusChange={(id, s) => void handleStatusChange(id, s)}
                   onMoveUp={(t) => void handleMoveUp(group, t)}
                   onMoveDown={(t) => void handleMoveDown(group, t)}

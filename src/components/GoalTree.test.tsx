@@ -57,7 +57,7 @@ beforeEach(() => {
   orchdDeleteGoalMock.mockReset().mockResolvedValue(undefined);
   orchdListGoalsMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
-  useAppStore.setState({ goalsByProject: {}, toast: null }, false);
+  useAppStore.setState({ goalsByProject: {}, toast: null, orchdDown: false }, false);
 });
 
 describe("GoalTree", () => {
@@ -209,5 +209,42 @@ describe("GoalTree", () => {
     // goalsByProject has no entry at all for this project (never fetched).
     render(<GoalTree projectId={projectId} />);
     await waitFor(() => expect(orchdListGoalsMock).toHaveBeenCalledWith(projectId));
+  });
+
+  it("while orchdDown: every mutating control is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
+    const child1 = makeGoal({ id: "child1", parentId: "root", title: "Первая", ord: 0 });
+    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Вторая", ord: 1 });
+    useAppStore.setState(
+      { goalsByProject: { [projectId]: [root, child1, child2] }, orchdDown: true },
+      false,
+    );
+
+    render(<GoalTree projectId={projectId} />);
+
+    const titleInput = screen.getByTestId("goal-title-input-child1") as HTMLInputElement;
+    const statusSelect = screen.getByTestId("goal-status-child1") as HTMLSelectElement;
+    const deleteButton = screen.getByTestId("goal-delete-child1") as HTMLButtonElement;
+    const moveUpButton = screen.getByTestId("goal-move-up-child2") as HTMLButtonElement; // otherwise movable
+    const moveDownButton = screen.getByTestId("goal-move-down-child1") as HTMLButtonElement; // otherwise movable
+    const addSubgoalButton = within(screen.getByTestId("goal-row-child1")).getByRole("button", {
+      name: "+ подцель",
+    }) as HTMLButtonElement;
+
+    expect(titleInput.disabled).toBe(true);
+    expect(statusSelect.disabled).toBe(true);
+    expect(deleteButton.disabled).toBe(true);
+    expect(moveUpButton.disabled).toBe(true);
+    expect(moveDownButton.disabled).toBe(true);
+    expect(addSubgoalButton.disabled).toBe(true);
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(deleteButton);
+    fireEvent.click(addSubgoalButton);
+    fireEvent.click(moveUpButton);
+    fireEvent.click(moveDownButton);
+
+    expect(orchdDeleteGoalMock).not.toHaveBeenCalled();
+    expect(orchdCreateGoalMock).not.toHaveBeenCalled();
+    expect(orchdMoveGoalMock).not.toHaveBeenCalled();
   });
 });

@@ -143,6 +143,9 @@ interface GoalRowProps {
   isStrategic: boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
+  /** `orchdDown` (spec §10): while `true`, every mutating control on this row is disabled — see
+   * `GoalTree`'s own doc comment for the "banner in ProjectPanel, disable here" split. */
+  disabled: boolean;
   onTitleCommit: (id: string, title: string) => Promise<boolean>;
   onStatusChange: (id: string, status: GoalStatus) => void;
   onAddSubgoal: (parentId: string) => void;
@@ -165,6 +168,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
     isStrategic,
     canMoveUp,
     canMoveDown,
+    disabled,
     onTitleCommit,
     onStatusChange,
     onAddSubgoal,
@@ -199,6 +203,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
         data-testid={`goal-title-input-${goal.id}`}
         aria-label="Название цели"
         value={title}
+        disabled={disabled}
         onChange={(e) => setTitle(e.target.value)}
         onBlur={() => void commit()}
         onKeyDown={(e) => {
@@ -213,6 +218,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
         data-testid={`goal-status-${goal.id}`}
         aria-label="Статус цели"
         value={goal.status}
+        disabled={disabled}
         onChange={(e) => onStatusChange(goal.id, e.target.value as GoalStatus)}
         style={selectStyle}
       >
@@ -227,7 +233,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
           type="button"
           data-testid={`goal-move-up-${goal.id}`}
           aria-label="Переместить вверх"
-          disabled={!canMoveUp}
+          disabled={disabled || !canMoveUp}
           onClick={() => onMoveUp(goal)}
           style={{ ...iconButtonStyle, opacity: canMoveUp ? 1 : 0.35 }}
         >
@@ -239,7 +245,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
           type="button"
           data-testid={`goal-move-down-${goal.id}`}
           aria-label="Переместить вниз"
-          disabled={!canMoveDown}
+          disabled={disabled || !canMoveDown}
           onClick={() => onMoveDown(goal)}
           style={{ ...iconButtonStyle, opacity: canMoveDown ? 1 : 0.35 }}
         >
@@ -248,6 +254,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
       )}
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onAddSubgoal(goal.id)}
         style={textButtonStyle}
       >
@@ -257,6 +264,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
         <button
           type="button"
           data-testid={`goal-delete-${goal.id}`}
+          disabled={disabled}
           onClick={() => onDelete(goal.id)}
           style={deleteButtonStyle}
         >
@@ -280,6 +288,12 @@ function GoalRow(props: GoalRowProps): JSX.Element {
  * consistent, same as every other domain surface. Every mutating call is wrapped in try/catch:
  * a rejection never throws unhandled, it surfaces as `showToast(describeOrchdError(e))` (spec §7
  * honest error surface).
+ *
+ * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every mutating control
+ * on every row (title input, status select, move ▲/▼, "+ подцель", Удалить) is disabled — reads
+ * (the tree itself) stay live. `ProjectPanel` owns the shared banner; this component only owns
+ * disabling its own controls, composed with the pre-existing per-row disable logic (e.g. ▲ on the
+ * first sibling) via `disabled || <existing condition>`, never replacing it.
  */
 export function GoalTree(props: { projectId: string }): JSX.Element {
   const { projectId } = props;
@@ -287,6 +301,7 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
   const goalsByProject = useAppStore((s) => s.goalsByProject);
   const refreshGoals = useAppStore((s) => s.refreshGoals);
   const showToast = useAppStore((s) => s.showToast);
+  const orchdDown = useAppStore((s) => s.orchdDown);
 
   const goals = goalsByProject[projectId] ?? [];
 
@@ -396,6 +411,7 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
             isStrategic={isStrategic}
             canMoveUp={!isStrategic && idx > 0}
             canMoveDown={!isStrategic && idx >= 0 && idx < siblings.length - 1}
+            disabled={orchdDown}
             onTitleCommit={handleTitleCommit}
             onStatusChange={handleStatusChange}
             onAddSubgoal={handleAddSubgoal}

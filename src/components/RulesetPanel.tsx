@@ -298,6 +298,12 @@ function ChipList(props: ChipListProps): JSX.Element {
  * (Save/Принять/Создать заново/policy Save) so the UI reflects the new hash/state immediately
  * rather than waiting on a `RuleSetChanged` push that may not even fire for every one of these
  * (e.g. Acknowledge is a pure client action from the daemon's perspective in some races).
+ *
+ * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every mutating button
+ * (Сохранить, Принять, Создать заново, Сохранить политику) is disabled — reads (the content
+ * textarea, the policy draft fields, показать файл — a local Finder reveal, not an orchd
+ * mutation) stay live. `ProjectPanel` owns the shared banner; this component only owns disabling
+ * its own controls.
  */
 export function RulesetPanel(props: { scope: RuleScope; projectId: string | null }): JSX.Element {
   const { scope, projectId } = props;
@@ -306,6 +312,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
   const view = useAppStore((s) => s.rulesets[key]);
   const refreshRuleset = useAppStore((s) => s.refreshRuleset);
   const showToast = useAppStore((s) => s.showToast);
+  const orchdDown = useAppStore((s) => s.orchdDown);
 
   const [content, setContent] = useState(view?.mdContent ?? "");
   const [spendCapText, setSpendCapText] = useState(
@@ -423,6 +430,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           <button
             type="button"
             data-testid="ruleset-acknowledge"
+            disabled={orchdDown}
             onClick={() => void handleAcknowledge()}
             style={textButtonStyle}
           >
@@ -437,6 +445,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           <button
             type="button"
             data-testid="ruleset-recreate"
+            disabled={orchdDown}
             onClick={() => void handleRecreate()}
             style={textButtonStyle}
           >
@@ -458,6 +467,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           <button
             type="button"
             data-testid="ruleset-save-content"
+            disabled={orchdDown}
             onClick={() => void handleSaveContent()}
             style={primaryButtonStyle}
           >
@@ -516,6 +526,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
         <button
           type="button"
           data-testid="ruleset-save-policy"
+          disabled={orchdDown}
           onClick={() => void handleSavePolicy()}
           style={primaryButtonStyle}
         >

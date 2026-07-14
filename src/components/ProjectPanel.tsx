@@ -16,6 +16,7 @@ import { IdeasList } from "./IdeasList";
 import { TasksList } from "./TasksList";
 import { InsightsList } from "./InsightsList";
 import { RulesetPanel } from "./RulesetPanel";
+import { OrchdDownBanner } from "./OrchdDownBanner";
 import { theme } from "../theme";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
@@ -132,11 +133,18 @@ function linkedWorkspaceIds(projects: { workspaceIds: string[] }[]): Set<string>
  * workspaceIds`, explicitly `refreshProjects()`s afterward rather than waiting on the
  * `orchd://projects-changed` push (same defensive-refresh discipline as `GoalTree`/`TasksList`'s
  * own mutations).
+ *
+ * Honest degradation (spec §10): the shared `<OrchdDownBanner/>` renders above the tab bar
+ * whenever the store's `orchdDown` is `true` — this is the panel-level half of "every domain
+ * surface shows the banner"; each of the five tab bodies (`GoalTree`/`IdeasList`/`TasksList`/
+ * `InsightsList`/`RulesetPanel`) independently disables its own mutating controls off the same
+ * flag.
  */
 export function ProjectPanel(props: { projectId: string }): JSX.Element {
   const { projectId } = props;
 
   const projects = useAppStore((s) => s.projects);
+  const orchdDown = useAppStore((s) => s.orchdDown);
   const workspaces = useAppStore((s) => s.workspaces);
   const goalsByProject = useAppStore((s) => s.goalsByProject);
   const tasksByProject = useAppStore((s) => s.tasksByProject);
@@ -268,6 +276,8 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
           <div style={{ fontSize: 12, color: theme.colors.textDim, marginTop: 2 }}>{project.description}</div>
         )}
       </div>
+
+      {orchdDown && <OrchdDownBanner />}
 
       <div role="tablist" style={tabBarStyle}>
         {TABS.map((t) => (

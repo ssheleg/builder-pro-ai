@@ -59,7 +59,7 @@ beforeEach(() => {
   orchdDeleteIdeaMock.mockReset().mockResolvedValue(undefined);
   orchdListIdeasMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
-  useAppStore.setState({ ideas: [], projects: [], toast: null }, false);
+  useAppStore.setState({ ideas: [], projects: [], toast: null, orchdDown: false }, false);
 });
 
 describe("IdeasList", () => {
@@ -194,5 +194,52 @@ describe("IdeasList", () => {
   it("renders an empty state when there are no matching ideas", () => {
     render(<IdeasList projectId={projectId} />);
     expect(screen.getByTestId("ideas-list-empty")).toBeTruthy();
+  });
+
+  it("while orchdDown: every mutating control is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
+    const idea = makeIdea({ id: "i1" });
+    useAppStore.setState({ ideas: [idea], orchdDown: true }, false);
+
+    render(<IdeasList projectId={projectId} />);
+
+    const titleInput = screen.getByTestId("idea-title-input-i1") as HTMLInputElement;
+    const bodyInput = screen.getByTestId("idea-body-input-i1") as HTMLTextAreaElement;
+    const lifecycleSelect = screen.getByTestId("idea-lifecycle-i1") as HTMLSelectElement;
+    const deleteButton = screen.getByTestId("idea-delete-i1") as HTMLButtonElement;
+
+    expect(titleInput.disabled).toBe(true);
+    expect(bodyInput.disabled).toBe(true);
+    expect(lifecycleSelect.disabled).toBe(true);
+    expect(deleteButton.disabled).toBe(true);
+
+    // create-submit's PRE-EXISTING disable condition is "title blank" — fill the title first so
+    // the assertion below proves orchdDown ALONE still keeps it disabled.
+    fireEvent.change(screen.getByTestId("idea-create-title"), { target: { value: "x" } });
+    const submitButton = screen.getByTestId("idea-create-submit") as HTMLButtonElement;
+    expect(submitButton.disabled).toBe(true);
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(deleteButton);
+    fireEvent.click(submitButton);
+
+    expect(orchdDeleteIdeaMock).not.toHaveBeenCalled();
+    expect(orchdCreateIdeaMock).not.toHaveBeenCalled();
+  });
+
+  it("while orchdDown: an orphan row's «привязать к проекту» button is disabled", () => {
+    const idea = makeIdea({ id: "i1", projectId: null });
+    useAppStore.setState(
+      { ideas: [idea], projects: [{ id: "p1", name: "Proj", description: "", status: "active", workspaceIds: [], createdAt: 1, updatedAt: 1 }], orchdDown: true },
+      false,
+    );
+
+    render(<IdeasList projectId={null} />);
+
+    fireEvent.change(screen.getByTestId("idea-attach-select-i1"), { target: { value: "p1" } });
+    const attachButton = screen.getByTestId("idea-attach-button-i1") as HTMLButtonElement;
+    expect(attachButton.disabled).toBe(true);
+
+    fireEvent.click(attachButton);
+    expect(orchdSetIdeaProjectMock).not.toHaveBeenCalled();
   });
 });

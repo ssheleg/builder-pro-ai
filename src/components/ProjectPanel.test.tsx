@@ -141,6 +141,7 @@ beforeEach(() => {
       ideas: [],
       insights: [],
       toast: null,
+      orchdDown: false,
     },
     false,
   );
@@ -151,6 +152,20 @@ describe("ProjectPanel", () => {
     useAppStore.setState({ projects: [] }, false);
     render(<ProjectPanel projectId="missing" />);
     expect(screen.getByTestId("project-panel-loading")).toBeTruthy();
+  });
+
+  it("does NOT render the orchd-down banner while orchd is up", () => {
+    render(<ProjectPanel projectId="p1" />);
+    expect(screen.queryByTestId("orchd-down-banner")).toBeNull();
+  });
+
+  it("while orchdDown: renders the shared OrchdDownBanner above the tab bar (spec §10)", () => {
+    useAppStore.setState({ orchdDown: true }, false);
+    render(<ProjectPanel projectId="p1" />);
+    const banner = screen.getByTestId("orchd-down-banner");
+    expect(banner).toBeTruthy();
+    expect(banner.getAttribute("role")).toBe("alert");
+    expect(screen.getByText("Оркестратор недоступен")).toBeTruthy();
   });
 
   it("renders the Обзор tab by default with honest entity counters", async () => {

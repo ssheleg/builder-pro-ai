@@ -2187,6 +2187,10 @@ impl Db {
         let policy_json = policy.map(validate_policy).transpose()?;
 
         let tx = self.conn.unchecked_transaction()?;
+        // spec §5.2: a project-scoped ruleset row is a child of `project` — the archived-project
+        // guard must fire before the row is loaded/written, same as every other project-scoped
+        // mutator. A global-scoped ruleset (`project_id: None`) has no project, so no check.
+        ensure_optional_project_active(&tx, project_id)?;
         let row = load_ruleset_row_by_scope(&tx, &scope, project_id)?;
         let effective_path = md_path.unwrap_or(&row.md_path).to_string();
 
@@ -2220,9 +2224,14 @@ impl Db {
     /// missing")` (spec, task-8 brief) — the ROW is found, it's the FILE that's gone, and
     /// "acknowledge" a file that isn't there is a contradiction in terms, not silently ignored.
     /// Any OTHER read failure (permission denied, …) is `Io`, distinct from the missing-file case.
+    /// A project-scoped ruleset row is a child of `project` (spec §5.2) — the archived-project
+    /// guard fires right after the row is looked up (needed to know its `project_id`) but before
+    /// the file is read or the row is written; a global-scoped ruleset (`project_id: None`) has
+    /// no project, so no check.
     pub fn acknowledge_rule_file(&self, id: &str) -> Result<RuleSet, OrchdPersistError> {
         let tx = self.conn.unchecked_transaction()?;
         let row = load_ruleset_row_by_id(&tx, id)?;
+        ensure_optional_project_active(&tx, row.project_id.as_deref())?;
 
         let content = match std::fs::read_to_string(&row.md_path) {
             Ok(c) => c,
@@ -4589,6 +4598,45 @@ mod ruleset_tests {
         assert!(matches!(err, OrchdPersistError::NotFound));
     }
 
+    #[test]
+    fn archived_project_blocks_upsert_ruleset() {
+        // spec §5.2: EVERY mutating verb touching an archived project or its children ⇒
+        // `Invariant`. A project-scoped ruleset row is a child of `project` — upsert-ing it must
+        // be blocked the same as every other project-scoped mutator.
+        //
+        // HERMETICITY: a project row's default md_path resolves under the REAL
+        // `app_support_dir()` ($HOME/Library/Application Support/...) — pass an explicit tempdir
+        // `md_path` so IF the guard regresses and the write actually runs, it lands in the
+        // tempdir (cleaned up on drop) rather than the real app-support tree (same pattern as
+        // `upsert_ruleset_with_content_writes_the_file_and_rehashes`).
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let before = project_ruleset(&db, &project.id);
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("rules.md");
+        db.archive_project(&project.id).unwrap();
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                Some("# rules\n"),
+                Some(md_path.to_str().unwrap()),
+                None,
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+        // No partial effect: the row's hash/path are unchanged, and no file was written.
+        let after = project_ruleset(&db, &project.id);
+        assert_eq!(after.md_hash, before.md_hash);
+        assert_eq!(after.md_path, before.md_path);
+        assert!(!md_path.exists(), "guard must fire before any file write");
+    }
+
     // ---- upsert_ruleset: md_path validation ----
 
     #[test]
@@ -4860,5 +4908,38 @@ mod ruleset_tests {
         );
         assert_eq!(content, Some("v2 - hand edited".to_string()));
         assert_eq!(state, bpa_orchd_proto::RuleFileState::Ok);
+    }
+
+    #[test]
+    fn archived_project_blocks_acknowledge_rule_file() {
+        // spec §5.2: EVERY mutating verb touching an archived project or its children ⇒
+        // `Invariant`. A project-scoped ruleset row is a child of `project` — acknowledging its
+        // file must be blocked the same as every other project-scoped mutator.
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("rules.md");
+        let rs = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                Some("v1"),
+                Some(md_path.to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+        // Simulate an external hand-edit, same as the happy-path test above.
+        std::fs::write(&rs.md_path, "v2 - hand edited").unwrap();
+        db.archive_project(&project.id).unwrap();
+
+        let err = db.acknowledge_rule_file(&rs.id).unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+        // No partial effect: the row's hash is still the pre-archive value, not the hand-edited
+        // content's hash.
+        assert_eq!(project_ruleset(&db, &project.id).md_hash, rs.md_hash);
     }
 }

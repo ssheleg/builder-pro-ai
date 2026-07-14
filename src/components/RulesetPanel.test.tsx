@@ -56,7 +56,7 @@ beforeEach(() => {
   orchdAcknowledgeRuleFileMock.mockReset().mockResolvedValue(makeView());
   orchdRevealRulesFileMock.mockReset().mockResolvedValue(undefined);
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
-  useAppStore.setState({ rulesets: {}, toast: null }, false);
+  useAppStore.setState({ rulesets: {}, toast: null, orchdDown: false }, false);
 });
 
 describe("RulesetPanel", () => {
@@ -241,5 +241,40 @@ describe("RulesetPanel", () => {
     render(<RulesetPanel scope="global" projectId={null} />);
 
     await waitFor(() => expect(orchdGetRulesetMock).toHaveBeenCalledWith("global", null));
+  });
+
+  it("while orchdDown: every mutating (Save/Принять/Создать заново) button is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
+    const modified = makeView({ fileState: "externallyModified", mdContent: "# changed\n" });
+    useAppStore.setState({ rulesets: { global: modified }, orchdDown: true }, false);
+
+    render(<RulesetPanel scope="global" projectId={null} />);
+
+    const saveContentButton = screen.getByTestId("ruleset-save-content") as HTMLButtonElement;
+    const acknowledgeButton = screen.getByTestId("ruleset-acknowledge") as HTMLButtonElement;
+    const savePolicyButton = screen.getByTestId("ruleset-save-policy") as HTMLButtonElement;
+
+    expect(saveContentButton.disabled).toBe(true);
+    expect(acknowledgeButton.disabled).toBe(true);
+    expect(savePolicyButton.disabled).toBe(true);
+
+    fireEvent.click(saveContentButton);
+    fireEvent.click(acknowledgeButton);
+    fireEvent.click(savePolicyButton);
+
+    expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
+    expect(orchdAcknowledgeRuleFileMock).not.toHaveBeenCalled();
+  });
+
+  it("while orchdDown: the «Создать заново» button (missing file state) is disabled", () => {
+    const missing = makeView({ fileState: "missing", mdContent: null });
+    useAppStore.setState({ rulesets: { global: missing }, orchdDown: true }, false);
+
+    render(<RulesetPanel scope="global" projectId={null} />);
+
+    const recreateButton = screen.getByTestId("ruleset-recreate") as HTMLButtonElement;
+    expect(recreateButton.disabled).toBe(true);
+
+    fireEvent.click(recreateButton);
+    expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
   });
 });

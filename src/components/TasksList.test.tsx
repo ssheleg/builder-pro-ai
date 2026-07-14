@@ -55,7 +55,7 @@ beforeEach(() => {
   orchdDeleteTaskMock.mockReset().mockResolvedValue(undefined);
   orchdListTasksMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
-  useAppStore.setState({ tasksByProject: {}, toast: null }, false);
+  useAppStore.setState({ tasksByProject: {}, toast: null, orchdDown: false }, false);
 });
 
 describe("TasksList", () => {
@@ -259,5 +259,44 @@ describe("TasksList", () => {
     orchdListTasksMock.mockResolvedValue([]);
     render(<TasksList projectId={projectId} />);
     await waitFor(() => expect(orchdListTasksMock).toHaveBeenCalledWith(projectId));
+  });
+
+  it("while orchdDown: every mutating control is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
+    const a = makeTask({ id: "a", status: "backlog", rank: 0 });
+    const b = makeTask({ id: "b", status: "backlog", rank: 10 });
+    useAppStore.setState(
+      { tasksByProject: { [projectId]: [a, b] }, orchdDown: true },
+      false,
+    );
+
+    render(<TasksList projectId={projectId} />);
+
+    const statusSelect = within(screen.getByTestId("task-row-a")).getByTestId(
+      "task-status-select-a",
+    ) as HTMLSelectElement;
+    const moveDownButton = screen.getByTestId("task-move-down-a") as HTMLButtonElement; // otherwise movable
+    const moveUpButton = screen.getByTestId("task-move-up-b") as HTMLButtonElement; // otherwise movable
+    const deleteButton = screen.getByTestId("task-delete-a") as HTMLButtonElement;
+
+    expect(statusSelect.disabled).toBe(true);
+    expect(moveDownButton.disabled).toBe(true);
+    expect(moveUpButton.disabled).toBe(true);
+    expect(deleteButton.disabled).toBe(true);
+
+    // create-submit's PRE-EXISTING disable condition is "title blank" — fill the title first so
+    // the assertion below proves orchdDown ALONE still keeps it disabled, not the blank-title path.
+    fireEvent.change(screen.getByTestId("task-create-title"), { target: { value: "x" } });
+    const submitButton = screen.getByTestId("task-create-submit") as HTMLButtonElement;
+    expect(submitButton.disabled).toBe(true);
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(deleteButton);
+    fireEvent.click(moveDownButton);
+    fireEvent.click(moveUpButton);
+    fireEvent.click(submitButton);
+
+    expect(orchdDeleteTaskMock).not.toHaveBeenCalled();
+    expect(orchdSetTaskRankMock).not.toHaveBeenCalled();
+    expect(orchdCreateTaskMock).not.toHaveBeenCalled();
   });
 });

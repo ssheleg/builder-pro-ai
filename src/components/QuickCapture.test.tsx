@@ -43,7 +43,18 @@ beforeEach(() => {
     updatedAt: 1,
   });
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
-  useAppStore.setState({ projects: [], orchdDown: false, toast: null }, false);
+  useAppStore.setState(
+    {
+      projects: [],
+      orchdDown: false,
+      toast: null,
+      daemonIncompatible: false,
+      upgradeDialogOpen: false,
+      orchdIncompatible: false,
+      orchdUpgradeDialogOpen: false,
+    },
+    false,
+  );
 });
 
 describe("QuickCapture", () => {
@@ -98,6 +109,20 @@ describe("QuickCapture", () => {
     const inner = screen.getByTestId("xterm-inner");
     (inner as HTMLElement).focus();
     expect(document.activeElement).toBe(inner);
+    pressCmdK();
+    expect(screen.queryByTestId("quick-capture-overlay")).toBeNull();
+  });
+
+  it("⌘K is IGNORED while the daemon upgrade dialog is a mandatory blocker (daemonIncompatible && upgradeDialogOpen)", () => {
+    useAppStore.setState({ daemonIncompatible: true, upgradeDialogOpen: true }, false);
+    render(<QuickCapture />);
+    pressCmdK();
+    expect(screen.queryByTestId("quick-capture-overlay")).toBeNull();
+  });
+
+  it("⌘K is IGNORED while the orchd upgrade dialog is a mandatory blocker (orchdIncompatible && orchdUpgradeDialogOpen)", () => {
+    useAppStore.setState({ orchdIncompatible: true, orchdUpgradeDialogOpen: true }, false);
+    render(<QuickCapture />);
     pressCmdK();
     expect(screen.queryByTestId("quick-capture-overlay")).toBeNull();
   });

@@ -43,7 +43,7 @@ beforeEach(() => {
   orchdSetInsightStatusMock.mockReset().mockResolvedValue(makeInsight({ id: "in1" }));
   orchdListInsightsMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
-  useAppStore.setState({ insights: [], toast: null }, false);
+  useAppStore.setState({ insights: [], toast: null, orchdDown: false }, false);
 });
 
 describe("InsightsList", () => {
@@ -159,5 +159,32 @@ describe("InsightsList", () => {
   it("renders an empty state when there are no matching insights", () => {
     render(<InsightsList projectId={projectId} />);
     expect(screen.getByTestId("insights-list-empty")).toBeTruthy();
+  });
+
+  it("while orchdDown: every mutating control is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
+    const insight = makeInsight({ id: "in1" });
+    useAppStore.setState({ insights: [insight], orchdDown: true }, false);
+
+    render(<InsightsList projectId={projectId} />);
+
+    const statusSelect = screen.getByTestId("insight-status-in1") as HTMLSelectElement;
+    const verdictApplyButton = screen.getByTestId("insight-verdict-apply-in1") as HTMLButtonElement;
+
+    expect(statusSelect.disabled).toBe(true);
+    expect(verdictApplyButton.disabled).toBe(true);
+
+    fireEvent.click(verdictApplyButton);
+    expect(orchdSetInsightFitVerdictMock).not.toHaveBeenCalled();
+
+    // The status select is disabled, so the "archived" branch (which reveals the archive-confirm
+    // button) can never even be reached by interaction — but drive it directly via fireEvent to
+    // prove the confirm button ITSELF is also disabled defensively, not merely unreachable.
+    fireEvent.change(statusSelect, { target: { value: "archived" } });
+    const archiveConfirmButton = screen.getByTestId(
+      "insight-archive-confirm-in1",
+    ) as HTMLButtonElement;
+    expect(archiveConfirmButton.disabled).toBe(true);
+    fireEvent.click(archiveConfirmButton);
+    expect(orchdSetInsightStatusMock).not.toHaveBeenCalled();
   });
 });

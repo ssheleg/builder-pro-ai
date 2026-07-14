@@ -157,11 +157,21 @@ export function QuickCapture(): JSX.Element | null {
 
   // Unconditional global ⌘K listener (task-19 brief: "Register the global keydown listener in
   // QuickCapture's own effect"). Never depends on `open` — it must keep listening even while the
-  // overlay itself is closed, which is the whole point of a global shortcut.
+  // overlay itself is closed, which is the whole point of a global shortcut. Empty deps, so it
+  // never re-reads a stale closure: `isTypingTarget(document.activeElement)` re-reads the DOM
+  // live at keydown time, and `useAppStore.getState()` (rather than a subscribed hook value)
+  // re-reads the store live at keydown time for the same reason.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent): void {
       if (!e.metaKey || e.key.toLowerCase() !== "k") return;
       if (isTypingTarget(document.activeElement)) return;
+      // Also never steal ⌘K out from under a MANDATORY upgrade dialog (UpgradeDialog focuses a
+      // button, not an input/textarea, so `isTypingTarget` alone doesn't catch this case) — a
+      // blocking daemon/orchd version-incompatibility dialog must not have quick-capture opened
+      // on top of it.
+      const s = useAppStore.getState();
+      if (s.daemonIncompatible && s.upgradeDialogOpen) return;
+      if (s.orchdIncompatible && s.orchdUpgradeDialogOpen) return;
       e.preventDefault();
       setOpen(true);
     }

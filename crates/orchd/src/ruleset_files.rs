@@ -59,11 +59,11 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<String> {
 /// honest-degradation stance, e.g. `persistence::open_db_degrading`'s in-memory fallback). File
 /// content is NEVER logged by this function or its caller (spec §5 no-secrets discipline).
 ///
-/// Not yet called from this crate's production code: `OrchdRequest::GetRuleSet`'s dispatch
-/// handler (a later task, spec §5/§6) is the intended production caller, combining this with
-/// `persistence::Db::get_ruleset`'s DB-row half into the wire `RuleSetView`. Exercised directly
-/// by this module's own tests (and `persistence::ruleset_tests`) until then.
-#[allow(dead_code)]
+/// Called from production code in two places: `socket_server::build_ruleset_view` (spec §5/§6's
+/// `GetRuleSet` dispatch handler, pairing this with `persistence::Db::get_ruleset`'s DB-row half
+/// into the wire `RuleSetView`) and `export::read_live_md_content` (spec §8's export bundling,
+/// which only wants the `Option<String>` content half). Also exercised directly by this module's
+/// own tests (and `persistence::ruleset_tests`).
 pub fn read_state(path: &Path, stored_hash: &str) -> (Option<String>, RuleFileState) {
     match std::fs::read_to_string(path) {
         Ok(content) => {

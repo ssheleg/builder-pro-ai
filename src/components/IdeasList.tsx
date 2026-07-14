@@ -136,6 +136,9 @@ interface IdeaRowProps {
   idea: Idea;
   isOrphan: boolean;
   projects: { id: string; name: string }[];
+  /** `orchdDown` (spec §10): while `true`, every mutating control on this row is disabled — see
+   * `IdeasList`'s own doc comment. */
+  disabled: boolean;
   onTitleCommit: (id: string, title: string) => Promise<void>;
   onBodyCommit: (id: string, body: string) => Promise<void>;
   onLifecycleChange: (id: string, lifecycle: IdeaLifecycle) => void;
@@ -147,8 +150,17 @@ interface IdeaRowProps {
  * (in-flight, not-yet-committed) exactly like `GoalTree`'s `GoalRow` — a rejected mutation reverts
  * to the store's copy rather than lying about what was saved. */
 function IdeaRow(props: IdeaRowProps): JSX.Element {
-  const { idea, isOrphan, projects, onTitleCommit, onBodyCommit, onLifecycleChange, onDelete, onAttach } =
-    props;
+  const {
+    idea,
+    isOrphan,
+    projects,
+    disabled,
+    onTitleCommit,
+    onBodyCommit,
+    onLifecycleChange,
+    onDelete,
+    onAttach,
+  } = props;
 
   const [title, setTitle] = useState(idea.title);
   const [body, setBody] = useState(idea.body);
@@ -181,6 +193,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         data-testid={`idea-title-input-${idea.id}`}
         aria-label="Название идеи"
         value={title}
+        disabled={disabled}
         onChange={(e) => setTitle(e.target.value)}
         onBlur={() => void commitTitle()}
         onKeyDown={(e) => {
@@ -195,6 +208,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         data-testid={`idea-lifecycle-${idea.id}`}
         aria-label="Стадия идеи"
         value={idea.lifecycle}
+        disabled={disabled}
         onChange={(e) => onLifecycleChange(idea.id, e.target.value as IdeaLifecycle)}
         style={selectStyle}
       >
@@ -207,6 +221,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
       <button
         type="button"
         data-testid={`idea-delete-${idea.id}`}
+        disabled={disabled}
         onClick={() => onDelete(idea.id)}
         style={deleteButtonStyle}
       >
@@ -216,6 +231,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         data-testid={`idea-body-input-${idea.id}`}
         aria-label="Описание идеи"
         value={body}
+        disabled={disabled}
         onChange={(e) => setBody(e.target.value)}
         onBlur={() => void commitBody()}
         rows={2}
@@ -240,7 +256,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
           <button
             type="button"
             data-testid={`idea-attach-button-${idea.id}`}
-            disabled={attachTo === ""}
+            disabled={disabled || attachTo === ""}
             onClick={() => onAttach(idea.id, attachTo)}
             style={{ ...textButtonStyle, opacity: attachTo === "" ? 0.5 : 1 }}
           >
@@ -263,6 +279,11 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
  * between structural and field-level mutations; a lifecycle/title/body edit relies on the shared
  * `orchd://ideas-changed` → `refreshIdeas` pipe wired in App.tsx. Every mutating call is wrapped in
  * try/catch → `showToast(describeOrchdError(e))` (spec §7 honest error surface).
+ *
+ * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every per-row mutating
+ * control (title/body input, lifecycle select, Удалить, «привязать к проекту») and the create
+ * form's submit button are disabled — reads (the rows themselves) stay live. `ProjectPanel` owns
+ * the shared banner; this component only owns disabling its own controls.
  */
 export function IdeasList(props: { projectId: string | null }): JSX.Element {
   const { projectId } = props;
@@ -271,6 +292,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
   const projects = useAppStore((s) => s.projects);
   const refreshIdeas = useAppStore((s) => s.refreshIdeas);
   const showToast = useAppStore((s) => s.showToast);
+  const orchdDown = useAppStore((s) => s.orchdDown);
 
   const [createTitle, setCreateTitle] = useState("");
   const [createBody, setCreateBody] = useState("");
@@ -360,7 +382,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
         <button
           type="button"
           data-testid="idea-create-submit"
-          disabled={createTitle.trim() === ""}
+          disabled={orchdDown || createTitle.trim() === ""}
           onClick={() => void handleCreate()}
           style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
         >
@@ -382,6 +404,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
             idea={idea}
             isOrphan={isOrphanView}
             projects={projects}
+            disabled={orchdDown}
             onTitleCommit={handleTitleCommit}
             onBodyCommit={handleBodyCommit}
             onLifecycleChange={(id, lifecycle) => void handleLifecycleChange(id, lifecycle)}

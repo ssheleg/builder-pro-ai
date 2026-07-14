@@ -136,6 +136,9 @@ function fitBadgeText(v: FitVerdict | null): string {
 
 interface InsightRowProps {
   insight: Insight;
+  /** `orchdDown` (spec §10): while `true`, every mutating control on this row is disabled — see
+   * `InsightsList`'s own doc comment. */
+  disabled: boolean;
   onVerdictApply: (id: string, verdict: FitVerdict | null, reasoning: string) => void;
   onStatusApply: (id: string, status: InsightStatus, resolutionReasoning: string | null) => void;
 }
@@ -144,7 +147,7 @@ interface InsightRowProps {
  * `resolutionReasoning` server-side (spec §5.2) — the row collects it inline and blocks the call
  * client-side with an honest message rather than round-tripping a doomed request. */
 function InsightRow(props: InsightRowProps): JSX.Element {
-  const { insight, onVerdictApply, onStatusApply } = props;
+  const { insight, disabled, onVerdictApply, onStatusApply } = props;
 
   const [verdict, setVerdict] = useState<FitVerdict | "">(insight.fitVerdict ?? "");
   const [verdictReasoning, setVerdictReasoning] = useState(insight.fitReasoning);
@@ -202,6 +205,7 @@ function InsightRow(props: InsightRowProps): JSX.Element {
           data-testid={`insight-status-${insight.id}`}
           aria-label="Статус инсайта"
           value={pendingStatus}
+          disabled={disabled}
           onChange={(e) => handleStatusChange(e.target.value as InsightStatus)}
           style={selectStyle}
         >
@@ -234,6 +238,7 @@ function InsightRow(props: InsightRowProps): JSX.Element {
           <button
             type="button"
             data-testid={`insight-archive-confirm-${insight.id}`}
+            disabled={disabled}
             onClick={handleArchiveConfirm}
             style={textButtonStyle}
           >
@@ -273,6 +278,7 @@ function InsightRow(props: InsightRowProps): JSX.Element {
         <button
           type="button"
           data-testid={`insight-verdict-apply-${insight.id}`}
+          disabled={disabled}
           onClick={() =>
             onVerdictApply(insight.id, verdict === "" ? null : verdict, verdictReasoning)
           }
@@ -298,12 +304,18 @@ function InsightRow(props: InsightRowProps): JSX.Element {
  * wired in App.tsx (same as `GoalTree`'s title/status edits) for reconciliation; it never calls
  * `refreshInsights` itself. Every mutating call is wrapped in try/catch →
  * `showToast(describeOrchdError(e))` (spec §7 honest error surface).
+ *
+ * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every mutating control
+ * (status select, «подтвердить архивацию», «применить вердикт») is disabled — reads (the rows
+ * themselves) stay live. `ProjectPanel` owns the shared banner; this component only owns
+ * disabling its own controls.
  */
 export function InsightsList(props: { projectId: string | null }): JSX.Element {
   const { projectId } = props;
 
   const insights = useAppStore((s) => s.insights);
   const showToast = useAppStore((s) => s.showToast);
+  const orchdDown = useAppStore((s) => s.orchdDown);
 
   const rows = insights
     .filter((i) => i.projectId === projectId)
@@ -349,6 +361,7 @@ export function InsightsList(props: { projectId: string | null }): JSX.Element {
           <InsightRow
             key={insight.id}
             insight={insight}
+            disabled={orchdDown}
             onVerdictApply={(id, verdict, reasoning) =>
               void handleVerdictApply(id, verdict, reasoning)
             }
