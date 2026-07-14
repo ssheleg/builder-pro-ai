@@ -1,0 +1,491 @@
+import { useEffect, useMemo, useState, type CSSProperties, type JSX } from "react";
+import { useAppStore } from "../store/store";
+import {
+  orchdCreateTask,
+  orchdSetTaskStatus,
+  orchdSetTaskRank,
+  orchdDeleteTask,
+  describeOrchdError,
+} from "../ipc/orchd";
+import type { DomainTask, TaskSource, TaskStatus } from "../ipc/orchd-types";
+import { theme } from "../theme";
+
+const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+
+/** Locked enum order (spec §4.2 `TaskStatus`) — the status groups render in exactly this order,
+ * always, even for an empty group (design-system.md "Status group" atom, S3 §10). */
+const STATUS_VALUES: TaskStatus[] = ["backlog", "todo", "waiting", "progress", "testing", "done"];
+
+const STATUS_LABEL: Record<TaskStatus, string> = {
+  backlog: "бэклог",
+  todo: "к выполнению",
+  waiting: "ожидание",
+  progress: "в работе",
+  testing: "тестирование",
+  done: "готово",
+};
+
+/** Locked enum order (spec §4.2 `TaskSource`) — the create dialog's source select. */
+const SOURCE_VALUES: TaskSource[] = ["idea", "insight", "bug", "plan"];
+
+const SOURCE_LABEL: Record<TaskSource, string> = {
+  idea: "идея",
+  insight: "инсайт",
+  bug: "баг",
+  plan: "план",
+};
+
+/**
+ * Fractional-rank move increment (task-16 brief "CRITICAL rank lesson"). `orchd_set_task_rank`
+ * sets an EXACT f64 rank with no server-side shift of neighbors — moving a row to either end of
+ * its group must land it strictly outside the current min/max, so `firstRank - RANK_GAP` /
+ * `lastRank + RANK_GAP` is used instead of a midpoint (there is no "far" neighbor to average
+ * with). Moving a row BETWEEN two existing neighbors always uses their midpoint, which — for
+ * distinct f64 ranks — is itself distinct from both, so a SINGLE `orchdSetTaskRank` call per move
+ * is correct (unlike `GoalTree`'s ordinal `ord` swap, which needs two calls to avoid a collision).
+ */
+const RANK_GAP = 1024;
+
+/** Confirm copy for task delete (mirrors `GoalTree`/`IdeasList`'s honesty pattern). When the task
+ * has descendants the message names the exact cascade count up front — never a silent cascading
+ * delete (task-16 brief "«удалит N подзадач»" verbatim). */
+function deleteConfirmText(descendantCount: number): string {
+  if (descendantCount === 0) return "удалить задачу?";
+  return `удалить задачу? удалит ${descendantCount} подзадач`;
+}
+
+/** Every descendant (children, grandchildren, …) of `id` within `tasks` — the count the delete
+ * confirm names. Recursive rather than direct-children-only so a deeper subtask chain is still
+ * reported honestly, even though the current domain model typically nests one level deep. */
+function countDescendants(tasks: DomainTask[], id: string): number {
+  let count = 0;
+  const stack: string[] = [id];
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    for (const t of tasks) {
+      if (t.parentId === current) {
+        count += 1;
+        stack.push(t.id);
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * Groups `tasks` by status (spec §4.2 order, §10) and sorts each group by `rank` ascending — the
+ * single flat order that both drives the group's on-screen row order AND is what ▲/▼'s midpoint
+ * math operates against (task-16 brief: "the adjacent same-group task"). Subtasks are NOT
+ * re-nested into a parent-relative tree here — indentation is a pure rendering detail applied per
+ * row (`rowDepth` below), so a subtask still competes for rank position with every other task in
+ * its status group exactly like a top-level task.
+ */
+function groupByStatus(tasks: DomainTask[]): Map<TaskStatus, DomainTask[]> {
+  const groups = new Map<TaskStatus, DomainTask[]>();
+  for (const s of STATUS_VALUES) groups.set(s, []);
+  for (const t of tasks) {
+    groups.get(t.status)?.push(t);
+  }
+  for (const list of groups.values()) {
+    list.sort((a, b) => a.rank - b.rank);
+  }
+  return groups;
+}
+
+/** Visual indent for a subtask row — binary (0 or 1 level), not full ancestor-chain depth, since
+ * group order is flat rank order rather than a parent-first tree (see `groupByStatus`). */
+function rowDepth(task: DomainTask): number {
+  return task.parentId !== null ? 1 : 0;
+}
+
+const sectionStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  marginBottom: 12,
+};
+
+const sectionHeaderStyle: CSSProperties = {
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  fontWeight: 600,
+  color: theme.colors.textDim,
+  textTransform: "uppercase",
+  letterSpacing: "0.04em",
+  padding: "4px 8px",
+};
+
+function rowStyle(depth: number): CSSProperties {
+  return {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    paddingLeft: 8 + depth * 16,
+    paddingRight: 8,
+    height: 32,
+    fontFamily: MONO_FONT,
+    fontSize: 12,
+    borderBottom: `1px solid ${theme.colors.border}`,
+  };
+}
+
+const titleTextStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: theme.colors.text,
+};
+
+const selectStyle: CSSProperties = {
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  color: theme.colors.text,
+  background: theme.colors.bg,
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 4,
+  padding: "2px 4px",
+  flexShrink: 0,
+};
+
+const iconButtonStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: theme.colors.textDim,
+  cursor: "pointer",
+  fontSize: 12,
+  lineHeight: 1,
+  padding: "2px 4px",
+  flexShrink: 0,
+};
+
+const textButtonStyle: CSSProperties = {
+  border: `1px solid ${theme.colors.border}`,
+  background: "transparent",
+  color: theme.colors.text,
+  cursor: "pointer",
+  fontSize: 11,
+  borderRadius: 4,
+  padding: "2px 6px",
+  flexShrink: 0,
+  whiteSpace: "nowrap",
+};
+
+const deleteButtonStyle: CSSProperties = {
+  ...textButtonStyle,
+  color: theme.colors.statusExited,
+  borderColor: theme.colors.statusExited,
+};
+
+const primaryButtonStyle: CSSProperties = {
+  ...textButtonStyle,
+  color: theme.colors.bg,
+  background: theme.colors.accent,
+  borderColor: theme.colors.accent,
+};
+
+const createFormStyle: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+  padding: "8px 12px",
+  marginBottom: 12,
+  border: `1px dashed ${theme.colors.border}`,
+  borderRadius: 8,
+};
+
+const createInputStyle: CSSProperties = {
+  flex: "1 1 160px",
+  minWidth: 0,
+  fontFamily: MONO_FONT,
+  fontSize: 12,
+  color: theme.colors.text,
+  background: theme.colors.bg,
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 4,
+  padding: "3px 6px",
+};
+
+interface TaskRowProps {
+  task: DomainTask;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onStatusChange: (id: string, status: TaskStatus) => void;
+  onMoveUp: (task: DomainTask) => void;
+  onMoveDown: (task: DomainTask) => void;
+  onDelete: (task: DomainTask) => void;
+}
+
+/** One task row (design-system.md "Task row" atom, S3 §10). Title/tags/source are read-only here
+ * — inline title/body editing is out of this task's scope (task-16 brief lists only status
+ * select, rank ▲/▼, and delete per row); the create dialog is the only place fields are entered. */
+function TaskRow(props: TaskRowProps): JSX.Element {
+  const { task, canMoveUp, canMoveDown, onStatusChange, onMoveUp, onMoveDown, onDelete } = props;
+  const depth = rowDepth(task);
+
+  return (
+    <div data-testid={`task-row-${task.id}`} role="listitem" style={rowStyle(depth)}>
+      <span data-testid={`task-title-${task.id}`} style={titleTextStyle}>
+        {task.title}
+      </span>
+      <select
+        data-testid={`task-status-select-${task.id}`}
+        aria-label="Статус задачи"
+        value={task.status}
+        onChange={(e) => onStatusChange(task.id, e.target.value as TaskStatus)}
+        style={selectStyle}
+      >
+        {STATUS_VALUES.map((s) => (
+          <option key={s} value={s}>
+            {STATUS_LABEL[s]}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        data-testid={`task-move-up-${task.id}`}
+        aria-label="Переместить вверх"
+        disabled={!canMoveUp}
+        onClick={() => onMoveUp(task)}
+        style={{ ...iconButtonStyle, opacity: canMoveUp ? 1 : 0.35 }}
+      >
+        ▲
+      </button>
+      <button
+        type="button"
+        data-testid={`task-move-down-${task.id}`}
+        aria-label="Переместить вниз"
+        disabled={!canMoveDown}
+        onClick={() => onMoveDown(task)}
+        style={{ ...iconButtonStyle, opacity: canMoveDown ? 1 : 0.35 }}
+      >
+        ▼
+      </button>
+      <button
+        type="button"
+        data-testid={`task-delete-${task.id}`}
+        onClick={() => onDelete(task)}
+        style={deleteButtonStyle}
+      >
+        Удалить
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Status-grouped task list with fractional-rank reordering (S3 spec §10, task-16). Renders the
+ * six `TaskStatus` groups in their locked spec §4.2 order, always (even empty), each internally
+ * rank-ordered ascending; ▲/▼ moves compute a midpoint against the two would-be neighbors in that
+ * SAME flat rank order (see `groupByStatus`/`RANK_GAP` docs above) and issue a single
+ * `orchdSetTaskRank` call — no server-side renumbering exists, so the computed rank must already
+ * be unique and correctly positioned.
+ *
+ * Structural mutations (create/delete — anything that changes which rows exist) explicitly
+ * `refreshTasks(projectId)` after a successful round-trip, mirroring `GoalTree`/`IdeasList`'s
+ * split between structural and field-level mutations; a status or rank edit relies on the shared
+ * `orchd://tasks-changed` → `refreshTasks` pipe wired in App.tsx. Every mutating call is wrapped
+ * in try/catch → `showToast(describeOrchdError(e))` (spec §7 honest error surface).
+ */
+export function TasksList(props: { projectId: string }): JSX.Element {
+  const { projectId } = props;
+
+  const tasksByProject = useAppStore((s) => s.tasksByProject);
+  const refreshTasks = useAppStore((s) => s.refreshTasks);
+  const showToast = useAppStore((s) => s.showToast);
+
+  const tasks = tasksByProject[projectId] ?? [];
+
+  useEffect(() => {
+    const current = useAppStore.getState().tasksByProject[projectId];
+    if (!current || current.length === 0) {
+      void refreshTasks(projectId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  const groups = useMemo(() => groupByStatus(tasks), [tasks]);
+
+  const [createTitle, setCreateTitle] = useState("");
+  const [createBody, setCreateBody] = useState("");
+  const [createSource, setCreateSource] = useState<TaskSource>("idea");
+  const [createParentId, setCreateParentId] = useState("");
+  const [createTags, setCreateTags] = useState("");
+
+  async function handleStatusChange(id: string, status: TaskStatus): Promise<void> {
+    try {
+      await orchdSetTaskStatus(id, status);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  async function applyRank(id: string, rank: number): Promise<void> {
+    try {
+      await orchdSetTaskRank(id, rank);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  /**
+   * ▲: move `task` above the row currently just before it in its status group's rank order. The
+   * new rank is the midpoint of that row's two would-be new neighbors — the row two spots up
+   * (`prevPrev`) and the row one spot up (`prev`, whose position `task` is overtaking). When
+   * `prev` is already the group's first row (no `prevPrev`), there is nothing to average with, so
+   * the new rank goes below the group's floor: `firstRank - RANK_GAP`.
+   */
+  async function handleMoveUp(group: DomainTask[], task: DomainTask): Promise<void> {
+    const idx = group.findIndex((t) => t.id === task.id);
+    if (idx <= 0) return;
+    const prev = group[idx - 1];
+    const prevPrev = idx - 2 >= 0 ? group[idx - 2] : undefined;
+    const newRank = prevPrev ? (prevPrev.rank + prev.rank) / 2 : prev.rank - RANK_GAP;
+    await applyRank(task.id, newRank);
+  }
+
+  /** ▼: symmetric to `handleMoveUp` — midpoint of the row one spot down (`next`) and two spots
+   * down (`nextNext`); with no `nextNext` (next is already the group's last row), the new rank
+   * goes above the group's ceiling: `lastRank + RANK_GAP`. */
+  async function handleMoveDown(group: DomainTask[], task: DomainTask): Promise<void> {
+    const idx = group.findIndex((t) => t.id === task.id);
+    if (idx < 0 || idx >= group.length - 1) return;
+    const next = group[idx + 1];
+    const nextNext = idx + 2 < group.length ? group[idx + 2] : undefined;
+    const newRank = nextNext ? (next.rank + nextNext.rank) / 2 : next.rank + RANK_GAP;
+    await applyRank(task.id, newRank);
+  }
+
+  async function handleDelete(task: DomainTask): Promise<void> {
+    const descendantCount = countDescendants(tasks, task.id);
+    if (!window.confirm(deleteConfirmText(descendantCount))) return;
+    try {
+      await orchdDeleteTask(task.id);
+      await refreshTasks(projectId);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  async function handleCreate(): Promise<void> {
+    const title = createTitle.trim();
+    if (title === "") return;
+    const tags = createTags
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter((tag) => tag !== "");
+    const parentId = createParentId === "" ? null : createParentId;
+    try {
+      await orchdCreateTask(projectId, parentId, title, createBody, null, createSource, null, tags);
+      setCreateTitle("");
+      setCreateBody("");
+      setCreateSource("idea");
+      setCreateParentId("");
+      setCreateTags("");
+      await refreshTasks(projectId);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  return (
+    <div data-testid="tasks-list">
+      <div style={createFormStyle}>
+        <input
+          data-testid="task-create-title"
+          aria-label="Название новой задачи"
+          placeholder="название задачи"
+          value={createTitle}
+          onChange={(e) => setCreateTitle(e.target.value)}
+          style={createInputStyle}
+        />
+        <textarea
+          data-testid="task-create-body"
+          aria-label="Описание новой задачи"
+          placeholder="описание (необязательно)"
+          value={createBody}
+          onChange={(e) => setCreateBody(e.target.value)}
+          rows={2}
+          style={{ ...createInputStyle, flex: "1 1 100%", resize: "vertical" }}
+        />
+        <select
+          data-testid="task-create-source"
+          aria-label="Источник новой задачи"
+          value={createSource}
+          onChange={(e) => setCreateSource(e.target.value as TaskSource)}
+          style={selectStyle}
+        >
+          {SOURCE_VALUES.map((s) => (
+            <option key={s} value={s}>
+              {SOURCE_LABEL[s]}
+            </option>
+          ))}
+        </select>
+        <select
+          data-testid="task-create-parent"
+          aria-label="Родительская задача"
+          value={createParentId}
+          onChange={(e) => setCreateParentId(e.target.value)}
+          style={selectStyle}
+        >
+          <option value="">без родителя</option>
+          {tasks.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.title}
+            </option>
+          ))}
+        </select>
+        <input
+          data-testid="task-create-tags"
+          aria-label="Теги новой задачи (через запятую)"
+          placeholder="теги через запятую"
+          value={createTags}
+          onChange={(e) => setCreateTags(e.target.value)}
+          style={createInputStyle}
+        />
+        <button
+          type="button"
+          data-testid="task-create-submit"
+          disabled={createTitle.trim() === ""}
+          onClick={() => void handleCreate()}
+          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
+        >
+          + задача
+        </button>
+      </div>
+
+      {STATUS_VALUES.map((status) => {
+        const group = groups.get(status) ?? [];
+        return (
+          <div key={status} data-testid={`task-status-group-${status}`} style={sectionStyle}>
+            <div style={sectionHeaderStyle}>
+              {STATUS_LABEL[status]} ({group.length})
+            </div>
+            {group.length === 0 ? (
+              <div
+                data-testid={`task-empty-group-${status}`}
+                style={{ color: theme.colors.textDim, fontSize: 12, padding: "0 8px" }}
+              >
+                нет задач
+              </div>
+            ) : (
+              group.map((task, idx) => (
+                <TaskRow
+                  key={task.id}
+                  task={task}
+                  canMoveUp={idx > 0}
+                  canMoveDown={idx < group.length - 1}
+                  onStatusChange={(id, s) => void handleStatusChange(id, s)}
+                  onMoveUp={(t) => void handleMoveUp(group, t)}
+                  onMoveDown={(t) => void handleMoveDown(group, t)}
+                  onDelete={(t) => void handleDelete(t)}
+                />
+              ))
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
