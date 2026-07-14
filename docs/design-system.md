@@ -94,6 +94,7 @@ defect. New tokens are added to `theme.ts` first, doc second, usage third.
 | **Lifecycle chip** | mono 11px `<select>` styled as a pill (999px radius, 1px `border`), cycling a LOCKED enum in its declared order only (`IdeaLifecycle`'s six values, `FitVerdict`'s three, `InsightStatus`'s three — spec §4.2); one accent on hover/focus, no amber (amber stays reserved for "нужен ты"); an archiving transition that has a server-side precondition (Insight `status → archived` requires non-empty `resolutionReasoning`) is never fired straight from the select — it opens an inline reasoning field + confirm button below the row instead, blocking with a `statusExited` inline message on an empty reasoning rather than round-tripping a doomed request (`IdeasList.tsx`/`InsightsList.tsx`, S3 §10) |
 | **Policy form** | numeric cap (empty=∞), chip inputs for classes/allowlist; client mirrors server validation |
 | **File-state banner** | info banner (не amber): ExternallyModified → [Принять]; Missing → [Создать заново] |
+| **Project group row** | bold project header + nested workspace rows; «Без проекта» group last |
 
 Buttons: primary = accent fill (one per view maximum), secondary = 1px border ghost; destructive
 = red border ghost with confirm. Toggles, not checkboxes, for enable/disable.

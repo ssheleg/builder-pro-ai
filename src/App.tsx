@@ -34,6 +34,7 @@ import { DaemonBanner } from "./components/DaemonBanner";
 import { UpgradeDialog } from "./components/UpgradeDialog";
 import { FilesRail } from "./components/FilesRail";
 import { HomeView } from "./components/HomeView";
+import { ProjectPanel } from "./components/ProjectPanel";
 import { Toast } from "./components/Toast";
 import { theme } from "./theme";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -98,6 +99,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const workspaces = useAppStore((s) => s.workspaces);
   const view = useAppStore((s) => s.view);
+  const activeProjectId = useAppStore((s) => s.activeProjectId);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<WorkspaceId | null>(null);
 
   useEffect(() => {
@@ -385,6 +387,11 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           // straight into a waiting terminal. `setActiveWorkspaceId` is threaded down so that
           // jump can select the target workspace the same way the sidebar does.
           <HomeView manager={manager} setActiveWorkspaceId={setActiveWorkspaceId} />
+        ) : view === "project" ? (
+          // S3 project panel (spec §10, T18): guarded on `activeProjectId` non-null — `openProject`
+          // is the only setter of `view: "project"` and always sets both together (store.ts), but
+          // this stays defensive rather than assuming that invariant can never be violated.
+          activeProjectId !== null && <ProjectPanel projectId={activeProjectId} />
         ) : (
           <>
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>

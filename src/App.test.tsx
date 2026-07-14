@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, act } from "@testing-library/react";
+import { render, screen, cleanup, act, within } from "@testing-library/react";
 
 // ---- capture each subscriber callback so tests can fire daemon events ----
 const cbs: Record<string, (p: unknown) => void> = {};
@@ -95,6 +95,13 @@ const orchdListIdeasMock = vi.fn().mockResolvedValue([]);
 const orchdListInsightsMock = vi.fn().mockResolvedValue([]);
 const orchdListTasksMock = vi.fn().mockResolvedValue([]);
 const orchdGetRulesetMock = vi.fn();
+// T18: ProjectPanel (rendered once view === "project") imports these directly from the same
+// module — mocked here too so a project-view test never hits the real `invoke()`.
+const orchdAddProjectWorkspaceMock = vi.fn();
+const orchdRemoveProjectWorkspaceMock = vi.fn();
+const orchdExportProjectMock = vi.fn();
+const orchdExportToFileMock = vi.fn();
+const orchdImportFromFileMock = vi.fn();
 vi.mock("./ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -102,6 +109,11 @@ vi.mock("./ipc/orchd", () => ({
   orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
   orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
+  orchdAddProjectWorkspace: (...a: unknown[]) => orchdAddProjectWorkspaceMock(...a),
+  orchdRemoveProjectWorkspace: (...a: unknown[]) => orchdRemoveProjectWorkspaceMock(...a),
+  orchdExportProject: (...a: unknown[]) => orchdExportProjectMock(...a),
+  orchdExportToFile: (...a: unknown[]) => orchdExportToFileMock(...a),
+  orchdImportFromFile: (...a: unknown[]) => orchdImportFromFileMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -214,6 +226,11 @@ beforeEach(() => {
   orchdListInsightsMock.mockReset().mockResolvedValue([]);
   orchdListTasksMock.mockReset().mockResolvedValue([]);
   orchdGetRulesetMock.mockReset();
+  orchdAddProjectWorkspaceMock.mockReset();
+  orchdRemoveProjectWorkspaceMock.mockReset();
+  orchdExportProjectMock.mockReset();
+  orchdExportToFileMock.mockReset();
+  orchdImportFromFileMock.mockReset();
   useAppStore.setState(
     {
       sessions: {},
@@ -1166,5 +1183,39 @@ describe("S3 T13: orchd domain event wiring", () => {
       cbs.orchdIncompatible(null);
     });
     expect(useAppStore.getState().orchdIncompatible).toBe(true);
+  });
+});
+
+describe("T18: view='project' renders ProjectPanel", () => {
+  it("renders ProjectPanel for the active project once openProject is called", async () => {
+    orchdListProjectsMock.mockResolvedValue([
+      { id: "p1", name: "Proj A", description: "", status: "active", workspaceIds: [], createdAt: 1, updatedAt: 1 },
+    ]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      useAppStore.getState().openProject("p1");
+    });
+
+    expect(useAppStore.getState().view).toBe("project");
+    const panel = screen.getByTestId("project-panel");
+    expect(panel).toBeTruthy();
+    // "Proj A" also appears as the sidebar's project-group header now (T18) — scope to the panel.
+    expect(within(panel).getByText("Proj A")).toBeTruthy();
+    expect(screen.queryByTestId("home-stats")).toBeNull();
+  });
+
+  it("view='project' with no active project renders nothing (guarded, no crash)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      useAppStore.getState().setView("project");
+    });
+
+    expect(useAppStore.getState().activeProjectId).toBeNull();
+    expect(screen.queryByTestId("project-panel")).toBeNull();
+    expect(screen.queryByTestId("project-panel-loading")).toBeNull();
   });
 });
