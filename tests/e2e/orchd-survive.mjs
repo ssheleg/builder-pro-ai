@@ -50,6 +50,7 @@ import {
   killProcessGroup,
 } from "./lib/daemon-harness.mjs";
 import { startStubMcpServer } from "./lib/stub-mcp-server.mjs";
+import { startStubRestServer } from "./lib/stub-rest-server.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..", "..");
 const ORCHD_BIN = process.env.BPA_ORCHD ?? path.join(REPO, "target", "debug", "bpa-orchd");
@@ -226,6 +227,30 @@ function encodeOrchdRequest(req) {
           limit: req.limit ?? null,
         },
       };
+    // S-EXT Connectors / accounts (spec §5/§7, appended — order FROZEN append-only) — only the 4
+    // verbs phase7 drives. `ConnectorListAccounts` is a unit variant (no fields), same bare-string
+    // convention as `ListProjects`/`ExportAll` above.
+    case "ConnectorAddApiKey":
+      return {
+        ConnectorAddApiKey: {
+          provider: req.provider,
+          label: req.label,
+          api_key: req.apiKey,
+        },
+      };
+    case "ConnectorListAccounts":
+      return "ConnectorListAccounts";
+    case "ConnectorInvoke":
+      return {
+        ConnectorInvoke: {
+          account_id: req.accountId,
+          op: req.op,
+          args_json: req.argsJson,
+          project_id: req.projectId ?? null,
+        },
+      };
+    case "ConnectorDeleteAccount":
+      return { ConnectorDeleteAccount: { id: req.id } };
     default:
       throw new Error(`encodeOrchdRequest: unsupported request type ${req.t}`);
   }
@@ -316,6 +341,15 @@ function decodeOrchdResponse(value) {
     case "McpInvocations":
     case "McpArtifacts":
     case "McpArtifact":
+    // S-EXT Connectors / accounts (spec §5/§7, appended — order FROZEN append-only): `Account`
+    // is a newtype variant over a camelCase-serde entity struct (same convention as `McpServer`/
+    // `McpArtifact` above — verified against `src/ipc/orchd-types.ts`'s generated field names,
+    // `Account = {id, provider, label, authKind, scopes, expiresAt, createdAt, updatedAt}`);
+    // `Accounts` is the `Vec<Account>` newtype sibling, decoded identically. `ConnectorInvoke`'s
+    // own success payload is `McpCallResult` (reuses the MCP call/artifact/invocation path, spec
+    // §6), already decoded above — no separate case needed for it.
+    case "Account":
+    case "Accounts":
       return { t: variant, value: inner };
     case "ImportReport":
       return {
@@ -339,7 +373,14 @@ function decodeOrchdResponse(value) {
  * variants -> bare strings; `GoalsChanged`/`TasksChanged`/`RuleSetChanged` are struct variants.
  * The full enum is decoded (not just the subset phase1's mutations trigger) so an unexpected-but-
  * valid push never throws mid-test — `sock.on("data", ...)` runs this decode synchronously on
- * every inbound push, whether or not the test ever awaits it. */
+ * every inbound push, whether or not the test ever awaits it.
+ *
+ * S-EXT Connectors (spec §5/§7, appended — order FROZEN append-only): `ConnectorsChanged` is
+ * ALSO a unit variant (no `project_id` — the `account` table has no such column, spec §5 comment)
+ * — it falls through the SAME bare-string branch immediately below as `ProjectsChanged`/
+ * `IdeasChanged`/`InsightsChanged`, so no dedicated `case` is needed for it in the switch below;
+ * `ConnectorInvoke`'s OTHER push, `McpArtifactsChanged`, is a struct variant already decoded
+ * further down (shared with `McpCallTool`'s own success path). */
 function decodeOrchdPush(value) {
   if (typeof value === "string") {
     return { t: value };
@@ -486,6 +527,27 @@ const APP_SUPPORT_DIR = path.join(
 );
 const DB_PATH = path.join(APP_SUPPORT_DIR, "orchd.db");
 
+// ---- Keychain access under the isolated HOME (S-EXT phase7: `ConnectorAddApiKey` writes a real
+// macOS Keychain entry via `bpa_secrets`/`security_framework::passwords::*`, which resolves the
+// default (login) Keychain off a `$HOME`-derived path). A bare synthetic `$HOME` pointing at a
+// fresh, otherwise-empty tempdir (like `isolatedHomeDir` above) has no `Library/Keychains`
+// subtree, so Security.framework finds no keychain there and attempts to provision a brand-new
+// one — which requires an interactive "choose a password" prompt that hangs forever in this
+// harness's non-interactive run. Symlinking `Library/Keychains` from the REAL `$HOME` into the
+// isolated one fixes this (confirmed empirically against this exact daemon binary): the OS's
+// default-keychain path resolution then finds the SAME keychain this test process could already
+// read/write directly — no new access is granted, only where to look. This mirrors
+// `crates/orchd/tests/dispatch_integration.rs`'s `HomeGuard::set` byte-for-byte (S-EXT task T13a's
+// own discovery of the identical problem for orchd's in-process Rust integration tests). Applied
+// unconditionally, before phase0's very first boot: harmless for every earlier phase (none of
+// them touch Keychain), and required starting phase7.
+{
+  const realHomeDir = os.homedir();
+  const keychainsLink = path.join(isolatedHomeDir, "Library", "Keychains");
+  fs.mkdirSync(path.dirname(keychainsLink), { recursive: true });
+  fs.symlinkSync(path.join(realHomeDir, "Library", "Keychains"), keychainsLink);
+}
+
 /**
  * Cleanup state tracked across phases so the top-level `finally` in `main()` can tear everything
  * down on ANY exit path — success, a failed assertion mid-phase, or a request timeout.
@@ -494,6 +556,11 @@ const cleanup = {
   daemonPid: null,
   conns: [],
   stubMcpServer: null,
+  stubRestServer: null,
+  // Set while a phase7 connector account exists but hasn't been explicitly `ConnectorDeleteAccount`-
+  // ed yet, so `cleanupAll()` can best-effort clean up the REAL Keychain entry it created even if a
+  // mid-phase assertion throws before the happy-path deletion runs (see phase7 below).
+  connectorAccountId: null,
 };
 
 /** Poll `pidAlive` until `pid` exits or `deadlineMs` elapses; throws if it never exits. */
@@ -1015,6 +1082,164 @@ async function main() {
 
   log("phase6 OK: mcp tool artifact survived restart");
 
+  // ---- phase 7: CONNECTOR invoke artifact survives restart (S-EXT Phase-2 DoD, spec §9's DoD
+  // extended from the MCP path (phase6) to the CONNECTOR path: spec §6 "ConnectorInvoke passes
+  // through trust::authorize IDENTICALLY to McpCallTool ... every mcp_artifact from McpCallTool
+  // AND ConnectorInvoke is is_untrusted=1"). Spawn a local stub generic-rest target -> Connector
+  // AddApiKey (writes a REAL Keychain entry — see the HOME/Keychain symlink comment above this
+  // file's `cleanup` declaration) -> capture the account id -> ConnectorInvoke(op="post") against
+  // the stub with a planted marker in the body (args shape verified against
+  // `crates/orchd/src/connectors/adapter.rs::GenericRestAdapter::invoke`: `post` reads
+  // `args["url"]` + JSON-encodes `args["body"]`) -> assert McpCallResult{isError:false} + a
+  // persisted artifact whose content carries the stub's OWN echoed marker (proving the adapter's
+  // real HTTP round trip, not a canned local value) -> close the stub (mirrors phase6: artifact
+  // durability must not depend on the connector target still being reachable) -> OrchdShutdown
+  // {drain:true} -> relaunch -> McpListArtifacts still returns the artifact with its content
+  // intact -> ConnectorDeleteAccount (cleans up the DB row AND the real Keychain entry,
+  // `connectors::accounts::Db::delete_account`).
+  log(
+    "phase7: spawn stub generic-rest server + ConnectorAddApiKey(generic-rest) + " +
+      "ConnectorInvoke(post)",
+  );
+
+  const stubRestServer = await startStubRestServer();
+  cleanup.stubRestServer = stubRestServer;
+  log(`phase7: stub generic-rest server listening at ${stubRestServer.url}`);
+
+  const apiKeyValue = `e2e-key-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const addAccountResp = await orchdRequest(conn, {
+    t: "ConnectorAddApiKey",
+    provider: "generic-rest",
+    label: "E2E Connector",
+    apiKey: apiKeyValue,
+  });
+  assert.equal(
+    addAccountResp.t,
+    "Account",
+    `ConnectorAddApiKey -> ${JSON.stringify(addAccountResp)}`,
+  );
+  const accountId = addAccountResp.value.id;
+  // Tracked so `cleanupAll()` can best-effort delete the REAL Keychain entry this created even if
+  // a later assertion in this phase throws before the happy-path `ConnectorDeleteAccount` below
+  // runs — cleared once that explicit deletion succeeds.
+  cleanup.connectorAccountId = accountId;
+  assert.equal(addAccountResp.value.provider, "generic-rest");
+  assert.equal(addAccountResp.value.authKind, "apikey");
+  assert.equal(addAccountResp.value.label, "E2E Connector");
+
+  const invokeMarker = "connector-restart-survivor";
+  const invokeResp = await orchdRequest(conn, {
+    t: "ConnectorInvoke",
+    accountId,
+    op: "post",
+    argsJson: JSON.stringify({ url: stubRestServer.url, body: { marker: invokeMarker } }),
+    projectId: null,
+  });
+  assert.equal(invokeResp.t, "McpCallResult", `ConnectorInvoke -> ${JSON.stringify(invokeResp)}`);
+  assert.equal(
+    invokeResp.value.isError,
+    false,
+    `connector post call must not be a call-level error: ${JSON.stringify(invokeResp.value)}`,
+  );
+  assert.ok(invokeResp.value.artifactId, "expected a persisted artifact id");
+  assert.ok(
+    invokeResp.value.contentJson.includes(invokeMarker),
+    `expected the stub's echoed marker in the call result content: ${invokeResp.value.contentJson}`,
+  );
+  const connectorArtifactId = invokeResp.value.artifactId;
+
+  assert.equal(
+    stubRestServer.lastAuthHeader(),
+    `Bearer ${apiKeyValue}`,
+    "GenericRestAdapter must send the account's api key as Authorization: Bearer <key>",
+  );
+
+  log(`phase7: added account ${accountId}, invoked post -> artifact ${connectorArtifactId}`);
+
+  // Close the stub NOW, before the restart — same rationale as phase6: the artifact's durability
+  // must not depend on the connector target still being reachable after this point.
+  await stubRestServer.close();
+  cleanup.stubRestServer = null;
+  log("phase7: stub generic-rest server closed (artifact durability must not depend on it)");
+
+  await shutdownAndWaitExit(conn);
+  log(`phase7 OK: orchd (pid ${cleanup.daemonPid}) process exited (pre-connector-restart)`);
+
+  conn = await bootAndConnect();
+  assert.equal(
+    conn.chosenVersion,
+    1,
+    `post-connector-restart preamble handshake negotiated unexpected version: ${JSON.stringify(conn)}`,
+  );
+
+  const artifactsAfterConnectorRestart = await orchdRequest(conn, {
+    t: "McpListArtifacts",
+    // No `serverId` filter: a `ConnectorInvoke` artifact has `server_id: null` (spec §4
+    // account_id/server_id XOR) — filtering by the phase6 MCP server id would never match it.
+    projectId: null,
+    serverId: null,
+    limit: null,
+  });
+  assert.equal(
+    artifactsAfterConnectorRestart.t,
+    "McpArtifacts",
+    `McpListArtifacts -> ${JSON.stringify(artifactsAfterConnectorRestart)}`,
+  );
+  const rehydratedConnectorArtifact = artifactsAfterConnectorRestart.value.find(
+    (a) => a.id === connectorArtifactId,
+  );
+  assert.ok(
+    rehydratedConnectorArtifact,
+    `connector artifact ${connectorArtifactId} lost across orchd restart (artifacts: ` +
+      `${JSON.stringify(artifactsAfterConnectorRestart.value.map((a) => a.id))})`,
+  );
+  assert.ok(
+    rehydratedConnectorArtifact.contentJson.includes(invokeMarker),
+    `rehydrated connector artifact lost its content across orchd restart: ` +
+      `${rehydratedConnectorArtifact.contentJson}`,
+  );
+  assert.equal(
+    rehydratedConnectorArtifact.accountId,
+    accountId,
+    "rehydrated connector artifact must still reference its source account",
+  );
+  assert.equal(
+    rehydratedConnectorArtifact.serverId,
+    null,
+    "a ConnectorInvoke artifact has NO server_id (account_id/server_id XOR, spec §4)",
+  );
+  assert.ok(
+    rehydratedConnectorArtifact.isUntrusted,
+    "spec §6/D9: every mcp_artifact from ConnectorInvoke is is_untrusted=1",
+  );
+
+  log("phase7: connector invoke artifact survived restart — cleaning up the connector account");
+
+  const deleteAccountResp = await orchdRequest(conn, {
+    t: "ConnectorDeleteAccount",
+    id: accountId,
+  });
+  assert.equal(
+    deleteAccountResp.t,
+    "Ack",
+    `ConnectorDeleteAccount -> ${JSON.stringify(deleteAccountResp)}`,
+  );
+  cleanup.connectorAccountId = null;
+
+  const accountsAfterDelete = await orchdRequest(conn, { t: "ConnectorListAccounts" });
+  assert.equal(
+    accountsAfterDelete.t,
+    "Accounts",
+    `ConnectorListAccounts -> ${JSON.stringify(accountsAfterDelete)}`,
+  );
+  assert.ok(
+    !accountsAfterDelete.value.some((a) => a.id === accountId),
+    `ConnectorDeleteAccount must remove the account (still present: ` +
+      `${JSON.stringify(accountsAfterDelete.value)})`,
+  );
+
+  log("phase7 OK: connector invoke artifact survived restart");
+
   log("ALL PHASES PASSED");
 }
 
@@ -1030,6 +1255,35 @@ async function cleanupAll() {
       /* best-effort cleanup */
     }
     cleanup.stubMcpServer = null;
+  }
+
+  if (cleanup.stubRestServer != null) {
+    try {
+      await cleanup.stubRestServer.close();
+    } catch {
+      /* best-effort cleanup */
+    }
+    cleanup.stubRestServer = null;
+  }
+
+  // Best-effort safety net: if phase7 created a connector account (a REAL Keychain entry, not
+  // just isolated-tempdir state) but a LATER assertion in that same phase threw before its own
+  // explicit `ConnectorDeleteAccount` ran, clean it up here too — via the most recently tracked
+  // LIVE connection, BEFORE the daemon is torn down below (a dead daemon can't service this
+  // request). A failure here is swallowed: this is cleanup for an already-failing run, not itself
+  // a test assertion; the happy path always clears `connectorAccountId` itself (phase7), so this
+  // branch is normally a no-op.
+  if (cleanup.connectorAccountId != null && cleanup.conns.length > 0) {
+    const liveConn = cleanup.conns[cleanup.conns.length - 1];
+    try {
+      await orchdRequest(liveConn, {
+        t: "ConnectorDeleteAccount",
+        id: cleanup.connectorAccountId,
+      });
+    } catch {
+      /* best-effort cleanup */
+    }
+    cleanup.connectorAccountId = null;
   }
 
   for (const c of cleanup.conns) {
