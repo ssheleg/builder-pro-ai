@@ -145,6 +145,51 @@ fn load_research_run(conn: &Connection, id: &str) -> Result<ResearchRunRow, Orch
         .into_row()
 }
 
+// ================================================================================
+// ---- wire conversions (S-IDEA spec §5, task T5): this module's persistence-layer
+// `ResearchRunRow`/`ResearchStatus` -> `bpa_orchd_proto`'s wire `ResearchRun`/`ResearchStatus`
+// (the entity task T3 already defined) — mirrors `mcp::mod`'s own
+// `McpServerRow -> bpa_orchd_proto::McpServer` conversion block byte-for-byte (S-EXT task T6):
+// every field is a plain field-for-field move (both sides mirror the same spec §4 DDL columns —
+// the wire `ResearchRun`'s own doc comment says so explicitly), `i64` timestamps pass straight
+// through (`#[ts(type = "number")]` on the wire side already handles the TS-side cast, nothing to
+// do here). Referenced fully-qualified (`bpa_orchd_proto::ResearchStatus`/`bpa_orchd_proto::
+// ResearchRun`) rather than imported bare, since this module's OWN `ResearchStatus` shares the
+// exact same short name — a bare import of both would collide (same rationale `mcp::mod`'s own
+// comment gives for `McpTransport`/`McpScope`/`McpAuthKind`). `socket_server`'s dispatch arms
+// (task T5) call `.into()` on a loaded [`ResearchRunRow`] (or `Vec<ResearchRunRow>` via
+// `.map(Into::into)`), exactly like every other read/mutate dispatch arm in this crate.
+// ================================================================================
+
+impl From<ResearchStatus> for bpa_orchd_proto::ResearchStatus {
+    fn from(s: ResearchStatus) -> Self {
+        match s {
+            ResearchStatus::Pending => bpa_orchd_proto::ResearchStatus::Pending,
+            ResearchStatus::Running => bpa_orchd_proto::ResearchStatus::Running,
+            ResearchStatus::Done => bpa_orchd_proto::ResearchStatus::Done,
+            ResearchStatus::Failed => bpa_orchd_proto::ResearchStatus::Failed,
+        }
+    }
+}
+
+impl From<ResearchRunRow> for bpa_orchd_proto::ResearchRun {
+    fn from(r: ResearchRunRow) -> Self {
+        bpa_orchd_proto::ResearchRun {
+            id: r.id,
+            idea_id: r.idea_id,
+            server_id: r.server_id,
+            tool_name: r.tool_name,
+            args_json: r.args_json,
+            status: r.status.into(),
+            invocation_id: r.invocation_id,
+            artifact_id: r.artifact_id,
+            error_kind: r.error_kind,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
 impl Db {
     /// `start_research_run` (spec §4 "Transition atomicity" note, §6 steps 1-2): ONE
     /// `unchecked_transaction()` — verifies BOTH the idea and the server exist, inserts
@@ -931,6 +976,53 @@ mod tests {
         db.delete_mcp_server(&server_id).unwrap();
 
         assert!(db.get_research_run(&run.id).unwrap().is_none());
+    }
+
+    // ---- wire conversions (task T5) ----
+
+    #[test]
+    fn research_run_row_into_proto_research_run_maps_every_field_1to1() {
+        let db = new_db();
+        let idea_id = new_idea(&db, IdeaLifecycle::Captured);
+        let server_id = new_server(&db);
+        let row = db
+            .start_research_run(new_run(&idea_id, &server_id))
+            .unwrap();
+        let row = db.set_research_run_done(&row.id, "inv-1", "art-1").unwrap();
+
+        let wire: bpa_orchd_proto::ResearchRun = row.clone().into();
+
+        assert_eq!(wire.id, row.id);
+        assert_eq!(wire.idea_id, row.idea_id);
+        assert_eq!(wire.server_id, row.server_id);
+        assert_eq!(wire.tool_name, row.tool_name);
+        assert_eq!(wire.args_json, row.args_json);
+        assert_eq!(wire.status, bpa_orchd_proto::ResearchStatus::Done);
+        assert_eq!(wire.invocation_id, row.invocation_id);
+        assert_eq!(wire.artifact_id, row.artifact_id);
+        assert_eq!(wire.error_kind, row.error_kind);
+        assert_eq!(wire.created_at, row.created_at);
+        assert_eq!(wire.updated_at, row.updated_at);
+    }
+
+    #[test]
+    fn research_status_into_proto_maps_every_variant() {
+        assert_eq!(
+            bpa_orchd_proto::ResearchStatus::from(ResearchStatus::Pending),
+            bpa_orchd_proto::ResearchStatus::Pending
+        );
+        assert_eq!(
+            bpa_orchd_proto::ResearchStatus::from(ResearchStatus::Running),
+            bpa_orchd_proto::ResearchStatus::Running
+        );
+        assert_eq!(
+            bpa_orchd_proto::ResearchStatus::from(ResearchStatus::Done),
+            bpa_orchd_proto::ResearchStatus::Done
+        );
+        assert_eq!(
+            bpa_orchd_proto::ResearchStatus::from(ResearchStatus::Failed),
+            bpa_orchd_proto::ResearchStatus::Failed
+        );
     }
 }
 

@@ -14,8 +14,9 @@ use bpa_orchd::protocol::{
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
     McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
     OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Policy,
-    PolicyScope, Project, RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
-    ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
+    PolicyScope, Project, ResearchRun, ResearchStatus, RuleFileState, RuleScope, RuleSetView,
+    Skill, SkillFileState, SkillScope, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION,
+    ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -423,6 +424,20 @@ fn expect_audit_rows(res: OrchdResponse) -> Vec<AuditRow> {
     }
 }
 
+fn expect_research_run(res: OrchdResponse) -> ResearchRun {
+    match res {
+        OrchdResponse::ResearchRun(r) => r,
+        other => panic!("expected ResearchRun, got {other:?}"),
+    }
+}
+
+fn expect_research_runs(res: OrchdResponse) -> Vec<ResearchRun> {
+    match res {
+        OrchdResponse::ResearchRuns(v) => v,
+        other => panic!("expected ResearchRuns, got {other:?}"),
+    }
+}
+
 /// `McpAddServer` convenience: an `http`, globally-scoped, unauthenticated server pointed at
 /// `url` (the loopback stub's base url from [`spawn_stub_mcp_server`]) — every MCP dispatch test
 /// below that needs "a registered server" uses this.
@@ -454,6 +469,19 @@ async fn create_project(c: &mut Client, name: &str) -> Project {
             name: name.to_string(),
             description: String::new(),
             workspace_ids: vec![uuid::Uuid::new_v4().to_string()],
+        })
+        .await,
+    )
+}
+
+/// Test-only convenience: `CreateIdea`, project-less (`project_id: None`) — every research
+/// dispatch test below that needs "an idea to run research against" uses this.
+async fn create_idea(c: &mut Client, title: &str) -> Idea {
+    expect_idea(
+        c.request(OrchdRequest::CreateIdea {
+            project_id: None,
+            title: title.to_string(),
+            body: String::new(),
         })
         .await,
     )
@@ -2742,6 +2770,287 @@ async fn trust_list_audit_returns_rows_newest_first_and_broadcasts_nothing() {
         None,
         "a read verb (TrustListAudit) must broadcast nothing"
     );
+
+    c1.shutdown(boot).await;
+}
+
+// ================================================================================
+// ---- S-IDEA research dispatch (spec §5/§6, task T5): real per-verb socket dispatch against the
+// SAME loopback stub MCP server the S-EXT MCP dispatch tests above use (`spawn_stub_mcp_server`,
+// `EchoServer`'s `echo`/`slow_echo` tools) — the research verbs are, under the hood, a thin
+// provenance wrapper around the exact `mcp::invoke::call_tool` path those tests already exercise,
+// so reusing the same stub proves the real production wiring end to end (a research run against a
+// REAL (loopback) MCP round-trip, not a fake `connect_fn` — the driver-level fakes already live in
+// `research::mod::driver_tests`, task T4).
+// ================================================================================
+
+/// Bounded poll of `ResearchGetRun{id}` until its status leaves `pending`/`running` (i.e. reaches
+/// a terminal state) or the deadline elapses. The stub's `echo` tool answers essentially
+/// instantly (an in-process loopback HTTP round-trip), so a short bound with small sleeps is
+/// hermetic — no environment-fragile wall-clock assertion (mirrors the S4 lesson the design spec's
+/// own §8 testing-strategy section cites).
+async fn poll_research_run_terminal(c: &mut Client, id: &str) -> ResearchRun {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let run = expect_research_run(
+            c.request(OrchdRequest::ResearchGetRun { id: id.to_string() })
+                .await,
+        );
+        if !matches!(
+            run.status,
+            ResearchStatus::Pending | ResearchStatus::Running
+        ) {
+            return run;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "research run {id} did not reach a terminal state within the bound"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn research_start_run_returns_pending_row_then_reaches_done_via_pushes_and_get_run_poll() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+    expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+    let idea = create_idea(&mut c1, "Research this").await;
+
+    // c2 connects only after every setup push already landed, so it observes exactly the
+    // `ResearchRunsChanged` pushes this test is proving (not `McpServersChanged`/`McpToolsChanged`/
+    // `IdeasChanged` from the setup steps above).
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let args_json = serde_json::json!({"msg": "hello research"}).to_string();
+    let run = expect_research_run(
+        c1.request(OrchdRequest::ResearchStartRun {
+            idea_id: idea.id.clone(),
+            server_id: server.id.clone(),
+            tool_name: "echo".to_string(),
+            args_json: args_json.clone(),
+        })
+        .await,
+    );
+    assert_eq!(
+        run.status,
+        ResearchStatus::Pending,
+        "ResearchStartRun's own reply is the freshly-inserted pending row, never the terminal one"
+    );
+    assert_eq!(run.idea_id, idea.id);
+    assert_eq!(run.server_id, server.id);
+    assert_eq!(run.tool_name, "echo");
+    assert_eq!(run.args_json, args_json);
+    assert!(run.invocation_id.is_none());
+    assert!(run.artifact_id.is_none());
+    assert!(run.error_kind.is_none());
+
+    // The spawned driver pushes `ResearchRunsChanged{idea_id}` on EVERY transition it drives
+    // (pending->running, then running->done) — a subscriber must observe at least one.
+    match c2
+        .recv_push_timeout(Duration::from_secs(2))
+        .await
+        .expect("expected at least one ResearchRunsChanged push")
+    {
+        OrchdPush::ResearchRunsChanged { idea_id } => {
+            assert_eq!(idea_id.as_deref(), Some(idea.id.as_str()))
+        }
+        other => panic!("expected ResearchRunsChanged, got {other:?}"),
+    }
+
+    let done = poll_research_run_terminal(&mut c1, &run.id).await;
+    assert_eq!(done.status, ResearchStatus::Done);
+    assert!(
+        done.artifact_id.is_some(),
+        "a done run must carry an artifactId"
+    );
+    assert!(
+        done.invocation_id.is_some(),
+        "a done run must carry an invocationId"
+    );
+    assert!(done.error_kind.is_none());
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn research_list_runs_returns_the_ideas_runs_and_a_plain_read_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+    expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+    let idea = create_idea(&mut c1, "List this").await;
+
+    let args_json = serde_json::json!({"msg": "list me"}).to_string();
+    let run = expect_research_run(
+        c1.request(OrchdRequest::ResearchStartRun {
+            idea_id: idea.id.clone(),
+            server_id: server.id.clone(),
+            tool_name: "echo".to_string(),
+            args_json,
+        })
+        .await,
+    );
+    // Let the run reach its terminal state (on c1) BEFORE c2 connects, so the read-broadcasts-
+    // nothing assertion below isn't racing the driver's own `done` push.
+    let done = poll_research_run_terminal(&mut c1, &run.id).await;
+    assert_eq!(done.status, ResearchStatus::Done);
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let runs = expect_research_runs(
+        c1.request(OrchdRequest::ResearchListRuns {
+            idea_id: idea.id.clone(),
+        })
+        .await,
+    );
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, run.id);
+    assert_eq!(runs[0].status, ResearchStatus::Done);
+
+    let refetched = expect_research_run(
+        c1.request(OrchdRequest::ResearchGetRun { id: run.id.clone() })
+            .await,
+    );
+    assert_eq!(refetched.status, ResearchStatus::Done);
+
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "ResearchListRuns/ResearchGetRun are plain reads — they must broadcast nothing"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn research_get_run_unknown_id_is_error_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let res = c1
+        .request(OrchdRequest::ResearchGetRun {
+            id: "no-such-run".to_string(),
+        })
+        .await;
+    assert_eq!(expect_error_code(res), OrchdErrorCode::NotFound);
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn research_start_run_against_a_disabled_tool_reaches_failed_with_error_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+    expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+    let idea = create_idea(&mut c1, "Fail this").await;
+
+    let tools = expect_mcp_tools(
+        c1.request(OrchdRequest::McpListTools {
+            server_id: server.id.clone(),
+        })
+        .await,
+    );
+    let echo_tool = tools
+        .iter()
+        .find(|t| t.name == "echo")
+        .expect("echo tool must be cached after connect");
+    let disabled = expect_mcp_tool(
+        c1.request(OrchdRequest::McpSetToolEnabled {
+            tool_id: echo_tool.id.clone(),
+            enabled: false,
+        })
+        .await,
+    );
+    assert!(!disabled.enabled);
+
+    let run = expect_research_run(
+        c1.request(OrchdRequest::ResearchStartRun {
+            idea_id: idea.id.clone(),
+            server_id: server.id.clone(),
+            tool_name: "echo".to_string(),
+            args_json: "{}".to_string(),
+        })
+        .await,
+    );
+    assert_eq!(run.status, ResearchStatus::Pending);
+
+    let failed = poll_research_run_terminal(&mut c1, &run.id).await;
+    assert_eq!(failed.status, ResearchStatus::Failed);
+    assert_eq!(
+        failed.error_kind.as_deref(),
+        Some("tool_disabled"),
+        "a call against a disabled tool must classify as tool_disabled (mirrors \
+         classify_run_error's OrchdMcpError::ToolDisabled arm)"
+    );
+    assert!(failed.artifact_id.is_none());
+    assert!(failed.invocation_id.is_none());
 
     c1.shutdown(boot).await;
 }

@@ -50,6 +50,7 @@ use crate::connectors::{self, accounts::ConnectorsState};
 use crate::export;
 use crate::mcp::{self, OrchdMcpError};
 use crate::persistence::{Db, NewPolicy, OrchdPersistError};
+use crate::research;
 use crate::ruleset_files;
 use crate::skills::{self, NewSkill};
 
@@ -1918,19 +1919,63 @@ async fn dispatch(
             }
         }
 
-        // ---- S-IDEA research (spec §5, task T3) ----
-        // TEMPORARY stub: the wire shape (`orchd-proto`) and persistence (`bpa_orchd::research`,
-        // T2) both already exist, but the async run driver that wires this dispatch arm to
-        // `Db::start_research_run`/`list_research_runs`/`get_research_run` (plus the
-        // `mcp::invoke::call_tool` orchestration and `ResearchRunsChanged` broadcast) is a later
-        // task (T4/T5) — this arm only keeps `bpa-orchd` building in the meantime. `Io` mirrors
-        // the other adapter/dispatch-not-ready error kinds in this file (e.g. `map_secret_err`'s
-        // "no dedicated wire code yet" fallback above).
-        OrchdRequest::ResearchStartRun { .. }
-        | OrchdRequest::ResearchListRuns { .. }
-        | OrchdRequest::ResearchGetRun { .. } => OrchdResponse::Error {
-            code: OrchdErrorCode::Io,
-            message: "research dispatch not yet implemented".to_string(),
-        },
+        // ---- S-IDEA research (spec §5/§6, task T5) ----
+        // `ResearchStartRun` -> [`research::start_run`] (T4): ONE call does the whole spec §6
+        // steps 1-3 — insert `research_run{pending}` + the only-if-captured idea lifecycle flip
+        // (its own `unchecked_transaction()`), THEN `tokio::spawn`s the background run driver
+        // (`research::run_research`) against the SHARED `Arc<Mutex<Db>>`/`Broadcaster` and
+        // returns the freshly-inserted `pending` row immediately. The reply below is exactly that
+        // `pending` row — this arm must NOT broadcast `ResearchRunsChanged` itself: the spawned
+        // driver ALREADY fires that push on every transition it drives (running/done/failed,
+        // `research::run_research`'s own doc comment), so pushing here too would double-fire for
+        // the SAME `pending`->`running` transition the driver's own phase 1 push already covers.
+        // Pass the shared `Arc<Mutex<Db>>` + `broadcaster` directly (not a locked guard) — mirrors
+        // `McpConnect`/`McpCallTool` above: `start_run` only holds the guard for its own short
+        // insert+resolve phase, then drops it before spawning, so no guard is ever held across the
+        // driver's later network `.await`.
+        OrchdRequest::ResearchStartRun {
+            idea_id,
+            server_id,
+            tool_name,
+            args_json,
+        } => {
+            match research::start_run(
+                &deps.db,
+                broadcaster,
+                research::NewResearchRun {
+                    idea_id,
+                    server_id,
+                    tool_name,
+                    args_json,
+                },
+            )
+            .await
+            {
+                Ok(row) => OrchdResponse::ResearchRun(row.into()),
+                Err(e) => map_err(e),
+            }
+        }
+        // Plain read (spec §5: "runs for an idea, newest first") — no push, mirrors every other
+        // `List*` verb in this file.
+        OrchdRequest::ResearchListRuns { idea_id } => {
+            let db = deps.db.lock().await;
+            match db.list_research_runs(&idea_id) {
+                Ok(v) => OrchdResponse::ResearchRuns(v.into_iter().map(Into::into).collect()),
+                Err(e) => map_err(e),
+            }
+        }
+        // Plain read — no push. `Db::get_research_run` is `Ok(None)` for an unknown id (its own
+        // doc comment: a `ResearchGetRun` client could race a delete) — that honest `Option`
+        // degradation is remapped to the wire `NotFound` error here, matching every other
+        // single-row getter's "unknown id -> Error{NotFound}" contract (e.g. `McpGetArtifact`
+        // above, whose `Db::get_artifact` already returns `Err(NotFound)` directly).
+        OrchdRequest::ResearchGetRun { id } => {
+            let db = deps.db.lock().await;
+            match db.get_research_run(&id) {
+                Ok(Some(row)) => OrchdResponse::ResearchRun(row.into()),
+                Ok(None) => map_err(OrchdPersistError::NotFound),
+                Err(e) => map_err(e),
+            }
+        }
     }
 }

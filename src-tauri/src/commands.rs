@@ -31,8 +31,8 @@ use bpa_orchd_proto::{
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle,
     Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
     McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdRequest,
-    OrchdResponse, Policy, PolicyRules, PolicyScope, Project, RuleScope, RuleSetView, Skill,
-    SkillScope, TaskSource, TaskStatus,
+    OrchdResponse, Policy, PolicyRules, PolicyScope, Project, ResearchRun, RuleScope, RuleSetView,
+    Skill, SkillScope, TaskSource, TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -869,6 +869,23 @@ fn expect_policies(res: OrchdResponse) -> Result<Vec<Policy>, CommandError> {
 fn expect_audit_rows(res: OrchdResponse) -> Result<Vec<AuditRow>, CommandError> {
     match res {
         OrchdResponse::AuditRows(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+// ── S-IDEA research orchd response unwrappers (spec §5/§6, task T5) — mirrors the Trust block
+// above exactly, one unwrapper per `OrchdResponse::{ResearchRun,ResearchRuns}` variant ─────────
+
+fn expect_research_run(res: OrchdResponse) -> Result<ResearchRun, CommandError> {
+    match res {
+        OrchdResponse::ResearchRun(r) => Ok(r),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_research_runs(res: OrchdResponse) -> Result<Vec<ResearchRun>, CommandError> {
+    match res {
+        OrchdResponse::ResearchRuns(v) => Ok(v),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -2611,6 +2628,70 @@ pub async fn trust_list_audit(
         state
             .orchd()?
             .request(OrchdRequest::TrustListAudit { limit })
+            .await?,
+    )
+}
+
+// ── S-IDEA research (spec §5/§6, task T5) — thin proxies over the 3 net-new research verbs,
+// mirroring every `orchd_*` command above exactly (build the request, `.request(..).await?`,
+// unwrap the expected `OrchdResponse` variant). Deliberately named WITHOUT the `orchd_` prefix
+// (spec §3 module-layout table: "commands.rs: research_start_run / research_list_runs /
+// research_get_run (proxy)") — the frontend ipc wrapper names these bind to are
+// `researchStartRun`/`researchListRuns`/`researchGetRun` (Tauri's camelCase default), not
+// `orchdResearchStartRun` etc. ────────────────────────────────────────────────────────────────
+
+/// Starts a research run (spec §6 step 1): inserts `research_run{pending}` and flips the idea
+/// `captured`->`researching` (only if currently `captured`), THEN spawns the background driver
+/// that actually calls `tool_name` on `server_id` via the SHIPPED `mcp::invoke::call_tool` path.
+/// The reply is that freshly-inserted `pending` row — the run's terminal state (`done`/`failed`)
+/// arrives later via `orchd://research-runs-changed` (`ResearchRunsChanged`), NOT this reply.
+#[tauri::command]
+pub async fn research_start_run(
+    state: State<'_, AppState>,
+    idea_id: String,
+    server_id: String,
+    tool_name: String,
+    args_json: String,
+) -> Result<ResearchRun, CommandError> {
+    expect_research_run(
+        state
+            .orchd()?
+            .request(OrchdRequest::ResearchStartRun {
+                idea_id,
+                server_id,
+                tool_name,
+                args_json,
+            })
+            .await?,
+    )
+}
+
+/// Runs for one idea, newest first (spec §5). Plain read — broadcasts nothing.
+#[tauri::command]
+pub async fn research_list_runs(
+    state: State<'_, AppState>,
+    idea_id: String,
+) -> Result<Vec<ResearchRun>, CommandError> {
+    expect_research_runs(
+        state
+            .orchd()?
+            .request(OrchdRequest::ResearchListRuns { idea_id })
+            .await?,
+    )
+}
+
+/// One run by id (spec §5). Plain read — broadcasts nothing. An unknown `id` surfaces as
+/// `CommandError::Daemon{code:"NotFound"}` (the daemon's `ResearchGetRun` dispatch arm maps its
+/// own `Db::get_research_run`'s honest `Ok(None)` to `Error{NotFound}` — see `socket_server.rs`).
+#[tauri::command]
+pub async fn research_get_run(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ResearchRun, CommandError> {
+    expect_research_run(
+        state
+            .orchd()?
+            .request(OrchdRequest::ResearchGetRun { id })
             .await?,
     )
 }
@@ -4961,6 +5042,81 @@ pub(crate) mod orchd_commands_over_stub_daemon {
                     message,
                     "skill: name required (pass it explicitly or via the SKILL.md frontmatter)"
                 );
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    // ── S-IDEA research (spec §5/§6, task T5) — mirrors the `CreateProject`/`SkillAdd` round-trip
+    // + error-mapping pair above exactly, over `ResearchStartRun`. ─────────────────────────────
+
+    #[tokio::test]
+    async fn research_start_run_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::ResearchStartRun {
+                idea_id,
+                server_id,
+                tool_name,
+                args_json,
+            } => OrchdResponse::ResearchRun(bpa_orchd_proto::ResearchRun {
+                id: "run-1".into(),
+                idea_id,
+                server_id,
+                tool_name,
+                args_json,
+                status: bpa_orchd_proto::ResearchStatus::Pending,
+                invocation_id: None,
+                artifact_id: None,
+                error_kind: None,
+                created_at: 0,
+                updated_at: 0,
+            }),
+            other => panic!("expected ResearchStartRun, got {other:?}"),
+        })
+        .await;
+
+        let req = OrchdRequest::ResearchStartRun {
+            idea_id: "idea-1".into(),
+            server_id: "server-1".into(),
+            tool_name: "echo".into(),
+            args_json: "{}".into(),
+        };
+        let res = client.request(req).await.unwrap();
+        let run = expect_research_run(res).unwrap();
+        assert_eq!(run.id, "run-1");
+        assert_eq!(run.idea_id, "idea-1");
+        assert_eq!(run.server_id, "server-1");
+        assert_eq!(run.tool_name, "echo");
+        assert_eq!(run.status, bpa_orchd_proto::ResearchStatus::Pending);
+        assert!(run.invocation_id.is_none());
+        assert!(run.artifact_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn research_start_run_error_response_becomes_command_error_daemon_end_to_end() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::NotFound,
+            message: "not found".into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::ResearchStartRun {
+                idea_id: "no-such-idea".into(),
+                server_id: "server-1".into(),
+                tool_name: "echo".into(),
+                args_json: "{}".into(),
+            })
+            .await;
+        // Mirrors `orchd_invariant_error_response_becomes_command_error_daemon_invariant_end_to_end`
+        // above: `OrchdClientError::Daemon` is raised directly by `OrchdClient::request`, so `?` in
+        // `research_start_run`'s own body would surface it via the `From<OrchdClientError>` impl —
+        // confirm that reshape lands on the spec §9-locked `Daemon{code, message}` shape.
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "NotFound");
+                assert_eq!(message, "not found");
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }

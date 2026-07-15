@@ -282,12 +282,14 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
         OrchdPush::PoliciesChanged => {
             BrokerAction::Emit(EV_ORCHD_POLICIES_CHANGED, serde_json::Value::Null)
         }
-        // S-IDEA research (spec §5/§8, task T3, appended — order FROZEN append-only). TEMPORARY
-        // mapping: no dispatch arm produces this push yet (`ResearchStartRun`/`ResearchListRuns`/
-        // `ResearchGetRun` are still stubbed in `bpa-orchd`'s `socket_server.rs`, T3) — the
-        // mapping shape is wired now so `--workspace` builds against the frozen `orchd-proto`
-        // variant; a later task (T4/T5) lands the dispatch that actually broadcasts it. Mirrors
-        // `GoalsChanged`/`McpServersChanged`'s camelCase-reshape precedent above.
+        // S-IDEA research (spec §5/§8, task T3, appended — order FROZEN append-only). The
+        // background run driver (`research::run_research`, task T4) is the ONLY place this is
+        // ever broadcast from — it fires on every `pending`->`running`->`done`/`failed`
+        // transition it drives; `bpa-orchd`'s `ResearchStartRun` dispatch arm (task T5) spawns
+        // that driver and replies with the `pending` row but deliberately does NOT push itself
+        // (would double-fire for the driver's own first transition — see that arm's own doc
+        // comment). Mirrors `GoalsChanged`/`McpServersChanged`'s camelCase-reshape precedent
+        // above.
         OrchdPush::ResearchRunsChanged { idea_id } => BrokerAction::Emit(
             EV_ORCHD_RESEARCH_RUNS_CHANGED,
             serde_json::json!({ "ideaId": idea_id }),
