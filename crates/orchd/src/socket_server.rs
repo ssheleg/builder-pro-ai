@@ -1547,5 +1547,21 @@ async fn dispatch(
                 Err(e) => map_err(e),
             }
         }
+
+        // TEMPORARY stub (task T10, spec §5/§7 Phase-2 wire): none of the connector/OAuth
+        // subsystem (account CRUD, PKCE flow, adapter invoke) exists yet — T11/T12 build it,
+        // T13a replaces this arm with the real dispatch. Covers all 7 `Connector*` request
+        // variants; MUST be deleted (not extended) once T13a lands, same discipline as T3's
+        // now-superseded `Mcp*` stub (see git history around commit `019ff11`).
+        OrchdRequest::ConnectorBeginOAuth { .. }
+        | OrchdRequest::ConnectorCompleteOAuth { .. }
+        | OrchdRequest::ConnectorAddApiKey { .. }
+        | OrchdRequest::ConnectorListAccounts
+        | OrchdRequest::ConnectorDeleteAccount { .. }
+        | OrchdRequest::ConnectorListOps { .. }
+        | OrchdRequest::ConnectorInvoke { .. } => OrchdResponse::Error {
+            code: OrchdErrorCode::Io,
+            message: "connector dispatch not yet implemented".into(),
+        },
     }
 }

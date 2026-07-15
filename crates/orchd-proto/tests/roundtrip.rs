@@ -262,6 +262,33 @@ fn sample_mcp_artifact() -> McpArtifact {
     }
 }
 
+fn sample_account() -> Account {
+    Account {
+        id: "account-1".into(),
+        provider: "generic-rest".into(),
+        label: "Demo account".into(),
+        auth_kind: AccountAuthKind::Oauth,
+        scopes: vec!["read".into(), "write".into()],
+        expires_at: Some(1_720_000_500),
+        created_at: 1_720_000_000,
+        updated_at: 1_720_000_100,
+    }
+}
+
+fn sample_connector_op() -> ConnectorOp {
+    ConnectorOp {
+        name: "get".into(),
+        description: Some("HTTP GET against the account's base URL".into()),
+    }
+}
+
+fn sample_oauth_challenge() -> OAuthChallenge {
+    OAuthChallenge {
+        authorize_url: "https://example.com/oauth/authorize?state=abc".into(),
+        state: "abc".into(),
+    }
+}
+
 fn all_requests() -> Vec<OrchdRequest> {
     vec![
         OrchdRequest::Ping,
@@ -521,6 +548,34 @@ fn all_requests() -> Vec<OrchdRequest> {
             server_id: "mcp-1".into(),
             kind: "connect".into(),
         },
+        OrchdRequest::ConnectorBeginOAuth {
+            provider: "generic-rest".into(),
+            label: "Demo account".into(),
+            scopes: Some(vec!["read".into()]),
+            server_id: None,
+        },
+        OrchdRequest::ConnectorCompleteOAuth {
+            state: "abc".into(),
+            code: "auth-code".into(),
+        },
+        OrchdRequest::ConnectorAddApiKey {
+            provider: "generic-rest".into(),
+            label: "Demo API key".into(),
+            api_key: "sk-demo".into(),
+        },
+        OrchdRequest::ConnectorListAccounts,
+        OrchdRequest::ConnectorDeleteAccount {
+            id: "account-1".into(),
+        },
+        OrchdRequest::ConnectorListOps {
+            account_id: "account-1".into(),
+        },
+        OrchdRequest::ConnectorInvoke {
+            account_id: "account-1".into(),
+            op: "get".into(),
+            args_json: "{\"path\":\"/ping\"}".into(),
+            project_id: Some("proj-1".into()),
+        },
     ]
 }
 
@@ -582,6 +637,10 @@ fn all_responses() -> Vec<OrchdResponse> {
         OrchdResponse::McpInvocations(vec![sample_mcp_invocation()]),
         OrchdResponse::McpArtifacts(vec![sample_mcp_artifact()]),
         OrchdResponse::McpArtifact(sample_mcp_artifact()),
+        OrchdResponse::Account(sample_account()),
+        OrchdResponse::Accounts(vec![sample_account()]),
+        OrchdResponse::OAuthChallenge(sample_oauth_challenge()),
+        OrchdResponse::ConnectorOps(vec![sample_connector_op()]),
     ]
 }
 
@@ -617,6 +676,7 @@ fn all_pushes() -> Vec<OrchdPush> {
         OrchdPush::McpInvocationLogged {
             server_id: "mcp-1".into(),
         },
+        OrchdPush::ConnectorsChanged,
     ]
 }
 
@@ -859,5 +919,72 @@ fn mcp_servers_response_json_roundtrips() {
     assert_eq!(
         decoded, original,
         "OrchdResponse::McpServers must JSON round-trip byte-for-byte equal"
+    );
+}
+
+// ---- S-EXT connector/OAuth wire-tag / entity-camelCase / frame-JSON-roundtrip tests (task
+// T10, spec §5/§7 Phase-2 subset) ----
+
+#[test]
+fn account_auth_kind_wire_tags_are_lowercase() {
+    // Discriminating: exact tag equality (a broken `rename_all` producing "Oauth" fails).
+    assert_serde_tag(&AccountAuthKind::Oauth, "oauth");
+    assert_serde_tag(&AccountAuthKind::Apikey, "apikey");
+}
+
+#[test]
+fn account_entity_serializes_with_camelcase_keys() {
+    let json = serde_json::to_string(&sample_account()).expect("serialize Account");
+    assert!(
+        json.contains("\"authKind\""),
+        "Account.auth_kind must serialize as camelCase `authKind`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"expiresAt\""),
+        "Account.expires_at must serialize as camelCase `expiresAt`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"createdAt\""),
+        "Account.created_at must serialize as camelCase `createdAt`; got:\n{json}"
+    );
+    assert!(
+        !json.contains("auth_kind") && !json.contains("expires_at") && !json.contains("created_at"),
+        "generated JSON must not contain snake_case field names; got:\n{json}"
+    );
+    assert!(
+        !json.contains("secretRef") && !json.contains("secret_ref"),
+        "Account must NOT expose secret_ref on the wire (Keychain key structure); got:\n{json}"
+    );
+    assert!(
+        !json.contains("refreshRef") && !json.contains("refresh_ref"),
+        "Account must NOT expose refresh_ref on the wire (Keychain key structure); got:\n{json}"
+    );
+}
+
+#[test]
+fn oauth_challenge_entity_serializes_with_camelcase_authorize_url() {
+    let json = serde_json::to_string(&sample_oauth_challenge()).expect("serialize OAuthChallenge");
+    assert!(
+        json.contains("\"authorizeUrl\""),
+        "OAuthChallenge.authorize_url must serialize as camelCase `authorizeUrl`; got:\n{json}"
+    );
+    assert!(
+        !json.contains("authorize_url"),
+        "generated JSON must not contain snake_case `authorize_url`; got:\n{json}"
+    );
+}
+
+#[test]
+fn connector_accounts_response_json_roundtrips() {
+    // Frame round-trip via `serde_json` directly (in addition to the CBOR-wire round-trip
+    // exercised by `every_response_variant_roundtrips`): the frame stays plain snake_case even
+    // though it wraps a camelCase entity.
+    let original = OrchdResponse::Accounts(vec![sample_account()]);
+    let json = serde_json::to_string(&original).expect("serialize OrchdResponse::Accounts");
+    let decoded: OrchdResponse =
+        serde_json::from_str(&json).expect("deserialize OrchdResponse::Accounts");
+    assert_eq!(
+        decoded, original,
+        "OrchdResponse::Accounts must JSON round-trip byte-for-byte equal"
     );
 }

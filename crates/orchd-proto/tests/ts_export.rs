@@ -55,6 +55,10 @@ fn export_and_read() -> String {
     McpCallResult::export_all_to(types_ts_dir()).expect("export McpCallResult");
     McpInvocation::export_all_to(types_ts_dir()).expect("export McpInvocation");
     McpArtifact::export_all_to(types_ts_dir()).expect("export McpArtifact");
+    Account::export_all_to(types_ts_dir()).expect("export Account");
+    AccountAuthKind::export_all_to(types_ts_dir()).expect("export AccountAuthKind");
+    ConnectorOp::export_all_to(types_ts_dir()).expect("export ConnectorOp");
+    OAuthChallenge::export_all_to(types_ts_dir()).expect("export OAuthChallenge");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -247,6 +251,8 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "input_tokens",
         "output_tokens",
         "started_at",
+        "expires_at",
+        "authorize_url",
     ] {
         assert!(
             !ts.contains(snake),
@@ -432,6 +438,69 @@ fn mcp_transport_scope_auth_kind_wire_tags_are_camelcase() {
         assert!(
             contains_normalized(&ts, &format!("\"{tag}\"")),
             "McpAuthKind must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+}
+
+// ---- S-EXT connector/OAuth entity export tests (task T10, spec §5/§7 Phase-2 subset) ----
+
+#[test]
+fn connector_entities_are_present_with_camelcase_fields_and_ts_number_timestamps() {
+    let ts = export_and_read();
+    for expected in [
+        "export type Account",
+        "export type ConnectorOp",
+        "export type OAuthChallenge",
+    ] {
+        assert!(
+            contains_normalized(&ts, expected),
+            "expected {expected:?} in generated orchd-types.ts; got:\n{ts}"
+        );
+    }
+    assert!(
+        contains_normalized(&ts, "authKind: AccountAuthKind"),
+        "Account.auth_kind must serialize as camelCase `authKind`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "expiresAt: number | null"),
+        "Account.expires_at (Option<i64>) must be TS `number | null`, not `bigint | null`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "createdAt: number"),
+        "Account.created_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "authorizeUrl: string"),
+        "OAuthChallenge.authorize_url must serialize as camelCase `authorizeUrl`; got:\n{ts}"
+    );
+    // Scoped to the `Account` type's own definition line — `secretRef`/`refreshRef` legitimately
+    // appear elsewhere in the file (`McpServer.secretRef`), so a whole-file substring check would
+    // false-positive on that unrelated type.
+    let account_line = ts
+        .lines()
+        .find(|l| l.contains("export type Account ="))
+        .expect("Account type definition line present");
+    assert!(
+        !account_line.contains("secretRef") && !account_line.contains("secret_ref"),
+        "Account must NOT expose secret_ref on the generated TS (Keychain key structure); got:\n{account_line}"
+    );
+    assert!(
+        !account_line.contains("refreshRef") && !account_line.contains("refresh_ref"),
+        "Account must NOT expose refresh_ref on the generated TS (Keychain key structure); got:\n{account_line}"
+    );
+    assert!(
+        !ts.contains("bigint"),
+        "generated orchd-types.ts must never contain `bigint`; got:\n{ts}"
+    );
+}
+
+#[test]
+fn account_auth_kind_wire_tags_are_camelcase() {
+    let ts = export_and_read();
+    for tag in ["oauth", "apikey"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "AccountAuthKind must include wire tag {tag:?}; got:\n{ts}"
         );
     }
 }

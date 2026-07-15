@@ -516,6 +516,60 @@ pub struct McpArtifact {
     pub created_at: i64,
 }
 
+// ---- S-EXT Connector/OAuth entities (spec §5/§7, appended — order FROZEN append-only) ----
+// Phase-2 subset: external OAuth/apikey accounts (the spec §4 `account` table) + the direct-API
+// adapter's op list + the OAuth authorize challenge, with the usual camelCase + ts-rs wire
+// treatment layered on top (mirrors the `McpServer` entity block byte-for-byte). Deliberately
+// deviates from the "mirror the DB row 1:1" precedent T3 set for `McpServer`: `secret_ref`/
+// `refresh_ref` are Keychain REFERENCE strings, same non-secret shape as `McpServer.secret_ref`,
+// but the frontend never needs them (no UI surface reads a Keychain key name), so they are
+// omitted from this wire entity entirely rather than round-tripped for no consumer — narrower
+// surface, nothing to leak, one field less to keep in sync.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct Account {
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+    pub auth_kind: AccountAuthKind,
+    pub scopes: Vec<String>,
+    #[ts(type = "number | null")]
+    pub expires_at: Option<i64>,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum AccountAuthKind {
+    Oauth,
+    Apikey,
+}
+
+/// One operation a `ConnectorAdapter` (spec §7) exposes for a given account's provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct ConnectorOp {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// `OrchdRequest::ConnectorBeginOAuth`'s success payload (spec §5): the PKCE authorize URL to
+/// open in the browser, plus the CSRF `state` the subsequent `ConnectorCompleteOAuth` must echo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct OAuthChallenge {
+    pub authorize_url: String,
+    pub state: String,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -845,6 +899,47 @@ pub enum OrchdRequest {
         server_id: String,
         kind: String,
     },
+    // S-EXT Connectors / accounts (spec §5/§7, appended — order FROZEN append-only). Phase-2
+    // subset: OAuth/apikey account lifecycle + the generic direct-API adapter invoke path.
+    /// → `OrchdResponse::OAuthChallenge`; opens the browser to `authorize_url` (PKCE); pending
+    /// state keyed by `state` until the matching `ConnectorCompleteOAuth`.
+    ConnectorBeginOAuth {
+        provider: String,
+        label: String,
+        scopes: Option<Vec<String>>,
+        server_id: Option<String>,
+    },
+    /// → `OrchdResponse::Account`; exchanges `code` for tokens (Keychain), pushes
+    /// `ConnectorsChanged`.
+    ConnectorCompleteOAuth {
+        state: String,
+        code: String,
+    },
+    /// → `OrchdResponse::Account`; `api_key` -> Keychain, ref -> DB. `api_key` NEVER
+    /// logged/echoed. Pushes `ConnectorsChanged`.
+    ConnectorAddApiKey {
+        provider: String,
+        label: String,
+        api_key: String,
+    },
+    /// → `OrchdResponse::Accounts`.
+    ConnectorListAccounts,
+    /// → `OrchdResponse::Ack`; pushes `ConnectorsChanged`.
+    ConnectorDeleteAccount {
+        id: String,
+    },
+    /// → `OrchdResponse::ConnectorOps`; the account's provider adapter's op list (spec §7).
+    ConnectorListOps {
+        account_id: String,
+    },
+    /// → `OrchdResponse::McpCallResult`; reuses the MCP call/artifact/invocation path (spec §6
+    /// "connector_invoke passes through trust::authorize identically to McpCallTool").
+    ConnectorInvoke {
+        account_id: String,
+        op: String,
+        args_json: String,
+        project_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -891,6 +986,11 @@ pub enum OrchdResponse {
     McpInvocations(Vec<McpInvocation>),
     McpArtifacts(Vec<McpArtifact>),
     McpArtifact(McpArtifact),
+    // S-EXT Connectors / accounts (spec §5/§7, appended — order FROZEN append-only)
+    Account(Account),
+    Accounts(Vec<Account>),
+    OAuthChallenge(OAuthChallenge),
+    ConnectorOps(Vec<ConnectorOp>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -925,6 +1025,9 @@ pub enum OrchdPush {
     McpInvocationLogged {
         server_id: String,
     },
+    // S-EXT Connectors / accounts (spec §5/§7, appended — order FROZEN append-only). No
+    // payload: the `account` table (spec §4) has no `project_id` column to scope by.
+    ConnectorsChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

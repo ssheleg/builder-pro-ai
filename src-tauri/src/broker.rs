@@ -74,6 +74,10 @@ pub const EV_ORCHD_MCP_TOOLS_CHANGED: &str = "orchd://mcp-tools-changed";
 pub const EV_ORCHD_MCP_ARTIFACTS_CHANGED: &str = "orchd://mcp-artifacts-changed";
 /// Payload `{ serverId }`.
 pub const EV_ORCHD_MCP_INVOCATION_LOGGED: &str = "orchd://mcp-invocation-logged";
+/// S-EXT connectors/accounts coarse-invalidation (spec §5/§7/§8, task T10, appended — order
+/// FROZEN append-only). No payload (`null`) — the spec §4 `account` table has no `project_id`
+/// column to scope by, same "nothing to name" precedent as `EV_ORCHD_PROJECTS_CHANGED` above.
+pub const EV_ORCHD_CONNECTORS_CHANGED: &str = "orchd://connectors-changed";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -247,6 +251,15 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
             EV_ORCHD_MCP_INVOCATION_LOGGED,
             serde_json::json!({ "serverId": server_id }),
         ),
+        // TEMPORARY minimal wiring (task T10, spec §5/§7/§8 Phase-2 push): no connector/account
+        // subsystem exists yet to trigger this push (T11/T12 build it, T13a wires the real
+        // `connector_*` commands) — added now purely to keep `cargo build --workspace` green
+        // across T11/T12 rather than leaving the workspace red for two tasks. The mapping itself
+        // (no payload) is already the FINAL shape per spec §5/§8; T13a should not need to touch
+        // this arm, only add the commands that emit `OrchdPush::ConnectorsChanged`.
+        OrchdPush::ConnectorsChanged => {
+            BrokerAction::Emit(EV_ORCHD_CONNECTORS_CHANGED, serde_json::Value::Null)
+        }
     }
 }
 
@@ -852,6 +865,21 @@ mod tests {
                 assert_eq!(event, EV_ORCHD_MCP_INVOCATION_LOGGED);
                 assert_eq!(payload["serverId"], "srv-2");
                 assert!(payload.get("server_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    // ── map_orchd_push: S-EXT connectors/accounts (spec §5/§7/§8, task T10) — mirrors the
+    // ProjectsChanged/IdeasChanged/InsightsChanged null-payload precedent above exactly ────────
+
+    #[test]
+    fn orchd_connectors_changed_maps_to_emit_with_null_payload() {
+        let action = map_orchd_push(OrchdPush::ConnectorsChanged);
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_CONNECTORS_CHANGED);
+                assert!(payload.is_null());
             }
             other => panic!("expected Emit, got {other:?}"),
         }
