@@ -63,7 +63,7 @@ type ConfiguredClient =
 /// An OAuth 2.1 IdP's endpoints + this app's registered client credentials for one `provider`
 /// string (spec §4 `account.provider`, e.g. `"prowl"`). See this module's doc comment for why this
 /// is a registry entry rather than a `begin_oauth` parameter.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuthProviderConfig {
     pub client_id: String,
     /// Public clients (PKCE-only, e.g. a native/desktop app registration) have none.
@@ -72,12 +72,40 @@ pub struct OAuthProviderConfig {
     pub token_url: String,
 }
 
+// Hand-written `Debug` redacts `client_secret` (D4, no-secret-in-logs): the derived impl would
+// print a live client secret the first time this config is `{:?}`-formatted / `#[instrument]`-ed.
+// `client_id`/`auth_url`/`token_url` are public OAuth-registration values, safe to show.
+impl std::fmt::Debug for OAuthProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthProviderConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("auth_url", &self.auth_url)
+            .field("token_url", &self.token_url)
+            .finish()
+    }
+}
+
 /// The resolved bearer credential [`ConnectorsState::token_for`] hands to a caller (T12's
 /// connector-invoke / MCP-server-OAuth consumer) — never persisted, never logged; lives only for
 /// the duration of the one call that needed it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AccountToken {
     pub bearer: String,
+}
+
+// Hand-written `Debug` redacts the live bearer (D4, no-secret-in-logs): this value is handed to
+// T12's connector-invoke consumer, so a downstream `tracing::debug!(?token)` / `#[instrument]`
+// with the derived impl would leak a working credential to the logs.
+impl std::fmt::Debug for AccountToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountToken")
+            .field("bearer", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Errors from the connector OAuth/apikey flow driver. `Display`/`Debug` never carry secret bytes:
@@ -692,6 +720,38 @@ mod tests {
                 false
             }
         }
+    }
+
+    #[test]
+    fn account_token_debug_redacts_the_bearer() {
+        let token = AccountToken {
+            bearer: "s3cr3t-bearer-must-not-leak-9f2a".to_string(),
+        };
+        let rendered = format!("{token:?}");
+        assert!(
+            !rendered.contains("s3cr3t-bearer-must-not-leak-9f2a"),
+            "AccountToken Debug leaked the bearer: {rendered}"
+        );
+        assert!(rendered.contains("REDACTED"), "expected redaction marker: {rendered}");
+    }
+
+    #[test]
+    fn oauth_provider_config_debug_redacts_the_client_secret() {
+        let cfg = OAuthProviderConfig {
+            client_id: "public-client-id".to_string(),
+            client_secret: Some("s3cr3t-client-secret-must-not-leak-c41d".to_string()),
+            auth_url: "https://idp.example/authorize".to_string(),
+            token_url: "https://idp.example/token".to_string(),
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("s3cr3t-client-secret-must-not-leak-c41d"),
+            "OAuthProviderConfig Debug leaked the client_secret: {rendered}"
+        );
+        assert!(rendered.contains("REDACTED"), "expected redaction marker: {rendered}");
+        // Non-secret fields stay visible for debuggability.
+        assert!(rendered.contains("public-client-id"));
+        assert!(rendered.contains("idp.example/authorize"));
     }
 
     /// Best-effort teardown so a panicking test never leaves a stray real Keychain entry.
