@@ -4,6 +4,7 @@ import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
 import type { FsEntry } from "../ipc/fs";
 import type {
+  Account,
   DomainTask,
   Goal,
   GraphView,
@@ -27,6 +28,7 @@ import {
   mcpListServers,
   mcpListTools,
   mcpListArtifacts,
+  connectorListAccounts,
   describeOrchdError,
 } from "../ipc/orchd";
 
@@ -175,6 +177,10 @@ export interface AppState {
    * convention — the Артефакты tab filters client-side). Replaced wholesale by
    * `refreshMcpArtifacts`. */
   mcpArtifacts: McpArtifact[];
+  /** Every connector account (S-EXT §8, T13b: the «Расширения»/«Коннекторы» tab). Mirrors
+   * `mcpServers`'s whole-store, un-scoped convention exactly (`connectorListAccounts` has no
+   * filter either) — replaced wholesale by `refreshAccounts`. */
+  accounts: Account[];
 
   /** Honest orchd connectivity (spec §9/§11, mirrors sessiond's `daemonConnected` inverted):
    * `true` while the `orchd://down` event is the most recent connection-state signal seen, `false`
@@ -295,6 +301,10 @@ export interface AppState {
   /** Re-fetch `mcpArtifacts` wholesale (no project/server filter — every artifact). Mirrors
    * `refreshIdeas`/`refreshInsights` exactly. */
   refreshMcpArtifacts: () => Promise<void>;
+  /** Re-fetch `accounts` wholesale (`connectorListAccounts()` has no filter). Mirrors
+   * `refreshMcpServers` exactly: try/catch -> `showToast(describeOrchdError(e))` on failure,
+   * replace on success. */
+  refreshAccounts: () => Promise<void>;
   /** Set `orchdDown`. See its doc above. */
   setOrchdDown: (v: boolean) => void;
   /** Set `orchdIncompatible`. See its doc above — never auto-clears, mirrors
@@ -369,6 +379,7 @@ export const useAppStore = create<AppState>((set, get) => {
     mcpServers: [],
     mcpToolsByServer: {},
     mcpArtifacts: [],
+    accounts: [],
     orchdDown: false,
     orchdIncompatible: false,
     orchdUpgradeDialogOpen: false,
@@ -601,6 +612,17 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const mcpArtifacts = await mcpListArtifacts(null, null, null);
         set({ mcpArtifacts });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    // ── Connectors slice (S-EXT §8, T13b) ────────────────────────────────────────────────────
+
+    refreshAccounts: async () => {
+      try {
+        const accounts = await connectorListAccounts();
+        set({ accounts });
       } catch (e) {
         get().showToast(describeOrchdError(e));
       }

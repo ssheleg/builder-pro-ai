@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceId } from "./commands";
 import type {
+  Account,
+  ConnectorOp,
   DomainTask,
   FitVerdict,
   Goal,
@@ -25,6 +27,7 @@ import type {
   McpServer,
   McpTool,
   McpTransport,
+  OAuthChallenge,
   PolicyRules,
   Project,
   RuleScope,
@@ -553,6 +556,98 @@ export function mcpGetArtifact(id: string): Promise<McpArtifact> {
  * fingerprint), so callers may call this unconditionally before every connect attempt. */
 export function trustGrantConsent(serverId: string, kind: string): Promise<void> {
   return invoke<void>("trust_grant_consent", { serverId, kind });
+}
+
+// ── Connectors (S-EXT §5/§7/§8, T13a's connector_* commands) ───────────────────────────────────
+//
+// One thin wrapper per `connector_*` `#[tauri::command]` (`src-tauri/src/commands.rs`, T13a).
+// Unlike every wrapper above, each of these seven takes ONE destructured options object rather
+// than positional params — deliberate for this family (T13b brief): several verbs share
+// argument NAMES with different verbs' UNRELATED positions (`id` on `connectorDeleteAccount` vs.
+// `accountId` everywhere else), so a single object per call reads unambiguously at every call
+// site. The object's OWN keys are still copied straight into `invoke()`'s payload object
+// (Tauri maps each camelCase JS key to its Rust snake_case parameter, same convention as every
+// wrapper above) — `provider`/`label`/`apiKey`/`accountId`/`op`/`argsJson`/`id` all match T13a's
+// Rust parameter names verbatim. Optional fields (`scopes`, `serverId`, `projectId`) are `T | null`
+// on the wire even though the object's own TS type marks them optional (`?`) for a nicer call
+// site — an omitted key becomes `null`, never `undefined`, matching every `Option<T>` wrapper
+// above.
+//
+// `apiKey` (`connectorAddApiKey`) and `code` (`connectorCompleteOAuth`) are passed straight
+// through to `invoke()` and never logged/echoed by this module (spec §5/§6, mirrors
+// `mcpSetServerBearer`'s doc above verbatim).
+
+/** Begins an OAuth 2.1 + PKCE flow for a new connector account (spec §5/§7). Returns the
+ * `authorizeUrl` to open in the browser plus the CSRF `state` `connectorCompleteOAuth` must echo
+ * back. `serverId` links this account to an existing OAuth-authenticated MCP server (spec D5) —
+ * omit it (or pass `undefined`) for a standalone/direct-API connector account. */
+export function connectorBeginOAuth(args: {
+  provider: string;
+  label: string;
+  scopes?: string[];
+  serverId?: string;
+}): Promise<OAuthChallenge> {
+  return invoke<OAuthChallenge>("connector_begin_oauth", {
+    provider: args.provider,
+    label: args.label,
+    scopes: args.scopes ?? null,
+    serverId: args.serverId ?? null,
+  });
+}
+
+/**
+ * Completes the PKCE round-trip: `code` -> exchanged for tokens on the orchd side (Keychain);
+ * this wrapper never logs or echoes it (spec §5/§6). The wire arg key is `oauthState` — T13a's
+ * Rust parameter is named `oauth_state`, NOT `state` (that name is reserved on the Rust side for
+ * Tauri's own injected `State<'_, AppState>`) — but this wrapper's OWN parameter stays named
+ * `state` so callers can pass `OAuthChallenge.state` straight through without renaming it.
+ */
+export function connectorCompleteOAuth(args: { state: string; code: string }): Promise<Account> {
+  return invoke<Account>("connector_complete_oauth", { oauthState: args.state, code: args.code });
+}
+
+/** `apiKey` -> Keychain, ref -> DB, on the orchd side; never logged or echoed by this module
+ * (spec §5/§6, mirrors `mcpSetServerBearer`'s doc above). */
+export function connectorAddApiKey(args: {
+  provider: string;
+  label: string;
+  apiKey: string;
+}): Promise<Account> {
+  return invoke<Account>("connector_add_api_key", {
+    provider: args.provider,
+    label: args.label,
+    apiKey: args.apiKey,
+  });
+}
+
+export function connectorListAccounts(): Promise<Account[]> {
+  return invoke<Account[]>("connector_list_accounts");
+}
+
+export function connectorDeleteAccount(args: { id: string }): Promise<void> {
+  return invoke<void>("connector_delete_account", { id: args.id });
+}
+
+export function connectorListOps(args: { accountId: string }): Promise<ConnectorOp[]> {
+  return invoke<ConnectorOp[]>("connector_list_ops", { accountId: args.accountId });
+}
+
+/** Trust-gated IDENTICALLY to `mcpCallTool` (spec §6/§7): a spend/rate-cap denial rejects with
+ * `CommandError{kind:"daemon",code:"Policy"}` BEFORE dispatch, and the result persists as a
+ * durable `is_untrusted:true` artifact on success (spec D9) — same "never a silent no-op"
+ * contract as `mcpCallTool` above. */
+export function connectorInvoke(args: {
+  accountId: string;
+  op: string;
+  argsJson: string;
+  projectId?: string;
+}): Promise<McpCallResult> {
+  return invoke<McpCallResult>("connector_invoke", {
+    accountId: args.accountId,
+    op: args.op,
+    argsJson: args.argsJson,
+    projectId: args.projectId ?? null,
+  });
 }
 
 // ── error mapping ────────────────────────────────────────────────────────────────────────────

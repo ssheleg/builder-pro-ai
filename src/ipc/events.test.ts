@@ -36,6 +36,7 @@ import {
   onOrchdMcpToolsChanged,
   onOrchdMcpArtifactsChanged,
   onOrchdMcpInvocationLogged,
+  onOrchdConnectorsChanged,
 } from "./events";
 import type { SessionMeta, Workspace } from "./types";
 import type {
@@ -306,5 +307,16 @@ describe("ipc/events", () => {
     const p: McpInvocationLoggedPayload = { serverId: "s1" };
     registered.get("orchd://mcp-invocation-logged")!({ payload: p });
     expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  // ── Connectors coarse-invalidation event (S-EXT §8, T13b) ──────────────────────────────────
+
+  it("onOrchdConnectorsChanged subscribes to orchd://connectors-changed and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    const un = await onOrchdConnectorsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://connectors-changed", expect.any(Function));
+    registered.get("orchd://connectors-changed")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(un).toBe(unlisten);
   });
 });

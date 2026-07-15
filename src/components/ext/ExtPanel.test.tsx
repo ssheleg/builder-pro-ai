@@ -8,6 +8,9 @@ vi.mock("./ServersTab", () => ({
 vi.mock("./ToolsBrowser", () => ({
   ToolsBrowser: () => <div data-testid="marker-tools" />,
 }));
+vi.mock("./ConnectorsTab", () => ({
+  ConnectorsTab: () => <div data-testid="marker-connectors" />,
+}));
 
 const mcpListServersMock = vi.fn();
 vi.mock("../../ipc/orchd", () => ({
@@ -21,7 +24,7 @@ afterEach(cleanup);
 beforeEach(() => {
   mcpListServersMock.mockReset().mockResolvedValue([]);
   useAppStore.setState(
-    { mcpServers: [], mcpToolsByServer: {}, mcpArtifacts: [], orchdDown: false },
+    { mcpServers: [], mcpToolsByServer: {}, mcpArtifacts: [], accounts: [], orchdDown: false },
     false,
   );
 });
@@ -51,9 +54,16 @@ describe("ExtPanel", () => {
     expect(screen.queryByTestId("marker-servers")).toBeNull();
   });
 
+  it("switching to «Коннекторы» mounts ConnectorsTab, unmounting ServersTab (S-EXT §8, T13b)", () => {
+    render(<ExtPanel />);
+    fireEvent.click(screen.getByTestId("ext-tab-connectors"));
+    expect(screen.getByTestId("marker-connectors")).toBeTruthy();
+    expect(screen.queryByTestId("marker-servers")).toBeNull();
+  });
+
   it("the not-yet-built tabs render a «скоро» stub", () => {
     render(<ExtPanel />);
-    for (const key of ["connectors", "log", "artifacts", "skills"]) {
+    for (const key of ["log", "artifacts", "skills"]) {
       fireEvent.click(screen.getByTestId(`ext-tab-${key}`));
       expect(screen.getByTestId("ext-tab-stub")).toBeTruthy();
     }

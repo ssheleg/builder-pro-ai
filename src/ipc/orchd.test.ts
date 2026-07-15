@@ -71,6 +71,13 @@ import {
   mcpListArtifacts,
   mcpGetArtifact,
   trustGrantConsent,
+  connectorBeginOAuth,
+  connectorCompleteOAuth,
+  connectorAddApiKey,
+  connectorListAccounts,
+  connectorDeleteAccount,
+  connectorListOps,
+  connectorInvoke,
   describeOrchdError,
 } from "./orchd";
 
@@ -621,6 +628,85 @@ describe("ipc/orchd", () => {
   it("trustGrantConsent sends serverId/kind", async () => {
     await trustGrantConsent("s1", "connect");
     expect(invokeMock).toHaveBeenCalledWith("trust_grant_consent", { serverId: "s1", kind: "connect" });
+  });
+
+  // ── Connectors (S-EXT §5/§7/§8, T13a's connector_* commands, T13b) ────────────────────────────
+
+  it("connectorBeginOAuth sends provider/label/scopes/serverId, defaulting the optionals to null", async () => {
+    await connectorBeginOAuth({ provider: "github", label: "My GitHub" });
+    expect(invokeMock).toHaveBeenCalledWith("connector_begin_oauth", {
+      provider: "github",
+      label: "My GitHub",
+      scopes: null,
+      serverId: null,
+    });
+  });
+
+  it("connectorBeginOAuth passes scopes/serverId through when given", async () => {
+    await connectorBeginOAuth({
+      provider: "github",
+      label: "My GitHub",
+      scopes: ["repo", "user"],
+      serverId: "srv-1",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("connector_begin_oauth", {
+      provider: "github",
+      label: "My GitHub",
+      scopes: ["repo", "user"],
+      serverId: "srv-1",
+    });
+  });
+
+  it("connectorCompleteOAuth sends oauthState (not state) + code — T13a's Rust param is oauth_state", async () => {
+    await connectorCompleteOAuth({ state: "st-1", code: "code-xyz" });
+    expect(invokeMock).toHaveBeenCalledWith("connector_complete_oauth", {
+      oauthState: "st-1",
+      code: "code-xyz",
+    });
+  });
+
+  it("connectorAddApiKey sends provider/label/apiKey", async () => {
+    await connectorAddApiKey({ provider: "generic-rest", label: "My API", apiKey: "sekret-key" });
+    expect(invokeMock).toHaveBeenCalledWith("connector_add_api_key", {
+      provider: "generic-rest",
+      label: "My API",
+      apiKey: "sekret-key",
+    });
+  });
+
+  it("connectorListAccounts sends no args", async () => {
+    await connectorListAccounts();
+    expect(invokeMock).toHaveBeenCalledWith("connector_list_accounts");
+  });
+
+  it("connectorDeleteAccount sends id", async () => {
+    await connectorDeleteAccount({ id: "a1" });
+    expect(invokeMock).toHaveBeenCalledWith("connector_delete_account", { id: "a1" });
+  });
+
+  it("connectorListOps sends accountId", async () => {
+    await connectorListOps({ accountId: "a1" });
+    expect(invokeMock).toHaveBeenCalledWith("connector_list_ops", { accountId: "a1" });
+  });
+
+  it("connectorInvoke sends accountId/op/argsJson/projectId, defaulting projectId to null", async () => {
+    await connectorInvoke({ accountId: "a1", op: "get", argsJson: '{"path":"/x"}' });
+    expect(invokeMock).toHaveBeenCalledWith("connector_invoke", {
+      accountId: "a1",
+      op: "get",
+      argsJson: '{"path":"/x"}',
+      projectId: null,
+    });
+  });
+
+  it("connectorInvoke passes projectId through when given", async () => {
+    await connectorInvoke({ accountId: "a1", op: "get", argsJson: "{}", projectId: "p1" });
+    expect(invokeMock).toHaveBeenCalledWith("connector_invoke", {
+      accountId: "a1",
+      op: "get",
+      argsJson: "{}",
+      projectId: "p1",
+    });
   });
 
   // ── describeOrchdError ────────────────────────────────────────────────────────────────────

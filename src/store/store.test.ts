@@ -3,6 +3,7 @@ import type { SessionMeta, Workspace } from "../ipc/types";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
 import type { FsEntry } from "../ipc/fs";
 import type {
+  Account,
   DomainTask,
   Goal,
   GraphView,
@@ -25,6 +26,7 @@ const orchdGetRulesetMock = vi.fn();
 const mcpListServersMock = vi.fn();
 const mcpListToolsMock = vi.fn();
 const mcpListArtifactsMock = vi.fn();
+const connectorListAccountsMock = vi.fn();
 vi.mock("../ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -36,6 +38,7 @@ vi.mock("../ipc/orchd", () => ({
   mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
+  connectorListAccounts: (...a: unknown[]) => connectorListAccountsMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -70,6 +73,7 @@ describe("useAppStore", () => {
     mcpListServersMock.mockReset();
     mcpListToolsMock.mockReset();
     mcpListArtifactsMock.mockReset();
+    connectorListAccountsMock.mockReset();
     useAppStore.setState(
       {
         sessions: {},
@@ -99,6 +103,7 @@ describe("useAppStore", () => {
         mcpServers: [],
         mcpToolsByServer: {},
         mcpArtifacts: [],
+        accounts: [],
         orchdDown: false,
         orchdIncompatible: false,
         orchdUpgradeDialogOpen: false,
@@ -652,12 +657,25 @@ describe("useAppStore", () => {
     id: "a1",
     invocationId: "i1",
     serverId: "s1",
+    accountId: null,
     toolName: "search",
     projectId: null,
     contentJson: "{}",
     contentText: null,
     isUntrusted: true,
     createdAt: 1,
+    ...over,
+  });
+
+  const account = (over: Partial<Account> = {}): Account => ({
+    id: "a1",
+    provider: "generic-rest",
+    label: "My API",
+    authKind: "apikey",
+    scopes: [],
+    expiresAt: null,
+    createdAt: 1,
+    updatedAt: 1,
     ...over,
   });
 
@@ -690,6 +708,7 @@ describe("useAppStore", () => {
     expect(s.mcpServers).toEqual([]);
     expect(s.mcpToolsByServer).toEqual({});
     expect(s.mcpArtifacts).toEqual([]);
+    expect(s.accounts).toEqual([]);
     expect(s.orchdDown).toBe(false);
     expect(s.orchdIncompatible).toBe(false);
     expect(s.orchdUpgradeDialogOpen).toBe(false);
@@ -893,6 +912,28 @@ describe("useAppStore", () => {
     mcpListArtifactsMock.mockRejectedValueOnce(err);
     await useAppStore.getState().refreshMcpArtifacts();
     expect(useAppStore.getState().mcpArtifacts).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  // ---- Connectors slice (S-EXT §8, T13b) ----
+
+  it("refreshAccounts replaces accounts from connectorListAccounts()", async () => {
+    connectorListAccountsMock.mockResolvedValueOnce([account()]);
+    await useAppStore.getState().refreshAccounts();
+    expect(connectorListAccountsMock).toHaveBeenCalledWith();
+    expect(useAppStore.getState().accounts).toEqual([account()]);
+
+    connectorListAccountsMock.mockResolvedValueOnce([account({ id: "a2", label: "Other" })]);
+    await useAppStore.getState().refreshAccounts();
+    // REPLACED, not merged/appended — only the new list survives.
+    expect(useAppStore.getState().accounts).toEqual([account({ id: "a2", label: "Other" })]);
+  });
+
+  it("refreshAccounts surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    connectorListAccountsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshAccounts();
+    expect(useAppStore.getState().accounts).toEqual([]);
     expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 });

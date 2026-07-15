@@ -98,6 +98,10 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdMcpArtifactsChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdConnectorsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdConnectorsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
 }));
 
 // T8 (S-EXT §8): ExtPanel is mocked here — its own tests (`components/ext/ExtPanel.test.tsx`)
@@ -131,6 +135,9 @@ const orchdImportFromFileMock = vi.fn();
 const mcpListServersMock = vi.fn().mockResolvedValue([]);
 const mcpListToolsMock = vi.fn().mockResolvedValue([]);
 const mcpListArtifactsMock = vi.fn().mockResolvedValue([]);
+// S-EXT §8 T13b: the Connectors slice's `refreshAccounts` (`store.ts`) calls straight through to
+// this — mocked here for the same reason as the MCP wrappers above.
+const connectorListAccountsMock = vi.fn().mockResolvedValue([]);
 vi.mock("./ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -147,6 +154,7 @@ vi.mock("./ipc/orchd", () => ({
   mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
+  connectorListAccounts: (...a: unknown[]) => connectorListAccountsMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -268,6 +276,7 @@ beforeEach(() => {
   mcpListServersMock.mockReset().mockResolvedValue([]);
   mcpListToolsMock.mockReset().mockResolvedValue([]);
   mcpListArtifactsMock.mockReset().mockResolvedValue([]);
+  connectorListAccountsMock.mockReset().mockResolvedValue([]);
   useAppStore.setState(
     {
       sessions: {},
@@ -296,6 +305,7 @@ beforeEach(() => {
       mcpServers: [],
       mcpToolsByServer: {},
       mcpArtifacts: [],
+      accounts: [],
       orchdDown: false,
       orchdIncompatible: false,
       orchdUpgradeDialogOpen: false,
@@ -305,7 +315,7 @@ beforeEach(() => {
 });
 
 describe("App", () => {
-  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP, S3 T13 + S4 T6 + S-EXT T8)", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP + one connectors, S3 T13 + S4 T6 + S-EXT T8/T13b)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -333,6 +343,7 @@ describe("App", () => {
       "orchdMcpServersChanged",
       "orchdMcpToolsChanged",
       "orchdMcpArtifactsChanged",
+      "orchdConnectorsChanged",
     ]) {
       expect(typeof cbs[key]).toBe("function");
     }
@@ -1351,5 +1362,16 @@ describe("S-EXT §8 T8: «Расширения» view + MCP event wiring", () =>
       cbs.orchdMcpArtifactsChanged({ projectId: null });
     });
     expect(mcpListArtifactsMock).toHaveBeenCalledWith(null, null, null);
+  });
+
+  it("orchd://connectors-changed re-fetches the accounts list (S-EXT §8, T13b)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    connectorListAccountsMock.mockClear();
+    await act(async () => {
+      cbs.orchdConnectorsChanged(null);
+    });
+    expect(connectorListAccountsMock).toHaveBeenCalledWith();
   });
 });

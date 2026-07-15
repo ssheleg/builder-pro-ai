@@ -24,6 +24,7 @@ import {
   onOrchdMcpServersChanged,
   onOrchdMcpToolsChanged,
   onOrchdMcpArtifactsChanged,
+  onOrchdConnectorsChanged,
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
@@ -212,6 +213,9 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       onOrchdMcpToolsChanged((p) => void useAppStore.getState().refreshMcpTools(p.serverId)),
     );
     track(onOrchdMcpArtifactsChanged(() => void useAppStore.getState().refreshMcpArtifacts()));
+    // Connectors coarse-invalidation event (S-EXT §8, T13b): same unconditional-refresh
+    // precedent as the MCP trio above — no "Коннекторы tab currently open" gating to mirror.
+    track(onOrchdConnectorsChanged(() => void useAppStore.getState().refreshAccounts()));
     // orchd connection state (spec §9): a DIRECT 1:1 mapping (see
     // `broker.rs::map_orchd_conn_state`'s doc) — unlike the sessiond trio there is no
     // reconnect-tracking scheme, `orchd://down`/`orchd://up` just flip `orchdDown`.

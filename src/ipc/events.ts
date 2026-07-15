@@ -272,3 +272,12 @@ export function onOrchdMcpInvocationLogged(
 ): Promise<UnlistenFn> {
   return listen<McpInvocationLoggedPayload>("orchd://mcp-invocation-logged", (e) => cb(e.payload));
 }
+
+// ── Connectors coarse-invalidation event (S-EXT §8, T13a's `EV_ORCHD_CONNECTORS_CHANGED`) ──────
+
+/** Subscribe to `orchd://connectors-changed`. Carries no payload — mirrors
+ * `onOrchdIdeasChanged`/`onOrchdInsightsChanged` above (the store's `accounts` slice is not
+ * project-scoped, so a full `refreshAccounts` is the only meaningful reaction). */
+export function onOrchdConnectorsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://connectors-changed", () => cb());
+}
