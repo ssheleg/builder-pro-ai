@@ -86,6 +86,24 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdIncompatible = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdMcpServersChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdMcpServersChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdMcpToolsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdMcpToolsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdMcpArtifactsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdMcpArtifactsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+}));
+
+// T8 (S-EXT §8): ExtPanel is mocked here — its own tests (`components/ext/ExtPanel.test.tsx`)
+// cover its content; App only needs to prove it renders on `view === "ext"`.
+vi.mock("./components/ext/ExtPanel", () => ({
+  ExtPanel: () => <div data-testid="ext-panel-mock" />,
 }));
 
 // The store's `refresh*` actions (S3 T13) call straight through to `./ipc/orchd`; mocked here so
@@ -107,6 +125,12 @@ const orchdRemoveProjectWorkspaceMock = vi.fn();
 const orchdExportProjectMock = vi.fn();
 const orchdExportToFileMock = vi.fn();
 const orchdImportFromFileMock = vi.fn();
+// T8 (S-EXT §8): the MCP slice's `refresh*` actions (`store.ts`) call straight through to these —
+// mocked here for the same reason as the sessiond-domain wrappers above (deterministic resolution
+// instead of a real invoke() reject in jsdom).
+const mcpListServersMock = vi.fn().mockResolvedValue([]);
+const mcpListToolsMock = vi.fn().mockResolvedValue([]);
+const mcpListArtifactsMock = vi.fn().mockResolvedValue([]);
 vi.mock("./ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -120,6 +144,9 @@ vi.mock("./ipc/orchd", () => ({
   orchdExportProject: (...a: unknown[]) => orchdExportProjectMock(...a),
   orchdExportToFile: (...a: unknown[]) => orchdExportToFileMock(...a),
   orchdImportFromFile: (...a: unknown[]) => orchdImportFromFileMock(...a),
+  mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
+  mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
+  mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -238,6 +265,9 @@ beforeEach(() => {
   orchdExportProjectMock.mockReset();
   orchdExportToFileMock.mockReset();
   orchdImportFromFileMock.mockReset();
+  mcpListServersMock.mockReset().mockResolvedValue([]);
+  mcpListToolsMock.mockReset().mockResolvedValue([]);
+  mcpListArtifactsMock.mockReset().mockResolvedValue([]);
   useAppStore.setState(
     {
       sessions: {},
@@ -263,6 +293,9 @@ beforeEach(() => {
       tasksByProject: {},
       graphByProject: {},
       rulesets: {},
+      mcpServers: [],
+      mcpToolsByServer: {},
+      mcpArtifacts: [],
       orchdDown: false,
       orchdIncompatible: false,
       orchdUpgradeDialogOpen: false,
@@ -272,7 +305,7 @@ beforeEach(() => {
 });
 
 describe("App", () => {
-  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd, S3 T13 + S4 T6)", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP, S3 T13 + S4 T6 + S-EXT T8)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -297,6 +330,9 @@ describe("App", () => {
       "orchdDown",
       "orchdUp",
       "orchdIncompatible",
+      "orchdMcpServersChanged",
+      "orchdMcpToolsChanged",
+      "orchdMcpArtifactsChanged",
     ]) {
       expect(typeof cbs[key]).toBe("function");
     }
@@ -1254,5 +1290,66 @@ describe("T18: view='project' renders ProjectPanel", () => {
     expect(useAppStore.getState().activeProjectId).toBeNull();
     expect(screen.queryByTestId("project-panel")).toBeNull();
     expect(screen.queryByTestId("project-panel-loading")).toBeNull();
+  });
+});
+
+describe("S-EXT §8 T8: «Расширения» view + MCP event wiring", () => {
+  it("clicking the «Расширения» sidebar button sets view to \"ext\" and renders ExtPanel", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(screen.queryByTestId("ext-panel-mock")).toBeNull();
+
+    await act(async () => {
+      screen.getByTestId("ext-nav-button").click();
+    });
+
+    expect(useAppStore.getState().view).toBe("ext");
+    expect(screen.getByTestId("ext-panel-mock")).toBeTruthy();
+  });
+
+  it("orchd://mcp-servers-changed re-fetches the MCP server list", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    mcpListServersMock.mockClear();
+    await act(async () => {
+      cbs.orchdMcpServersChanged({ projectId: null });
+    });
+    expect(mcpListServersMock).toHaveBeenCalledWith(null);
+  });
+
+  it("orchd://mcp-tools-changed refreshes ONLY the named server's tools", async () => {
+    mcpListToolsMock.mockResolvedValue([
+      {
+        id: "t1",
+        serverId: "s1",
+        name: "search",
+        title: null,
+        description: null,
+        inputSchemaJson: "{}",
+        enabled: true,
+        fetchedAt: 1,
+      },
+    ]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.orchdMcpToolsChanged({ serverId: "s1" });
+    });
+    expect(mcpListToolsMock).toHaveBeenCalledWith("s1");
+    expect(useAppStore.getState().mcpToolsByServer["s1"]).toHaveLength(1);
+  });
+
+  it("orchd://mcp-artifacts-changed re-fetches the whole-store artifacts list", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    mcpListArtifactsMock.mockClear();
+    await act(async () => {
+      cbs.orchdMcpArtifactsChanged({ projectId: null });
+    });
+    expect(mcpListArtifactsMock).toHaveBeenCalledWith(null, null, null);
   });
 });

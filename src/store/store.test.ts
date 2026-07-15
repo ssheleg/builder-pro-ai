@@ -8,6 +8,9 @@ import type {
   GraphView,
   Idea,
   Insight,
+  McpArtifact,
+  McpServer,
+  McpTool,
   Project,
   RuleSetView,
 } from "../ipc/orchd-types";
@@ -19,6 +22,9 @@ const orchdListInsightsMock = vi.fn();
 const orchdListTasksMock = vi.fn();
 const orchdGraphListProjectMock = vi.fn();
 const orchdGetRulesetMock = vi.fn();
+const mcpListServersMock = vi.fn();
+const mcpListToolsMock = vi.fn();
+const mcpListArtifactsMock = vi.fn();
 vi.mock("../ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -27,6 +33,9 @@ vi.mock("../ipc/orchd", () => ({
   orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
   orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
+  mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
+  mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
+  mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -58,6 +67,9 @@ describe("useAppStore", () => {
     orchdListTasksMock.mockReset();
     orchdGraphListProjectMock.mockReset();
     orchdGetRulesetMock.mockReset();
+    mcpListServersMock.mockReset();
+    mcpListToolsMock.mockReset();
+    mcpListArtifactsMock.mockReset();
     useAppStore.setState(
       {
         sessions: {},
@@ -84,6 +96,9 @@ describe("useAppStore", () => {
         tasksByProject: {},
         graphByProject: {},
         rulesets: {},
+        mcpServers: [],
+        mcpToolsByServer: {},
+        mcpArtifacts: [],
         orchdDown: false,
         orchdIncompatible: false,
         orchdUpgradeDialogOpen: false,
@@ -124,12 +139,14 @@ describe("useAppStore", () => {
     expect(typeof initial.setWatchPaused).toBe("function");
   });
 
-  it('setView flips between "home", "workspace" and "project" (spec §10 widened union)', () => {
+  it('setView flips between "home", "workspace", "project" and "ext" (spec §10/S-EXT §8 widened union)', () => {
     expect(useAppStore.getState().view).toBe("home");
     useAppStore.getState().setView("workspace");
     expect(useAppStore.getState().view).toBe("workspace");
     useAppStore.getState().setView("project");
     expect(useAppStore.getState().view).toBe("project");
+    useAppStore.getState().setView("ext");
+    expect(useAppStore.getState().view).toBe("ext");
     useAppStore.getState().setView("home");
     expect(useAppStore.getState().view).toBe("home");
   });
@@ -597,6 +614,53 @@ describe("useAppStore", () => {
     ...over,
   });
 
+  const mcpServer = (over: Partial<McpServer> = {}): McpServer => ({
+    id: "s1",
+    name: "Prowl",
+    transport: "http",
+    url: "https://prowl.chat/mcp",
+    command: null,
+    args: [],
+    env: {},
+    scope: "global",
+    projectId: null,
+    authKind: "none",
+    secretRef: null,
+    accountId: null,
+    enabled: true,
+    timeoutMs: 30000,
+    maxRetries: 2,
+    protocolVersion: null,
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  const mcpTool = (over: Partial<McpTool> = {}): McpTool => ({
+    id: "t1",
+    serverId: "s1",
+    name: "search",
+    title: null,
+    description: null,
+    inputSchemaJson: "{}",
+    enabled: true,
+    fetchedAt: 1,
+    ...over,
+  });
+
+  const mcpArtifact = (over: Partial<McpArtifact> = {}): McpArtifact => ({
+    id: "a1",
+    invocationId: "i1",
+    serverId: "s1",
+    toolName: "search",
+    projectId: null,
+    contentJson: "{}",
+    contentText: null,
+    isUntrusted: true,
+    createdAt: 1,
+    ...over,
+  });
+
   const rulesetView = (over: Partial<RuleSetView> = {}): RuleSetView => ({
     rule: {
       id: "r1",
@@ -623,6 +687,9 @@ describe("useAppStore", () => {
     expect(s.tasksByProject).toEqual({});
     expect(s.graphByProject).toEqual({});
     expect(s.rulesets).toEqual({});
+    expect(s.mcpServers).toEqual([]);
+    expect(s.mcpToolsByServer).toEqual({});
+    expect(s.mcpArtifacts).toEqual([]);
     expect(s.orchdDown).toBe(false);
     expect(s.orchdIncompatible).toBe(false);
     expect(s.orchdUpgradeDialogOpen).toBe(false);
@@ -763,5 +830,69 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(true);
     useAppStore.getState().setOrchdUpgradeDialogOpen(false);
     expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(false);
+  });
+
+  // ---- MCP slice (S-EXT §8, T8) ----
+
+  it("refreshMcpServers replaces mcpServers from mcpListServers(null)", async () => {
+    mcpListServersMock.mockResolvedValueOnce([mcpServer()]);
+    await useAppStore.getState().refreshMcpServers();
+    expect(mcpListServersMock).toHaveBeenCalledWith(null);
+    expect(useAppStore.getState().mcpServers).toEqual([mcpServer()]);
+
+    mcpListServersMock.mockResolvedValueOnce([mcpServer({ id: "s2", name: "Other" })]);
+    await useAppStore.getState().refreshMcpServers();
+    // REPLACED, not merged/appended — only the new list survives.
+    expect(useAppStore.getState().mcpServers).toEqual([mcpServer({ id: "s2", name: "Other" })]);
+  });
+
+  it("refreshMcpServers surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    mcpListServersMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshMcpServers();
+    expect(useAppStore.getState().mcpServers).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  it("refreshMcpTools(serverId) updates ONLY the named server's tools, leaving others untouched", async () => {
+    useAppStore.setState(
+      { mcpToolsByServer: { s2: [mcpTool({ id: "t2", serverId: "s2" })] } },
+      false,
+    );
+
+    mcpListToolsMock.mockResolvedValueOnce([mcpTool({ id: "t1", serverId: "s1" })]);
+    await useAppStore.getState().refreshMcpTools("s1");
+
+    expect(mcpListToolsMock).toHaveBeenCalledWith("s1");
+    expect(useAppStore.getState().mcpToolsByServer["s1"]).toEqual([
+      mcpTool({ id: "t1", serverId: "s1" }),
+    ]);
+    // A DIFFERENT server's entry (s2) must be untouched by an s1 refresh.
+    expect(useAppStore.getState().mcpToolsByServer["s2"]).toEqual([
+      mcpTool({ id: "t2", serverId: "s2" }),
+    ]);
+  });
+
+  it("refreshMcpTools surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "daemon", code: "Policy", message: "tool_disabled" };
+    mcpListToolsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshMcpTools("s1");
+    expect(useAppStore.getState().mcpToolsByServer["s1"]).toBeUndefined();
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  it("refreshMcpArtifacts replaces the whole-store mcpArtifacts list, calling mcpListArtifacts(null, null, null)", async () => {
+    mcpListArtifactsMock.mockResolvedValueOnce([mcpArtifact()]);
+    await useAppStore.getState().refreshMcpArtifacts();
+    expect(mcpListArtifactsMock).toHaveBeenCalledWith(null, null, null);
+    expect(useAppStore.getState().mcpArtifacts).toEqual([mcpArtifact()]);
+  });
+
+  it("refreshMcpArtifacts surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    mcpListArtifactsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshMcpArtifacts();
+    expect(useAppStore.getState().mcpArtifacts).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 });

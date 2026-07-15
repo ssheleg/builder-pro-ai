@@ -16,6 +16,15 @@ import type {
   IdeaLifecycle,
   Insight,
   InsightStatus,
+  McpArtifact,
+  McpAuthKind,
+  McpCallResult,
+  McpConnectReport,
+  McpInvocation,
+  McpScope,
+  McpServer,
+  McpTool,
+  McpTransport,
   PolicyRules,
   Project,
   RuleScope,
@@ -408,6 +417,144 @@ export function orchdUpgrade(): Promise<void> {
   return invoke<void>("orchd_upgrade");
 }
 
+// ── MCP (S-EXT §8, T7's mcp_*/trust_* commands) ─────────────────────────────────────────────
+//
+// One thin wrapper per `mcp_*`/`trust_*` `#[tauri::command]` (`src-tauri/src/commands.rs`, T7),
+// same naming/arg-shape-verbatim convention as every wrapper above — argument order and names
+// are copied straight from each Rust command's parameter list. `Option<T>` parameters are
+// modeled as `T | null`, matching every wrapper above (never `undefined`).
+
+export function mcpAddServer(
+  name: string,
+  transport: McpTransport,
+  url: string | null,
+  command: string | null,
+  args: string[] | null,
+  env: Record<string, string> | null,
+  scope: McpScope,
+  projectId: string | null,
+  authKind: McpAuthKind,
+  timeoutMs: number | null,
+  maxRetries: number | null,
+): Promise<McpServer> {
+  return invoke<McpServer>("mcp_add_server", {
+    name,
+    transport,
+    url,
+    command,
+    args,
+    env,
+    scope,
+    projectId,
+    authKind,
+    timeoutMs,
+    maxRetries,
+  });
+}
+
+export function mcpListServers(projectId: string | null): Promise<McpServer[]> {
+  return invoke<McpServer[]>("mcp_list_servers", { projectId });
+}
+
+export function mcpUpdateServer(
+  id: string,
+  name: string | null,
+  url: string | null,
+  command: string | null,
+  args: string[] | null,
+  env: Record<string, string> | null,
+  authKind: McpAuthKind | null,
+  timeoutMs: number | null,
+  maxRetries: number | null,
+): Promise<McpServer> {
+  return invoke<McpServer>("mcp_update_server", {
+    id,
+    name,
+    url,
+    command,
+    args,
+    env,
+    authKind,
+    timeoutMs,
+    maxRetries,
+  });
+}
+
+export function mcpSetServerEnabled(id: string, enabled: boolean): Promise<McpServer> {
+  return invoke<McpServer>("mcp_set_server_enabled", { id, enabled });
+}
+
+export function mcpDeleteServer(id: string): Promise<void> {
+  return invoke<void>("mcp_delete_server", { id });
+}
+
+/**
+ * `token` -> Keychain, ref -> DB, on the orchd side; this wrapper never logs or echoes it
+ * (spec §5, mirrors `commands.rs::mcp_set_server_bearer`'s own doc comment verbatim).
+ */
+export function mcpSetServerBearer(id: string, token: string): Promise<void> {
+  return invoke<void>("mcp_set_server_bearer", { id, token });
+}
+
+/** Trust-gated (spec D10): rejects with `CommandError{kind:"daemon",code:"Consent"}` when no
+ * valid consent grant exists yet for this server's current URL — callers show `ConnectDialog`
+ * on that rejection (`ServersTab.tsx`). */
+export function mcpConnect(id: string): Promise<McpConnectReport> {
+  return invoke<McpConnectReport>("mcp_connect", { id });
+}
+
+export function mcpDisconnect(id: string): Promise<void> {
+  return invoke<void>("mcp_disconnect", { id });
+}
+
+export function mcpListTools(serverId: string): Promise<McpTool[]> {
+  return invoke<McpTool[]>("mcp_list_tools", { serverId });
+}
+
+/** Per-tool allowlist toggle (S0/S1 §16) — note the Rust param is `tool_id`, not `id`. */
+export function mcpSetToolEnabled(toolId: string, enabled: boolean): Promise<McpTool> {
+  return invoke<McpTool>("mcp_set_tool_enabled", { toolId, enabled });
+}
+
+/** Rejects with `CommandError{kind:"daemon",code:"Policy"}` BEFORE dispatch when the named tool
+ * is disabled (spec §6 per-tool allowlist) — never a silent no-op. */
+export function mcpCallTool(
+  serverId: string,
+  toolName: string,
+  argsJson: string,
+  projectId: string | null,
+): Promise<McpCallResult> {
+  return invoke<McpCallResult>("mcp_call_tool", { serverId, toolName, argsJson, projectId });
+}
+
+export function mcpListInvocations(
+  serverId: string | null,
+  projectId: string | null,
+  limit: number | null,
+): Promise<McpInvocation[]> {
+  return invoke<McpInvocation[]>("mcp_list_invocations", { serverId, projectId, limit });
+}
+
+export function mcpListArtifacts(
+  projectId: string | null,
+  serverId: string | null,
+  limit: number | null,
+): Promise<McpArtifact[]> {
+  return invoke<McpArtifact[]>("mcp_list_artifacts", { projectId, serverId, limit });
+}
+
+export function mcpGetArtifact(id: string): Promise<McpArtifact> {
+  return invoke<McpArtifact>("mcp_get_artifact", { id });
+}
+
+/** Grants an owner consent (spec D10, `consent_grant` table): `kind` is `"connect"` for a
+ * server's first `mcpConnect` (`"stdio_exec"` is Phase 3, not surfaced yet). Idempotent
+ * (`Db::grant_consent` upserts on `(server_id, kind)` — a re-grant just refreshes the
+ * fingerprint), so callers may call this unconditionally before every connect attempt. */
+export function trustGrantConsent(serverId: string, kind: string): Promise<void> {
+  return invoke<void>("trust_grant_consent", { serverId, kind });
+}
+
 // ── error mapping ────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -421,9 +568,12 @@ export function orchdUpgrade(): Promise<void> {
  * `Debug`, e.g. `"Invariant"` — see `err_from_orchd_response` in `commands.rs`), NOT the
  * lower-camelCase `OrchdErrorCode` ts-rs union in `./orchd-types.ts` (that union is `serde`'s
  * `Serialize` casing, used only when an `OrchdErrorCode` itself is a struct field on the wire —
- * unrelated to this Debug-formatted string). Only the five codes `bpa_orchd_proto` actually
- * defines get a dedicated message; every other `kind` (`disconnected`, `incompatibleOrchd`, and
- * anything unrecognized) falls back to an honest generic message rather than guessing.
+ * unrelated to this Debug-formatted string). `Consent`/`Policy` are the two S-EXT-only codes
+ * (spec §5/§6, T7): `Consent` is `McpConnect`'s trust-choke-point denial (no valid consent grant
+ * yet for the server's current URL — `ConnectDialog.tsx` is the intended recovery, not merely a
+ * toast), `Policy` is `McpCallTool`'s denial (a disabled tool, the per-tool allowlist). Every
+ * other `kind` (`disconnected`, `incompatibleOrchd`, and anything unrecognized) falls back to an
+ * honest generic message rather than guessing.
  */
 export function describeOrchdError(e: unknown): string {
   if (e !== null && typeof e === "object" && "kind" in e) {
@@ -442,6 +592,10 @@ export function describeOrchdError(e: unknown): string {
           return `неверные данные: ${message}`;
         case "Io":
           return `ошибка сервиса: ${message}`;
+        case "Consent":
+          return `требуется согласие на подключение: ${message}`;
+        case "Policy":
+          return `запрещено политикой: ${message}`;
         default:
           return message || "ошибка оркестратора";
       }

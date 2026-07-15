@@ -9,6 +9,9 @@ import type {
   GraphView,
   Idea,
   Insight,
+  McpArtifact,
+  McpServer,
+  McpTool,
   Project,
   RuleScope,
   RuleSetView,
@@ -21,6 +24,9 @@ import {
   orchdListInsights,
   orchdListProjects,
   orchdListTasks,
+  mcpListServers,
+  mcpListTools,
+  mcpListArtifacts,
   describeOrchdError,
 } from "../ipc/orchd";
 
@@ -70,12 +76,13 @@ export interface AppState {
   hydrated: boolean;
 
   /**
-   * Top-level navigation (spec §6.6/§6.2/§10): `"home"` is the attention-first Home view over ALL
-   * terminals across workspaces; `"workspace"` is the existing per-workspace terminal layout;
-   * `"project"` is the S3 project panel (`openProject`, T18). Defaults to `"home"` — the owner's
-   * daily loop starts there, never mid-workspace.
+   * Top-level navigation (spec §6.6/§6.2/§10, S-EXT §8): `"home"` is the attention-first Home
+   * view over ALL terminals across workspaces; `"workspace"` is the existing per-workspace
+   * terminal layout; `"project"` is the S3 project panel (`openProject`, T18); `"ext"` is the
+   * S-EXT «Расширения» panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management.
+   * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
    */
-  view: "home" | "workspace" | "project";
+  view: "home" | "workspace" | "project" | "ext";
 
   /**
    * File-explorer slice (spec §6.6/§6.4). Every keyed map here uses the SAME key format:
@@ -149,6 +156,26 @@ export interface AppState {
    * single project's ruleset) — mirrors `orchd_get_ruleset`'s `(scope, projectId)` pair collapsed
    * into one string key. Replaced per-key by `refreshRuleset(key)`. */
   rulesets: Record<string, RuleSetView>;
+
+  /**
+   * MCP slice (S-EXT §8, T8: the «Расширения» view's Servers/Tools tabs). Mirrors the app-domain
+   * slice above exactly — invalidation-driven (D6: coarse `orchd://mcp-*-changed` pushes tell the
+   * frontend WHAT changed; the matching `refresh*` action re-fetches wholesale/per-key from
+   * `./orchd.ts`, replacing it — no client-side merge/patch).
+   */
+  /** Every MCP server (global scope — `mcpListServers(null)`; Phase 1's «Расширения» view has no
+   * per-project server list yet). Replaced wholesale by `refreshMcpServers`, mirrors `projects`. */
+  mcpServers: McpServer[];
+  /** A server's cached tool list (from `mcp_tool`, refreshed on connect/`list_changed`), keyed by
+   * `serverId`. Absence means "not yet fetched" — same convention as `goalsByProject`/
+   * `tasksByProject`. Replaced per-key by `refreshMcpTools(serverId)`; a `McpToolsChanged
+   * {serverId}` push never touches any OTHER server's entry. */
+  mcpToolsByServer: Record<string, McpTool[]>;
+  /** Every durable MCP artifact, unfiltered (mirrors `ideas`/`insights`'s whole-store
+   * convention — the Артефакты tab filters client-side). Replaced wholesale by
+   * `refreshMcpArtifacts`. */
+  mcpArtifacts: McpArtifact[];
+
   /** Honest orchd connectivity (spec §9/§11, mirrors sessiond's `daemonConnected` inverted):
    * `true` while the `orchd://down` event is the most recent connection-state signal seen, `false`
    * once `orchd://up` fires. Every domain surface shows the shared "Оркестратор недоступен"
@@ -195,7 +222,7 @@ export interface AppState {
   setActiveSession: (id: SessionId | null) => void;
 
   /** Switch the top-level view. See `view`'s doc above. */
-  setView: (v: "home" | "workspace" | "project") => void;
+  setView: (v: "home" | "workspace" | "project" | "ext") => void;
   /** Set (`open=true`) or clear (`open=false`) one directory's expanded flag. */
   setExpanded: (root: string, rel: string, open: boolean) => void;
   /** Insert or replace one directory's cached listing. */
@@ -257,6 +284,17 @@ export interface AppState {
   /** Open the project panel: sets `view: "project"` and `activeProjectId: id` (T18 renders the
    * panel itself; this task only owns the state transition). */
   openProject: (id: string) => void;
+
+  /** Re-fetch `mcpServers` wholesale (`mcpListServers(null)` — global scope). Mirrors
+   * `refreshProjects` exactly: try/catch -> `showToast(describeOrchdError(e))` on failure,
+   * replace on success. */
+  refreshMcpServers: () => Promise<void>;
+  /** Re-fetch ONE server's cached tool list, replacing only `mcpToolsByServer[serverId]` — every
+   * other server's entry is left untouched. Mirrors `refreshGoals`/`refreshTasks` exactly. */
+  refreshMcpTools: (serverId: string) => Promise<void>;
+  /** Re-fetch `mcpArtifacts` wholesale (no project/server filter — every artifact). Mirrors
+   * `refreshIdeas`/`refreshInsights` exactly. */
+  refreshMcpArtifacts: () => Promise<void>;
   /** Set `orchdDown`. See its doc above. */
   setOrchdDown: (v: boolean) => void;
   /** Set `orchdIncompatible`. See its doc above — never auto-clears, mirrors
@@ -328,6 +366,9 @@ export const useAppStore = create<AppState>((set, get) => {
     tasksByProject: {},
     graphByProject: {},
     rulesets: {},
+    mcpServers: [],
+    mcpToolsByServer: {},
+    mcpArtifacts: [],
     orchdDown: false,
     orchdIncompatible: false,
     orchdUpgradeDialogOpen: false,
@@ -535,6 +576,35 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     openProject: (id) => set({ view: "project", activeProjectId: id }),
+
+    // ── MCP slice (S-EXT §8, T8) ─────────────────────────────────────────────────────────────
+
+    refreshMcpServers: async () => {
+      try {
+        const mcpServers = await mcpListServers(null);
+        set({ mcpServers });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshMcpTools: async (serverId) => {
+      try {
+        const tools = await mcpListTools(serverId);
+        set((s) => ({ mcpToolsByServer: { ...s.mcpToolsByServer, [serverId]: tools } }));
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshMcpArtifacts: async () => {
+      try {
+        const mcpArtifacts = await mcpListArtifacts(null, null, null);
+        set({ mcpArtifacts });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
 
     setOrchdDown: (v) => set({ orchdDown: v }),
     setOrchdIncompatible: (v) => set({ orchdIncompatible: v }),

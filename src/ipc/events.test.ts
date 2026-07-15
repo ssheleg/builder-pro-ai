@@ -32,6 +32,10 @@ import {
   onOrchdDown,
   onOrchdUp,
   onOrchdIncompatible,
+  onOrchdMcpServersChanged,
+  onOrchdMcpToolsChanged,
+  onOrchdMcpArtifactsChanged,
+  onOrchdMcpInvocationLogged,
 } from "./events";
 import type { SessionMeta, Workspace } from "./types";
 import type {
@@ -43,6 +47,10 @@ import type {
   TasksChangedPayload,
   RulesetChangedPayload,
   GraphChangedPayload,
+  McpServersChangedPayload,
+  McpToolsChangedPayload,
+  McpArtifactsChangedPayload,
+  McpInvocationLoggedPayload,
 } from "./events";
 
 describe("ipc/events", () => {
@@ -251,5 +259,52 @@ describe("ipc/events", () => {
     expect(listenMock).toHaveBeenCalledWith("orchd://incompatible", expect.any(Function));
     registered.get("orchd://incompatible")!({ payload: null });
     expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  // ── MCP coarse-invalidation events (S-EXT §8, T8) ──────────────────────────────────────────
+
+  it("onOrchdMcpServersChanged subscribes to orchd://mcp-servers-changed and unwraps {projectId}", async () => {
+    const cb = vi.fn();
+    const un = await onOrchdMcpServersChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://mcp-servers-changed", expect.any(Function));
+    const p: McpServersChangedPayload = { projectId: "p1" };
+    registered.get("orchd://mcp-servers-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+    expect(un).toBe(unlisten);
+  });
+
+  it("onOrchdMcpServersChanged carries a null projectId through for the global scope", async () => {
+    const cb = vi.fn();
+    await onOrchdMcpServersChanged(cb);
+    const p: McpServersChangedPayload = { projectId: null };
+    registered.get("orchd://mcp-servers-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdMcpToolsChanged subscribes to orchd://mcp-tools-changed and unwraps {serverId}", async () => {
+    const cb = vi.fn();
+    await onOrchdMcpToolsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://mcp-tools-changed", expect.any(Function));
+    const p: McpToolsChangedPayload = { serverId: "s1" };
+    registered.get("orchd://mcp-tools-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdMcpArtifactsChanged subscribes to orchd://mcp-artifacts-changed and unwraps {projectId}", async () => {
+    const cb = vi.fn();
+    await onOrchdMcpArtifactsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://mcp-artifacts-changed", expect.any(Function));
+    const p: McpArtifactsChangedPayload = { projectId: null };
+    registered.get("orchd://mcp-artifacts-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  it("onOrchdMcpInvocationLogged subscribes to orchd://mcp-invocation-logged and unwraps {serverId}", async () => {
+    const cb = vi.fn();
+    await onOrchdMcpInvocationLogged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://mcp-invocation-logged", expect.any(Function));
+    const p: McpInvocationLoggedPayload = { serverId: "s1" };
+    registered.get("orchd://mcp-invocation-logged")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
   });
 });

@@ -207,3 +207,68 @@ export function onOrchdUp(cb: () => void): Promise<UnlistenFn> {
 export function onOrchdIncompatible(cb: () => void): Promise<UnlistenFn> {
   return listen<null>("orchd://incompatible", () => cb());
 }
+
+// ── MCP coarse-invalidation events (S-EXT §8, T7's `EV_ORCHD_MCP_*` broker consts, T8) ─────────
+//
+// Mirror `GoalsChangedPayload`/`GraphChangedPayload` exactly: each push names ONLY what changed
+// (D6 "coarse-grained invalidation"), never the updated entity — the store's matching `refresh*`
+// action (`store.ts`) does the actual re-fetch via `./orchd.ts`.
+
+/** Payload of `orchd://mcp-servers-changed`: `projectId` is `null` for a global-scope server
+ * change (mirrors `RulesetChangedPayload`'s `projectId` — the broker reshapes the raw
+ * `Option<String>` straight through, never coerced to a sentinel). */
+export interface McpServersChangedPayload {
+  projectId: string | null;
+}
+
+/** Payload of `orchd://mcp-tools-changed`: the ONE server whose cached tool list changed —
+ * `refreshMcpTools` must re-fetch only that server, never every server's tools. */
+export interface McpToolsChangedPayload {
+  serverId: string;
+}
+
+/** Payload of `orchd://mcp-artifacts-changed`. Mirrors `McpServersChangedPayload` — `projectId`
+ * is `null` for an artifact created outside any project context. */
+export interface McpArtifactsChangedPayload {
+  projectId: string | null;
+}
+
+/** Payload of `orchd://mcp-invocation-logged`: the ONE server a `tools/call` was just logged
+ * against. */
+export interface McpInvocationLoggedPayload {
+  serverId: string;
+}
+
+/** Subscribe to `orchd://mcp-servers-changed` — see `McpServersChangedPayload`. */
+export function onOrchdMcpServersChanged(
+  cb: (p: McpServersChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<McpServersChangedPayload>("orchd://mcp-servers-changed", (e) => cb(e.payload));
+}
+
+/** Subscribe to `orchd://mcp-tools-changed` — see `McpToolsChangedPayload`. */
+export function onOrchdMcpToolsChanged(
+  cb: (p: McpToolsChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<McpToolsChangedPayload>("orchd://mcp-tools-changed", (e) => cb(e.payload));
+}
+
+/** Subscribe to `orchd://mcp-artifacts-changed` — see `McpArtifactsChangedPayload`. */
+export function onOrchdMcpArtifactsChanged(
+  cb: (p: McpArtifactsChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<McpArtifactsChangedPayload>("orchd://mcp-artifacts-changed", (e) => cb(e.payload));
+}
+
+/**
+ * Subscribe to `orchd://mcp-invocation-logged` — see `McpInvocationLoggedPayload`. NOT yet bound
+ * in `App.tsx` (S-EXT §8 T8): no invocation-log store slice exists until the Журнал tab task
+ * wires one — this wrapper ships now (T7 already emits the push) so that later task only needs
+ * to bind it, exactly like every other listener in this file is a pure passthrough with zero
+ * App-side policy of its own.
+ */
+export function onOrchdMcpInvocationLogged(
+  cb: (p: McpInvocationLoggedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<McpInvocationLoggedPayload>("orchd://mcp-invocation-logged", (e) => cb(e.payload));
+}

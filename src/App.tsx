@@ -21,6 +21,9 @@ import {
   onOrchdDown,
   onOrchdUp,
   onOrchdIncompatible,
+  onOrchdMcpServersChanged,
+  onOrchdMcpToolsChanged,
+  onOrchdMcpArtifactsChanged,
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
@@ -38,6 +41,7 @@ import { QuickCapture } from "./components/QuickCapture";
 import { FilesRail } from "./components/FilesRail";
 import { HomeView } from "./components/HomeView";
 import { ProjectPanel } from "./components/ProjectPanel";
+import { ExtPanel } from "./components/ext/ExtPanel";
 import { Toast } from "./components/Toast";
 import { theme } from "./theme";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -201,6 +205,13 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // is no "graph panel currently open" gating to mirror — none of the S3 precedents this event
     // was modeled on gate their refresh on view/activeProjectId, so this doesn't invent one either.
     track(onOrchdGraphChanged((p) => void useAppStore.getState().refreshGraph(p.projectId)));
+    // MCP coarse-invalidation events (S-EXT §8, T8): same unconditional-refresh precedent as
+    // `orchd://graph-changed` above — no "Расширения view currently open" gating to mirror.
+    track(onOrchdMcpServersChanged(() => void useAppStore.getState().refreshMcpServers()));
+    track(
+      onOrchdMcpToolsChanged((p) => void useAppStore.getState().refreshMcpTools(p.serverId)),
+    );
+    track(onOrchdMcpArtifactsChanged(() => void useAppStore.getState().refreshMcpArtifacts()));
     // orchd connection state (spec §9): a DIRECT 1:1 mapping (see
     // `broker.rs::map_orchd_conn_state`'s doc) — unlike the sessiond trio there is no
     // reconnect-tracking scheme, `orchd://down`/`orchd://up` just flip `orchdDown`.
@@ -420,6 +431,9 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           // is the only setter of `view: "project"` and always sets both together (store.ts), but
           // this stays defensive rather than assuming that invariant can never be violated.
           activeProjectId !== null && <ProjectPanel projectId={activeProjectId} />
+        ) : view === "ext" ? (
+          // S-EXT «Расширения» panel (spec §8, T8): MCP servers/tools/connectors/skills.
+          <ExtPanel />
         ) : (
           <>
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>

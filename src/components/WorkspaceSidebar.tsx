@@ -150,6 +150,29 @@ export function WorkspaceSidebar(props: {
           ⌂ Home
         </button>
 
+        <button
+          type="button"
+          data-testid="ext-nav-button"
+          aria-label="Расширения"
+          aria-current={view === "ext" ? "true" : undefined}
+          onClick={() => setView("ext")}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "8px 12px",
+            fontSize: 13,
+            fontWeight: 600,
+            border: "none",
+            borderBottom: `1px solid ${theme.colors.border}`,
+            cursor: "pointer",
+            color: view === "ext" ? theme.colors.text : theme.colors.textDim,
+            background: view === "ext" ? theme.colors.bg : "transparent",
+          }}
+        >
+          ⚙ Расширения
+        </button>
+
         <div style={{ flex: 1, overflowY: "auto" }}>
           {sortedProjects.map((project) => {
             const projectWorkspaces = project.workspaceIds

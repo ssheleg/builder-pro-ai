@@ -170,4 +170,15 @@ describe("WorkspaceSidebar", () => {
 
     expect(screen.getByTestId("create-project-dialog")).toBeTruthy();
   });
+
+  // ---- S-EXT §8, T8: «Расширения» nav button ----
+
+  it("renders a «Расширения» nav item; clicking it sets view to \"ext\" and highlights it", () => {
+    useAppStore.setState({ view: "workspace" }, false);
+    render(<WorkspaceSidebar activeWorkspaceId="w1" onSelectWorkspace={() => {}} />);
+    const ext = screen.getByTestId("ext-nav-button");
+    expect(ext).toBeTruthy();
+    fireEvent.click(ext);
+    expect(useAppStore.getState().view).toBe("ext");
+  });
 });

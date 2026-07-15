@@ -56,6 +56,21 @@ import {
   orchdImportFromFile,
   orchdReconnect,
   orchdUpgrade,
+  mcpAddServer,
+  mcpListServers,
+  mcpUpdateServer,
+  mcpSetServerEnabled,
+  mcpDeleteServer,
+  mcpSetServerBearer,
+  mcpConnect,
+  mcpDisconnect,
+  mcpListTools,
+  mcpSetToolEnabled,
+  mcpCallTool,
+  mcpListInvocations,
+  mcpListArtifacts,
+  mcpGetArtifact,
+  trustGrantConsent,
   describeOrchdError,
 } from "./orchd";
 
@@ -481,6 +496,133 @@ describe("ipc/orchd", () => {
     await expect(orchdUpgrade()).rejects.toEqual(err);
   });
 
+  // ── MCP (S-EXT §8, T8) ─────────────────────────────────────────────────────────────────────
+
+  it("mcpAddServer sends every field camelCased, in T7's mcp_add_server param order", async () => {
+    await mcpAddServer(
+      "Prowl",
+      "http",
+      "https://prowl.chat/mcp",
+      null,
+      null,
+      null,
+      "global",
+      null,
+      "bearer",
+      30000,
+      2,
+    );
+    expect(invokeMock).toHaveBeenCalledWith("mcp_add_server", {
+      name: "Prowl",
+      transport: "http",
+      url: "https://prowl.chat/mcp",
+      command: null,
+      args: null,
+      env: null,
+      scope: "global",
+      projectId: null,
+      authKind: "bearer",
+      timeoutMs: 30000,
+      maxRetries: 2,
+    });
+  });
+
+  it("mcpListServers sends projectId", async () => {
+    await mcpListServers(null);
+    expect(invokeMock).toHaveBeenCalledWith("mcp_list_servers", { projectId: null });
+  });
+
+  it("mcpUpdateServer sends id + editable fields (null = unchanged)", async () => {
+    await mcpUpdateServer("s1", "New name", null, null, null, null, null, null, null);
+    expect(invokeMock).toHaveBeenCalledWith("mcp_update_server", {
+      id: "s1",
+      name: "New name",
+      url: null,
+      command: null,
+      args: null,
+      env: null,
+      authKind: null,
+      timeoutMs: null,
+      maxRetries: null,
+    });
+  });
+
+  it("mcpSetServerEnabled sends id/enabled", async () => {
+    await mcpSetServerEnabled("s1", false);
+    expect(invokeMock).toHaveBeenCalledWith("mcp_set_server_enabled", { id: "s1", enabled: false });
+  });
+
+  it("mcpDeleteServer sends id", async () => {
+    await mcpDeleteServer("s1");
+    expect(invokeMock).toHaveBeenCalledWith("mcp_delete_server", { id: "s1" });
+  });
+
+  it("mcpSetServerBearer sends id/token", async () => {
+    await mcpSetServerBearer("s1", "sekret-token");
+    expect(invokeMock).toHaveBeenCalledWith("mcp_set_server_bearer", {
+      id: "s1",
+      token: "sekret-token",
+    });
+  });
+
+  it("mcpConnect sends id", async () => {
+    await mcpConnect("s1");
+    expect(invokeMock).toHaveBeenCalledWith("mcp_connect", { id: "s1" });
+  });
+
+  it("mcpDisconnect sends id", async () => {
+    await mcpDisconnect("s1");
+    expect(invokeMock).toHaveBeenCalledWith("mcp_disconnect", { id: "s1" });
+  });
+
+  it("mcpListTools sends serverId", async () => {
+    await mcpListTools("s1");
+    expect(invokeMock).toHaveBeenCalledWith("mcp_list_tools", { serverId: "s1" });
+  });
+
+  it("mcpSetToolEnabled sends toolId (not id)/enabled", async () => {
+    await mcpSetToolEnabled("t1", true);
+    expect(invokeMock).toHaveBeenCalledWith("mcp_set_tool_enabled", { toolId: "t1", enabled: true });
+  });
+
+  it("mcpCallTool sends serverId/toolName/argsJson/projectId", async () => {
+    await mcpCallTool("s1", "search", '{"q":"x"}', "p1");
+    expect(invokeMock).toHaveBeenCalledWith("mcp_call_tool", {
+      serverId: "s1",
+      toolName: "search",
+      argsJson: '{"q":"x"}',
+      projectId: "p1",
+    });
+  });
+
+  it("mcpListInvocations sends serverId/projectId/limit", async () => {
+    await mcpListInvocations(null, null, 50);
+    expect(invokeMock).toHaveBeenCalledWith("mcp_list_invocations", {
+      serverId: null,
+      projectId: null,
+      limit: 50,
+    });
+  });
+
+  it("mcpListArtifacts sends projectId/serverId/limit", async () => {
+    await mcpListArtifacts(null, null, null);
+    expect(invokeMock).toHaveBeenCalledWith("mcp_list_artifacts", {
+      projectId: null,
+      serverId: null,
+      limit: null,
+    });
+  });
+
+  it("mcpGetArtifact sends id", async () => {
+    await mcpGetArtifact("a1");
+    expect(invokeMock).toHaveBeenCalledWith("mcp_get_artifact", { id: "a1" });
+  });
+
+  it("trustGrantConsent sends serverId/kind", async () => {
+    await trustGrantConsent("s1", "connect");
+    expect(invokeMock).toHaveBeenCalledWith("trust_grant_consent", { serverId: "s1", kind: "connect" });
+  });
+
   // ── describeOrchdError ────────────────────────────────────────────────────────────────────
 
   describe("describeOrchdError", () => {
@@ -512,6 +654,18 @@ describe("ipc/orchd", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "Io", message: "disk full" }),
       ).toBe("ошибка сервиса: disk full");
+    });
+
+    it("maps daemon/Consent (S-EXT §8)", () => {
+      expect(
+        describeOrchdError({ kind: "daemon", code: "Consent", message: "consent_required" }),
+      ).toBe("требуется согласие на подключение: consent_required");
+    });
+
+    it("maps daemon/Policy (S-EXT §8)", () => {
+      expect(
+        describeOrchdError({ kind: "daemon", code: "Policy", message: "tool_disabled" }),
+      ).toBe("запрещено политикой: tool_disabled");
     });
 
     it("maps disconnected", () => {
