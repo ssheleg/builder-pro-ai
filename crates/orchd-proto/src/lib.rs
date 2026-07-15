@@ -479,7 +479,13 @@ pub struct McpCallResult {
 #[ts(export_to = "orchd-types.ts")]
 pub struct McpInvocation {
     pub id: String,
-    pub server_id: String,
+    /// The MCP server this call targeted (`Some` for an `McpCallTool` invocation); `null` for a
+    /// `ConnectorInvoke`, which carries the account instead (spec §4 XOR; T12 review:
+    /// ConnectorInvoke reuses this invocation record path). Exactly one of the two is set.
+    pub server_id: Option<String>,
+    /// The connector account this call targeted (`Some` for a `ConnectorInvoke`); `null` for an
+    /// `McpCallTool`.
+    pub account_id: Option<String>,
     pub tool_name: String,
     pub project_id: Option<String>,
     /// sha256 of args, NEVER the args themselves (spec §4: no arg content logged).
@@ -506,7 +512,13 @@ pub struct McpInvocation {
 pub struct McpArtifact {
     pub id: String,
     pub invocation_id: String,
-    pub server_id: String,
+    /// The MCP server that produced this artifact (`Some` for an `McpCallTool` result); `null`
+    /// for a `ConnectorInvoke` artifact, which carries the account instead (spec §4 XOR, D9; T12
+    /// review: ConnectorInvoke persists a durable untrusted artifact too). Exactly one is set.
+    pub server_id: Option<String>,
+    /// The connector account that produced this artifact (`Some` for a `ConnectorInvoke` result);
+    /// `null` for an `McpCallTool`.
+    pub account_id: Option<String>,
     pub tool_name: String,
     pub project_id: Option<String>,
     pub content_json: String,

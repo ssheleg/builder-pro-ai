@@ -4,60 +4,33 @@
 //! (spec §7: `{provider, list_ops, invoke}`). [`GenericRestAdapter`] is the ONE reference adapter
 //! this slice ships (`provider = "generic-rest"`, ops `get`/`post` against an arbitrary
 //! caller-supplied URL). [`invoke`] is `ConnectorInvoke`'s implementation — routed through the
-//! SAME `crate::trust::authorize` choke-point as `mcp::invoke::call_tool` (spec §6: "passes
-//! through `trust::authorize` IDENTICALLY to `McpCallTool`").
+//! SAME `crate::trust::authorize` choke-point AND the same `mcp_invocation`/`mcp_artifact`
+//! persistence path as `mcp::invoke::call_tool` (spec §6: "passes through `trust::authorize`
+//! IDENTICALLY to `McpCallTool`"; §7: "same retry/timeout/artifact/audit path as MCP calls").
 //!
-//! # Artifact-persistence decision (v1, this task)
+//! # Durable artifact persistence (spec §6/§7/D9)
 //!
-//! The spec's `McpCallResult` doc comment says a call's "JSON result ... is already persisted as
-//! a durable artifact row" (`crates/orchd-proto/src/lib.rs`), and §9's DoD list says
-//! `ConnectorInvoke` "reuses the artifact/invocation path". In practice this is blocked by the
-//! frozen v3 schema (spec §4 DDL, `persistence.rs`'s `migrate_v3`, NOT touched by this task):
-//! both `mcp_invocation.server_id` AND `mcp_artifact.server_id` are `TEXT NOT NULL REFERENCES
-//! mcp_server(id) ON DELETE CASCADE` — a connector invocation has no `mcp_server` row to
-//! reference. Two ways around that were considered:
-//!
-//! 1. **A synthetic `mcp_server` row** representing the connector-adapter provider (e.g.
-//!    `transport='http', enabled=0`), satisfying the FK with no schema change. Rejected: THIS
-//!    task's own reading of `mcp::registry::list_mcp_servers` shows it has no
-//!    enabled/synthetic-row filter — `McpListServers` would return the sentinel row to the
-//!    frontend's «Серверы» tab as if it were a real, addable MCP server. Papering over that
-//!    would need either a second filter convention (which nothing else in `registry.rs` has) or
-//!    UI-side special-casing — both push complexity onto a LATER task for a problem this task
-//!    created.
-//! 2. **Audit-only (chosen)**: `invoke` below writes NO `mcp_invocation`/`mcp_artifact` row.
-//!    The `connector_invoke` `audit_log` row (spec D10, always written — see `crate::trust`) IS
-//!    the durable record that the call happened, WHO (`account_id`, in the audit row's
-//!    `server_id` column — see `trust::write_audit`'s doc comment), and the authorize verdict.
-//!    The returned [`McpCallResult`]'s `content_json` is still exactly the untrusted adapter
-//!    result (spec D9's semantics: this data must be treated as untrusted, same as any MCP tool
-//!    result), but it is EPHEMERAL — it does NOT survive an orchd restart, and
-//!    `McpGetArtifact`/`McpListArtifacts` will never resolve `artifact_id`/`invocation_id` below
-//!    (both a fixed, obviously-not-a-uuid [`UNPERSISTED_SENTINEL`], not a freshly-minted id that
-//!    could be mistaken for a real row).
-//!
-//! This is a genuine, documented capability gap versus `McpCallTool` (no invocation-log/artifact
-//! history for connector calls yet), not a silent omission — see the task-12 report for the
-//! backlog framing (a schema v4 with a connector-shaped invocation/artifact table, or a
-//! relaxed/nullable `mcp_server` FK, is the natural follow-up once a second real adapter needs
-//! it).
+//! A successful `ConnectorInvoke` persists a durable `mcp_invocation` row AND a durable
+//! `mcp_artifact` row (`is_untrusted=1`), exactly like `McpCallTool` — the result survives an
+//! orchd restart and is returned/listed by `McpGetArtifact`/`McpListArtifacts` (spec D9: "always
+//! true for external tool output", §6: "every `mcp_artifact` from `McpCallTool` AND
+//! `ConnectorInvoke` is `is_untrusted=1`"). Both rows are keyed by `account_id` (the connector
+//! account) with `server_id` NULL — the schema's `server_id`/`account_id` XOR (T12 review: the
+//! unreleased v3 `mcp_invocation`/`mcp_artifact` DDL was corrected in place to make `server_id`
+//! nullable and add `account_id`, rather than forcing a synthetic `mcp_server` row that would
+//! leak into `McpListServers`). A failed adapter call records an `ok=0` `mcp_invocation` (with
+//! `error_kind`) and NO artifact — same shape as `mcp::invoke::record_failed_invocation`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bpa_orchd_proto::{ConnectorOp, McpCallResult};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as TokioMutex;
 
 use super::accounts::{AccountToken, ConnectorError, ConnectorsState};
-use crate::persistence::Db;
+use crate::persistence::{now_ms, Db, NewArtifact, NewInvocation};
 use crate::trust::{self, Action, Decision};
-
-/// Sentinel `McpCallResult.artifact_id`/`invocation_id` for a `ConnectorInvoke` result (see this
-/// module's doc comment: artifact persistence is deferred, audit-only in v1). Deliberately NOT a
-/// uuid-v4-shaped string — `McpGetArtifact{id}`/`McpListInvocations` will never resolve this, and
-/// this shape makes that obvious to anyone inspecting a result rather than looking like a real,
-/// just-unlucky lookup miss.
-const UNPERSISTED_SENTINEL: &str = "unpersisted-v1-connector-invoke";
 
 /// Bounded per-request timeout for [`GenericRestAdapter`] (spec §7: "Bounded timeout ...
 /// (honest degradation)"). No per-account/per-op override exists yet — the `account` table has
@@ -280,15 +253,18 @@ fn resolve_adapter(provider: &str) -> Result<GenericRestAdapter, ConnectorError>
 /// anything else network-shaped.
 ///
 /// Takes the SHARED `Arc<tokio::sync::Mutex<Db>>` (the exact type `socket_server::ServerDeps.db`
-/// holds) and locks it in TWO phases with the network round-trip (bearer resolution — which may
-/// hit an OAuth refresh endpoint, see `accounts::ConnectorsState::token_for` — plus the adapter's
-/// own HTTP call) sandwiched BETWEEN, holding NO `Db` guard across either await (same T6
-/// review-fix discipline `mcp::invoke::call_tool`/`accounts::token_for`/`accounts::complete_oauth`
-/// all follow — holding the single daemon-wide `Db` mutex across a network round-trip stalls
-/// every other orchd connection for the duration of that call).
+/// holds) and locks it in phases with the network round-trip (bearer resolution — which may hit
+/// an OAuth refresh endpoint, see `accounts::ConnectorsState::token_for` — plus the adapter's own
+/// HTTP call) sandwiched BETWEEN, holding NO `Db` guard across either await (same T6 review-fix
+/// discipline `mcp::invoke::call_tool`/`accounts::token_for`/`accounts::complete_oauth` all follow
+/// — holding the single daemon-wide `Db` mutex across a network round-trip stalls every other
+/// orchd connection for the duration of that call).
 ///
-/// See this module's doc comment for why no `mcp_invocation`/`mcp_artifact` row is written (v1,
-/// audit-only) and what `McpCallResult.artifact_id`/`invocation_id` mean instead.
+/// Persists a durable `mcp_invocation` on every dispatched attempt (success OR terminal failure,
+/// spec D8) plus a durable `mcp_artifact` (`is_untrusted=1`, spec D9) on success — keyed by
+/// `account_id` with `server_id` NULL — so a connector result survives an orchd restart and is
+/// returned/listed by `McpGetArtifact`/`McpListArtifacts`, exactly like an `McpCallTool` result
+/// (see this module's doc comment).
 pub async fn invoke(
     connectors: &ConnectorsState,
     db: &Arc<TokioMutex<Db>>,
@@ -319,39 +295,154 @@ pub async fn invoke(
         return Err(ConnectorInvokeError::Denied(reason));
     }
 
+    // args_json parse happens BEFORE any network dispatch (mirrors `mcp::invoke::call_tool`: a
+    // malformed request never becomes a dispatched invocation row). `request_hash` is the sha256
+    // of the exact args bytes — NEVER the args themselves (spec §4/§6).
     let args: serde_json::Value = serde_json::from_str(args_json).map_err(|e| {
         ConnectorInvokeError::Adapter(ConnectorError::InvalidArgs(format!(
             "args_json is not valid JSON: {e}"
         )))
     })?;
+    let request_hash = sha256_hex(args_json.as_bytes());
+    let started_at = now_ms();
+    let start = Instant::now();
 
-    // ---- Phase 2: network. NO `Db`/`MutexGuard` reference is alive here. `token_for` may hit an
-    // OAuth refresh endpoint; `adapter.invoke` always hits the third-party API. ----
-    let token = connectors.token_for(db, account_id).await?;
-    let adapter = resolve_adapter(&account.provider)?;
-    let result = adapter.invoke(&token, op, args).await?;
+    // ---- Phase 2: network + local adapter resolution. NO `Db`/`MutexGuard` reference is alive
+    // here. `token_for` may hit an OAuth refresh endpoint; `adapter.invoke` always hits the
+    // third-party API. Any failure funnels to the failed-invocation recorder below. ----
+    let outcome = async {
+        let adapter = resolve_adapter(&account.provider)?;
+        let token = connectors.token_for(db, account_id).await?;
+        adapter.invoke(&token, op, args).await
+    }
+    .await;
 
-    let content_json = serde_json::to_string(&result).map_err(|e| {
-        ConnectorInvokeError::Adapter(ConnectorError::InvalidArgs(format!(
-            "failed to serialize connector result: {e}"
-        )))
-    })?;
+    let elapsed_ms = start.elapsed().as_millis() as i64;
 
-    // Structured tracing — account id/provider/op only, NEVER the bearer/args/result content
-    // (spec §6, mirrors `mcp::invoke::call_tool`'s own "tool call completed" trace).
-    tracing::info!(
-        account_id,
-        provider = %account.provider,
-        op,
-        "connector: invoke completed"
-    );
+    // ---- Phase 3: lock -> write. ----
+    match outcome {
+        Ok(result) => {
+            let content_json = serde_json::to_string(&result).map_err(|e| {
+                ConnectorInvokeError::Adapter(ConnectorError::InvalidArgs(format!(
+                    "failed to serialize connector result: {e}"
+                )))
+            })?;
 
-    Ok(McpCallResult {
-        artifact_id: UNPERSISTED_SENTINEL.to_string(),
-        invocation_id: UNPERSISTED_SENTINEL.to_string(),
-        content_json,
-        is_error: false,
-    })
+            let (artifact_id, invocation_id) = {
+                let guard = db.lock().await;
+                let invocation = guard.insert_invocation(NewInvocation {
+                    server_id: None,
+                    account_id: Some(account_id.to_string()),
+                    tool_name: op.to_string(),
+                    project_id: project_id.clone(),
+                    request_hash,
+                    ok: true,
+                    error_kind: None,
+                    latency_ms: elapsed_ms,
+                    // A generic-REST connector reports no token/cost accounting (spec D8: these
+                    // stay null when the source doesn't report usage — honestly).
+                    cost_usd: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    started_at,
+                })?;
+                let artifact = guard.insert_artifact(NewArtifact {
+                    invocation_id: invocation.id.clone(),
+                    server_id: None,
+                    account_id: Some(account_id.to_string()),
+                    tool_name: op.to_string(),
+                    project_id,
+                    content_json: content_json.clone(),
+                    // No MCP-content-block shape to flatten for an arbitrary REST JSON result;
+                    // the full result lives in content_json. (A future adapter that returns a
+                    // known text shape could populate this.)
+                    content_text: None,
+                })?;
+                (artifact.id, invocation.id)
+            };
+
+            // Structured tracing — account id/provider/op only, NEVER the bearer/args/result
+            // content (spec §6, mirrors `mcp::invoke::call_tool`'s own "tool call completed").
+            tracing::info!(
+                account_id,
+                provider = %account.provider,
+                op,
+                ok = true,
+                latency_ms = elapsed_ms,
+                "connector: invoke completed"
+            );
+
+            Ok(McpCallResult {
+                artifact_id,
+                invocation_id,
+                content_json,
+                is_error: false,
+            })
+        }
+        Err(e) => {
+            let error_kind = connector_error_kind(&e);
+            // A terminal failure records an ok=0 invocation (spec D8) and NO artifact — same
+            // shape as `mcp::invoke::record_failed_invocation`. Trace carries the error KIND
+            // only, never the error's own message text (which could echo upstream content).
+            {
+                let guard = db.lock().await;
+                guard.insert_invocation(NewInvocation {
+                    server_id: None,
+                    account_id: Some(account_id.to_string()),
+                    tool_name: op.to_string(),
+                    project_id,
+                    request_hash,
+                    ok: false,
+                    error_kind: Some(error_kind.to_string()),
+                    latency_ms: elapsed_ms,
+                    cost_usd: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    started_at,
+                })?;
+            }
+            tracing::warn!(
+                account_id,
+                provider = %account.provider,
+                op,
+                ok = false,
+                error_kind,
+                "connector: invoke failed"
+            );
+            Err(ConnectorInvokeError::Adapter(e))
+        }
+    }
+}
+
+/// Short, non-secret `mcp_invocation.error_kind` label for a terminal [`ConnectorError`] (mirrors
+/// `mcp::invoke::classify_error_kind`). Never the error's own message text.
+fn connector_error_kind(err: &ConnectorError) -> &'static str {
+    match err {
+        ConnectorError::NoAdapter(_) => "no_adapter",
+        ConnectorError::UnknownOp(_) => "unknown_op",
+        ConnectorError::InvalidArgs(_) => "invalid_args",
+        ConnectorError::Request(_) => "request",
+        ConnectorError::Timeout => "timeout",
+        ConnectorError::UpstreamStatus(_) => "upstream_status",
+        ConnectorError::SecretNotUtf8 => "secret",
+        ConnectorError::Secret(_) => "secret",
+        ConnectorError::TokenExchange(_) => "token_exchange",
+        ConnectorError::Http(_) => "http",
+        ConnectorError::UnknownProvider(_) => "unknown_provider",
+        ConnectorError::UnknownState => "unknown_state",
+        ConnectorError::InvalidConfig(_) => "invalid_config",
+        ConnectorError::Persist(_) => "persist",
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -569,7 +660,7 @@ mod tests {
     // ================================================================================
 
     #[tokio::test]
-    async fn connector_invoke_happy_path_authorizes_audits_and_returns_untrusted_result() {
+    async fn connector_invoke_happy_path_authorizes_audits_and_persists_untrusted_artifact() {
         if !keychain_available() {
             return;
         }
@@ -602,11 +693,15 @@ mod tests {
             captured.lock().unwrap().auth_header.as_deref(),
             Some("Bearer test-api-key-42")
         );
+        // real (resolvable) ids, not a sentinel.
+        assert!(!result.artifact_id.is_empty());
+        assert!(!result.invocation_id.is_empty());
+
+        let guard = db.lock().await;
 
         // trust::authorize wrote exactly one connector_invoke/allow audit row (spec §6/D10),
         // carrying account_id/op in the reused server_id/tool_name columns (trust::write_audit's
         // doc comment).
-        let guard = db.lock().await;
         let audit_count: i64 = guard
             .conn()
             .query_row(
@@ -618,14 +713,42 @@ mod tests {
             .unwrap();
         assert_eq!(audit_count, 1);
 
-        // v1 artifact-persistence deferral (see this module's doc comment): no mcp_artifact row
-        // is (or even validly could be, given the mcp_server FK) written for a connector
-        // invocation — the connector_invoke audit row above is the durable record instead.
-        assert!(guard.list_artifacts(None, None, None).unwrap().is_empty());
+        // D9/§6: the connector result persists as a durable untrusted artifact, keyed by
+        // account_id (server_id null), returned by get_artifact/list_artifacts.
+        let artifact = guard.get_artifact(&result.artifact_id).unwrap();
+        assert!(
+            artifact.is_untrusted,
+            "connector artifact must be untrusted (D9)"
+        );
+        assert_eq!(artifact.account_id.as_deref(), Some(account.id.as_str()));
+        assert_eq!(artifact.server_id, None);
+        assert_eq!(artifact.tool_name, "get");
+        assert_eq!(artifact.content_json, result.content_json);
+        assert_eq!(artifact.invocation_id, result.invocation_id);
+
+        // it shows up in an unfiltered McpListArtifacts (the same query the wire verb runs).
+        let listed = guard.list_artifacts(None, None, None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, result.artifact_id);
+
+        // and a durable ok=1 invocation row keyed by account_id (server_id null).
+        let invocation = guard.list_invocations(None, None, None).unwrap();
+        assert_eq!(invocation.len(), 1);
+        assert!(invocation[0].ok);
+        assert_eq!(
+            invocation[0].account_id.as_deref(),
+            Some(account.id.as_str())
+        );
+        assert_eq!(invocation[0].server_id, None);
+        assert_eq!(
+            invocation[0].request_hash,
+            sha256_hex(args.as_bytes()),
+            "request_hash is sha256(args_json), never the raw args"
+        );
     }
 
     #[tokio::test]
-    async fn connector_invoke_adapter_transport_error_still_audits_and_returns_typed_error() {
+    async fn connector_invoke_adapter_error_records_failed_invocation_and_no_artifact() {
         if !keychain_available() {
             return;
         }
@@ -656,9 +779,10 @@ mod tests {
             "expected Adapter(UpstreamStatus(500)), got {err:?}"
         );
 
+        let guard = db.lock().await;
+
         // authorize() ran (and audited) in Phase 1, BEFORE the failing network call in Phase 2 —
         // the audit row exists even though the adapter call itself failed downstream.
-        let guard = db.lock().await;
         let audit_count: i64 = guard
             .conn()
             .query_row(
@@ -672,6 +796,21 @@ mod tests {
             audit_count, 1,
             "the connector_invoke audit row is written on every invoke, success or failure"
         );
+
+        // D8: a terminal failure still records an ok=0 invocation (keyed by account_id), but NO
+        // artifact.
+        let invocations = guard.list_invocations(None, None, None).unwrap();
+        assert_eq!(invocations.len(), 1);
+        assert!(!invocations[0].ok);
+        assert_eq!(
+            invocations[0].error_kind.as_deref(),
+            Some("upstream_status")
+        );
+        assert_eq!(
+            invocations[0].account_id.as_deref(),
+            Some(account.id.as_str())
+        );
+        assert_eq!(invocations[0].server_id, None);
         assert!(
             guard.list_artifacts(None, None, None).unwrap().is_empty(),
             "a failed adapter call must never produce a result artifact"

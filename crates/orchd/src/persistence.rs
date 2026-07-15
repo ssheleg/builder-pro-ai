@@ -429,11 +429,17 @@ pub(crate) fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
            updated_at     INTEGER NOT NULL
          );
 
-         -- Per-call invocation records (cost/latency from call #1)
+         -- Per-call invocation records (cost/latency from call #1). Exactly ONE source is set:
+         -- server_id (an MCP tools/call) XOR account_id (a direct-API connector_invoke) — the
+         -- CHECK below enforces it. ConnectorInvoke reuses this invocation/artifact path
+         -- identically to McpCallTool (S-EXT §6/§7, D9; T12 review). server_id is nullable (was
+         -- NOT NULL in the unreleased v3 first cut) so a connector row — which has no mcp_server
+         -- to reference — can live here without a synthetic server row.
          CREATE TABLE mcp_invocation (
            id             TEXT PRIMARY KEY,             -- uuid v4
-           server_id      TEXT NOT NULL,
-           tool_name      TEXT NOT NULL,
+           server_id      TEXT,                          -- MCP tools/call source; null for a connector_invoke
+           account_id     TEXT,                          -- connector_invoke source; null for an MCP tools/call
+           tool_name      TEXT NOT NULL,                 -- MCP tool name OR connector op name
            project_id     TEXT,                          -- context if called within a project
            request_hash   TEXT NOT NULL,                 -- sha256 of args (NOT the args themselves)
            ok             INTEGER NOT NULL,
@@ -443,22 +449,31 @@ pub(crate) fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
            input_tokens   INTEGER,
            output_tokens  INTEGER,
            started_at     INTEGER NOT NULL,
-           FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE
+           FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
+           FOREIGN KEY(account_id) REFERENCES account(id) ON DELETE CASCADE,
+           CHECK ( (server_id IS NOT NULL) <> (account_id IS NOT NULL) )
          );
          CREATE INDEX mcp_invocation_by_server ON mcp_invocation(server_id, started_at);
 
-         -- Durable artifacts (tool results); untrusted by construction
+         -- Durable artifacts (tool results); untrusted by construction. server_id/account_id XOR
+         -- mirrors mcp_invocation (an MCP tools/call vs a connector_invoke); is_untrusted=1 for
+         -- BOTH sources (S-EXT D9/§6: every artifact from McpCallTool AND ConnectorInvoke is
+         -- untrusted). Survives orchd restart for the connector path too (T12 review DoD).
          CREATE TABLE mcp_artifact (
            id             TEXT PRIMARY KEY,             -- uuid v4
            invocation_id  TEXT NOT NULL,
-           server_id      TEXT NOT NULL,
+           server_id      TEXT,                          -- MCP source; null for a connector_invoke
+           account_id     TEXT,                          -- connector source; null for an MCP tools/call
            tool_name      TEXT NOT NULL,
            project_id     TEXT,
            content_json   TEXT NOT NULL,                 -- full structured result
            content_text   TEXT,                          -- flattened text for preview/search
            is_untrusted   INTEGER NOT NULL DEFAULT 1,    -- always 1 for external output (S6b mediation flag)
            created_at     INTEGER NOT NULL,
-           FOREIGN KEY(invocation_id) REFERENCES mcp_invocation(id) ON DELETE CASCADE
+           FOREIGN KEY(invocation_id) REFERENCES mcp_invocation(id) ON DELETE CASCADE,
+           FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
+           FOREIGN KEY(account_id) REFERENCES account(id) ON DELETE CASCADE,
+           CHECK ( (server_id IS NOT NULL) <> (account_id IS NOT NULL) )
          );
          CREATE INDEX mcp_artifact_by_project ON mcp_artifact(project_id, created_at);
 
@@ -5236,7 +5251,14 @@ mod ruleset_tests {
 /// reflect when the call actually began; `mcp::invoke::call_tool` captures it before dispatching.
 #[derive(Debug, Clone)]
 pub struct NewInvocation {
-    pub server_id: String,
+    /// The MCP server this call targeted — `Some` for an MCP `tools/call` (`mcp::invoke::
+    /// call_tool`), `None` for a connector_invoke. Exactly one of `server_id`/`account_id` is
+    /// `Some` (the DB CHECK enforces the XOR — spec §4, T12 review).
+    pub server_id: Option<String>,
+    /// The connector account this call targeted — `Some` for a `ConnectorInvoke`
+    /// (`connectors::adapter::invoke`), `None` for an MCP `tools/call`.
+    pub account_id: Option<String>,
+    /// MCP tool name OR connector op name (spec §4 `tool_name` column doubles for both).
     pub tool_name: String,
     pub project_id: Option<String>,
     pub request_hash: String,
@@ -5255,7 +5277,12 @@ pub struct NewInvocation {
 #[derive(Debug, Clone)]
 pub struct NewArtifact {
     pub invocation_id: String,
-    pub server_id: String,
+    /// `Some` for an MCP `tools/call` artifact, `None` for a connector_invoke artifact. Exactly
+    /// one of `server_id`/`account_id` is `Some` (DB CHECK enforces the XOR — spec §4/D9, T12
+    /// review: ConnectorInvoke persists a durable untrusted artifact too).
+    pub server_id: Option<String>,
+    /// `Some` for a connector_invoke artifact, `None` for an MCP `tools/call` artifact.
+    pub account_id: Option<String>,
     pub tool_name: String,
     pub project_id: Option<String>,
     pub content_json: String,
@@ -5307,7 +5334,8 @@ pub struct AuditRow {
 
 struct McpInvocationRawRow {
     id: String,
-    server_id: String,
+    server_id: Option<String>,
+    account_id: Option<String>,
     tool_name: String,
     project_id: Option<String>,
     request_hash: String,
@@ -5325,16 +5353,17 @@ impl McpInvocationRawRow {
         Ok(Self {
             id: r.get(0)?,
             server_id: r.get(1)?,
-            tool_name: r.get(2)?,
-            project_id: r.get(3)?,
-            request_hash: r.get(4)?,
-            ok: r.get(5)?,
-            error_kind: r.get(6)?,
-            latency_ms: r.get(7)?,
-            cost_usd: r.get(8)?,
-            input_tokens: r.get(9)?,
-            output_tokens: r.get(10)?,
-            started_at: r.get(11)?,
+            account_id: r.get(2)?,
+            tool_name: r.get(3)?,
+            project_id: r.get(4)?,
+            request_hash: r.get(5)?,
+            ok: r.get(6)?,
+            error_kind: r.get(7)?,
+            latency_ms: r.get(8)?,
+            cost_usd: r.get(9)?,
+            input_tokens: r.get(10)?,
+            output_tokens: r.get(11)?,
+            started_at: r.get(12)?,
         })
     }
 
@@ -5342,6 +5371,7 @@ impl McpInvocationRawRow {
         McpInvocation {
             id: self.id,
             server_id: self.server_id,
+            account_id: self.account_id,
             tool_name: self.tool_name,
             project_id: self.project_id,
             request_hash: self.request_hash,
@@ -5356,8 +5386,8 @@ impl McpInvocationRawRow {
     }
 }
 
-const MCP_INVOCATION_COLUMNS: &str = "id, server_id, tool_name, project_id, request_hash, ok, \
-     error_kind, latency_ms, cost_usd, input_tokens, output_tokens, started_at";
+const MCP_INVOCATION_COLUMNS: &str = "id, server_id, account_id, tool_name, project_id, \
+     request_hash, ok, error_kind, latency_ms, cost_usd, input_tokens, output_tokens, started_at";
 
 fn load_invocation(conn: &Connection, id: &str) -> Result<McpInvocation, OrchdPersistError> {
     let sql = format!("SELECT {MCP_INVOCATION_COLUMNS} FROM mcp_invocation WHERE id = ?1");
@@ -5371,7 +5401,8 @@ fn load_invocation(conn: &Connection, id: &str) -> Result<McpInvocation, OrchdPe
 struct McpArtifactRawRow {
     id: String,
     invocation_id: String,
-    server_id: String,
+    server_id: Option<String>,
+    account_id: Option<String>,
     tool_name: String,
     project_id: Option<String>,
     content_json: String,
@@ -5386,12 +5417,13 @@ impl McpArtifactRawRow {
             id: r.get(0)?,
             invocation_id: r.get(1)?,
             server_id: r.get(2)?,
-            tool_name: r.get(3)?,
-            project_id: r.get(4)?,
-            content_json: r.get(5)?,
-            content_text: r.get(6)?,
-            is_untrusted: r.get(7)?,
-            created_at: r.get(8)?,
+            account_id: r.get(3)?,
+            tool_name: r.get(4)?,
+            project_id: r.get(5)?,
+            content_json: r.get(6)?,
+            content_text: r.get(7)?,
+            is_untrusted: r.get(8)?,
+            created_at: r.get(9)?,
         })
     }
 
@@ -5400,6 +5432,7 @@ impl McpArtifactRawRow {
             id: self.id,
             invocation_id: self.invocation_id,
             server_id: self.server_id,
+            account_id: self.account_id,
             tool_name: self.tool_name,
             project_id: self.project_id,
             content_json: self.content_json,
@@ -5410,8 +5443,8 @@ impl McpArtifactRawRow {
     }
 }
 
-const MCP_ARTIFACT_COLUMNS: &str = "id, invocation_id, server_id, tool_name, project_id, \
-     content_json, content_text, is_untrusted, created_at";
+const MCP_ARTIFACT_COLUMNS: &str = "id, invocation_id, server_id, account_id, tool_name, \
+     project_id, content_json, content_text, is_untrusted, created_at";
 
 fn load_artifact(conn: &Connection, id: &str) -> Result<McpArtifact, OrchdPersistError> {
     let sql = format!("SELECT {MCP_ARTIFACT_COLUMNS} FROM mcp_artifact WHERE id = ?1");
@@ -5435,12 +5468,13 @@ impl Db {
         let id = Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO mcp_invocation
-               (id, server_id, tool_name, project_id, request_hash, ok, error_kind, latency_ms,
-                cost_usd, input_tokens, output_tokens, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+               (id, server_id, account_id, tool_name, project_id, request_hash, ok, error_kind,
+                latency_ms, cost_usd, input_tokens, output_tokens, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 id,
                 new.server_id,
+                new.account_id,
                 new.tool_name,
                 new.project_id,
                 new.request_hash,
@@ -5494,13 +5528,14 @@ impl Db {
         let now = now_ms();
         tx.execute(
             "INSERT INTO mcp_artifact
-               (id, invocation_id, server_id, tool_name, project_id, content_json, content_text,
-                is_untrusted, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+               (id, invocation_id, server_id, account_id, tool_name, project_id, content_json,
+                content_text, is_untrusted, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
             rusqlite::params![
                 id,
                 new.invocation_id,
                 new.server_id,
+                new.account_id,
                 new.tool_name,
                 new.project_id,
                 new.content_json,
@@ -5661,6 +5696,7 @@ impl Db {
 #[cfg(test)]
 mod trust_persistence_tests {
     use super::*;
+    use crate::connectors::{AccountAuthKind, NewAccount};
     use crate::mcp::{McpAuthKind, McpScope, McpTransport, NewMcpServer};
 
     fn new_db() -> Db {
@@ -5688,9 +5724,29 @@ mod trust_persistence_tests {
         .id
     }
 
+    /// Inserts an `account` row directly (no Keychain — pure DB, `secret_ref` is a plain fake
+    /// ref string), so the connector invocation/artifact XOR path (T12 review) can be exercised
+    /// at the persistence layer without a real credential.
+    fn add_account(db: &Db) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        db.insert_account(NewAccount {
+            id: id.clone(),
+            provider: "generic-rest".to_string(),
+            label: "Test REST".to_string(),
+            auth_kind: AccountAuthKind::Apikey,
+            secret_ref: format!("{id}:apikey"),
+            scopes: vec![],
+            expires_at: None,
+            refresh_ref: None,
+        })
+        .unwrap()
+        .id
+    }
+
     fn new_invocation(server_id: &str) -> NewInvocation {
         NewInvocation {
-            server_id: server_id.to_string(),
+            server_id: Some(server_id.to_string()),
+            account_id: None,
             tool_name: "search".to_string(),
             project_id: None,
             request_hash: "deadbeef".to_string(),
@@ -5704,6 +5760,24 @@ mod trust_persistence_tests {
         }
     }
 
+    /// A connector_invoke invocation — `account_id` set, `server_id` null (T12 review).
+    fn new_connector_invocation(account_id: &str) -> NewInvocation {
+        NewInvocation {
+            server_id: None,
+            account_id: Some(account_id.to_string()),
+            tool_name: "get".to_string(),
+            project_id: None,
+            request_hash: "deadbeef".to_string(),
+            ok: true,
+            error_kind: None,
+            latency_ms: 42,
+            cost_usd: None,
+            input_tokens: None,
+            output_tokens: None,
+            started_at: now_ms(),
+        }
+    }
+
     // ---- insert_invocation / list_invocations ----
 
     #[test]
@@ -5712,13 +5786,79 @@ mod trust_persistence_tests {
         let server_id = add_server(&db);
         let row = db.insert_invocation(new_invocation(&server_id)).unwrap();
         assert!(!row.id.is_empty());
-        assert_eq!(row.server_id, server_id);
+        assert_eq!(row.server_id.as_deref(), Some(server_id.as_str()));
+        assert_eq!(row.account_id, None);
         assert_eq!(row.tool_name, "search");
         assert!(row.ok);
         assert_eq!(row.error_kind, None);
         assert_eq!(row.cost_usd, Some(0.01));
         assert_eq!(row.input_tokens, Some(10));
         assert_eq!(row.output_tokens, Some(20));
+    }
+
+    #[test]
+    fn insert_connector_invocation_and_artifact_round_trip_with_account_id() {
+        // T12 review: a connector_invoke persists a durable invocation + untrusted artifact via
+        // the SAME insert path as an MCP tools/call, keyed by account_id (server_id null).
+        let db = new_db();
+        let account_id = add_account(&db);
+
+        let invocation = db
+            .insert_invocation(new_connector_invocation(&account_id))
+            .unwrap();
+        assert_eq!(invocation.server_id, None);
+        assert_eq!(invocation.account_id.as_deref(), Some(account_id.as_str()));
+        assert_eq!(invocation.tool_name, "get");
+
+        let artifact = db
+            .insert_artifact(NewArtifact {
+                invocation_id: invocation.id.clone(),
+                server_id: None,
+                account_id: Some(account_id.clone()),
+                tool_name: "get".to_string(),
+                project_id: None,
+                content_json: "{\"ok\":true}".to_string(),
+                content_text: Some("ok".to_string()),
+            })
+            .unwrap();
+        assert!(
+            artifact.is_untrusted,
+            "D9: connector artifact is untrusted too"
+        );
+        assert_eq!(artifact.server_id, None);
+        assert_eq!(artifact.account_id.as_deref(), Some(account_id.as_str()));
+
+        // it shows up in an unfiltered list (server-filtered lists correctly exclude it).
+        let all = db.list_artifacts(None, None, None).unwrap();
+        assert!(all.iter().any(|a| a.id == artifact.id));
+    }
+
+    #[test]
+    fn insert_invocation_rejects_both_server_and_account_id_set() {
+        // The XOR CHECK forbids a row with BOTH sources (or neither) set.
+        let db = new_db();
+        let server_id = add_server(&db);
+        let account_id = add_account(&db);
+        let mut both = new_invocation(&server_id);
+        both.account_id = Some(account_id);
+        let err = db.insert_invocation(both).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Sql(_)),
+            "XOR CHECK violation must surface as a Sql error; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn insert_invocation_rejects_neither_server_nor_account_id_set() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let mut neither = new_invocation(&server_id);
+        neither.server_id = None;
+        let err = db.insert_invocation(neither).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Sql(_)),
+            "XOR CHECK violation must surface as a Sql error; got {err:?}"
+        );
     }
 
     #[test]
@@ -5757,7 +5897,8 @@ mod trust_persistence_tests {
         let artifact = db
             .insert_artifact(NewArtifact {
                 invocation_id: invocation.id.clone(),
-                server_id: server_id.clone(),
+                server_id: Some(server_id.clone()),
+                account_id: None,
                 tool_name: "search".to_string(),
                 project_id: None,
                 content_json: "{\"ok\":true}".to_string(),
@@ -5787,7 +5928,8 @@ mod trust_persistence_tests {
         let invocation = db.insert_invocation(new_invocation(&server_id)).unwrap();
         db.insert_artifact(NewArtifact {
             invocation_id: invocation.id.clone(),
-            server_id: server_id.clone(),
+            server_id: Some(server_id.clone()),
+            account_id: None,
             tool_name: "search".to_string(),
             project_id: Some("proj-1".to_string()),
             content_json: "{}".to_string(),
@@ -5796,7 +5938,8 @@ mod trust_persistence_tests {
         .unwrap();
         db.insert_artifact(NewArtifact {
             invocation_id: invocation.id.clone(),
-            server_id: server_id.clone(),
+            server_id: Some(server_id.clone()),
+            account_id: None,
             tool_name: "search".to_string(),
             project_id: Some("proj-2".to_string()),
             content_json: "{}".to_string(),

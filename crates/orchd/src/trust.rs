@@ -37,11 +37,10 @@ pub enum Action {
     /// One `ConnectorInvoke` attempt — a direct-API [`crate::connectors::adapter::ConnectorAdapter`]
     /// call (spec §6/§7, task T12). Passes through this SAME choke-point "IDENTICALLY to
     /// `McpCallTool`" (spec §6): same policy scope (spend/rate caps land in T18, exactly like
-    /// `ToolCall`), a `connector_invoke` audit action, and (per T12's own artifact-persistence
-    /// decision — see `connectors::adapter::invoke`'s doc comment) the returned result is treated
-    /// as untrusted content the same way an `mcp_artifact` is (spec D9), even though v1 does not
-    /// persist a durable artifact row for it (the `mcp_artifact`/`mcp_invocation` FK to
-    /// `mcp_server` has no connector-shaped analogue — a schema change, out of this task's scope).
+    /// `ToolCall`), a `connector_invoke` audit action, and a durable untrusted `mcp_artifact`
+    /// (`is_untrusted=1`, spec D9) — `connectors::adapter::invoke` persists the invocation +
+    /// artifact keyed by `account_id` (with `server_id` NULL, the schema `server_id`/`account_id`
+    /// XOR), reusing the exact `mcp_invocation`/`mcp_artifact` path `McpCallTool` writes to.
     ConnectorInvoke {
         account_id: String,
         op: String,

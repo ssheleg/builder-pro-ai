@@ -183,11 +183,14 @@ CREATE TABLE account (
   updated_at     INTEGER NOT NULL
 );
 
--- Per-call invocation records (cost/latency from call #1)
+-- Per-call invocation records (cost/latency from call #1). Exactly ONE source is set:
+-- server_id (an MCP tools/call) XOR account_id (a direct-API connector_invoke). ConnectorInvoke
+-- reuses this invocation/artifact path identically to McpCallTool (§6/§7, D9; T12 review).
 CREATE TABLE mcp_invocation (
   id             TEXT PRIMARY KEY,             -- uuid v4
-  server_id      TEXT NOT NULL,
-  tool_name      TEXT NOT NULL,
+  server_id      TEXT,                          -- MCP tools/call source; null for a connector_invoke
+  account_id     TEXT,                          -- connector_invoke source; null for an MCP tools/call
+  tool_name      TEXT NOT NULL,                 -- MCP tool name OR connector op name
   project_id     TEXT,                          -- context if called within a project
   request_hash   TEXT NOT NULL,                 -- sha256 of args (NOT the args themselves)
   ok             INTEGER NOT NULL,
@@ -197,22 +200,29 @@ CREATE TABLE mcp_invocation (
   input_tokens   INTEGER,
   output_tokens  INTEGER,
   started_at     INTEGER NOT NULL,
-  FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE
+  FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
+  FOREIGN KEY(account_id) REFERENCES account(id) ON DELETE CASCADE,
+  CHECK ( (server_id IS NOT NULL) <> (account_id IS NOT NULL) )
 );
 CREATE INDEX mcp_invocation_by_server ON mcp_invocation(server_id, started_at);
 
--- Durable artifacts (tool results); untrusted by construction
+-- Durable artifacts (tool results); untrusted by construction. server_id/account_id XOR mirrors
+-- mcp_invocation; is_untrusted=1 for BOTH McpCallTool AND ConnectorInvoke output (D9/§6).
 CREATE TABLE mcp_artifact (
   id             TEXT PRIMARY KEY,             -- uuid v4
   invocation_id  TEXT NOT NULL,
-  server_id      TEXT NOT NULL,
+  server_id      TEXT,                          -- MCP source; null for a connector_invoke
+  account_id     TEXT,                          -- connector source; null for an MCP tools/call
   tool_name      TEXT NOT NULL,
   project_id     TEXT,
   content_json   TEXT NOT NULL,                 -- full structured result
   content_text   TEXT,                          -- flattened text for preview/search
   is_untrusted   INTEGER NOT NULL DEFAULT 1,    -- always 1 for external output (S6b mediation flag)
   created_at     INTEGER NOT NULL,
-  FOREIGN KEY(invocation_id) REFERENCES mcp_invocation(id) ON DELETE CASCADE
+  FOREIGN KEY(invocation_id) REFERENCES mcp_invocation(id) ON DELETE CASCADE,
+  FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
+  FOREIGN KEY(account_id) REFERENCES account(id) ON DELETE CASCADE,
+  CHECK ( (server_id IS NOT NULL) <> (account_id IS NOT NULL) )
 );
 CREATE INDEX mcp_artifact_by_project ON mcp_artifact(project_id, created_at);
 

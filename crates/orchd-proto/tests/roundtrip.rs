@@ -234,7 +234,8 @@ fn sample_mcp_call_result() -> McpCallResult {
 fn sample_mcp_invocation() -> McpInvocation {
     McpInvocation {
         id: "invocation-1".into(),
-        server_id: "mcp-1".into(),
+        server_id: Some("mcp-1".into()),
+        account_id: None,
         tool_name: "search".into(),
         project_id: Some("proj-1".into()),
         request_hash: "deadbeef".into(),
@@ -252,7 +253,8 @@ fn sample_mcp_artifact() -> McpArtifact {
     McpArtifact {
         id: "artifact-1".into(),
         invocation_id: "invocation-1".into(),
-        server_id: "mcp-1".into(),
+        server_id: Some("mcp-1".into()),
+        account_id: None,
         tool_name: "search".into(),
         project_id: Some("proj-1".into()),
         content_json: "{\"ok\":true}".into(),

@@ -148,7 +148,8 @@ where
             let (artifact_id, invocation_id) = {
                 let guard = db.lock().await;
                 let invocation = guard.insert_invocation(NewInvocation {
-                    server_id: server_id_owned.clone(),
+                    server_id: Some(server_id_owned.clone()),
+                    account_id: None,
                     tool_name: tool_name.to_string(),
                     project_id: project_id.clone(),
                     request_hash,
@@ -163,7 +164,8 @@ where
 
                 let artifact = guard.insert_artifact(NewArtifact {
                     invocation_id: invocation.id.clone(),
-                    server_id: server_id_owned.clone(),
+                    server_id: Some(server_id_owned.clone()),
+                    account_id: None,
                     tool_name: tool_name.to_string(),
                     project_id,
                     content_json: content_json.clone(),
@@ -213,7 +215,8 @@ fn failed_invocation(
     err: &bpa_mcp::McpError,
 ) -> NewInvocation {
     NewInvocation {
-        server_id: server_id.to_string(),
+        server_id: Some(server_id.to_string()),
+        account_id: None,
         tool_name: tool_name.to_string(),
         project_id,
         request_hash: request_hash.to_string(),
@@ -239,7 +242,10 @@ async fn record_failed_invocation(
 ) -> Result<(), OrchdMcpError> {
     let error_kind = classify_error_kind(err);
     tracing::warn!(
-        server_id = %new.server_id,
+        // Always `Some` on the MCP path (server_id is now `Option` only because a
+        // connector_invoke shares this row shape — see `NewInvocation`); `.as_deref()` keeps the
+        // trace field non-secret and Display-free.
+        server_id = new.server_id.as_deref(),
         tool_name = %new.tool_name,
         ok = false,
         error_kind,

@@ -60,7 +60,18 @@ export type InsightStatus = "new" | "accepted" | "archived";
  * always `true` for every artifact this Phase-1 slice creates — the S6b agent-boundary flag
  * this quarantines against, not something a client can ever clear via the wire.
  */
-export type McpArtifact = { id: string, invocationId: string, serverId: string, toolName: string, projectId: string | null, contentJson: string, contentText: string | null, isUntrusted: boolean, createdAt: number, };
+export type McpArtifact = { id: string, invocationId: string, 
+/**
+ * The MCP server that produced this artifact (`Some` for an `McpCallTool` result); `null`
+ * for a `ConnectorInvoke` artifact, which carries the account instead (spec §4 XOR, D9; T12
+ * review: ConnectorInvoke persists a durable untrusted artifact too). Exactly one is set.
+ */
+serverId: string | null, 
+/**
+ * The connector account that produced this artifact (`Some` for a `ConnectorInvoke` result);
+ * `null` for an `McpCallTool`.
+ */
+accountId: string | null, toolName: string, projectId: string | null, contentJson: string, contentText: string | null, isUntrusted: boolean, createdAt: number, };
 
 export type McpAuthKind = "none" | "bearer" | "oauth";
 
@@ -75,7 +86,18 @@ export type McpCallResult = { artifactId: string, invocationId: string, contentJ
  */
 export type McpConnectReport = { protocolVersion: string, toolCount: number, };
 
-export type McpInvocation = { id: string, serverId: string, toolName: string, projectId: string | null, 
+export type McpInvocation = { id: string, 
+/**
+ * The MCP server this call targeted (`Some` for an `McpCallTool` invocation); `null` for a
+ * `ConnectorInvoke`, which carries the account instead (spec §4 XOR; T12 review:
+ * ConnectorInvoke reuses this invocation record path). Exactly one of the two is set.
+ */
+serverId: string | null, 
+/**
+ * The connector account this call targeted (`Some` for a `ConnectorInvoke`); `null` for an
+ * `McpCallTool`.
+ */
+accountId: string | null, toolName: string, projectId: string | null, 
 /**
  * sha256 of args, NEVER the args themselves (spec §4: no arg content logged).
  */
