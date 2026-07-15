@@ -93,12 +93,18 @@ export function ArtifactViewer(props: {
   artifact: McpArtifact;
   source: string;
   defaultOpen?: boolean;
+  /** Optional ARIA role for the single root element. `ArtifactsTab` passes `"listitem"` (its
+   * rows sit inside a `role="list"` container) so the list semantics land on THIS one element —
+   * no extra wrapper `<div>` — while `ResearchPane` omits it (its viewer is not inside a list).
+   * A nested/duplicate `listitem` is invalid a11y, so the role lives here on the root and nowhere
+   * else. */
+  role?: string;
 }): JSX.Element {
-  const { artifact, source, defaultOpen = false } = props;
+  const { artifact, source, defaultOpen = false, role } = props;
   const [isOpen, setIsOpen] = useState(defaultOpen);
 
   return (
-    <div data-testid={`artifact-row-${artifact.id}`} style={rowStyle}>
+    <div role={role} data-testid={`artifact-row-${artifact.id}`} style={rowStyle}>
       <div style={rowHeaderStyle}>
         <span data-testid={`artifact-tool-${artifact.id}`} style={titleTextStyle}>
           {artifact.toolName}
@@ -176,9 +182,12 @@ export function ArtifactsTab(): JSX.Element {
                 ? (serverNames[artifact.serverId] ?? artifact.serverId)
                 : (artifact.accountId ?? "—");
             return (
-              <div key={artifact.id} role="listitem">
-                <ArtifactViewer artifact={artifact} source={source} />
-              </div>
+              <ArtifactViewer
+                key={artifact.id}
+                artifact={artifact}
+                source={source}
+                role="listitem"
+              />
             );
           })}
         </div>

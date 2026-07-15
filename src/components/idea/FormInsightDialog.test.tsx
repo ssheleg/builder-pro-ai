@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
 const orchdCreateInsightMock = vi.fn();
 const orchdSetInsightFitVerdictMock = vi.fn();
@@ -335,5 +335,53 @@ describe("FormInsightDialog", () => {
     expect(createButton.disabled).toBe(true);
     fireEvent.click(createButton);
     expect(orchdCreateInsightMock).not.toHaveBeenCalled();
+  });
+
+  // Regression guard (T6 review, Finding 1): «Принять»/«В backlog» are gated behind
+  // `insight !== null` (and, for backlog, `status === "accepted"`), so the create-only orchdDown
+  // test above can NEVER reach them — a regression dropping `orchdDown` from `acceptBlocked`/
+  // `backlogBlocked` would go undetected. This test first drives past those gates (create, then
+  // accept) so each button renders in the state where `orchdDown` is its ONLY remaining blocking
+  // term, then flips orchdDown and asserts the disabled + click-not-called invariant for BOTH.
+  it("while orchdDown after create/accept: «Принять» (status new) and «В backlog» (status accepted) are disabled and click NEITHER wrapper", async () => {
+    render(
+      <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={() => {}} />,
+    );
+
+    // Get past the `insight !== null` gate: create the insight (resolves to status "new").
+    fireEvent.click(screen.getByTestId("form-insight-create"));
+    await waitFor(() => expect(screen.getByTestId("form-insight-accept")).toBeTruthy());
+
+    // Phase A — «Принять» with status "new": `acceptBlocked = orchdDown || insight===null ||
+    // insight.status!=="new"`. insight is non-null and status is "new", so orchdDown is the ONLY
+    // term that can block it here — a dropped-orchdDown regression flips this assertion.
+    act(() => {
+      useAppStore.setState({ orchdDown: true }, false);
+    });
+    const acceptButton = screen.getByTestId("form-insight-accept") as HTMLButtonElement;
+    expect(acceptButton.disabled).toBe(true);
+    fireEvent.click(acceptButton);
+    expect(orchdSetInsightStatusMock).not.toHaveBeenCalled();
+
+    // Restore and actually accept (resolves to status "accepted") so «В backlog» renders.
+    act(() => {
+      useAppStore.setState({ orchdDown: false }, false);
+    });
+    fireEvent.click(screen.getByTestId("form-insight-accept"));
+    await waitFor(() => expect(screen.getByTestId("form-insight-backlog")).toBeTruthy());
+    orchdSetInsightStatusMock.mockClear(); // drop the successful accept call before Phase B
+
+    // Phase B — «В backlog» with status "accepted" and a concrete projectId: `backlogBlocked =
+    // orchdDown || insight===null || insight.status!=="accepted" || idea.projectId===null`. All
+    // three non-orchdDown terms are satisfied (non-null, accepted, project set), so orchdDown is
+    // again the ONLY term that can block it — the regression guard for the backlog expression.
+    act(() => {
+      useAppStore.setState({ orchdDown: true }, false);
+    });
+    const backlogButton = screen.getByTestId("form-insight-backlog") as HTMLButtonElement;
+    expect(backlogButton.disabled).toBe(true);
+    fireEvent.click(backlogButton);
+    expect(orchdCreateTaskMock).not.toHaveBeenCalled();
+    expect(orchdSetIdeaLifecycleMock).not.toHaveBeenCalled();
   });
 });
