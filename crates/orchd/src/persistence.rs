@@ -21,7 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bpa_orchd_proto::{
     DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
-    InsightStatus, PolicyRules, Project, ProjectStatus, RuleScope, RuleSet, TaskSource, TaskStatus,
+    InsightStatus, McpArtifact, McpInvocation, PolicyRules, Project, ProjectStatus, RuleScope,
+    RuleSet, TaskSource, TaskStatus,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
@@ -5203,5 +5204,648 @@ mod ruleset_tests {
         // No partial effect: the row's hash is still the pre-archive value, not the hand-edited
         // content's hash.
         assert_eq!(project_ruleset(&db, &project.id).md_hash, rs.md_hash);
+    }
+}
+
+// ================================================================================
+// ---- S-EXT trust layer: invocation / artifact / consent / audit CRUD (spec §4/§6, task T5) ----
+// ================================================================================
+//
+// `mcp_server`/`mcp_tool` CRUD lives in `crate::mcp::registry` (T2). These remaining four
+// schema-v3 tables land here instead, directly alongside the rest of this file's domain CRUD:
+// `consent_grant`/`audit_log` back `crate::trust` (a crate-root module, not nested under `mcp`),
+// so their persistence fits better here than in a new `mcp::` submodule; `mcp_invocation`/
+// `mcp_artifact` sit alongside them for the same "not really mcp_server/mcp_tool registry
+// concerns" reason (task-5 brief: "Modify: ... persistence.rs (invocation/artifact/consent/audit
+// CRUD)").
+//
+// `insert_invocation`/`insert_artifact`/`list_invocations`/`list_artifacts`/`get_artifact`
+// return `bpa_orchd_proto::{McpInvocation, McpArtifact}` directly (the wire entities T3 already
+// defined) rather than inventing parallel `*Row` structs — mirrors this file's OWN established
+// convention for `Project`/`Goal`/`Idea`/`Insight`/`DomainTask`/`RuleSet` (all wire types,
+// returned directly by this file's CRUD), unlike `crate::mcp::{McpServerRow, McpToolRow}` (T2),
+// which predates T3's wire types and had nothing to reuse yet. `audit_log` has no wire entity
+// yet (`TrustListAudit` hasn't landed — `orchd-proto`'s S-EXT block stops at
+// `TrustGrantConsent`), so `AuditRow` stays crate-local for now, the same way `McpServerRow` did
+// before T3.
+
+/// Input to [`Db::insert_invocation`] (spec §4 `mcp_invocation`; `id` assigned here via uuid
+/// v4). `started_at` is caller-supplied — unlike every OTHER table's `created_at` in this file
+/// (always stamped by `now_ms()` at insert time), this row is only written AFTER the call
+/// completes (once `latency_ms`/`ok`/`error_kind` are known), but `started_at` must still
+/// reflect when the call actually began; `mcp::invoke::call_tool` captures it before dispatching.
+#[derive(Debug, Clone)]
+pub struct NewInvocation {
+    pub server_id: String,
+    pub tool_name: String,
+    pub project_id: Option<String>,
+    pub request_hash: String,
+    pub ok: bool,
+    pub error_kind: Option<String>,
+    pub latency_ms: i64,
+    pub cost_usd: Option<f64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub started_at: i64,
+}
+
+/// Input to [`Db::insert_artifact`] (spec §4 `mcp_artifact`; `id`/`created_at` assigned here).
+/// No `is_untrusted` field: `insert_artifact` ALWAYS writes `is_untrusted=1` (spec D9: "always
+/// true for external tool output") — not a caller-settable choice, see that method's doc.
+#[derive(Debug, Clone)]
+pub struct NewArtifact {
+    pub invocation_id: String,
+    pub server_id: String,
+    pub tool_name: String,
+    pub project_id: Option<String>,
+    pub content_json: String,
+    pub content_text: Option<String>,
+}
+
+/// Input to [`Db::insert_audit`] (spec §4 `audit_log`; `id`/`at` assigned here). `action` /
+/// `decision` are the spec's own literal TEXT values (`'connect'|'disconnect'|'stdio_spawn'|
+/// 'tool_call'|'connector_invoke'|'consent_grant'|'policy_deny'` / `'allow'|'deny'`) — kept as
+/// plain `String` (not a Rust enum): `crate::trust` is this type's only caller today and already
+/// works with those literals as `&'static str`.
+#[derive(Debug, Clone)]
+pub struct NewAudit {
+    pub action: String,
+    pub server_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub project_id: Option<String>,
+    pub decision: String,
+    pub reason: Option<String>,
+    pub invocation_id: Option<String>,
+}
+
+/// `audit_log` row, decoded (spec §4). See this section's header comment for why this stays a
+/// crate-local type rather than a `bpa_orchd_proto` wire entity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditRow {
+    pub id: String,
+    pub at: i64,
+    pub action: String,
+    pub server_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub project_id: Option<String>,
+    pub decision: String,
+    pub reason: Option<String>,
+    pub invocation_id: Option<String>,
+}
+
+struct McpInvocationRawRow {
+    id: String,
+    server_id: String,
+    tool_name: String,
+    project_id: Option<String>,
+    request_hash: String,
+    ok: i64,
+    error_kind: Option<String>,
+    latency_ms: i64,
+    cost_usd: Option<f64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    started_at: i64,
+}
+
+impl McpInvocationRawRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            server_id: r.get(1)?,
+            tool_name: r.get(2)?,
+            project_id: r.get(3)?,
+            request_hash: r.get(4)?,
+            ok: r.get(5)?,
+            error_kind: r.get(6)?,
+            latency_ms: r.get(7)?,
+            cost_usd: r.get(8)?,
+            input_tokens: r.get(9)?,
+            output_tokens: r.get(10)?,
+            started_at: r.get(11)?,
+        })
+    }
+
+    fn into_entity(self) -> McpInvocation {
+        McpInvocation {
+            id: self.id,
+            server_id: self.server_id,
+            tool_name: self.tool_name,
+            project_id: self.project_id,
+            request_hash: self.request_hash,
+            ok: self.ok != 0,
+            error_kind: self.error_kind,
+            latency_ms: self.latency_ms,
+            cost_usd: self.cost_usd,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            started_at: self.started_at,
+        }
+    }
+}
+
+const MCP_INVOCATION_COLUMNS: &str = "id, server_id, tool_name, project_id, request_hash, ok, \
+     error_kind, latency_ms, cost_usd, input_tokens, output_tokens, started_at";
+
+fn load_invocation(conn: &Connection, id: &str) -> Result<McpInvocation, OrchdPersistError> {
+    let sql = format!("SELECT {MCP_INVOCATION_COLUMNS} FROM mcp_invocation WHERE id = ?1");
+    let raw = conn
+        .query_row(&sql, rusqlite::params![id], McpInvocationRawRow::from_row)
+        .optional()?
+        .ok_or(OrchdPersistError::NotFound)?;
+    Ok(raw.into_entity())
+}
+
+struct McpArtifactRawRow {
+    id: String,
+    invocation_id: String,
+    server_id: String,
+    tool_name: String,
+    project_id: Option<String>,
+    content_json: String,
+    content_text: Option<String>,
+    is_untrusted: i64,
+    created_at: i64,
+}
+
+impl McpArtifactRawRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            invocation_id: r.get(1)?,
+            server_id: r.get(2)?,
+            tool_name: r.get(3)?,
+            project_id: r.get(4)?,
+            content_json: r.get(5)?,
+            content_text: r.get(6)?,
+            is_untrusted: r.get(7)?,
+            created_at: r.get(8)?,
+        })
+    }
+
+    fn into_entity(self) -> McpArtifact {
+        McpArtifact {
+            id: self.id,
+            invocation_id: self.invocation_id,
+            server_id: self.server_id,
+            tool_name: self.tool_name,
+            project_id: self.project_id,
+            content_json: self.content_json,
+            content_text: self.content_text,
+            is_untrusted: self.is_untrusted != 0,
+            created_at: self.created_at,
+        }
+    }
+}
+
+const MCP_ARTIFACT_COLUMNS: &str = "id, invocation_id, server_id, tool_name, project_id, \
+     content_json, content_text, is_untrusted, created_at";
+
+fn load_artifact(conn: &Connection, id: &str) -> Result<McpArtifact, OrchdPersistError> {
+    let sql = format!("SELECT {MCP_ARTIFACT_COLUMNS} FROM mcp_artifact WHERE id = ?1");
+    let raw = conn
+        .query_row(&sql, rusqlite::params![id], McpArtifactRawRow::from_row)
+        .optional()?
+        .ok_or(OrchdPersistError::NotFound)?;
+    Ok(raw.into_entity())
+}
+
+impl Db {
+    /// `insert_invocation` (spec §4 `mcp_invocation`, task-5 brief). Every `tools/call` attempt
+    /// writes exactly one row — success or terminal failure (spec D8: "every tools/call writes
+    /// an mcp_invocation row"). `id` assigned here (uuid v4); `started_at` is caller-supplied
+    /// (see [`NewInvocation`]'s doc comment).
+    pub fn insert_invocation(
+        &self,
+        new: NewInvocation,
+    ) -> Result<McpInvocation, OrchdPersistError> {
+        let tx = self.conn().unchecked_transaction()?;
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO mcp_invocation
+               (id, server_id, tool_name, project_id, request_hash, ok, error_kind, latency_ms,
+                cost_usd, input_tokens, output_tokens, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                id,
+                new.server_id,
+                new.tool_name,
+                new.project_id,
+                new.request_hash,
+                new.ok as i64,
+                new.error_kind,
+                new.latency_ms,
+                new.cost_usd,
+                new.input_tokens,
+                new.output_tokens,
+                new.started_at,
+            ],
+        )?;
+        let row = load_invocation(&tx, &id)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// `list_invocations` (task-5 brief): newest-first, optionally filtered by `server_id`
+    /// and/or `project_id`, optionally capped at `limit` rows. Mirrors `list_ideas`/
+    /// `list_insights`/`list_tasks`'s `?1 IS NULL OR col = ?1` optional-filter idiom.
+    pub fn list_invocations(
+        &self,
+        server_id: Option<&str>,
+        project_id: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<Vec<McpInvocation>, OrchdPersistError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id FROM mcp_invocation
+             WHERE (?1 IS NULL OR server_id = ?1) AND (?2 IS NULL OR project_id = ?2)
+             ORDER BY started_at DESC, id
+             LIMIT ?3",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(
+                rusqlite::params![server_id, project_id, limit.unwrap_or(i64::MAX)],
+                |r| r.get(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        ids.iter()
+            .map(|id| load_invocation(self.conn(), id))
+            .collect()
+    }
+
+    /// `insert_artifact` (spec §4 `mcp_artifact`, D9): `is_untrusted` is ALWAYS written as `1`
+    /// (spec D9: "always true for external tool output") — not a field on [`NewArtifact`], so no
+    /// code path can persist an artifact any other way.
+    pub fn insert_artifact(&self, new: NewArtifact) -> Result<McpArtifact, OrchdPersistError> {
+        let tx = self.conn().unchecked_transaction()?;
+        let id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO mcp_artifact
+               (id, invocation_id, server_id, tool_name, project_id, content_json, content_text,
+                is_untrusted, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+            rusqlite::params![
+                id,
+                new.invocation_id,
+                new.server_id,
+                new.tool_name,
+                new.project_id,
+                new.content_json,
+                new.content_text,
+                now,
+            ],
+        )?;
+        let row = load_artifact(&tx, &id)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// `list_artifacts` (task-5 brief): newest-first, optionally filtered by `project_id`
+    /// and/or `server_id`, optionally capped at `limit`.
+    pub fn list_artifacts(
+        &self,
+        project_id: Option<&str>,
+        server_id: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<Vec<McpArtifact>, OrchdPersistError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id FROM mcp_artifact
+             WHERE (?1 IS NULL OR project_id = ?1) AND (?2 IS NULL OR server_id = ?2)
+             ORDER BY created_at DESC, id
+             LIMIT ?3",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(
+                rusqlite::params![project_id, server_id, limit.unwrap_or(i64::MAX)],
+                |r| r.get(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        ids.iter()
+            .map(|id| load_artifact(self.conn(), id))
+            .collect()
+    }
+
+    /// `get_artifact` (task-5 brief). Unknown `id` ⇒ `NotFound`.
+    pub fn get_artifact(&self, id: &str) -> Result<McpArtifact, OrchdPersistError> {
+        load_artifact(self.conn(), id)
+    }
+
+    /// `has_consent` (spec §6/D10, task-5 brief): existence check only — `(server_id, kind)` is
+    /// UNIQUE in `consent_grant`, so this is `true` iff a grant row exists. Phase-1 scope: does
+    /// NOT compare `fingerprint` — spec D10's "re-prompt on URL change" is not implemented by
+    /// this task (see `crate::trust::Action::Connect`'s doc comment).
+    pub fn has_consent(&self, server_id: &str, kind: &str) -> Result<bool, OrchdPersistError> {
+        let found: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT 1 FROM consent_grant WHERE server_id = ?1 AND kind = ?2",
+                rusqlite::params![server_id, kind],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// `grant_consent` (spec §6/D10, task-5 brief): upserts — `UNIQUE(server_id, kind)` means a
+    /// re-grant (e.g. after a fingerprint change) replaces the prior grant's `fingerprint`/
+    /// `granted_at` rather than erroring. `server_id` must reference an existing `mcp_server` row
+    /// (`FOREIGN KEY ... `, `foreign_keys=ON` on every `Db` connection) — an unknown `server_id`
+    /// surfaces as the FK's own `OrchdPersistError::Sql`, matching every other FK'd insert in
+    /// this file (no bespoke existence pre-check here either).
+    pub fn grant_consent(
+        &self,
+        server_id: &str,
+        kind: &str,
+        fingerprint: &str,
+    ) -> Result<(), OrchdPersistError> {
+        self.conn().execute(
+            "INSERT INTO consent_grant (id, kind, server_id, fingerprint, granted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(server_id, kind) DO UPDATE SET
+               fingerprint = excluded.fingerprint,
+               granted_at = excluded.granted_at",
+            rusqlite::params![
+                Uuid::new_v4().to_string(),
+                kind,
+                server_id,
+                fingerprint,
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// `insert_audit` (spec §6/D10, task-5 brief): the trust choke-point's append-only sink —
+    /// `crate::trust::authorize` calls this on EVERY decision, allow or deny. `id`/`at` assigned
+    /// here (uuid v4 / `now_ms()`).
+    pub fn insert_audit(&self, new: NewAudit) -> Result<AuditRow, OrchdPersistError> {
+        let tx = self.conn().unchecked_transaction()?;
+        let id = Uuid::new_v4().to_string();
+        let at = now_ms();
+        tx.execute(
+            "INSERT INTO audit_log
+               (id, at, action, server_id, tool_name, project_id, decision, reason, invocation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                id,
+                at,
+                new.action,
+                new.server_id,
+                new.tool_name,
+                new.project_id,
+                new.decision,
+                new.reason,
+                new.invocation_id,
+            ],
+        )?;
+        let row = tx.query_row(
+            "SELECT id, at, action, server_id, tool_name, project_id, decision, reason, \
+             invocation_id FROM audit_log WHERE id = ?1",
+            rusqlite::params![id],
+            |r| {
+                Ok(AuditRow {
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    action: r.get(2)?,
+                    server_id: r.get(3)?,
+                    tool_name: r.get(4)?,
+                    project_id: r.get(5)?,
+                    decision: r.get(6)?,
+                    reason: r.get(7)?,
+                    invocation_id: r.get(8)?,
+                })
+            },
+        )?;
+        tx.commit()?;
+        Ok(row)
+    }
+}
+
+#[cfg(test)]
+mod trust_persistence_tests {
+    use super::*;
+    use crate::mcp::{McpAuthKind, McpScope, McpTransport, NewMcpServer};
+
+    fn new_db() -> Db {
+        Db::open_in_memory().unwrap()
+    }
+
+    fn add_server(db: &Db) -> String {
+        db.add_mcp_server(NewMcpServer {
+            name: "Prowl".to_string(),
+            transport: McpTransport::Http,
+            url: Some("https://example.com/mcp".to_string()),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            secret_ref: None,
+            account_id: None,
+            enabled: true,
+            timeout_ms: 30_000,
+            max_retries: 2,
+        })
+        .unwrap()
+        .id
+    }
+
+    fn new_invocation(server_id: &str) -> NewInvocation {
+        NewInvocation {
+            server_id: server_id.to_string(),
+            tool_name: "search".to_string(),
+            project_id: None,
+            request_hash: "deadbeef".to_string(),
+            ok: true,
+            error_kind: None,
+            latency_ms: 42,
+            cost_usd: Some(0.01),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            started_at: now_ms(),
+        }
+    }
+
+    // ---- insert_invocation / list_invocations ----
+
+    #[test]
+    fn insert_invocation_round_trips() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let row = db.insert_invocation(new_invocation(&server_id)).unwrap();
+        assert!(!row.id.is_empty());
+        assert_eq!(row.server_id, server_id);
+        assert_eq!(row.tool_name, "search");
+        assert!(row.ok);
+        assert_eq!(row.error_kind, None);
+        assert_eq!(row.cost_usd, Some(0.01));
+        assert_eq!(row.input_tokens, Some(10));
+        assert_eq!(row.output_tokens, Some(20));
+    }
+
+    #[test]
+    fn list_invocations_filters_by_server_and_project_newest_first() {
+        let db = new_db();
+        let server_a = add_server(&db);
+        let server_b = add_server(&db);
+
+        let mut first = new_invocation(&server_a);
+        first.started_at = 1_000;
+        db.insert_invocation(first).unwrap();
+        let mut second = new_invocation(&server_a);
+        second.started_at = 2_000;
+        let second_row = db.insert_invocation(second).unwrap();
+        db.insert_invocation(new_invocation(&server_b)).unwrap();
+
+        let for_a = db.list_invocations(Some(&server_a), None, None).unwrap();
+        assert_eq!(for_a.len(), 2);
+        assert_eq!(for_a[0].id, second_row.id, "newest first");
+
+        let all = db.list_invocations(None, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+
+        let capped = db.list_invocations(None, None, Some(1)).unwrap();
+        assert_eq!(capped.len(), 1);
+    }
+
+    // ---- insert_artifact / list_artifacts / get_artifact ----
+
+    #[test]
+    fn insert_artifact_always_sets_is_untrusted() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let invocation = db.insert_invocation(new_invocation(&server_id)).unwrap();
+
+        let artifact = db
+            .insert_artifact(NewArtifact {
+                invocation_id: invocation.id.clone(),
+                server_id: server_id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+                content_json: "{\"ok\":true}".to_string(),
+                content_text: Some("ok".to_string()),
+            })
+            .unwrap();
+
+        assert!(artifact.is_untrusted, "D9: every artifact is untrusted");
+        assert_eq!(artifact.invocation_id, invocation.id);
+        assert_eq!(artifact.content_json, "{\"ok\":true}");
+
+        let fetched = db.get_artifact(&artifact.id).unwrap();
+        assert_eq!(fetched, artifact);
+    }
+
+    #[test]
+    fn get_artifact_unknown_id_is_not_found() {
+        let db = new_db();
+        let err = db.get_artifact("missing").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound), "{err:?}");
+    }
+
+    #[test]
+    fn list_artifacts_filters_by_project_and_server() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let invocation = db.insert_invocation(new_invocation(&server_id)).unwrap();
+        db.insert_artifact(NewArtifact {
+            invocation_id: invocation.id.clone(),
+            server_id: server_id.clone(),
+            tool_name: "search".to_string(),
+            project_id: Some("proj-1".to_string()),
+            content_json: "{}".to_string(),
+            content_text: None,
+        })
+        .unwrap();
+        db.insert_artifact(NewArtifact {
+            invocation_id: invocation.id.clone(),
+            server_id: server_id.clone(),
+            tool_name: "search".to_string(),
+            project_id: Some("proj-2".to_string()),
+            content_json: "{}".to_string(),
+            content_text: None,
+        })
+        .unwrap();
+
+        let for_proj_1 = db
+            .list_artifacts(Some("proj-1"), Some(&server_id), None)
+            .unwrap();
+        assert_eq!(for_proj_1.len(), 1);
+        assert_eq!(for_proj_1[0].project_id.as_deref(), Some("proj-1"));
+
+        let for_server = db.list_artifacts(None, Some(&server_id), None).unwrap();
+        assert_eq!(for_server.len(), 2);
+    }
+
+    // ---- has_consent / grant_consent ----
+
+    #[test]
+    fn has_consent_false_until_granted_then_true() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        assert!(!db.has_consent(&server_id, "connect").unwrap());
+
+        db.grant_consent(&server_id, "connect", "https://example.com/mcp")
+            .unwrap();
+        assert!(db.has_consent(&server_id, "connect").unwrap());
+        // a different kind is unaffected
+        assert!(!db.has_consent(&server_id, "stdio_exec").unwrap());
+    }
+
+    #[test]
+    fn grant_consent_upserts_on_re_grant() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        db.grant_consent(&server_id, "connect", "https://example.com/mcp")
+            .unwrap();
+        db.grant_consent(&server_id, "connect", "https://example.com/mcp-v2")
+            .unwrap();
+
+        let fingerprint: String = db
+            .conn()
+            .query_row(
+                "SELECT fingerprint FROM consent_grant WHERE server_id = ?1 AND kind = 'connect'",
+                rusqlite::params![server_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fingerprint, "https://example.com/mcp-v2");
+
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM consent_grant WHERE server_id = ?1",
+                rusqlite::params![server_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "upsert must not create a second row");
+    }
+
+    // ---- insert_audit ----
+
+    #[test]
+    fn insert_audit_round_trips_and_never_requires_secrets() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let row = db
+            .insert_audit(NewAudit {
+                action: "connect".to_string(),
+                server_id: Some(server_id.clone()),
+                tool_name: None,
+                project_id: None,
+                decision: "deny".to_string(),
+                reason: Some("consent_required".to_string()),
+                invocation_id: None,
+            })
+            .unwrap();
+
+        assert!(!row.id.is_empty());
+        assert_eq!(row.action, "connect");
+        assert_eq!(row.server_id.as_deref(), Some(server_id.as_str()));
+        assert_eq!(row.decision, "deny");
+        assert_eq!(row.reason.as_deref(), Some("consent_required"));
     }
 }

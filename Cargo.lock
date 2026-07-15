@@ -380,9 +380,11 @@ name = "bpa-orchd"
 version = "0.1.0"
 dependencies = [
  "bpa-daemon-core",
+ "bpa-mcp",
  "bpa-orchd-proto",
  "bpa-paths",
  "bpa-protocol",
+ "bpa-secrets",
  "libc",
  "rusqlite",
  "serde",

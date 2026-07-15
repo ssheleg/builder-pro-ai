@@ -279,6 +279,14 @@ impl Db {
         Ok(row)
     }
 
+    /// `get_mcp_server` (task-5 addition): the single-row counterpart to `list_mcp_servers`,
+    /// needed by `mcp::lifecycle`/`mcp::invoke` (T5) to resolve a server's `url`/`auth_kind`/
+    /// `timeout_ms`/`max_retries` before connecting or calling a tool. Not in the task-2 brief's
+    /// original method list (T2 predates that need). Unknown `id` ⇒ `NotFound`.
+    pub fn get_mcp_server(&self, id: &str) -> Result<McpServerRow, OrchdPersistError> {
+        load_server(self.conn(), id)
+    }
+
     /// `list_mcp_servers` (task-2 brief): `Some(project_id)` returns global-scope servers PLUS
     /// that project's own; `None` returns global-scope servers only (no project context to join
     /// against). A single parameterized query handles both via `?1 IS NOT NULL AND ...` rather
@@ -688,6 +696,24 @@ mod tests {
         new.url = Some("https://example.com".to_string());
         let err = db.add_mcp_server(new).unwrap_err();
         assert!(matches!(err, OrchdPersistError::Validation(_)), "{err:?}");
+    }
+
+    // ---- get_mcp_server ----
+
+    #[test]
+    fn get_mcp_server_round_trips() {
+        let db = new_db();
+        let row = db
+            .add_mcp_server(http_server("Prowl", McpScope::Global, None))
+            .unwrap();
+        assert_eq!(db.get_mcp_server(&row.id).unwrap(), row);
+    }
+
+    #[test]
+    fn get_mcp_server_unknown_id_is_not_found() {
+        let db = new_db();
+        let err = db.get_mcp_server("missing").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound), "{err:?}");
     }
 
     // ---- list_mcp_servers ----

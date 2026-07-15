@@ -16,6 +16,12 @@ pub mod socket_server;
 /// MCP yet (T3), so this module's row/enum types need to stay independently nameable.
 pub mod mcp;
 
+/// Trust choke-point (S-EXT spec §6, D10, task T5): the single pre-dispatch gate every MCP
+/// connect / tool-call passes through (`trust::authorize`). `pub` — `mcp::lifecycle`/
+/// `mcp::invoke` (sibling top-level-adjacent modules, not nested under `mcp`) both call into it,
+/// and a later task's `socket_server` dispatch will too (e.g. `TrustGrantConsent`).
+pub mod trust;
+
 mod boot;
 /// Knowledge-graph node/edge persistence (S4 spec §4 schema v2, §5 persistence + invariants).
 /// Crate-private — `persistence::Db`'s CRUD/getter surface (`conn()`, `ensure_project_active`,
