@@ -11,23 +11,27 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI). Ships as a universal m
 
 ## Status
 
-**S0+S1+Pv2+S2+S3+S4 implemented.** The foundation slice, the terminal core (daemon-owned PTYs,
-OSC-driven status, sanitized scrollback replay, SQLite persistence, launchd-supervised survival),
-Protocol v2 (CBOR wire, version negotiation, multi-subscriber attach), S2 (multi-root
+**S0+S1+Pv2+S2+S3+S4+S-EXT implemented.** The foundation slice, the terminal core (daemon-owned
+PTYs, OSC-driven status, sanitized scrollback replay, SQLite persistence, launchd-supervised
+survival), Protocol v2 (CBOR wire, version negotiation, multi-subscriber attach), S2 (multi-root
 workspaces, a core-owned file explorer + read-only preview + live watch, an attention-first Home,
 an OSC-133 command strip, terminal file links), S3 (a SECOND launchd daemon `bpa-orchd`
 hosting the app-domain store — projects, goals, ideas, insights, tasks, rulesets — with full CRUD,
-export/import, and an owner-facing UI), and S4 (a knowledge graph in that same `bpa-orchd` store —
+export/import, and an owner-facing UI), S4 (a knowledge graph in that same `bpa-orchd` store —
 typed nodes/edges, cross-project links, a workspace-wide agent retrieval API, and an editable
-`@xyflow/react` graph canvas) are done, tested, and documented. See
-[`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this implementation is derived
-from and [`docs/traceability.md`](docs/traceability.md) for the contract → test matrix.
+`@xyflow/react` graph canvas), and S-EXT (an MCP client, OAuth/api-key connectors, and a skills
+registry, in that same `bpa-orchd` daemon — the app's first outbound network egress + macOS
+Keychain surface, gated by a trust layer of consent/allowlist/spend-caps/audit) are done, tested,
+and documented. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this
+implementation is derived from and [`docs/traceability.md`](docs/traceability.md) for the
+contract → test matrix.
 
 - **Platform overview & roadmap:** [`2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md)
 - **S0+S1 spec:** [`2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
 - **S2 spec (workspace multi-root + file explorer + attention-first Home):** [`2026-07-08-s2-workspace-explorer-home-design.md`](docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md)
 - **S3 spec (`bpa-orchd` + app-domain foundation):** [`2026-07-13-s3-orchd-domain-foundation-design.md`](docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md)
 - **S4 spec (knowledge graph + workspace-wide retrieval API):** [`2026-07-14-s4-knowledge-graph-design.md`](docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md)
+- **S-EXT spec (MCP client + connectors + skills + trust layer):** [`2026-07-15-s-ext-mcp-connectors-design.md`](docs/superpowers/specs/2026-07-15-s-ext-mcp-connectors-design.md)
 - **Architecture summary:** [`docs/architecture.md`](docs/architecture.md)
 - **Contract → test traceability:** [`docs/traceability.md`](docs/traceability.md)
 - **Release build/sign/notarize runbook:** [`docs/build-macos.md`](docs/build-macos.md)
@@ -90,6 +94,31 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
   while `orchd://down`. A cross-project ghost node click navigates to its own project; a local
   `entityRef` node click is currently an honest no-op (no deep-link seam yet into a specific
   goal/idea/insight/task row in another tab).
+- **MCP client (S-EXT):** a server registry (add/enable/disable, global or per-project) speaking
+  both **Streamable HTTP** (remote servers, e.g. prowl.chat) and **stdio** (local child
+  processes, behind a dedicated execution-consent gate); cached tool discovery with a per-tool
+  allowlist; typed `tools/call` with per-server timeout, transport-only bounded retry, and honest
+  degradation on every terminal failure. Every successful call persists a durable, `is_untrusted`
+  artifact that survives an `bpa-orchd` restart. The app's first outbound network egress and
+  macOS Keychain surface (two new crates, `bpa-secrets` and `bpa-mcp`), entirely inside
+  `bpa-orchd` — never Hop-B, never `bpa-sessiond`.
+- **Connectors (S-EXT):** external OAuth 2.1 (PKCE, SSRF-guarded, refresh-on-expiry) or api-key
+  accounts, tokens always in Keychain, never SQLite or logs. One reference `generic-rest`
+  direct-API adapter ships; `ConnectorInvoke` shares the exact same trust + durable-artifact path
+  an MCP tool call uses.
+- **Trust layer (S-EXT, closes BL-1/BL-20/BL-22):** a single pre-dispatch choke-point in
+  `bpa-orchd` gates every connect / stdio-spawn / tool-call / connector-invoke — owner consent
+  (re-prompted on a URL or stdio-binary change), the per-tool allowlist, spend/rate policy caps
+  (most-specific scope wins; a spend cap binds only when a server actually reports cost),
+  untrusted-result tagging, and an append-only audit log (never a secret or tool argument). A
+  shared `DYLD_*`/`LD_*` env denylist now filters BOTH orchd's stdio spawn AND `bpa-sessiond`'s
+  `env_overrides`.
+- **Skills (S-EXT):** a SKILL.md-format registry (portable — matches the Claude Code convention)
+  with files-as-truth (Present/Modified/Missing). **Plumbing only** — there is no runtime
+  consumer yet (that's the S6b agent org); the «Навыки» tab says so honestly.
+- **«Расширения» management UI (S-EXT):** Серверы / Инструменты / Коннекторы / Журнал /
+  Артефакты / Навыки tabs, consent dialogs, untrusted-result banners; every mutating control
+  disabled while `orchd://down`.
 
 ## Principles
 
@@ -100,9 +129,11 @@ from and [`docs/traceability.md`](docs/traceability.md) for the contract → tes
 
 ## Architecture
 
-**Three OS processes, two independent Hop-B connections** (as of S4, `[0.5.0]`): the GUI app and
-TWO launchd-supervised daemons — `bpa-sessiond` (terminal domain) and `bpa-orchd` (app domain:
-projects/goals/ideas/insights/tasks/rulesets, plus a knowledge graph as of S4). The diagram below
+**Three OS processes, two independent Hop-B connections** (as of S-EXT, `[0.6.0]`): the GUI app
+and TWO launchd-supervised daemons — `bpa-sessiond` (terminal domain) and `bpa-orchd` (app
+domain: projects/goals/ideas/insights/tasks/rulesets, a knowledge graph as of S4, and — as of
+S-EXT — an MCP client + connectors + skills registry, the app's first outbound network egress and
+Keychain surface). The diagram below
 shows the terminal-domain half only (`bpa-sessiond`'s daemon owns every PTY so the GUI can close,
 crash, or restart without
 killing a running shell — tmux/re-attach model; File I/O + live watch (S2) live in the Tauri core
@@ -152,7 +183,7 @@ to each, never a process handle.
 | GUI close / crash / restart | Live shells **keep running** (daemon-owned) — reattach + scrollback replay |
 | Daemon restart / upgrade / crash | Live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
 | **macOS logout** | Sessions **die** — the per-user LaunchAgent is torn down with the login session |
-| **`bpa-orchd` restart / upgrade (S3, `[0.4.0]`; graph added S4, `[0.5.0]`)** | Domain data (projects/goals/ideas/insights/tasks/rules) **fully survives** — it's all SQLite (`orchd.db`); there is no live runtime state to lose in S3/S4 (no scheduler/workflow/agent runtime yet — those are roadmap, SW1/SW2/S6b+), so a restart is a non-event beyond a brief `orchd://down` banner while it reconnects. The S4 knowledge graph is the same durable-store guarantee: a graph edge that links nodes in TWO DIFFERENT projects survives a restart intact on BOTH sides (proven by `npm run e2e:orchd` phase 5 below) |
+| **`bpa-orchd` restart / upgrade (S3, `[0.4.0]`; graph added S4, `[0.5.0]`; MCP/connectors/skills added S-EXT, `[0.6.0]`)** | Domain data (projects/goals/ideas/insights/tasks/rules) **fully survives** — it's all SQLite (`orchd.db`); there is no live runtime state to lose in S3/S4/S-EXT (no scheduler/workflow/agent runtime yet — those are roadmap, SW1/SW2/S6b+), so a restart is a non-event beyond a brief `orchd://down` banner while it reconnects. The S4 knowledge graph is the same durable-store guarantee: a graph edge that links nodes in TWO DIFFERENT projects survives a restart intact on BOTH sides (proven by `npm run e2e:orchd` phase 5 below). S-EXT extends the same guarantee to MCP tool results and connector-invoke results: both persist as a durable `is_untrusted` artifact that survives a restart (phases 6/7 below) — the account/server rows themselves are ordinary SQLite too; only the secret bytes (Keychain) live outside `orchd.db`, independent of the daemon's own lifecycle |
 
 This is an honest boundary, not a bug: any daemon stop (restart, upgrade, or crash) takes its live
 child processes down with it, and logging out tears down every per-user LaunchAgent along with
@@ -165,7 +196,11 @@ scrollback intact — Pv2 §9.8, closes BL-7 in [`docs/backlog.md`](docs/backlog
 `npm run e2e:orchd` proves the orchd half: create data → drain-restart → data intact →
 export → wipe the DB → re-import → re-export equals the original (S3 spec §12); phase 5 (S4)
 creates a cross-project graph edge, restarts the daemon, and asserts it survives on both projects'
-sides — the S4 spec §8 DoD proof.
+sides — the S4 spec §8 DoD proof. Phase 6 (S-EXT) registers a local stub MCP server, connects,
+calls a tool, restarts the daemon, and asserts the resulting artifact survived; phase 7 (S-EXT)
+does the connector-shaped analogue (an api-key `generic-rest` account, `ConnectorInvoke` against a
+local stub, restart, artifact survives) — gracefully SKIPPED (never a silent pass) if the runner's
+login Keychain is locked/unavailable.
 
 ## Quickstart
 
@@ -204,10 +239,10 @@ bash scripts/build-universal.sh
 
 | Suite | Command | What it covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | two daemons (`bpa-sessiond`, `bpa-orchd`), shared daemon infra (`bpa-daemon-core`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **726 tests** as of the last full run (S4, `[0.5.0]`) |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`) — **559 tests, 35 files** (S4, `[0.5.0]`) |
+| Rust workspace | `cargo test --workspace` | three daemons/daemon-adjacent crates (`bpa-sessiond`, `bpa-orchd`, `bpa-daemon-core`), the MCP client + Keychain wrapper (`bpa-mcp`, `bpa-secrets`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **975 tests** as of the last full run (S-EXT, `[0.6.0]`), 0 failed |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`/the `ext/` «Расширения» components) — **717 tests, 43 files** (S-EXT, `[0.6.0]`), 0 failed |
 | End-to-end (sessiond) | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
-| End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof); phase 5 creates two projects + a cross-project graph edge, restarts the daemon, and asserts the edge survives on both projects' sides (S4 spec §8 DoD proof) |
+| End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof); phase 5 creates two projects + a cross-project graph edge, restarts the daemon, and asserts the edge survives on both projects' sides (S4 spec §8 DoD proof); phase 6 registers a local stub MCP server, connects, calls a tool, restarts, and asserts the artifact survived (S-EXT spec §9 Phase-1 DoD); phase 7 does the connector-invoke analogue against a local stub, gracefully skipping on a Keychain-unavailable runner (S-EXT spec §9 Phase-2 DoD) |
 | Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — real, enforcing ≥80% line-coverage gates on BOTH daemon crates (requires `cargo install cargo-llvm-cov`) |
 | Everything, in order | `bash scripts/final-suite.sh` | 9 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff (`bpa-protocol` + `bpa-orchd-proto`) → coverage gate (both daemons) → e2e:survive → e2e:orchd; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) / [`docs/runbook-orchd.md`](docs/runbook-orchd.md) |
 

@@ -127,6 +127,57 @@ S3 spec §8) as the supported recovery path once the daemon is back up on a fres
 `orchd.tracing.log`, unbounded growth, shared `bpa_daemon_core::logging::init_tracing`). Tracked
 as BL-21 in `docs/backlog.md` (now applies to both daemons).
 
+## Keychain / MCP / connector egress (S-EXT, `[0.6.0]`)
+
+`bpa-orchd` is the app's first process to perform outbound network I/O and macOS Keychain access
+(never `bpa-sessiond`, never the GUI core — see `docs/architecture.md`'s "Extensions" section for
+the full design). Nothing here is a new daemon or a new socket — it's new *behavior* inside the
+existing orchd process, gated by the trust choke-point (`crates/orchd/src/trust.rs`) on every
+connect/spawn/call.
+
+**Keychain entries this daemon creates:**
+
+| What | Keychain service | Keychain account |
+|---|---|---|
+| An MCP server's bearer token (`McpSetServerBearer`) | `ai.builderpro.desktop.mcp` | the server's uuid |
+| A connector account's OAuth access token | `ai.builderpro.desktop.account` | `<account-uuid>:token` |
+| A connector account's OAuth refresh token | `ai.builderpro.desktop.account` | `<account-uuid>:refresh` |
+| A connector account's static api-key | `ai.builderpro.desktop.account` | `<account-uuid>:apikey` |
+
+`orchd.db` never stores the secret bytes — only the Keychain account-key string above (the
+`secret_ref`/`refresh_ref` columns on `mcp_server`/`account`). Deleting a server (`McpDeleteServer`)
+or an account (`ConnectorDeleteAccount`) deletes the matching Keychain entry(ies) too — inspect
+with `security find-generic-password -s ai.builderpro.desktop.mcp -a <server-id>` (or the
+`.account` service for a connector) if you need to confirm one exists/was removed; never `-w` to
+print the secret value in a shared terminal/log.
+
+**What can reach the network:** ONLY an MCP server the owner explicitly registered + granted
+connect (or `stdio_exec`) consent to, and ONLY a connector account/adapter the owner explicitly
+added — there is no background polling, no telemetry call, no unsolicited egress. Every attempt
+(allow or deny) writes an `audit_log` row (`TrustListAudit`, surfaced in the «Расширения» →
+Журнал tab) — `reason` never contains a secret or a tool argument, only a short code like
+`consent_required`/`spend_cap_exceeded`.
+
+**stdio MCP servers spawn a real child process:** `pgrep -fl` under `bpa-orchd`'s pid will show
+it like any other child; it inherits NO ambient env (the `DYLD_*`/`LD_*` denylist + `env_clear()`
+discipline in `crates/mcp/src/transport.rs`/`crates/orchd/src/mcp/mod.rs` — the same shared
+`env_filter` helper `bpa-sessiond` now applies to `env_overrides`, `docs/runbook-daemon.md`). Its
+stderr is currently inherited straight to orchd's own log stream, unredacted (BL-69) — be aware
+before running an untrusted/third-party stdio server, and don't paste `orchd.tracing.log` output
+publicly without checking it first if any stdio server has been connected.
+
+**Human step — connecting a real provider (e.g. prowl.chat):** the autonomous/CI path proves the
+whole MCP + connector mechanism against a LOCAL STUB server (`tests/e2e/orchd-survive.mjs` phases
+6/7) — no agent creates or enters a real credential. To connect a REAL server: open «Расширения» →
+Серверы → add a server (name + URL) → «Подключиться» (grants connect consent) → if it needs a
+bearer, «задать токен» (masked, never echoed back) and paste it yourself. For a real OAuth
+connector: «Расширения» → Коннекторы → «подключить OAuth» — this needs an owner-registered OAuth
+client (the v1 provider registry ships EMPTY; `register_oauth_provider` must be called with a
+real IdP's client id/secret/endpoints before `ConnectorBeginOAuth` can succeed for that provider —
+there is no config-file-backed registry yet, D14 Phase 3 follow-up) — or «добавить API-ключ» for a
+simpler static key. None of this is on the automated test path; it's a one-time, owner-performed
+setup step.
+
 ## Related docs
 
 - `docs/runbook-daemon.md` — the `bpa-sessiond` runbook this one mirrors.

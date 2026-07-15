@@ -92,3 +92,14 @@ file with `sqlite3`; there is no automatic re-import.
 
 **None today** — the appender is `tracing_appender::rolling::never` (single
 `sessiond.tracing.log`, unbounded growth). Tracked as BL-21 in `docs/backlog.md`.
+
+## Env-override filtering (S-EXT, closes BL-1)
+
+`env_overrides` (the per-session env passed on `CreateSession`) is now filtered through the
+shared `bpa_daemon_core::env_filter::strip_dangerous_env` helper BEFORE being merged into the
+resolved child env — any `DYLD_*`/`LD_*`-prefixed key (case-sensitive) is stripped, closing the
+previously-open BL-1 gap (the allowlist used to be a default, not a ceiling). This is the SAME
+helper `bpa-orchd`'s stdio MCP-server spawn path uses (S-EXT, `docs/runbook-orchd.md`) — one
+shared denylist, two spawn call sites, no daemon-specific copy to drift. `bpa-sessiond` itself
+does not perform any outbound network I/O or Keychain access — that surface is new to `bpa-orchd`
+only; see `docs/runbook-orchd.md`'s "Keychain / MCP / connector egress" section.

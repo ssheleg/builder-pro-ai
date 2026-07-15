@@ -10,7 +10,9 @@ Builder Pro AI is split into **three OS processes**: the GUI app (webview + Rust
 independently `launchd`-supervised daemons — `bpa-sessiond` (terminal domain: PTYs, scrollback,
 `command_events`) and `bpa-orchd` (app domain: projects/goals/ideas/insights/tasks/rulesets,
 shipped S3, `[0.4.0]`; plus a knowledge graph — nodes/edges + a workspace-wide retrieval API,
-shipped S4, `[0.5.0]`). Closing (or crashing) the GUI never kills a running shell or loses domain
+shipped S4, `[0.5.0]`; plus an MCP client + OAuth/api-key connectors + a skills registry — the
+app's first outbound network egress and macOS Keychain surface, shipped S-EXT, `[0.6.0]`). Closing
+(or crashing) the GUI never kills a running shell or loses domain
 data — each daemon owns its own durable state and survives independently of the app AND of the
 other daemon, supervised by `launchd`, not by the app. The core holds one socket connection to
 EACH daemon; a failure of either degrades only that daemon's own panels (see "Honest-degradation"
@@ -219,25 +221,64 @@ crates/sessiond/src/              # the terminal daemon binary — S3 RE-SEATED 
 crates/orchd-proto/src/lib.rs     # NEW (S3, bpa-orchd-proto): orchd's own wire enums
                                   # (OrchdFrame/OrchdRequest/OrchdResponse/OrchdPush), the 6
                                   # entity structs, version consts (ORCHD_{CLIENT,DAEMON}_
-                                  # {MIN,MAX}_VERSION = 1), ts-rs export (spec §4.2)
+                                  # {MIN,MAX}_VERSION = 1), ts-rs export (spec §4.2); S-EXT appends
+                                  # Mcp*/Connector*/Skill*/Trust* entities+verbs+pushes at the END
+                                  # of every enum (append-only — the version space stays [1,1])
+crates/secrets/src/lib.rs         # NEW (S-EXT, bpa-secrets): the ONLY Keychain caller in the app —
+                                  # a thin `security-framework::passwords` wrapper (set/get/delete
+                                  # generic password), fixed service prefix "ai.builderpro.desktop";
+                                  # never logs the secret bytes (BL-20)
+crates/mcp/src/                   # NEW (S-EXT, bpa-mcp): thin wrapper over the official `rmcp`
+│                                  # SDK — protocol isolation; orchd domain code never imports rmcp
+│                                  # types directly
+├─ client.rs                      # connect(TransportConfig, Option<Bearer>) -> McpSession;
+│                                  # McpSession::{list_tools, call_tool, protocol_version, close}
+├─ transport.rs                   # TransportConfig::{Http{url}, Stdio{command,args,env}} → rmcp's
+│                                  # StreamableHttpClientTransport / TokioChildProcess; the stdio
+│                                  # child is `env_clear()`'d — the CALLER (orchd) must supply the
+│                                  # complete, already-filtered child env, no ambient inheritance
+├─ types.rs                       # McpTool / McpToolResult / Usage — maps rmcp's types to this
+│                                  # crate's own project-shaped types
+└─ error.rs                       # McpError { Transport, Protocol, Timeout, ToolError, Auth }
 crates/orchd/src/                 # NEW (S3, bpa-orchd): the app-domain daemon binary
 ├─ main.rs                        # arg parse, tracing init, flock, socket bind, SIGTERM drain —
 │                                  # mirrors sessiond's main.rs shape exactly, on daemon-core
 ├─ boot.rs                        # testable boot core: bind → wire deps → serve → drain; ensures
 │                                  # the global ruleset row + rules/global.md at every boot
-├─ persistence.rs                 # rusqlite (WAL), orchd.db schema v1 (S4: v2, additive), CRUD ×
-│                                  # 6 entity families, every invariant/cascade, migration runner
+├─ persistence.rs                 # rusqlite (WAL), orchd.db schema v1 (S4: v2; S-EXT: v3,
+│                                  # additive) — CRUD × 6 entity families + the S-EXT MCP/connector/
+│                                  # skill/trust tables, every invariant/cascade, migration runner
 │                                  # (daemon-core)
 ├─ socket_server.rs               # tokio UnixListener; dispatch every OrchdRequest verb (S4: the 9
-│                                  # graph verbs too); peer-cred; bounded outq; Broadcaster<OrchdFrame>
-│                                  # push fan-out (S4: GraphChanged to every affected project, deduped)
-├─ ruleset_files.rs                # the ONE file family orchd touches (D4, narrow exception) —
-│                                  # atomic-write (tmp+rename) + sha256 hash + fresh-read-on-Get
+│                                  # graph verbs; S-EXT: every Mcp*/Connector*/Skill*/Trust* verb
+│                                  # too); peer-cred; bounded outq; Broadcaster<OrchdFrame> push
+│                                  # fan-out (S4: GraphChanged to every affected project, deduped)
+├─ ruleset_files.rs                # the ONE file family orchd touches via THIS module (D4, narrow
+│                                  # exception) — atomic-write (tmp+rename) + sha256 hash +
+│                                  # fresh-read-on-Get (S-EXT's skills/registry.rs is a second,
+│                                  # equally narrow SKILL.md file-read surface, see below)
 ├─ graph.rs                       # NEW (S4): graph_node/graph_edge CRUD + the workspace-wide
 │                                  # retrieval API (list_project_graph/neighborhood/search_nodes) —
 │                                  # see "Knowledge graph" below
-└─ export.rs                      # per-project + whole-store JSON export/import, bundleFormat: 1,
-                                   # field-verbatim preservation, 16 MiB frame-cap guard (spec §8)
+├─ export.rs                      # per-project + whole-store JSON export/import, bundleFormat: 1,
+│                                  # field-verbatim preservation, 16 MiB frame-cap guard (spec §8)
+├─ mcp/                            # NEW (S-EXT): registry.rs (mcp_server/mcp_tool CRUD, global +
+│                                  # per-project scope), lifecycle.rs (connect/disconnect, tool-
+│                                  # cache refresh), invoke.rs (trust-authorize → bpa_mcp::call_tool
+│                                  # → invocation+artifact rows; retry/timeout/honest degradation),
+│                                  # cache.rs — see "Extensions" below
+├─ connectors/                     # NEW (S-EXT): accounts.rs (OAuth 2.1 PKCE via `oauth2`, tokens
+│                                  # in Keychain via bpa-secrets, refresh; api-key accounts),
+│                                  # adapter.rs (ConnectorAdapter trait + the one reference
+│                                  # `generic-rest` adapter + ConnectorInvoke — the SAME trust +
+│                                  # invocation/artifact path an MCP tool call uses)
+├─ skills/                         # NEW (S-EXT): registry.rs — SKILL.md CRUD, minimal frontmatter
+│                                  # parse, files-as-truth (Present/Modified/Missing, mirrors
+│                                  # ruleset_files.rs's own honest-degradation pattern)
+└─ trust.rs                        # NEW (S-EXT): the single pre-dispatch choke-point — authorize()
+                                   # for connect / stdio-spawn / tool-call / connector-invoke;
+                                   # persisted consent grants, spend/rate policy caps, an
+                                   # append-only audit log — see "Extensions" below
 ```
 
 `crates/protocol` and `crates/orchd-proto` are the two genuinely shared files: `src/ipc/types.ts`
@@ -396,6 +437,117 @@ both owned entirely by `crates/orchd/src/graph.rs` (new module, no new crate). N
   retrieval is structural + `LIKE`-text only, no embeddings/semantic search (see
   `docs/backlog.md`).
 
+## Extensions: MCP client + connectors + skills — SHIPPED in S-EXT (`[0.6.0]`)
+
+S-EXT (`docs/superpowers/specs/2026-07-15-s-ext-mcp-connectors-design.md`) gives the app an
+**outbound extension layer**: connect to external MCP servers, discover and invoke their tools,
+hold external OAuth/api-key accounts ("connectors"), and register portable skills — all managed
+from a UI, all gated by a single trust choke-point. This is the **first application-driven
+egress + Keychain surface** in the product (`reqwest` was already latent in the build graph via
+Tauri, but no BuilderProAI code previously performed outbound network I/O; `security-framework`/
+Keychain is genuinely first-time). Egress and Keychain access live ENTIRELY in `bpa-orchd` —
+never Hop-B, never sessiond, never the GUI core.
+
+**New crates:** `bpa-secrets` (the only Keychain caller — `security-framework::passwords`
+set/get/delete, fixed service prefix `ai.builderpro.desktop`, never logs the secret bytes — BL-20)
+and `bpa-mcp` (a thin wrapper over the official `rmcp = "2.2"` SDK — JSON-RPC, transports,
+`initialize` negotiation, `tools/*` — so orchd domain code never imports rmcp types directly).
+Two `reqwest` instances exist in the dependency graph (`bpa-mcp`'s own `reqwest 0.13` + `oauth2`
+5.0's pinned `reqwest 0.12`, a known/documented upstream constraint) — **both are rustls**, no
+OpenSSL/native-tls anywhere in the egress path (keeps the notarized build unaffected).
+
+**`orchd.db` schema v3 (additive, `SCHEMA_VERSION` 2→3):** `mcp_server`/`mcp_tool` (the MCP
+registry + cached tool descriptors, global or per-project scope), `account` (OAuth/api-key
+connector accounts — a Keychain *ref*, never the token bytes), `mcp_invocation`/`mcp_artifact`
+(per-call records + durable results — `server_id` XOR `account_id`, so an `McpCallTool` and a
+`ConnectorInvoke` share exactly one persistence path), `skill` (SKILL.md registry), and the trust
+layer's own `consent_grant`/`policy`/`audit_log`.
+
+**MCP client:** a registry (add/enable/disable, global + per-project), both transports —
+**Streamable HTTP** (remote servers, e.g. prowl.chat) and **stdio** (local child processes,
+behind the `stdio_exec` consent gate below) — tool discovery cached per server, a **per-tool
+allowlist** (a disabled tool is rejected pre-dispatch, `Error{Policy}`), and typed `tools/call`
+with per-server timeout + bounded retry (retried ONLY on a transport-level pre-dispatch failure —
+never a blind re-invoke of a possibly side-effecting tool) and honest degradation on every
+terminal failure. Every successful call persists a durable `mcp_artifact` row (`is_untrusted=1` —
+the S6b agent-boundary mediation flag) that survives an orchd restart — proven by the e2e harness
+(below). Cost/token fields on `mcp_invocation` are `Option` and populated only when the MCP
+server itself reports usage — most tool results carry none, so the fields are honestly `null`
+rather than a fabricated estimate.
+
+**Connectors** are an OAuth-account layer, decoupled from MCP: **OAuth 2.1** (authorization-code +
+PKCE via the `oauth2` crate, an SSRF-guarded token-exchange client — `redirect::Policy::none()` —
+and refresh-on-expiry) or a static **api-key** account, tokens/keys always in Keychain via
+`bpa-secrets`, `orchd.db` holding only the ref. One reference direct-API adapter ships —
+`GenericRestAdapter` (`provider="generic-rest"`, `get`/`post` against an account-scoped URL with
+the account's bearer) — proving the `ConnectorAdapter` trait seam without over-committing to a
+specific social network's churn (a named adapter, e.g. X/LinkedIn, is backlog). `ConnectorInvoke`
+routes through the identical trust-choke-point + invocation/artifact persistence path as
+`McpCallTool` (same `is_untrusted=1` contract, same durable-artifact-across-restart guarantee).
+
+**Trust layer (BL-22), a single pre-dispatch choke-point (`trust::authorize`) in `bpa-orchd`:**
+- **connect consent:** first connect to an MCP server requires an owner-granted `consent_grant`
+  (kind `connect`, fingerprint = URL); the URL changing re-prompts (fingerprint mismatch).
+- **stdio-exec consent:** spawning a stdio server's local process requires a DISTINCT
+  `stdio_exec` grant, fingerprinted by hashing the *resolved binary's bytes* (falls back to
+  hashing the command string when the binary can't be resolved) — a binary swapped in place at
+  the same path changes the fingerprint and re-prompts (a residual TOCTOU window between
+  authorize and spawn is accepted-deferred, BL-68).
+- **per-tool allowlist:** enforced pre-dispatch (above).
+- **spend/rate policy caps:** a rolling 60 s window; the most-specific configured scope wins
+  outright (server > project > global — never a per-field merge); spend caps bind ONLY when a
+  call's cost is actually known (an unreported cost never trips a cap — honest, not silently
+  permissive-by-omission when the server IS reporting cost).
+- **untrusted tagging:** every `mcp_artifact`, from BOTH `McpCallTool` and `ConnectorInvoke`, is
+  `is_untrusted=1` — the flag an eventual S6b agent-boundary mediation step will read; this slice
+  sets and stores it, it does not yet mediate/feed it anywhere.
+- **append-only audit log:** every connect / stdio-spawn / tool-call / connector-invoke / consent /
+  policy-deny appends an `audit_log` row (`action`, `decision`, `reason` — reason is NEVER a
+  secret or tool argument, only e.g. `"consent_required"`/`"spend_cap_exceeded"`).
+- **`DYLD_*`/`LD_*` env denylist (closes BL-1):** a shared `bpa_daemon_core::env_filter` helper
+  strips any `DYLD_*`/`LD_*`-prefixed key (case-sensitive) BEFORE a stdio MCP child's env is
+  built; the SAME helper now also filters sessiond's `env_overrides` (previously applied
+  unfiltered — the original BL-1 gap). A stdio child's env is `env_clear()`'d and built entirely
+  by the caller (filtered orchd-ambient env merged with the DB's `server.env`, server wins on
+  collision) — no ambient inheritance leak from either source.
+
+**Skills:** a `SKILL.md`-format registry (portable, matches the Claude Code convention) — CRUD +
+files-as-truth (`Present`/`Modified`/`Missing`, mirrors `ruleset_files.rs`'s pattern) + a
+management tab. **Plumbing only** — there is no runtime consumer yet (the agent org that would
+load and execute a skill is S6b); the UI states this honestly («Навыки исполняются, когда
+появится агент-оркестр (S6b) — сейчас это реестр»), never presenting the registry as executable.
+
+**UI — «Расширения»,** a new top-level view (alongside Home/Workspace/Project) with tabs:
+Серверы (MCP server registry + connect/consent), Инструменты (tool browser + per-tool allowlist +
+invoke), Коннекторы (OAuth/api-key accounts + the generic-rest ops runner), Журнал (invocation
+log + audit log + a spend/rate policy editor), Артефакты (durable results + an untrusted banner
+per item), Навыки (the skills registry). Every mutating control is `disabled` while `orchd://down`
+(the established honest-degradation contract).
+
+**e2e (`npm run e2e:orchd`):** phase 6 registers a local stub HTTP MCP server → grants connect
+consent → connects (tools cached) → lists tools → calls the `echo` tool → asserts a durable
+artifact → restarts orchd → asserts the artifact survived. Phase 7 does the connector-shaped
+analogue — an api-key `generic-rest` account against a local stub REST target → `ConnectorInvoke`
+→ artifact survives an orchd restart — but begins with a **Keychain-availability probe** (a
+throwaway `ConnectorAddApiKey`) and gracefully, loudly SKIPs the phase (never a silent pass) on a
+runner whose login keychain is locked/unavailable, so the gate stays honest in a headless CI
+environment without ever masking a real failure when the keychain IS available.
+
+**Deferred / explicitly out of scope this slice** (see `docs/backlog.md` for the filed rows):
+MCP **sampling** (server→client LLM calls) — disabled, not advertised; MCP **resources**/
+**prompts** — not surfaced; a named social direct-API adapter (X/LinkedIn) beyond the
+`generic-rest` reference; active tool-result prompt-injection *mediation* (the tag is set now,
+the agent-boundary consumer that reads it is S6b); a bulk MCP-server import (config file); a LIVE
+`tools/list_changed` subscription (Phase-1's connect-per-call architecture holds no session open
+between calls, so there is nothing to subscribe to yet — the tool cache instead refreshes
+wholesale on every `McpConnect`, BL-70); a stdio child's stderr is currently inherited to orchd's
+own log stream unredacted (BL-69). **BL-27** (Keychain access while the screen is LOCKED, for a
+future *unattended* orchd run) is re-targeted to S6b/SW2 — this slice's flows are all
+interactive/screen-unlocked and unaffected. Connecting the *real* prowl.chat server needs the
+owner's own account/API key — the autonomous path (above) proves the identical mechanism against
+a local stub; wiring a real provider is a documented, non-blocking Human step (owner adds the
+server / pastes a key in the «Расширения» UI).
+
 ## Resource envelope (per session)
 
 Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live
@@ -422,5 +574,7 @@ sessions; a configurable cap + typed `SessionLimitReached` error is planned (BL-
   summarize.
 - `docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md` — the locked S4 spec (knowledge
   graph + workspace-wide retrieval API) the "Knowledge graph" section above summarizes.
+- `docs/superpowers/specs/2026-07-15-s-ext-mcp-connectors-design.md` — the locked S-EXT spec (MCP
+  client, connectors, skills, trust layer) the "Extensions" section above summarizes.
 - `tests/e2e/README.md` — the three ways to exercise the survive-restart property (socket harness,
   launchd-managed variant, full-GUI manual/CI confirmation).

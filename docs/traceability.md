@@ -153,14 +153,86 @@ retrieval API, and the `@xyflow/react` graph canvas — shipped `[0.5.0]`.
 | E2E — cross-project edge survives BOTH projects' daemon restarts (the S4 spec §8 DoD proof): create 2 projects, 1 node each, a cross-project edge, `OrchdShutdown{drain:true}` → relaunch → `GraphListProject` on EITHER project still shows the edge + the foreign node as an `external_nodes` ghost (§8) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 5, log prefix `[e2e-orchd] phase5 …`) |
 | No-secrets-in-logs: a graph node's `label`/`body` never reach the tracing log sink (§8 — the extension the spec called for "extend orchd's `no_secrets_in_logs` test (or its graph-covering sibling)"). Plants two distinct secret markers (one per field) on a real on-disk `Db`, drives `create_project` → `add_node` → `update_node` → `add_edge` → a duplicate `add_edge` (`Conflict`) → a self-loop `add_edge` on the same node (`Invariant`) → `delete_node`, flushes the real sink, asserts neither marker appears in the log file. RED-proven (BL-62 closure): a temporary deliberate leak inserted into the test driver made the assertion fail before removal, confirming the test genuinely catches a leak (§8) | `cargo test -p bpa-orchd --test no_secrets_in_logs_graph planted_graph_node_secrets_never_appear_in_logs` |
 
+## S-EXT contract rows (`docs/superpowers/specs/2026-07-15-s-ext-mcp-connectors-design.md`)
+
+An MCP client (both transports) + OAuth/api-key connectors + a SKILL.md skills registry, all
+hosted in `bpa-orchd` (`orchd.db` schema v3, additive) behind a single trust choke-point — the
+app's first outbound network egress + macOS Keychain surface — shipped `[0.6.0]`.
+
+| Contract (S-EXT spec §) | Test (command) |
+|---|---|
+| Schema v3: fresh DB has all 9 S-EXT tables; scope/transport CHECK invariants (`scope='project'`⇔`project_id` set, `transport='http'`⇔`url` set) (§4) | `cargo test -p bpa-orchd --lib mcp::registry::tests::fresh_db_is_schema_v3_with_all_nine_s_ext_tables mcp::registry::tests::add_server_scope_project_without_project_id_is_validation mcp::registry::tests::add_server_scope_global_with_project_id_is_validation mcp::registry::tests::add_server_transport_http_without_url_is_validation mcp::registry::tests::add_server_transport_stdio_with_url_is_validation` |
+| MCP server/tool registry: add (http+stdio)/list (global + own project, not another's)/update/enable/delete-cascades-tools; tool-cache upsert replaces the cached set; per-tool `enabled` toggle (§3, §5) | `cargo test -p bpa-orchd --lib mcp::registry::tests::add_http_global_server_round_trips mcp::registry::tests::add_stdio_server_round_trips_args_and_env mcp::registry::tests::list_mcp_servers_returns_global_plus_own_project_not_other_projects mcp::registry::tests::update_mcp_server_patches_only_provided_fields mcp::registry::tests::set_mcp_server_enabled_flips mcp::registry::tests::delete_mcp_server_cascades_its_tools mcp::registry::tests::upsert_mcp_tools_replaces_the_cached_set mcp::registry::tests::set_mcp_tool_enabled_flips` |
+| Connect, both transports, gated by the trust choke-point: no consent → denied, bearer never sent; consent granted → tools cached; URL/command change re-prompts (fingerprint mismatch) (§6, D10) | `cargo test -p bpa-orchd --lib mcp::lifecycle::tests::connect_without_consent_is_denied_and_never_touches_the_network mcp::lifecycle::tests::connect_after_url_change_is_denied_and_bearer_is_never_sent mcp::lifecycle::tests::connect_after_consent_caches_tools_and_returns_report mcp::lifecycle::tests::connect_replaces_a_previously_cached_tool_set mcp::lifecycle::tests::stdio_connect_without_stdio_exec_consent_is_denied_and_never_spawns mcp::lifecycle::tests::stdio_connect_after_stdio_exec_consent_caches_tools_and_spawns mcp::lifecycle::tests::stdio_connect_after_command_change_denies_and_never_spawns` |
+| Typed `tools/call`: per-tool allowlist enforced pre-dispatch (no invocation/artifact written on deny); success writes invocation+artifact (`is_untrusted=1`), incl. an `is_error:true` tool result; transport error retried then succeeds, a `ToolError` is never retried; every terminal failure records a failed invocation with NO artifact; stdio call gated identically to connect, http unaffected (§6, §7, D7/D9) | `cargo test -p bpa-orchd --lib mcp::invoke::tests::call_tool_on_enabled_tool_writes_invocation_and_artifact mcp::invoke::tests::call_tool_ok_result_with_is_error_true_still_writes_invocation_and_artifact mcp::invoke::tests::call_tool_on_disabled_tool_is_denied_with_no_invocation_or_artifact mcp::invoke::tests::call_tool_transport_error_records_failed_invocation_no_artifact mcp::invoke::tests::call_tool_retries_transport_error_then_succeeds mcp::invoke::tests::call_tool_tool_error_is_not_retried mcp::invoke::tests::call_tool_connect_failure_records_failed_invocation mcp::invoke::tests::stdio_call_tool_without_stdio_exec_consent_is_denied_and_never_spawns mcp::invoke::tests::stdio_call_tool_after_stdio_exec_consent_spawns_and_succeeds mcp::invoke::tests::stdio_call_tool_http_server_is_unaffected_no_extra_gate` |
+| `bpa-mcp`: an in-process rmcp stub server proves `list_tools`/`call_tool`/an unknown-tool error/timeout over an in-memory transport (no network); the stdio (child-process) transport spawns and round-trips; the stdio child's env is `env_clear()`'d — exactly the caller-passed map, no ambient inheritance (§3, D2, D6) | `cargo test -p bpa-mcp --test stub` (6 tests) `cargo test -p bpa-mcp --test stdio` (4 tests) `cargo test -p bpa-mcp --lib transport::tests::transport_config_stdio_carries_command_args_and_env_verbatim transport::tests::stdio_child_env_is_exactly_the_passed_map_no_ambient_inheritance` |
+| Trust: spend/rate policy caps — most-specific scope wins outright (server>project>global), a rolling 60s window, a spend cap binds only when cost is actually reported (never on an unknown/null cost), `ConnectorInvoke` capped identically to `McpCallTool` (§6, D10) | `cargo test -p bpa-orchd --lib trust::tests::tool_call_spend_cap_breach_denies_with_audit_and_no_dispatch_implication trust::tests::tool_call_under_spend_cap_is_allowed trust::tests::tool_call_rate_limit_breach_denies_with_audit trust::tests::tool_call_under_rate_limit_is_allowed trust::tests::tool_call_rate_limit_only_counts_calls_inside_the_window trust::tests::connector_invoke_spend_cap_breach_denies_with_policy_deny_audit trust::tests::connector_invoke_rate_limit_breach_denies trust::tests::connector_invoke_under_caps_is_allowed trust::tests::null_cost_invocations_never_trip_the_spend_cap trust::tests::a_reported_cost_can_trip_even_the_tightest_zero_dollar_cap` |
+| Trust: `stdio_exec` consent + fingerprint — denies without a matching grant, allows after grant, a `connect`-kind grant does NOT satisfy a `stdio_exec` check; fingerprint hashes the RESOLVED BINARY'S BYTES (detects an in-place supply-chain swap), falls back to a command-string hash when the binary can't be resolved (§6, D10) | `cargo test -p bpa-orchd --lib trust::tests::stdio_spawn_without_consent_denies_and_audits_as_stdio_spawn trust::tests::stdio_spawn_after_stdio_exec_consent_is_allowed_and_audits trust::tests::stdio_spawn_after_command_change_denies_stdio_exec_required_reprompt trust::tests::stdio_exec_fingerprint_fallback_is_deterministic_and_distinguishes_command_and_args trust::tests::stdio_exec_fingerprint_uses_cmd_fallback_prefix_for_an_unresolvable_command trust::tests::stdio_exec_fingerprint_hashes_the_actual_resolved_binary_bytes` |
+| Shared `DYLD_*`/`LD_*` env denylist (closes BL-1): strips the injection vars, keeps benign ones, case-sensitive (lower-case look-alikes NOT stripped); applied to BOTH `bpa-sessiond`'s `env_overrides` AND `bpa-orchd`'s stdio spawn (ambient env included, real spawned-process proof, no leak from either source) (§6) | `cargo test -p bpa-daemon-core --lib env_filter::tests::strips_known_dyld_and_ld_injection_vars env_filter::tests::keeps_benign_vars_untouched env_filter::tests::lowercase_lookalikes_are_not_stripped_case_sensitive env_filter::tests::map_variant_strips_the_same_keys` `cargo test -p bpa-sessiond --lib socket_server::tests::env_overrides_strips_dyld_and_ld_vars_but_keeps_benign_overrides` `cargo test -p bpa-orchd --lib mcp::tests::build_transport_config_stdio_strips_dyld_and_ld_but_keeps_benign_env mcp::tests::build_transport_config_http_is_unaffected_by_env_filtering mcp::tests::build_stdio_env_merges_filtered_ambient_with_server_env_server_wins mcp::tests::stdio_child_gets_filtered_ambient_no_dyld_via_orchd_path` |
+| Connectors: OAuth 2.1 PKCE (S256 challenge + CSRF state) authorize-URL build; the token-exchange client's SSRF guard (`redirect::Policy::none()`) does not follow a redirecting token endpoint; tokens land in Keychain, never in `orchd.db`; api-key accounts store the ref not the value; `token_for` refreshes an expired oauth token and persists the new one (§5, D5) | `cargo test -p bpa-orchd connectors::accounts::tests::begin_oauth_returns_pkce_challenge_url_and_registers_pending connectors::accounts::tests::complete_oauth_ssrf_guard_does_not_follow_token_endpoint_redirect connectors::accounts::tests::complete_oauth_exchanges_code_stores_tokens_in_keychain_never_in_db connectors::accounts::tests::add_apikey_stores_key_in_keychain_ref_not_value_in_db_list_and_delete_roundtrip connectors::accounts::tests::token_for_apikey_returns_the_stored_key connectors::accounts::tests::token_for_refreshes_an_expired_oauth_token_and_persists_the_new_one` |
+| Connectors: the `generic-rest` reference adapter sends the bearer + JSON body, maps an upstream 5xx/unknown-op/missing-url to a typed error; `ConnectorInvoke` routes through `trust::authorize` IDENTICALLY to `McpCallTool` — authorizes+audits always, persists a durable `is_untrusted=1` artifact on success, records a failed invocation with NO artifact on adapter failure, an unknown account never even reaches authorize (§6, §7, D9/D10) | `cargo test -p bpa-orchd connectors::adapter::tests::generic_rest_adapter_get_sends_bearer_and_returns_stub_json connectors::adapter::tests::generic_rest_adapter_post_sends_json_body_and_bearer connectors::adapter::tests::generic_rest_adapter_upstream_500_returns_typed_error connectors::adapter::tests::generic_rest_adapter_unknown_op_returns_typed_error connectors::adapter::tests::generic_rest_adapter_missing_url_returns_typed_error connectors::adapter::tests::connector_invoke_happy_path_authorizes_audits_and_persists_untrusted_artifact connectors::adapter::tests::connector_invoke_adapter_error_records_failed_invocation_and_no_artifact connectors::adapter::tests::connector_invoke_unknown_provider_returns_typed_error_after_authorizing connectors::adapter::tests::connector_invoke_unknown_account_returns_not_found_no_audit` |
+| Skills: SKILL.md CRUD — an explicit name wins over frontmatter, frontmatter fills a missing name, no source at all is `Validation`; `md_path` symlink-escape rejected; files-as-truth state (`Present`/`Modified`/`Missing`) reflects the file at read time (§4, D11) | `cargo test -p bpa-orchd --lib skills::registry::tests::add_skill_with_no_name_parses_name_and_description_from_frontmatter skills::registry::tests::add_skill_with_no_name_and_no_frontmatter_is_validation skills::registry::tests::add_skill_frontmatter_with_only_description_still_requires_a_name skills::registry::tests::add_skill_symlink_escaping_md_path_is_validation skills::registry::tests::add_skill_missing_md_path_is_validation skills::registry::tests::list_skills_file_state_is_present_right_after_add skills::registry::tests::list_skills_file_state_is_modified_after_the_file_changes_on_disk skills::registry::tests::list_skills_file_state_is_missing_after_the_file_is_deleted` |
+| Socket dispatch, end-to-end over a real Unix socket, for the whole S-EXT verb surface: mutate → response + the correct coarse-invalidation push; `McpConnect` without consent → `Error{Consent}`; a disabled tool → `Error{Policy}` with the artifact count unchanged; an in-flight `McpCallTool` does not block other DB ops; every `Skill*`/`Connector*` verb dispatched (§5, §6) | `cargo test -p bpa-orchd --test dispatch_integration` (37 tests, incl. `mcp_add_server_returns_server_and_broadcasts_mcp_servers_changed`, `mcp_connect_without_consent_is_error_consent`, `mcp_connect_after_consent_returns_report_and_broadcasts_tools_changed_and_lists_echo`, `mcp_call_tool_echo_returns_result_and_broadcasts_artifact_and_invocation_pushes`, `mcp_call_tool_on_disabled_tool_is_error_policy_and_artifact_count_unchanged`, `mcp_call_tool_does_not_block_other_db_ops`, `connector_begin_oauth_unregistered_provider_is_error_no_pending_challenge`, `connector_add_api_key_list_accounts_delete_account_dispatch`, `connector_invoke_against_rest_stub_returns_result_and_broadcasts_artifacts_changed`, `connector_list_ops_returns_the_generic_rest_adapter_ops`, `skill_add_returns_skill_and_broadcasts_skills_changed`, `skill_add_no_name_and_no_frontmatter_is_error_validation_and_broadcasts_nothing`, `skill_list_returns_skills_and_broadcasts_nothing`, `skill_delete_returns_ack_and_broadcasts_skills_changed`, `skill_delete_unknown_id_is_error_not_found_and_broadcasts_nothing`) |
+| No-secrets-in-logs, the MCP/connector surface: a planted bearer never appears in the tracing log but genuinely reaches the stub server's `Authorization` header (§6, §13, §16) | `cargo test -p bpa-orchd --test no_secrets_in_logs_mcp planted_mcp_bearer_never_appears_in_logs_but_genuinely_reaches_the_server` |
+| `bpa-secrets`: Keychain set/get/update(upsert)/delete round-trip against a unique test service+account key, delete-then-get is `NotFound`, `SecretError`'s `Display` never contains the planted secret bytes (§3, D4) | `cargo test -p bpa-secrets` (4 tests) |
+| `bpa-orchd-proto`: every `Mcp*`/`Connector*`/`Skill*`/`Trust*` entity+verb+push CBOR round-trips; `orchd-types.ts` parity (camelCase fields, i64 timestamps as `number`); wire tags correct; version space stays `[1,1]` (§5, D13) | `cargo test -p bpa-orchd-proto --test roundtrip` (28 tests) `cargo test -p bpa-orchd-proto --test ts_export` (21 tests) then `git diff --exit-code -- src/ipc/orchd-types.ts` |
+| Core: every `mcp_*`/`connector_*`/`skill_*`/`trust_*` command proxies + maps a `Consent`/`Policy`/`Validation` daemon error; `map_orchd_push` — one test per new `OrchdPush` variant → the matching `orchd://*-changed` event, correct camelCase payload (§5, §8) | `cargo test -p builder-pro-ai --lib commands::mcp_add_server_round_trips_through_real_orchd_client commands::mcp_connect_consent_error_response_becomes_command_error_daemon_consent commands::mcp_call_tool_policy_error_response_becomes_command_error_daemon_policy commands::connector_add_api_key_round_trips_through_real_orchd_client commands::connector_invoke_policy_error_response_becomes_command_error_daemon_policy commands::skill_add_round_trips_through_real_orchd_client commands::skill_add_validation_error_response_becomes_command_error_daemon_validation broker::tests::orchd_mcp_servers_changed_maps_to_emit_with_camel_case_project_id_payload broker::tests::orchd_mcp_tools_changed_maps_to_emit_with_camel_case_server_id_payload broker::tests::orchd_mcp_artifacts_changed_maps_to_emit_with_camel_case_project_id_payload broker::tests::orchd_mcp_invocation_logged_maps_to_emit_with_camel_case_server_id_payload broker::tests::orchd_connectors_changed_maps_to_emit_with_null_payload broker::tests::orchd_skills_changed_maps_to_emit_with_camel_case_project_id_payload broker::tests::orchd_policies_changed_maps_to_emit_with_null_payload` |
+| Frontend: «Расширения» view — `ExtPanel` tabs (Серверы/Инструменты/Коннекторы/Журнал/Артефакты/Навыки) render; IPC wrapper name/arg parity; store slices refresh on their `orchd://*-changed` event; every mutating control `disabled` while `orchdDown`; an untrusted-result banner renders on a tool/connector result and on an artifact row; the Навыки tab's plumbing-only banner renders unconditionally (§8, D11) | `npx vitest run src/components/ext/ExtPanel.test.tsx src/components/ext/ServersTab.test.tsx src/components/ext/ToolsBrowser.test.tsx src/components/ext/ConnectorsTab.test.tsx src/components/ext/InvocationLog.test.tsx src/components/ext/ArtifactsTab.test.tsx src/components/ext/SkillsTab.test.tsx src/store/store.test.ts src/ipc/orchd.test.ts src/ipc/events.test.ts` |
+| E2E — an MCP tool artifact survives an orchd restart (Phase-1 DoD): register a local stub HTTP MCP server → grant connect consent → `McpConnect` (tools cached) → `McpListTools` → `McpCallTool echo` → assert a persisted artifact → `OrchdShutdown{drain:true}` → relaunch → `McpListArtifacts` returns it (§9) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 6, log prefix `[e2e-orchd] phase6 …`) |
+| E2E — a connector-invoke artifact survives an orchd restart (Phase-2 DoD), with a Keychain-availability probe-and-skip for headless CI: an api-key `generic-rest` account → `ConnectorInvoke(post)` against a local stub → assert a persisted `is_untrusted` artifact keyed by `account_id` (`server_id` null) → restart → artifact survives; a locked/unavailable login keychain SKIPs the phase loudly rather than failing the gate (§9, §10) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 7, log prefix `[e2e-orchd] phase7 …`) |
+
 ## Uncovered rows
 
-None in the S0+S1/S2/S3 rows above — every §14.2 row (and every S2/S3 contract row) resolves to at
-least one real, currently-passing test. **None in the S4 section above either:** the graph
-no-secrets-in-logs coverage (formerly BL-62, "Known gap") is now covered by the row directly above
-— every S4 contract row resolves to at least one real, currently-passing test.
+None in the S0+S1/S2/S3/S4 rows above — every §14.2 row (and every S2/S3/S4 contract row) resolves
+to at least one real, currently-passing test (the graph no-secrets-in-logs coverage, formerly
+BL-62 "Known gap", is covered by the row directly above the S4 table). **None in the S-EXT section
+above either:** every S-EXT contract row resolves to at least one real, currently-passing test —
+incl. the no-secrets-in-logs extension to the MCP/connector surface, the DYLD/LD env-denylist
+regression test on BOTH daemons, and the durable-artifact e2e proof for both an MCP tool call and
+a connector invoke.
 
-## Test totals — current (S4, `[0.5.0]`, 2026-07-14)
+## Test totals — current (S-EXT, `[0.6.0]`, 2026-07-15)
+
+- Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **975 tests**, 0 failed
+  (freshly re-measured this pass). Per-binary breakdown: `bpa-daemon-core` lib 33 (+4 vs S4's 29 —
+  the new `env_filter` module); `bpa-secrets` lib 4 (**new crate**); `bpa-mcp` lib 17 + `tests/
+  stub.rs` 6 + `tests/stdio.rs` 4 = 27 (**new crate**); `bpa-orchd` lib 361 + `boot_integration` 4 +
+  `dispatch_integration` 37 + `no_secrets_in_logs` 1 + `no_secrets_in_logs_graph` 1 +
+  `no_secrets_in_logs_mcp` 1 (**new integration-test binary**) = 405 (lib 211→361, +150: the whole
+  `mcp/`, `connectors/`, `skills/`, and `trust.rs` S-EXT surface; `dispatch_integration` 17→37,
+  +20: every new S-EXT verb's socket-dispatch test); `bpa-orchd-proto` `roundtrip` 28 (+17) +
+  `ts_export` 21 (+8) = 49; `bpa-paths` lib 18 [unchanged — S-EXT touches no fs-path code];
+  `bpa-protocol` lib 1 + `cbor_frame_generic` 7 + `framing` 7 + `preamble` 7 + `roundtrip` 8 +
+  `ts_export` 7 = 37 [unchanged — S-EXT touches no sessiond wire]; `bpa-sessiond` lib 156 (+1 vs
+  S4's 155 — the `env_overrides` DYLD/LD regression test, BL-1) + `boot_integration` 4 +
+  `no_secrets_in_logs` 1 + `rehydrate_attach` 1 + `skeleton` 1 = 163; `builder-pro-ai` lib 233
+  (+16 vs S4's 217 — the `mcp_*`/`connector_*`/`skill_*`/`trust_*` command + broker tests) +
+  `capabilities` 5 + `invoke_smoke` 1 = 239; every `main.rs`/doc-test binary 0. Delta vs. the
+  prior S4 pass (727, historical section below): **+248**, entirely inside the new S-EXT surface
+  (two new crates + the `bpa-orchd`/`bpa-orchd-proto`/`bpa-daemon-core`/`bpa-sessiond`/
+  `builder-pro-ai` growth enumerated above). No BL-40 attach-PTY flake occurred on this
+  measurement run — a clean pass on the first attempt. Re-run `cargo test --workspace -- --list`
+  yourself for the exact current per-crate breakdown.
+- TypeScript (`npx vitest run`): **717 tests**, 43 test files, 0 failed (freshly re-measured this
+  pass). Delta vs. the prior S4 pass (559, 35 files): S-EXT added 7 new test files under
+  `src/components/ext/` — the «Расширения» view's tabs: `ServersTab.test.tsx` (13),
+  `ToolsBrowser.test.tsx` (8), `ConnectorsTab.test.tsx` (14), `InvocationLog.test.tsx` (14),
+  `ArtifactsTab.test.tsx` (8), `SkillsTab.test.tsx` (16), `ExtPanel.test.tsx` (9) — plus growth in
+  `store/store.test.ts`, `ipc/orchd.test.ts`, `ipc/events.test.ts`, `ipc/commands.test.ts`, and
+  `App.test.tsx` for the new `view==="ext"` branch, the mcp/connectors/skills/policy store slices,
+  and every new `orchd://*-changed` event wiring (spec §8). (One further file,
+  `components/graph/nodeRenderers.test.tsx`, entered the suite between the S4 measurement and this
+  one as part of S4's own final-review pass, not S-EXT's work — noted here so the file-count delta
+  reconciles exactly: 35 + 7 (ext/) + 1 (nodeRenderers, pre-existing S4 follow-up) = 43.)
+- E2E: `npm run e2e:survive` green, unchanged by S-EXT (still 6 phases, 0–5, socket-harness
+  variant — the sessiond wire's OWN request/response verbs are untouched; only the shared
+  `env_filter` helper sessiond now calls into changed, covered above); `npm run e2e:orchd` green,
+  **extended this cycle** with phase 6 (MCP tool artifact survives an orchd restart, S-EXT spec §9
+  Phase-1 DoD) and phase 7 (connector-invoke artifact survives an orchd restart, with a
+  Keychain-availability probe-and-skip for headless CI, S-EXT spec §9 Phase-2 DoD). Phases 0-5
+  (S3/S4 CRUD survival, export/import, cross-project graph edge) stay green, unchanged.
+
+## Test totals — historical (S4, `[0.5.0]`, 2026-07-14) — superseded above
 
 - Rust workspace (`cargo test --workspace`): **727 tests**, 0 failed (BL-62 follow-up: +1 vs. the
   726 recorded below at S4's `[0.5.0]` release — the new `bpa-orchd` `no_secrets_in_logs_graph`
@@ -318,36 +390,43 @@ no-secrets-in-logs coverage (formerly BL-62, "Known gap") is now covered by the 
 (as of S3, `[0.4.0]`; unchanged interface as of S4) `cargo llvm-cov --package bpa-orchd
 --fail-under-lines 80` — two real, enforcing gates (either one failing below 80% fails the script).
 
-**`bpa-orchd` — measured (2026-07-14, S4 Task 9 docs-truth gate run): line coverage = 89.74 %**
-(regions 87.21 %, functions 90.28 %; 12688 regions/1623 missed, 607 functions/59 missed, 6959
-lines/714 missed — up from S3's 87.90 % line coverage, driven by the new `graph.rs` module's own
-thoroughly-unit-tested surface). Per-module lines: `boot.rs` 81.65 %, `export.rs` 93.01 %,
-`graph.rs` 95.47 % (**new this cycle** — 2940 regions/212 missed, 133 functions/3 missed, 1654
-lines/75 missed), `persistence.rs` 95.70 %, `ruleset_files.rs` 97.56 %, `socket_server.rs`
-54.53 %, `main.rs` 0 % — the process-concerns entrypoint, never unit-tested, same shape as
-sessiond's own `main.rs`; the crate TOTAL clears the 80% gate with headroom, no new tests needed
-beyond what S4 already shipped). `socket_server.rs`'s lower per-file number is expected — its
-dispatch arms (including the 9 new graph verb arms) are exercised by `dispatch_integration.rs`'s
-real-socket integration tests (counted separately by `cargo llvm-cov`, not folded into the
-unit-test-only per-file number above) rather than by `--lib` unit tests. *(Historical: the S3/T21
-gate-verification run measured 87.90 % line / 85.53 % region / 88.22 % function coverage on the
-pre-S4 crate — `boot.rs` 81.65 %, `export.rs` 93.01 %, `persistence.rs` 95.65 %,
-`ruleset_files.rs` 97.56 %, `socket_server.rs` 50.32 %, `main.rs` 0 %.)*
+**`bpa-orchd` — measured (2026-07-15, S-EXT Task 19 docs-truth gate run): line coverage = 90.78 %**
+(regions 88.04 %, functions 90.55 %; 22585 regions/2701 missed, 1185 functions/112 missed, 13588
+lines/1253 missed — up from S4's 89.74 % line coverage; the crate roughly DOUBLED in size this
+cycle — two new modules directories (`mcp/`, `connectors/`) plus `skills/mod.rs`/
+`skills/registry.rs` and `trust.rs` — and still clears the gate with headroom). Per-module lines:
+`boot.rs` 81.88 %, `connectors/accounts.rs` 89.26 % (**new**), `connectors/adapter.rs` 88.87 %
+(**new**), `connectors/mod.rs` 94.12 % (**new**), `export.rs` 93.01 %, `graph.rs` 95.41 %,
+`mcp/cache.rs` 97.44 % (**new**), `mcp/invoke.rs` 89.70 % (**new**), `mcp/lifecycle.rs` 91.43 %
+(**new**), `mcp/mod.rs` 85.71 % (**new**), `mcp/registry.rs` 96.01 % (**new**), `persistence.rs`
+96.42 %, `ruleset_files.rs` 97.56 %, `skills/mod.rs` 90.62 % (**new**), `skills/registry.rs`
+95.72 % (**new**), `socket_server.rs` 57.43 %, `trust.rs` 98.26 % (**new**), `main.rs` 0 % — the
+process-concerns entrypoint, never unit-tested, same shape as sessiond's own `main.rs`; the crate
+TOTAL clears the 80% gate with headroom, no extra tests needed beyond what S-EXT already
+shipped). `socket_server.rs`'s lower per-file number is expected — its dispatch arms (including
+every new S-EXT verb arm) are exercised by `dispatch_integration.rs`'s real-socket integration
+tests (counted separately by `cargo llvm-cov`, not folded into the unit-test-only per-file number
+above) rather than by `--lib` unit tests. *(Historical: the S4 measurement was 89.74 % line /
+87.21 % region / 90.28 % function coverage — `boot.rs` 81.65 %, `export.rs` 93.01 %, `graph.rs`
+95.47 %, `persistence.rs` 95.70 %, `ruleset_files.rs` 97.56 %, `socket_server.rs` 54.53 %,
+`main.rs` 0 %; the S3/T21 run measured 87.90 % line / 85.53 % region / 88.22 % function.)*
 
-**`bpa-sessiond` — measured (2026-07-14, S4 Task 9 docs-truth gate run): line coverage = 90.39 %**
-(regions 89.31 %, functions 90.79 %; 12086 regions/1292 missed, 608 functions/56 missed, 7659
-lines/736 missed — the gate passes with headroom). This is the EXACT SAME measurement as the prior
-S3/T21 run, region-for-region and line-for-line — expected and confirms the S4 spec §2 claim "NO
-sessiond change" at the coverage-tooling level, not just by source diff. Per-module lines:
-`attach.rs` 88.80 %, `boot.rs` 77.24 %, `live_grid.rs` 93.33 %, `main.rs` 0 % (entrypoint, never
+**`bpa-sessiond` — measured (2026-07-15, S-EXT Task 19 docs-truth gate run): line coverage =
+90.44 %** (regions 89.41 %, functions 91.01 %; 12132 regions/1285 missed, 612 functions/55
+missed, 7686 lines/735 missed — the gate passes with headroom). Per-module lines: `attach.rs`
+88.90 %, `boot.rs` 77.24 %, `live_grid.rs` 93.33 %, `main.rs` 0 % (entrypoint, never
 unit-tested), `osc_parser.rs` 94.82 %, `persistence.rs` 94.44 %, `pty_supervisor.rs` 91.46 %,
 `scrollback.rs` 93.12 %, `shell_integration/mod.rs` 92.51 %, `singleton.rs` 70.83 % (a thin
 wrapper over `bpa-daemon-core::singleton` — most of its former logic, and former coverage,
-belongs to daemon-core's own package total now), `socket_server.rs` 90.79 %.
-*(Historical, pre-S4: 2026-07-09, S2/`[0.3.0]` cycle measured 89.16 % line / 89.28 % functions /
-90.25 % regions; 2026-07-07, Pv2/`[0.2.0]` cycle measured 89.58 % line / 88.17 % functions /
-88.65 % regions; 2026-07-05, docs-truth/CI cycle measured 88.06 % line / 86.70 % functions /
-89.20 % regions.)*
+belongs to daemon-core's own package total now), `socket_server.rs` 90.87 % — essentially
+unchanged from S4's 90.39 % line coverage (S-EXT's only sessiond touch was the shared
+`env_filter` helper applied to `env_overrides`, BL-1; sessiond's own domain logic is otherwise
+untouched, confirming the S-EXT spec's D1 claim "never sessiond" at the coverage-tooling level,
+not just by source diff). *(Historical: S4 measured 90.39 % line / 89.31 % region / 90.79 %
+function (the exact same measurement as S3/T21, confirming S4's own "NO sessiond change" claim);
+2026-07-09 S2/`[0.3.0]` measured 89.16 % line / 89.28 % functions / 90.25 % regions; 2026-07-07
+Pv2/`[0.2.0]` measured 89.58 % line / 88.17 % functions / 88.65 % regions; 2026-07-05 docs-truth/CI
+measured 88.06 % line / 86.70 % functions / 89.20 % regions.)*
 
 The gate runs in two enforced places:
 
@@ -362,12 +441,18 @@ measurement time (covering every module: `attach`, `boot`, `live_grid`, `logging
 `persistence`, `pty_supervisor`, `scrollback`, `shell_integration`, `singleton`, `socket_server`)
 plus 3 `boot_integration` + 1 `no_secrets_in_logs` + 1 `rehydrate_attach` + 1 `skeleton`
 integration tests exercising the full boot→serve→drain (and cold-rehydrate→attach) lifecycle over
-the real wire protocol; post-S3-extraction (unchanged through S4) it is 155 lib tests (the six
+the real wire protocol; post-S3-extraction (unchanged through S4) it was 155 lib tests (the six
 daemon-core modules' own unit tests moved to `bpa-daemon-core`'s 29, not lost — see "Test totals"
-above) plus the same 4 integration-test files. The evidence base behind `bpa-orchd`'s number: 211
-`--lib` unit tests (covering `boot`, `export`, `graph` [new, S4], `persistence`, `ruleset_files`,
-`socket_server`) plus 4 `boot_integration` + 17 `dispatch_integration` + 1 `no_secrets_in_logs`
-integration tests exercising dispatch over a real Unix socket end-to-end.
+above) plus the same 4 integration-test files (now 3 `boot_integration`→4 with an S2 addition,
+unchanged since); as of S-EXT it is 156 lib tests (+1: `env_overrides` DYLD/LD regression, BL-1)
+plus the same 4 integration-test-binary structure. The evidence base behind `bpa-orchd`'s number:
+211 `--lib` unit tests at S4 measurement time (covering `boot`, `export`, `graph` [S4],
+`persistence`, `ruleset_files`, `socket_server`) plus 4 `boot_integration` + 17
+`dispatch_integration` + 1 `no_secrets_in_logs` integration tests; as of S-EXT it is 361 `--lib`
+unit tests (+150: the whole `mcp/`, `connectors/`, `skills/`, and `trust.rs` surface) plus 4
+`boot_integration` + 37 `dispatch_integration` (+20: every new S-EXT verb) + 1 `no_secrets_in_logs`
++ 1 `no_secrets_in_logs_graph` + 1 `no_secrets_in_logs_mcp` (**new**) integration tests exercising
+dispatch over a real Unix socket end-to-end.
 
 *(History: at S0+S1 completion this gate was documented but not executed — the authoring
 environment lacked the ~3–5 GB the instrumented build needs. That gap was closed by the

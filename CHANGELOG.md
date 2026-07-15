@@ -2,6 +2,100 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.6.0] — 2026-07-15
+
+### Added
+- **MCP client — the app's first outbound network egress + macOS Keychain surface, entirely
+  inside `bpa-orchd`:** two new crates, `bpa-secrets` (the ONLY Keychain caller —
+  `security-framework::passwords` set/get/delete, fixed service prefix
+  `ai.builderpro.desktop`, never logs the secret bytes — BL-20) and `bpa-mcp` (a thin wrapper
+  over the official `rmcp = "2.2"` SDK; orchd domain code never imports rmcp types directly).
+  Both transports ship: **Streamable HTTP** (remote servers, e.g. prowl.chat) and **stdio**
+  (local child processes, spawned only behind a dedicated `stdio_exec` consent gate). Egress
+  never touches `bpa-sessiond` or the GUI core — `bpa-orchd` is the sole host.
+- **`orchd.db` schema v3 (additive, `SCHEMA_VERSION` 2→3):** `mcp_server`/`mcp_tool` (the
+  registry + cached tool descriptors, global or per-project scope), `account` (OAuth/api-key
+  connector accounts — a Keychain ref only, never the token bytes), `mcp_invocation`/
+  `mcp_artifact` (per-call records + durable results, `server_id` XOR `account_id` so an
+  `McpCallTool` and a `ConnectorInvoke` share one persistence path), `skill` (SKILL.md
+  registry), `consent_grant`/`policy`/`audit_log` (the trust layer).
+- **Tool discovery + per-tool allowlist + typed invoke:** a server registry (add/enable/disable);
+  cached `tools/list` per server; a per-tool `enabled` toggle enforced pre-dispatch (a disabled
+  tool is rejected before any network call, `Error{Policy}`); typed `tools/call` with a
+  per-server timeout and bounded retry — retried ONLY on a transport-level pre-dispatch failure,
+  never a blind re-invoke of a possibly side-effecting tool — and honest degradation on every
+  terminal failure (a typed error + an audit row, never a silent swallow).
+- **Durable, untrusted artifacts:** every successful `tools/call` (and every successful
+  `ConnectorInvoke`) persists an `mcp_artifact` row (`is_untrusted=1` — the flag a future S6b
+  agent-boundary mediation step will read) that survives an `bpa-orchd` restart. Cost/token
+  fields on `mcp_invocation` are `Option`, populated only when the server itself reports usage
+  — honestly `null` otherwise, never a fabricated estimate.
+- **Connectors — an OAuth-account layer, decoupled from MCP:** OAuth 2.1 (authorization-code +
+  PKCE via the `oauth2` crate, an SSRF-guarded token-exchange client —
+  `redirect::Policy::none()` — refresh-on-expiry) or a static api-key account; tokens/keys
+  always in Keychain via `bpa-secrets`, `orchd.db` holding only the ref. One reference direct-API
+  adapter — `GenericRestAdapter` (`provider="generic-rest"`, `get`/`post` against an
+  account-scoped URL with the account's bearer) — proves the `ConnectorAdapter` trait seam.
+  `ConnectorInvoke` routes through the identical trust-choke-point and invocation/artifact
+  persistence path as `McpCallTool`.
+- **Trust layer (BL-22), a single pre-dispatch choke-point (`trust::authorize`) in `bpa-orchd`:**
+  connect consent (owner-granted, fingerprint = URL, re-prompted on change); a DISTINCT
+  `stdio_exec` consent for spawning a local process (fingerprint = the resolved binary's
+  sha256, falling back to the command string when the binary can't be resolved — re-prompted on
+  a binary/command change); the per-tool allowlist; spend/rate policy caps (a rolling 60 s
+  window, most-specific configured scope wins outright — server > project > global, never a
+  per-field merge — a spend cap binds only when a call's cost is actually known); untrusted-
+  result tagging on every artifact from both `McpCallTool` and `ConnectorInvoke`; an
+  append-only `audit_log` row on every connect / stdio-spawn / tool-call / connector-invoke /
+  consent / policy-deny (`reason` is NEVER a secret or tool argument).
+- **Shared `DYLD_*`/`LD_*` env denylist (closes BL-1):** a new `bpa_daemon_core::env_filter`
+  helper strips any `DYLD_*`/`LD_*`-prefixed key (case-sensitive) from a stdio MCP child's env
+  AND from `bpa-sessiond`'s `env_overrides` (previously applied unfiltered — the original BL-1
+  gap). A stdio child's env is `env_clear()`'d and built entirely by the caller (orchd's own
+  filtered ambient env merged with the DB's `server.env`, server wins on collision) — no ambient
+  inheritance leak from either source.
+- **Skills — a SKILL.md-format registry (plumbing only):** CRUD + files-as-truth
+  (`Present`/`Modified`/`Missing`, mirrors `ruleset_files.rs`'s pattern). There is no runtime
+  consumer yet (that's the S6b agent org); the «Навыки» tab states this honestly rather than
+  presenting the registry as executable.
+- **Frontend — «Расширения», a new top-level view** (alongside Home/Workspace/Project): Серверы
+  (MCP server registry + connect/consent), Инструменты (tool browser + per-tool allowlist +
+  invoke, an untrusted-result banner on every response), Коннекторы (OAuth/api-key accounts +
+  the generic-rest ops runner), Журнал (invocation log + audit log + a spend/rate policy
+  editor), Артефакты (durable results + an untrusted banner per item), Навыки (the skills
+  registry). Every mutating control is `disabled` while `orchd://down`.
+- **E2E (`npm run e2e:orchd`, extended with two phases):** phase 6 registers a local stub HTTP
+  MCP server → grants connect consent → connects (tools cached) → lists tools → calls the
+  `echo` tool → asserts a durable artifact → restarts orchd → asserts the artifact survived
+  (S-EXT spec §9 Phase-1 DoD). Phase 7 does the connector-shaped analogue — an api-key
+  `generic-rest` account against a local stub REST target → `ConnectorInvoke` → artifact
+  survives an orchd restart — beginning with a Keychain-availability probe that gracefully,
+  loudly SKIPs the phase (never a silent pass) on a runner whose login keychain is
+  locked/unavailable, so the gate stays honest on headless CI without masking a real failure
+  when the keychain IS available (S-EXT spec §9 Phase-2 DoD).
+- **Rust:** unit + integration coverage for every layer above (registry CRUD + invariants;
+  the trust choke-point's consent/allowlist/spend/rate-cap deny paths, each with an audit-row
+  assertion; the DYLD/LD env-filter mutation-tested against a real spawned process; connector
+  OAuth PKCE + SSRF-guard + Keychain-roundtrip; the generic-rest adapter against a loopback
+  stub; SKILL.md frontmatter parse + symlink-escape rejection + file-state classification;
+  socket-dispatch tests for every new verb, each asserting the correct coarse-invalidation
+  push); orchd-proto CBOR round-trip + ts-rs parity for every new entity/verb/push (all
+  append-only, orchd's wire version space stays `[1,1]`).
+
+### Changed
+- Gate: still 9 stages (`scripts/final-suite.sh`) — no new stage; every existing stage now also
+  exercises the S-EXT surface (orchd coverage, ts-rs parity for the new proto types,
+  `npm run e2e:orchd` phases 6/7).
+- Test totals grew with the new crates/modules: Rust workspace 727 → **975 tests** (two new
+  crates — `bpa-secrets`, `bpa-mcp` — plus the `bpa-orchd`/`bpa-orchd-proto` MCP/connector/
+  skill/trust surface); TypeScript 559 → **717 tests**, 35 → **43 files** (re-measured this
+  pass — see `README.md`/`docs/traceability.md`).
+
+### Fixed
+- `crates/orchd/src/connectors/adapter.rs`'s doc comment ("`connector_invoke` audit_log row
+  (allow or, once T18 lands, deny)") was stale — the spend/rate policy caps T18 refers to
+  shipped in this same slice. Reworded to "allow or deny".
+
 ## [0.5.0] — 2026-07-14
 
 ### Added

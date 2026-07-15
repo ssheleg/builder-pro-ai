@@ -10,6 +10,22 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - name: unlock keychain (S-EXT: MCP/connector Keychain-gated tests + e2e phase7)
+        run: |
+          # `bpa-secrets`'s unit tests, `crates/orchd`'s connector-account tests
+          # (`accounts.rs`/`adapter.rs`), the `no_secrets_in_logs_mcp` integration test, and the
+          # e2e `orchd-survive.mjs` phase7 (`ConnectorAddApiKey`) all write real macOS Keychain
+          # entries via `security-framework`. Every one of those already has its own
+          # `keychain_available()`-probe-and-skip guard, so a locked/absent keychain never fails
+          # the gate — but a graceful skip forfeits real CI coverage of that whole surface. Create
+          # a throwaway keychain with a known password, make it the default + unlocked for the rest
+          # of this job, so CI actually EXERCISES the Keychain path instead of silently skipping it
+          # every run. Standard recipe (matches fastlane's create-keychain action); the runner VM is
+          # torn down after the job, so no explicit cleanup is needed.
+          security create-keychain -p "" ci.keychain-db
+          security default-keychain -s ci.keychain-db
+          security unlock-keychain -p "" ci.keychain-db
+          security set-keychain-settings -lut 21600 ci.keychain-db
       - uses: dtolnay/rust-toolchain@stable # rustup honors rust-toolchain.toml (1.92)
       - uses: Swatinem/rust-cache@v2
       - name: stage sidecars (tauri build.rs requires BOTH daemons in a fresh checkout)
@@ -63,6 +79,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - name: unlock keychain (S-EXT: MCP/connector Keychain-gated tests under instrumentation)
+        run: |
+          # Same rationale as the `gates` job's identical step: `cargo llvm-cov`'s instrumented
+          # run re-executes every Keychain-gated test (bpa-secrets, connectors::accounts,
+          # no_secrets_in_logs_mcp) under this job's own process — give it a writable default
+          # keychain so the coverage measurement exercises the real path too, not the skip guard.
+          security create-keychain -p "" ci.keychain-db
+          security default-keychain -s ci.keychain-db
+          security unlock-keychain -p "" ci.keychain-db
+          security set-keychain-settings -lut 21600 ci.keychain-db
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

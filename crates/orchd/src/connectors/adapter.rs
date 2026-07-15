@@ -257,7 +257,7 @@ pub fn list_ops(provider: &str) -> Result<Vec<ConnectorOp>, ConnectorError> {
 ///
 /// Trust-gated identically to `mcp::invoke::call_tool` (spec §6: "passes through `trust::
 /// authorize` IDENTICALLY to `McpCallTool`") — [`trust::authorize`] ALWAYS writes a
-/// `connector_invoke` `audit_log` row (allow or, once T18 lands, deny) before this function does
+/// `connector_invoke` `audit_log` row (allow or deny) before this function does
 /// anything else network-shaped.
 ///
 /// Takes the SHARED `Arc<tokio::sync::Mutex<Db>>` (the exact type `socket_server::ServerDeps.db`

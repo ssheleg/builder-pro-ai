@@ -47,6 +47,48 @@ attach guards in component refs (a pane instance is reused across tab switches �
   tokens as CSS variables; until then inline styles read `theme` directly (current pattern).
 - **Color scheme posture: dark-only for v0.x** (explicit decision; light mode is future work).
 
+## Extensions view — `ExtPanel`, consent dialogs, untrusted banners (S-EXT)
+
+- **`view` union widened, not a registry (code-truth):** the top-level `view` string-union in
+  `store/store.ts` (`"home" | "workspace" | "project"`) gains `"ext"` — adding a new top-level
+  view touches exactly three files, named here so nobody rediscovers them by grep:
+  `store/store.ts` (the union + default), `components/WorkspaceSidebar.tsx` (the inline nav
+  button — nav buttons live inline there, no separate `LeftRail` component), `App.tsx` (the
+  `view === "ext"` branch in the `if`/`else` render chain).
+- **`ExtPanel` mirrors `ProjectPanel`'s tab pattern:** one panel component owns tab-selection
+  state and renders exactly one child per tab (Серверы/Инструменты/Коннекторы/Журнал/Артефакты/
+  Навыки — `src/components/ext/*.tsx`), same shape as `ProjectPanel`'s Обзор/Цели/Идеи/…
+  tabs — no new tab-panel pattern invented for this view.
+- **Honest degradation, unchanged discipline:** every mutating control across every `ext/*` tab
+  (add/enable/disable/connect/set-bearer/invoke/OAuth-begin/api-key-add/delete/set-policy/
+  skill-add/skill-delete) is `disabled={orchdDown}` — read-only affordances (lists, the tools
+  browser's read view, search) stay live. Tested per-tab: populate the form first, flip
+  `orchdDown`, assert `disabled` AND assert the wrapper is never called on a click (userEvent,
+  which respects `disabled` — plain `fireEvent` does not).
+- **`ConnectDialog`:** every connect attempt from `ServersTab` routes through this one dialog
+  (no "already consented" signal exists on the wire `McpServer` entity to gate a
+  dialog-vs-direct-connect choice on, and `trustGrantConsent` is idempotent, so always
+  confirming is simpler and honest) — `Подключиться` grants `TrustGrantConsent(id, "connect")`
+  THEN calls `mcpConnect`, in that order, since `mcpConnect` is trust-gated and rejects with
+  `Error{Consent}` until the grant exists. A failure (network/consent/policy) is shown IN-dialog
+  (`role="alert"`) via `describeOrchdError`, not just a toast. **`ServersTab`'s transport picker
+  is fixed at `"http"` for now** — a `"stdio"` option is present but disabled ("скоро"): the
+  backend's distinct `stdio_exec` consent kind (a different fingerprint scheme, binary-hash not
+  URL) is fully built (`crates/orchd/src/trust.rs`), but no UI flow can create a stdio server
+  yet, so there is no separate stdio-exec consent dialog to document — don't assume `ConnectDialog`
+  covers it until a future task wires up the stdio transport picker.
+- **Untrusted-result banner:** any surface that renders an MCP tool result or a connector-invoke
+  result (`ToolsBrowser`'s invoke-result panel, `ArtifactsTab`'s per-row viewer) shows a fixed
+  «непроверенные данные» banner — unconditional for any result at all (every `mcp_artifact` is
+  `is_untrusted=1` by construction, S-EXT spec D9), never computed from response content. Treat
+  this the same way as the graph canvas's orphan/ghost styling: a static, tested badge driven by
+  a boolean flag from the wire, not inferred client-side.
+- **Skills tab's plumbing-only banner:** `SkillsTab` renders a fixed, unconditional
+  `role="status"` banner («Навыки — это реестр; они исполняются, когда появится агент-оркестр
+  (S6b).») ABOVE the list — every skills-adjacent UI must keep stating this honestly until S6b
+  actually ships a runtime consumer; don't let a future edit quietly drop the banner while the
+  registry is still non-executable.
+
 ## Testing contract (per frontend slice)
 
 Three layers, all required:
