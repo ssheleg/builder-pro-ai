@@ -2020,12 +2020,16 @@ impl Db {
     /// insight, not the raw artifact"). `add_entity_ref_node` opens and commits its OWN
     /// transaction (see its doc comment: SQLite has no nested `BEGIN` on one connection, so it
     /// can't be folded into the status-update `tx` above) — this call happens SEQUENTIALLY, after
-    /// that transaction has already committed. A `Conflict` (the node already exists — a
-    /// re-accept after an intervening archive; archiving never removes the node, S4's
-    /// orphan-on-delete model) is a BENIGN no-op, not an error. A project-less (orphan) insight
-    /// has no `Some(project_id)` to ingest against — the graph is project-scoped — so it is
-    /// silently skipped, same honest-degradation shape as everywhere else an orphan insight is
-    /// handled. `Archived`/`New` transitions never seed a node.
+    /// that transaction has already committed. The ingest is BEST-EFFORT (the status is already
+    /// durably committed, so a failed ingest must not fail the whole call — see the inline
+    /// comment): a `Conflict` (the node already exists — a re-accept after an intervening archive;
+    /// archiving never removes the node, S4's orphan-on-delete model) is a benign no-op, and any
+    /// OTHER `add_entity_ref_node` error is logged-and-swallowed (mirroring
+    /// `socket_server::write_initial_ruleset_file`'s post-commit precedent), so this method still
+    /// returns `Ok` once the status is committed. A project-less (orphan) insight has no
+    /// `Some(project_id)` to ingest against — the graph is project-scoped — so it is silently
+    /// skipped, same honest-degradation shape as everywhere else an orphan insight is handled.
+    /// `Archived`/`New` transitions never seed a node.
     pub fn set_insight_status(
         &self,
         id: &str,
@@ -2060,6 +2064,15 @@ impl Db {
         let insight = load_insight(&tx, id)?;
         tx.commit()?;
 
+        // Graph-ingest is a BEST-EFFORT post-commit side effect (mirrors
+        // `socket_server::write_initial_ruleset_file`'s log-and-swallow precedent): the accept
+        // is ALREADY durably committed above, so a failure here must NOT turn the whole call into
+        // an `Err` — that would hand the client an error reply (and skip the `InsightsChanged`
+        // push) while the DB has genuinely flipped the status. A `Conflict` (the node already
+        // exists — a re-accept after archive; archiving never removes the node, S4's
+        // orphan-on-delete model) is the expected benign case and is silently ignored; any OTHER
+        // error is logged (`insight_id`/`entity_type`/error only — the insight `title` is NEVER
+        // logged, it can carry owner PII) and swallowed, so the accept still returns `Ok`.
         if matches!(status, InsightStatus::Accepted) {
             if let Some(pid) = insight.project_id.as_deref() {
                 match self.add_entity_ref_node(
@@ -2071,7 +2084,13 @@ impl Db {
                     0.0,
                 ) {
                     Ok(_) | Err(OrchdPersistError::Conflict(_)) => {}
-                    Err(e) => return Err(e),
+                    Err(e) => warn!(
+                        insight_id = %id,
+                        entity_type = "insight",
+                        error = %e,
+                        "graph-ingest of an accepted insight failed; status is committed, the \
+                         entityRef node is missing until a re-accept retries it"
+                    ),
                 }
             }
         }

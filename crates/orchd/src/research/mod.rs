@@ -474,35 +474,33 @@ fn classify_run_error(err: &OrchdMcpError) -> &'static str {
     }
 }
 
-/// `ResearchStartRun`'s entry point (spec §6 steps 1-3, D3): a plain (non-`async`) fn — the
-/// synchronous insert+flip is fast enough not to need `.await`, and NOT being `async` means
-/// `socket_server`'s dispatch arm (a later task, T5) calls it as an ordinary function, no
-/// `.await` required, before immediately replying with the `pending` row it returns.
+/// `ResearchStartRun`'s entry point (spec §6 steps 1-3, D3): an `async fn` that acquires the
+/// shared `Db` lock exactly like every other verb in `socket_server::dispatch` (`.lock().await`),
+/// so `socket_server`'s dispatch arm (a later task, T5) calls it with `.await` before immediately
+/// replying with the `pending` row it returns.
 ///
-/// Sequence: (1) `db.try_lock()` — NOT `.lock().await`: this fn is deliberately synchronous, and
-/// [`tokio::sync::Mutex`] has no synchronous *blocking* acquire that's safe to call from inside an
-/// async task (`blocking_lock` panics there by design); `try_lock`'s non-blocking, immediate
-/// success-or-`Io`-error semantics are the only sound choice for a fn with this shape. Contention
-/// is expected to be rare in practice — a local single-daemon socket server serializes each
-/// connection's own dispatch work into short lock/drop windows (spec's own "3-phase" discipline
-/// throughout this crate) — but a caller that hits it gets an honest `Io` error to retry, never a
-/// silent stall. (2) [`Db::start_research_run`] (T2's one-tx insert+idea-flip). (3) resolve the
-/// idea's OWN `project_id` (spec §6 step b: "`project_id = idea.project_id`" — the scope
-/// `mcp::invoke::call_tool` authorizes/spends against) under the SAME lock acquisition. (4) drop
-/// the guard, THEN `tokio::spawn` [`run_research`] against the PRODUCTION connect_fn
-/// ([`crate::mcp::connect_session`]) — fire-and-forget: this function returns the `pending` row
-/// immediately; the run's terminal state arrives later via the `ResearchRunsChanged` push
-/// `run_research` fires on every transition. [`Db::reconcile_interrupted_research_runs`] (T2,
-/// D11) is the crash/restart backstop for this detached, drain-untracked task.
-pub fn start_run(
+/// Sequence: (1) `db.lock().await` — the SAME acquisition every other dispatch-reachable op in
+/// this crate uses: it never spuriously rejects a valid request under contention (a T4-review fix
+/// replaced an earlier non-`async`, `try_lock`-on-contention→`Io` shape — under the multi-threaded
+/// runtime, one task per connection plus concurrent run drivers all touching this same
+/// `Arc<Mutex<Db>>` at phases 1/3 makes contention genuinely reachable, so a `try_lock` here would
+/// have been the only dispatch-reachable op that could reject a valid request; a short `.await`
+/// wait is correct). (2) [`Db::start_research_run`] (T2's one-tx insert+idea-flip). (3) resolve
+/// the idea's OWN `project_id` (spec §6 step b: "`project_id = idea.project_id`" — the scope
+/// `mcp::invoke::call_tool` authorizes/spends against) under the SAME held guard. (4) drop the
+/// guard via block-scope, THEN `tokio::spawn` [`run_research`] against the PRODUCTION connect_fn
+/// ([`crate::mcp::connect_session`]) — the driver reacquires the lock cleanly in its own phase 1.
+/// Fire-and-forget: this function returns the `pending` row immediately; the run's terminal state
+/// arrives later via the `ResearchRunsChanged` push `run_research` fires on every transition.
+/// [`Db::reconcile_interrupted_research_runs`] (T2, D11) is the crash/restart backstop for this
+/// detached, drain-untracked task.
+pub async fn start_run(
     db: &Arc<Mutex<Db>>,
     broadcaster: &Broadcaster<OrchdFrame>,
     new: NewResearchRun,
 ) -> Result<ResearchRunRow, OrchdPersistError> {
     let (row, project_id) = {
-        let guard = db
-            .try_lock()
-            .map_err(|_| OrchdPersistError::Io("database busy, try again".to_string()))?;
+        let guard = db.lock().await;
         let row = guard.start_research_run(new)?;
         let project_id = resolve_idea_project_id(guard.conn(), &row.idea_id)?;
         (row, project_id)
@@ -1019,10 +1017,10 @@ mod driver_tests {
     }
 
     /// A stdio-transport server with NO `mcp_tool` row registered at all — used only by
-    /// `start_run`'s own synchronous-part test, where the spawned `run_research` task (which the
-    /// test deliberately does not observe) must be guaranteed to deny at the per-tool allowlist
-    /// gate (`ToolDisabled`) BEFORE `connect_fn`/the network is ever touched, no matter how the
-    /// runtime schedules it — hermetic regardless of scheduling.
+    /// `start_run`'s own entry-point test, where the spawned `run_research` task (which the test
+    /// deliberately does not observe) must be guaranteed to deny at the per-tool allowlist gate
+    /// (`ToolDisabled`) BEFORE `connect_fn`/the network is ever touched, no matter how the runtime
+    /// schedules it — hermetic regardless of scheduling.
     fn new_stdio_server_without_tool(db: &Db) -> String {
         db.add_mcp_server(NewMcpServer {
             name: "prowl".to_string(),
@@ -1070,11 +1068,12 @@ mod driver_tests {
         count
     }
 
-    // ---- start_run (synchronous part only, spec §8: "a spawned run isn't needed for THIS
-    // assertion") — `new_server` (the T2 helper, sibling `mod tests`) registers a stdio server
-    // with NO `mcp_tool` row at all, so even if the spawned `run_research` task runs to
+    // ---- start_run entry point (spec §8: "a spawned run isn't needed for THIS assertion") — the
+    // stdio server has NO `mcp_tool` row at all, so even if the spawned `run_research` task runs to
     // completion in the background, it denies at the per-tool allowlist gate (`ToolDisabled`)
-    // BEFORE ever touching `connect_fn`/the network — hermetic regardless of scheduling. ----
+    // BEFORE ever touching `connect_fn`/the network — hermetic regardless of scheduling. Now
+    // `.await`s `start_run` (T4 review: it is an `async fn` acquiring the DB lock with
+    // `.lock().await`, no more `try_lock`/busy-reject). ----
 
     #[tokio::test]
     async fn start_run_returns_pending_row_and_flips_idea_to_researching() {
@@ -1098,6 +1097,7 @@ mod driver_tests {
                 args_json: "{}".to_string(),
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(row.status, ResearchStatus::Pending);
@@ -1452,5 +1452,62 @@ mod graph_ingest_tests {
             .unwrap();
         assert_eq!(updated.status, InsightStatus::Accepted);
         assert_eq!(entity_ref_node_count(&db, &insight.id), 0);
+    }
+
+    /// Best-effort post-commit ingest (T4 review Finding 2): the status flip is committed in its
+    /// OWN transaction FIRST; graph-ingest runs afterwards in a separate transaction, best-effort.
+    /// Even when that ingest does NO fresh insert — here the entityRef node was seeded out-of-band
+    /// so `add_entity_ref_node` returns `Conflict`, structurally the SAME swallow branch a
+    /// post-commit non-`Conflict` error takes (log-and-swallow) — the accept still returns `Ok`
+    /// and the status is DURABLY committed (asserted by a fresh reload, independent of the returned
+    /// value). This is the guarantee the fix adds: a failed post-commit ingest must never turn a
+    /// committed accept into an `Err` reply. (A genuine non-`Conflict` ingest error is only
+    /// reachable via a real archive-between-commit-and-ingest race, not deterministically
+    /// injectable through the public API — every constraint violation maps to `Conflict`, and the
+    /// only other errors, `NotFound`/`Invariant` from the project-active guard, can't occur when
+    /// the status update on the SAME active project just committed — so this Conflict path is the
+    /// deterministic proxy for the swallow branch.)
+    #[test]
+    fn accept_returns_ok_and_commits_status_even_when_ingest_is_a_noop() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let insight = db
+            .create_insight(Some(&project_id), "research-run:r1", "A finding", "body")
+            .unwrap();
+        // Seed the entityRef node out-of-band, so the accept's OWN ingest is a Conflict no-op from
+        // the very first accept (not a re-accept) — isolating the "ingest did nothing, accept must
+        // still succeed" contract.
+        db.add_entity_ref_node(
+            &project_id,
+            GraphEntityType::Insight,
+            &insight.id,
+            "A finding",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(entity_ref_node_count(&db, &insight.id), 1);
+
+        let updated = db
+            .set_insight_status(&insight.id, InsightStatus::Accepted, Some("looks good"))
+            .unwrap();
+        assert_eq!(updated.status, InsightStatus::Accepted);
+
+        // The status is durably committed regardless of the ingest outcome — prove it with a fresh
+        // read straight from the row, not the returned value.
+        let committed_status: String = db
+            .conn()
+            .query_row(
+                "SELECT status FROM insight WHERE id = ?1",
+                rusqlite::params![insight.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(committed_status, "accepted");
+        assert_eq!(
+            entity_ref_node_count(&db, &insight.id),
+            1,
+            "the no-op ingest must not have created a second node"
+        );
     }
 }
