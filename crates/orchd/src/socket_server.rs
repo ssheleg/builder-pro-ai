@@ -1917,5 +1917,20 @@ async fn dispatch(
                 Err(e) => map_err(e),
             }
         }
+
+        // ---- S-IDEA research (spec §5, task T3) ----
+        // TEMPORARY stub: the wire shape (`orchd-proto`) and persistence (`bpa_orchd::research`,
+        // T2) both already exist, but the async run driver that wires this dispatch arm to
+        // `Db::start_research_run`/`list_research_runs`/`get_research_run` (plus the
+        // `mcp::invoke::call_tool` orchestration and `ResearchRunsChanged` broadcast) is a later
+        // task (T4/T5) — this arm only keeps `bpa-orchd` building in the meantime. `Io` mirrors
+        // the other adapter/dispatch-not-ready error kinds in this file (e.g. `map_secret_err`'s
+        // "no dedicated wire code yet" fallback above).
+        OrchdRequest::ResearchStartRun { .. }
+        | OrchdRequest::ResearchListRuns { .. }
+        | OrchdRequest::ResearchGetRun { .. } => OrchdResponse::Error {
+            code: OrchdErrorCode::Io,
+            message: "research dispatch not yet implemented".to_string(),
+        },
     }
 }

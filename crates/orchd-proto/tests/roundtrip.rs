@@ -335,6 +335,23 @@ fn sample_audit_row() -> AuditRow {
     }
 }
 
+/// Named to avoid colliding with `sample_mcp_server`'s bare `server_id` sample values above.
+fn sample_research_run() -> ResearchRun {
+    ResearchRun {
+        id: "run-1".into(),
+        idea_id: "idea-1".into(),
+        server_id: "mcp-1".into(),
+        tool_name: "search".into(),
+        args_json: "{\"q\":\"rust\"}".into(),
+        status: ResearchStatus::Pending,
+        invocation_id: None,
+        artifact_id: None,
+        error_kind: None,
+        created_at: 1_720_000_000,
+        updated_at: 1_720_000_100,
+    }
+}
+
 fn all_requests() -> Vec<OrchdRequest> {
     vec![
         OrchdRequest::Ping,
@@ -657,6 +674,16 @@ fn all_requests() -> Vec<OrchdRequest> {
         OrchdRequest::TrustListPolicies,
         OrchdRequest::TrustListAudit { limit: Some(50) },
         OrchdRequest::TrustListAudit { limit: None },
+        OrchdRequest::ResearchStartRun {
+            idea_id: "idea-1".into(),
+            server_id: "mcp-1".into(),
+            tool_name: "search".into(),
+            args_json: "{\"q\":\"rust\"}".into(),
+        },
+        OrchdRequest::ResearchListRuns {
+            idea_id: "idea-1".into(),
+        },
+        OrchdRequest::ResearchGetRun { id: "run-1".into() },
     ]
 }
 
@@ -731,6 +758,8 @@ fn all_responses() -> Vec<OrchdResponse> {
             code: OrchdErrorCode::Policy,
             message: "rate_limit_exceeded".into(),
         },
+        OrchdResponse::ResearchRun(sample_research_run()),
+        OrchdResponse::ResearchRuns(vec![sample_research_run()]),
     ]
 }
 
@@ -772,6 +801,10 @@ fn all_pushes() -> Vec<OrchdPush> {
         },
         OrchdPush::SkillsChanged { project_id: None },
         OrchdPush::PoliciesChanged,
+        OrchdPush::ResearchRunsChanged {
+            idea_id: Some("idea-1".into()),
+        },
+        OrchdPush::ResearchRunsChanged { idea_id: None },
     ]
 }
 
@@ -1211,4 +1244,116 @@ fn trust_set_policy_null_cap_fields_roundtrip_as_unlimited() {
         rate_per_min: None,
     };
     assert_frame_roundtrip(OrchdFrame::Request { id: 1, req });
+}
+
+// ---- S-IDEA research wire tests (spec §5, task T3) ----
+
+#[test]
+fn research_status_wire_tags_are_lowercase() {
+    // Discriminating: exact tag equality (a broken `rename_all` producing "Pending" fails).
+    assert_serde_tag(&ResearchStatus::Pending, "pending");
+    assert_serde_tag(&ResearchStatus::Running, "running");
+    assert_serde_tag(&ResearchStatus::Done, "done");
+    assert_serde_tag(&ResearchStatus::Failed, "failed");
+}
+
+#[test]
+fn research_run_entity_serializes_with_camelcase_keys() {
+    let json = serde_json::to_string(&sample_research_run()).expect("serialize ResearchRun");
+    assert!(
+        json.contains("\"ideaId\""),
+        "ResearchRun.idea_id must serialize as camelCase `ideaId`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"serverId\""),
+        "ResearchRun.server_id must serialize as camelCase `serverId`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"toolName\""),
+        "ResearchRun.tool_name must serialize as camelCase `toolName`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"argsJson\""),
+        "ResearchRun.args_json must serialize as camelCase `argsJson`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"invocationId\""),
+        "ResearchRun.invocation_id must serialize as camelCase `invocationId`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"artifactId\""),
+        "ResearchRun.artifact_id must serialize as camelCase `artifactId`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"errorKind\""),
+        "ResearchRun.error_kind must serialize as camelCase `errorKind`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"createdAt\""),
+        "ResearchRun.created_at must serialize as camelCase `createdAt`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"updatedAt\""),
+        "ResearchRun.updated_at must serialize as camelCase `updatedAt`; got:\n{json}"
+    );
+    assert!(
+        !json.contains("idea_id")
+            && !json.contains("server_id")
+            && !json.contains("tool_name")
+            && !json.contains("args_json")
+            && !json.contains("invocation_id")
+            && !json.contains("artifact_id")
+            && !json.contains("error_kind")
+            && !json.contains("created_at")
+            && !json.contains("updated_at"),
+        "generated JSON must not contain snake_case field names; got:\n{json}"
+    );
+}
+
+#[test]
+fn research_runs_response_json_roundtrips() {
+    // Frame round-trip via `serde_json` directly (in addition to the CBOR-wire round-trip
+    // exercised by `every_response_variant_roundtrips`): the frame stays plain snake_case even
+    // though it wraps a camelCase entity.
+    let original = OrchdResponse::ResearchRuns(vec![sample_research_run()]);
+    let json = serde_json::to_string(&original).expect("serialize OrchdResponse::ResearchRuns");
+    let decoded: OrchdResponse =
+        serde_json::from_str(&json).expect("deserialize OrchdResponse::ResearchRuns");
+    assert_eq!(
+        decoded, original,
+        "OrchdResponse::ResearchRuns must JSON round-trip byte-for-byte equal"
+    );
+}
+
+#[test]
+fn research_runs_response_cbor_frame_roundtrips_losslessly() {
+    // Discriminating CBOR-wire check for the exact frame the brief calls out
+    // (`OrchdResponse::ResearchRuns(vec![sample])`), snake_case frame carrying the camelCase
+    // entity — mirrors `mcp_servers_response_json_roundtrips`'s companion CBOR coverage via
+    // `every_response_variant_roundtrips`, made explicit here for this one variant.
+    let frame = OrchdFrame::Response {
+        id: 1,
+        res: OrchdResponse::ResearchRuns(vec![sample_research_run()]),
+    };
+    assert_frame_roundtrip(frame);
+}
+
+#[test]
+fn research_start_run_request_stays_snake_case_on_the_wire() {
+    // The frame itself is Hop-B wire-only plain Rust snake_case (NOT ts-rs, NOT camelCase) — the
+    // request's own field names must reach the CBOR bytes verbatim, unlike the camelCase entity
+    // it responds with.
+    let frame = OrchdFrame::Request {
+        id: 1,
+        req: OrchdRequest::ResearchStartRun {
+            idea_id: "idea-1".into(),
+            server_id: "mcp-1".into(),
+            tool_name: "search".into(),
+            args_json: "{}".into(),
+        },
+    };
+    assert_wire_contains(&frame, "idea_id");
+    assert_wire_contains(&frame, "server_id");
+    assert_wire_contains(&frame, "tool_name");
+    assert_wire_contains(&frame, "args_json");
 }

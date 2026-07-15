@@ -87,6 +87,10 @@ pub const EV_ORCHD_SKILLS_CHANGED: &str = "orchd://skills-changed";
 /// scoped, so there's no single natural `projectId`/`serverId` to name coarsely, same
 /// "nothing to name" precedent as [`EV_ORCHD_CONNECTORS_CHANGED`].
 pub const EV_ORCHD_POLICIES_CHANGED: &str = "orchd://policies-changed";
+/// S-IDEA research coarse-invalidation (spec §5/§8, task T3, appended — order FROZEN
+/// append-only). Payload `{ ideaId }` (`ideaId` may be `null` — a future workspace-wide
+/// invalidation, currently unproduced), mirrors [`EV_ORCHD_MCP_SERVERS_CHANGED`]'s shape exactly.
+pub const EV_ORCHD_RESEARCH_RUNS_CHANGED: &str = "orchd://research-runs-changed";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -278,6 +282,16 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
         OrchdPush::PoliciesChanged => {
             BrokerAction::Emit(EV_ORCHD_POLICIES_CHANGED, serde_json::Value::Null)
         }
+        // S-IDEA research (spec §5/§8, task T3, appended — order FROZEN append-only). TEMPORARY
+        // mapping: no dispatch arm produces this push yet (`ResearchStartRun`/`ResearchListRuns`/
+        // `ResearchGetRun` are still stubbed in `bpa-orchd`'s `socket_server.rs`, T3) — the
+        // mapping shape is wired now so `--workspace` builds against the frozen `orchd-proto`
+        // variant; a later task (T4/T5) lands the dispatch that actually broadcasts it. Mirrors
+        // `GoalsChanged`/`McpServersChanged`'s camelCase-reshape precedent above.
+        OrchdPush::ResearchRunsChanged { idea_id } => BrokerAction::Emit(
+            EV_ORCHD_RESEARCH_RUNS_CHANGED,
+            serde_json::json!({ "ideaId": idea_id }),
+        ),
     }
 }
 
@@ -942,6 +956,37 @@ mod tests {
             BrokerAction::Emit(event, payload) => {
                 assert_eq!(event, EV_ORCHD_POLICIES_CHANGED);
                 assert!(payload.is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    // ── S-IDEA research (spec §5/§8, task T3) — mirrors the SkillsChanged optional-scope
+    // precedent above exactly ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn orchd_research_runs_changed_maps_to_emit_with_camel_case_idea_id_payload() {
+        let action = map_orchd_push(OrchdPush::ResearchRunsChanged {
+            idea_id: Some("idea-1".to_string()),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_RESEARCH_RUNS_CHANGED);
+                assert_eq!(payload["ideaId"], "idea-1");
+                // snake_case key must NOT leak through.
+                assert!(payload.get("idea_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_research_runs_changed_none_scope_has_null_idea_id() {
+        let action = map_orchd_push(OrchdPush::ResearchRunsChanged { idea_id: None });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_RESEARCH_RUNS_CHANGED);
+                assert!(payload["ideaId"].is_null());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

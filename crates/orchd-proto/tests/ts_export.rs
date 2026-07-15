@@ -65,6 +65,8 @@ fn export_and_read() -> String {
     Policy::export_all_to(types_ts_dir()).expect("export Policy");
     PolicyScope::export_all_to(types_ts_dir()).expect("export PolicyScope");
     AuditRow::export_all_to(types_ts_dir()).expect("export AuditRow");
+    ResearchRun::export_all_to(types_ts_dir()).expect("export ResearchRun");
+    ResearchStatus::export_all_to(types_ts_dir()).expect("export ResearchStatus");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -261,6 +263,8 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "authorize_url",
         "ref_id",
         "rate_per_min",
+        "idea_id",
+        "args_json",
     ] {
         assert!(
             !ts.contains(snake),
@@ -590,6 +594,76 @@ fn policy_scope_wire_tags_are_camelcase() {
         assert!(
             contains_normalized(&ts, &format!("\"{tag}\"")),
             "PolicyScope must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+}
+
+// ---- S-IDEA research entity export tests (spec §5, task T3) ----
+
+#[test]
+fn research_run_is_present_with_camelcase_fields_and_ts_number_timestamps() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "export type ResearchRun"),
+        "expected \"export type ResearchRun\" in generated orchd-types.ts; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "export type ResearchStatus"),
+        "expected \"export type ResearchStatus\" in generated orchd-types.ts; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "ideaId: string"),
+        "ResearchRun.idea_id must serialize as camelCase `ideaId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "serverId: string"),
+        "ResearchRun.server_id must serialize as camelCase `serverId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "toolName: string"),
+        "ResearchRun.tool_name must serialize as camelCase `toolName`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "argsJson: string"),
+        "ResearchRun.args_json must serialize as camelCase `argsJson`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "status: ResearchStatus"),
+        "ResearchRun.status must be typed `ResearchStatus`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "invocationId: string | null"),
+        "ResearchRun.invocation_id (Option<String>) must be TS `string | null`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "artifactId: string | null"),
+        "ResearchRun.artifact_id (Option<String>) must be TS `string | null`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "errorKind: string | null"),
+        "ResearchRun.error_kind (Option<String>) must be TS `string | null`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "createdAt: number"),
+        "ResearchRun.created_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "updatedAt: number"),
+        "ResearchRun.updated_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("bigint"),
+        "generated orchd-types.ts must never contain `bigint`; got:\n{ts}"
+    );
+}
+
+#[test]
+fn research_status_wire_tags_are_camelcase() {
+    let ts = export_and_read();
+    for tag in ["pending", "running", "done", "failed"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "ResearchStatus must include wire tag {tag:?}; got:\n{ts}"
         );
     }
 }

@@ -177,6 +177,16 @@ workspaceIds: Array<string>, createdAt: number, updatedAt: number, };
 
 export type ProjectStatus = "active" | "archived";
 
+/**
+ * `research_run` row (spec §4/§5, schema v4). The actual research artifact is the pre-existing
+ * `McpArtifact` row a run's `tools/call` produces (D2) — this row is only the provenance link
+ * plus status; `invocationId`/`artifactId` are `Some` only once the run reaches `done` (spec §4
+ * CHECK linking status and the artifact reference).
+ */
+export type ResearchRun = { id: string, ideaId: string, serverId: string, toolName: string, argsJson: string, status: ResearchStatus, invocationId: string | null, artifactId: string | null, errorKind: string | null, createdAt: number, updatedAt: number, };
+
+export type ResearchStatus = "pending" | "running" | "done" | "failed";
+
 export type RuleFileState = "ok" | "missing" | "externallyModified";
 
 export type RuleScope = "global" | "project";

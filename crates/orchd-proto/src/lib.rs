@@ -705,6 +705,47 @@ pub struct AuditRow {
     pub invocation_id: Option<String>,
 }
 
+// ---- S-IDEA research entities (spec §5, task T3, appended — order FROZEN append-only): the
+// `research_run` table (schema v4, task T2) is a THIN provenance link (idea↔invocation↔artifact,
+// D2) — this entity mirrors `bpa_orchd::research::ResearchRunRow`'s field set 1:1, with the usual
+// camelCase + ts-rs wire treatment layered on top (mirrors the `McpArtifact` entity block
+// byte-for-byte). `ResearchStatus`'s wire tags (`pending`/`running`/`done`/`failed`) match T2's
+// `research_run.status` TEXT literals exactly (`decode_research_status` in
+// `crates/orchd/src/research/mod.rs`).
+
+/// `research_run` row (spec §4/§5, schema v4). The actual research artifact is the pre-existing
+/// `McpArtifact` row a run's `tools/call` produces (D2) — this row is only the provenance link
+/// plus status; `invocationId`/`artifactId` are `Some` only once the run reaches `done` (spec §4
+/// CHECK linking status and the artifact reference).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct ResearchRun {
+    pub id: String,
+    pub idea_id: String,
+    pub server_id: String,
+    pub tool_name: String,
+    pub args_json: String,
+    pub status: ResearchStatus,
+    pub invocation_id: Option<String>,
+    pub artifact_id: Option<String>,
+    pub error_kind: Option<String>,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum ResearchStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -1117,6 +1158,26 @@ pub enum OrchdRequest {
     TrustListAudit {
         limit: Option<i64>,
     },
+    // S-IDEA research (spec §5, task T3, appended — order FROZEN append-only): starts a research
+    // run against an MCP tool for an idea (spec §6 step 1). Persistence + the pending→researching
+    // idea-lifecycle flip already land in T2 (`bpa_orchd::research::Db::start_research_run`); the
+    // async run driver that actually calls the tool and drives pending→running→done/failed is a
+    // later task (T4/T5) — this task only wires the wire shape + a temporary dispatch stub.
+    /// → `OrchdResponse::ResearchRun`.
+    ResearchStartRun {
+        idea_id: String,
+        server_id: String,
+        tool_name: String,
+        args_json: String,
+    },
+    /// → `OrchdResponse::ResearchRuns` (newest first, mirrors `Db::list_research_runs`'s order).
+    ResearchListRuns {
+        idea_id: String,
+    },
+    /// → `OrchdResponse::ResearchRun`.
+    ResearchGetRun {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1176,6 +1237,9 @@ pub enum OrchdResponse {
     Policy(Policy),
     Policies(Vec<Policy>),
     AuditRows(Vec<AuditRow>),
+    // S-IDEA research (spec §5, task T3, appended — order FROZEN append-only)
+    ResearchRun(ResearchRun),
+    ResearchRuns(Vec<ResearchRun>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1222,6 +1286,13 @@ pub enum OrchdPush {
     // there's no single natural `project_id`/`server_id` to name coarsely — mirrors
     // `ConnectorsChanged`'s "nothing to name" precedent.
     PoliciesChanged,
+    // S-IDEA research (spec §5, task T3, appended — order FROZEN append-only): fired after a
+    // research run's status changes (start/running/done/failed, T4/T5). `idea_id: Some` for a
+    // single idea's runs changing (the common case); `None` reserved for a future workspace-wide
+    // invalidation, mirroring `McpServersChanged`/`SkillsChanged`'s optional-scope shape.
+    ResearchRunsChanged {
+        idea_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
