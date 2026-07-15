@@ -303,7 +303,12 @@ fn is_retryable(err: &bpa_mcp::McpError) -> bool {
     )
 }
 
-fn classify_error_kind(err: &bpa_mcp::McpError) -> &'static str {
+/// `pub(crate)` (was module-private): S-IDEA task T4's research-run driver
+/// (`crate::research::classify_run_error`) reuses this SAME mapping for the `Mcp(_)`-family
+/// branch of `research_run.error_kind`, so a transport/protocol/timeout/tool_error/auth failure
+/// is classified identically whether it terminates an `McpCallTool` invocation or a background
+/// research run.
+pub(crate) fn classify_error_kind(err: &bpa_mcp::McpError) -> &'static str {
     match err {
         bpa_mcp::McpError::Transport(_) => "transport",
         bpa_mcp::McpError::Protocol(_) => "protocol",

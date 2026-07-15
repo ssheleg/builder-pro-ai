@@ -8,10 +8,9 @@
 //! `GraphNodeKind::EntityRef` ⇒ DB literal `'entity_ref'`.
 //!
 //! `socket_server.rs`'s dispatch match is fully wired to this module's mutators/readers (S4 T4) —
-//! no blanket `#![allow(dead_code)]` here. The one exception is [`Db::add_entity_ref_node`] (see
-//! its doc comment) plus the two helpers that exist solely to support it
-//! (`encode_entity_type`, `map_entity_ref_conflict`) — each carries its own scoped
-//! `#[allow(dead_code)]` with an accurate reason instead.
+//! no blanket `#![allow(dead_code)]` here. [`Db::add_entity_ref_node`] is internal-only (not a
+//! wire verb) but IS wired to a real caller: `persistence::Db::set_insight_status`'s accept path
+//! (S-IDEA spec §6 D9, task T4) — see that method's own doc comment.
 use std::collections::HashSet;
 
 use bpa_orchd_proto::{
@@ -55,9 +54,8 @@ fn decode_node_kind(s: &str) -> Result<GraphNodeKind, OrchdPersistError> {
     }
 }
 
-/// Only used by [`Db::add_entity_ref_node`] (and, transitively, [`map_entity_ref_conflict`])
-/// — see that method's doc comment for why it's currently exercised only by `#[cfg(test)]`.
-#[allow(dead_code)]
+/// Used by [`Db::add_entity_ref_node`] (and, transitively, [`map_entity_ref_conflict`]) — wired
+/// into `persistence::Db::set_insight_status`'s accept path (S-IDEA spec §6 D9, task T4).
 fn encode_entity_type(t: &GraphEntityType) -> &'static str {
     match t {
         GraphEntityType::Goal => "goal",
@@ -190,9 +188,9 @@ fn node_project_id(conn: &Connection, node_id: &str) -> Result<String, OrchdPers
 /// Maps a `graph_node_one_per_entity` partial-unique-index hit to `Conflict` (S4 spec §5:
 /// "duplicate (type,id) ⇒ Conflict"), otherwise passes the raw SQL error through unchanged.
 ///
-/// Only called from [`Db::add_entity_ref_node`] — see that method's doc comment for why it's
-/// currently exercised only by `#[cfg(test)]`.
-#[allow(dead_code)]
+/// Only called from [`Db::add_entity_ref_node`]. `persistence::Db::set_insight_status`'s accept
+/// path (S-IDEA spec §6 D9, task T4) treats exactly this `Conflict` shape as a benign no-op — a
+/// re-accept after archive finds the entityRef node already seeded and does not error.
 fn map_entity_ref_conflict(
     e: rusqlite::Error,
     entity_type: &GraphEntityType,
@@ -384,23 +382,24 @@ impl Db {
     /// `add_entity_ref_node` (S4 spec §5, D3/D6): archived project ⇒ `Invariant`; duplicate
     /// `(entity_type, entity_id)` ⇒ `Conflict` (partial unique index `graph_node_one_per_entity`
     /// — D3: "exactly one entityRef node per (entity_type, entity_id)"). NOT exposed as a wire
-    /// verb in S4 — internal-only.
+    /// verb — internal-only.
     ///
-    /// This is the tested API that future auto-population (S6: turning a promoted idea/insight/task
-    /// into an entityRef node without a round trip through the generic `add_node` wire verb) is
-    /// meant to call — but it is NOT YET WIRED to any caller outside this module's
-    /// `#[cfg(test)]` suite. In particular the D6 strategic-goal seed does NOT use this method:
-    /// it calls the free fn [`seed_strategic_entity_ref`] instead, because that seed must run
-    /// INSIDE a transaction the caller already owns (`create_project`'s own tx for new projects,
-    /// and `migrate_v2`'s tx for the v1→v2 backfill, which needs the plain
-    /// `fn(&Transaction) -> rusqlite::Result<()>` shape to plug into the migration runner) —
-    /// whereas this method opens and commits its own transaction via
-    /// `self.conn().unchecked_transaction()` and additionally enforces `ensure_project_active`,
-    /// neither of which the seed's two call sites can accommodate (the project row `create_project`
-    /// seeds against isn't committed yet, and the migration backfill must not skip archived
-    /// projects). Do not "fix" this by routing the seed through this method — the INSERTs only
-    /// look similar; the transaction-ownership contracts genuinely differ.
-    #[allow(dead_code)] // tested S6 API, not yet called outside #[cfg(test)] — see doc comment above
+    /// Wired into `persistence::Db::set_insight_status`'s accept path (S-IDEA spec §6 D9, task
+    /// T4): accepting a research-formed insight seeds it as an `entity_ref` graph node, treating
+    /// a `Conflict` (re-accept after archive — archiving never removes the node) as benign. In
+    /// particular the D6 strategic-goal seed does NOT use this method: it calls the free fn
+    /// [`seed_strategic_entity_ref`] instead, because that seed must run INSIDE a transaction the
+    /// caller already owns (`create_project`'s own tx for new projects, and `migrate_v2`'s tx for
+    /// the v1→v2 backfill, which needs the plain `fn(&Transaction) -> rusqlite::Result<()>` shape
+    /// to plug into the migration runner) — whereas this method opens and commits its own
+    /// transaction via `self.conn().unchecked_transaction()` and additionally enforces
+    /// `ensure_project_active`, neither of which the seed's two call sites can accommodate (the
+    /// project row `create_project` seeds against isn't committed yet, and the migration backfill
+    /// must not skip archived projects). Do not "fix" this by routing the seed through this
+    /// method — the INSERTs only look similar; the transaction-ownership contracts genuinely
+    /// differ. For the SAME reason, `set_insight_status` cannot fold this call into its own open
+    /// transaction (SQLite has no nested `BEGIN` on one connection) — it calls this method
+    /// sequentially, AFTER its own status-update transaction commits.
     pub(crate) fn add_entity_ref_node(
         &self,
         project_id: &str,

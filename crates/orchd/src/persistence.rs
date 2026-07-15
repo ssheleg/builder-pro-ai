@@ -19,16 +19,18 @@
 //! pre-existing `mcp_artifact` row a run's tool call produces, no blob duplication) as ONE
 //! `Migration { upto: 4 }` step. Its CRUD + the D11 boot-reconcile query live in the sibling
 //! `crate::research` module, mirroring how `crate::mcp::registry`/`crate::graph` build their own
-//! `impl Db` blocks on top of this file's `conn()`/`now_ms()`/`OrchdPersistError` seam.
+//! `impl Db` blocks on top of this file's `conn()`/`now_ms()`/`OrchdPersistError` seam. Task T4
+//! additionally folds graph-ingest-on-accept (D9) into this file's own `set_insight_status` — see
+//! that method's doc comment.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bpa_orchd_proto::{
-    AuditRow, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
-    InsightStatus, McpArtifact, McpInvocation, Policy, PolicyRules, PolicyScope, Project,
-    ProjectStatus, RuleScope, RuleSet, TaskSource, TaskStatus,
+    AuditRow, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEntityType, Idea,
+    IdeaLifecycle, Insight, InsightStatus, McpArtifact, McpInvocation, Policy, PolicyRules,
+    PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, TaskSource, TaskStatus,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
@@ -2010,6 +2012,20 @@ impl Db {
     /// (D11: plain `Option<T>` on a NON-nullable column means "absent/null = unchanged"; `Some`
     /// overwrites, including with `""`). Guard uses the insight's OWN current `project_id`.
     /// Unknown `id` ⇒ `NotFound`.
+    ///
+    /// **Graph-ingest on accept (S-IDEA spec §6 D9, task T4).** When `status` transitions to
+    /// `Accepted`, this ALSO seeds the insight as an `entity_ref` graph node
+    /// (`crate::graph::Db::add_entity_ref_node`) — the owner-curated insight is graph-ingested,
+    /// never the raw untrusted `mcp_artifact` a research run produced (D9: "graph-ingest the
+    /// insight, not the raw artifact"). `add_entity_ref_node` opens and commits its OWN
+    /// transaction (see its doc comment: SQLite has no nested `BEGIN` on one connection, so it
+    /// can't be folded into the status-update `tx` above) — this call happens SEQUENTIALLY, after
+    /// that transaction has already committed. A `Conflict` (the node already exists — a
+    /// re-accept after an intervening archive; archiving never removes the node, S4's
+    /// orphan-on-delete model) is a BENIGN no-op, not an error. A project-less (orphan) insight
+    /// has no `Some(project_id)` to ingest against — the graph is project-scoped — so it is
+    /// silently skipped, same honest-degradation shape as everywhere else an orphan insight is
+    /// handled. `Archived`/`New` transitions never seed a node.
     pub fn set_insight_status(
         &self,
         id: &str,
@@ -2043,6 +2059,23 @@ impl Db {
 
         let insight = load_insight(&tx, id)?;
         tx.commit()?;
+
+        if matches!(status, InsightStatus::Accepted) {
+            if let Some(pid) = insight.project_id.as_deref() {
+                match self.add_entity_ref_node(
+                    pid,
+                    GraphEntityType::Insight,
+                    id,
+                    &insight.title,
+                    0.0,
+                    0.0,
+                ) {
+                    Ok(_) | Err(OrchdPersistError::Conflict(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
         Ok(insight)
     }
 
