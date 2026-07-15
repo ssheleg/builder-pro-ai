@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 const mcpAddServerMock = vi.fn();
 const mcpSetServerEnabledMock = vi.fn();
@@ -225,27 +226,54 @@ describe("ServersTab", () => {
 
   // ---- honest degradation ----
 
-  it("orchdDown:true disables add-server submit and connect, and neither fires its call", async () => {
-    useAppStore.setState({ mcpServers: [makeServer()], orchdDown: true }, false);
+  it("orchdDown:true disables ALL SIX mutating controls, and clicking each never calls its wrapper (spec §8, TasksList precedent)", async () => {
+    // Render with orchdDown:false FIRST so the fields whose OTHER disable-condition would keep a
+    // control disabled regardless of orchdDown can be populated — add-submit needs name+url, and
+    // bearer-submit needs a non-empty token whose own input is itself disabled once orchdDown.
+    // Then flip orchdDown:true, so every `disabled` below is provably owed to orchdDown ALONE
+    // rather than a co-condition (mirrors TasksList.test.tsx's "fill the title first" pattern).
+    useAppStore.setState({ mcpServers: [makeServer()], orchdDown: false }, false);
     render(<ServersTab />);
 
     fireEvent.change(screen.getByTestId("server-create-name"), { target: { value: "Prowl" } });
     fireEvent.change(screen.getByTestId("server-create-url"), {
       target: { value: "https://prowl.chat/mcp" },
     });
-    expect(screen.getByTestId("server-create-submit")).toHaveProperty("disabled", true);
-    fireEvent.click(screen.getByTestId("server-create-submit"));
-    expect(mcpAddServerMock).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByTestId("server-bearer-input-s1"), {
+      target: { value: "sekret-token" },
+    });
 
-    expect(screen.getByTestId("server-connect-s1")).toHaveProperty("disabled", true);
-    fireEvent.click(screen.getByTestId("server-connect-s1"));
-    expect(screen.queryByTestId("connect-dialog")).toBeNull();
-    expect(mcpConnectMock).not.toHaveBeenCalled();
+    act(() => useAppStore.setState({ orchdDown: true }, false));
 
-    expect(screen.getByTestId("server-toggle-enabled-s1")).toHaveProperty("disabled", true);
-    expect(screen.getByTestId("server-disconnect-s1")).toHaveProperty("disabled", true);
-    expect(screen.getByTestId("server-delete-s1")).toHaveProperty("disabled", true);
+    const controls = [
+      screen.getByTestId("server-create-submit"),
+      screen.getByTestId("server-connect-s1"),
+      screen.getByTestId("server-toggle-enabled-s1"),
+      screen.getByTestId("server-disconnect-s1"),
+      screen.getByTestId("server-delete-s1"),
+      screen.getByTestId("server-bearer-submit-s1"),
+    ];
+    for (const c of controls) expect(c).toHaveProperty("disabled", true);
+    // the bearer INPUT is disabled too (so its token can no longer be edited while down)
     expect(screen.getByTestId("server-bearer-input-s1")).toHaveProperty("disabled", true);
-    expect(screen.getByTestId("server-bearer-submit-s1")).toHaveProperty("disabled", true);
+
+    // Clicking a disabled control must be an inert no-op. `window.confirm` is stubbed to `true`
+    // up front (beforeEach) so that IF the delete handler wrongly fired, it would proceed to the
+    // wrapper — making a "not called" assertion meaningful rather than blocked by a false confirm.
+    const user = userEvent.setup();
+    for (const c of controls) {
+      // `user.click` faithfully emulates a real user click, which the browser suppresses on a
+      // disabled control — the honest emulation of "cannot interact". (Plain `fireEvent.click`
+      // dispatches a raw event that jsdom does not gate on `disabled` for every element type.)
+      await user.click(c);
+    }
+
+    expect(mcpAddServerMock).not.toHaveBeenCalled();
+    expect(mcpConnectMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("connect-dialog")).toBeNull();
+    expect(mcpSetServerEnabledMock).not.toHaveBeenCalled();
+    expect(mcpDisconnectMock).not.toHaveBeenCalled();
+    expect(mcpDeleteServerMock).not.toHaveBeenCalled();
+    expect(mcpSetServerBearerMock).not.toHaveBeenCalled();
   });
 });
