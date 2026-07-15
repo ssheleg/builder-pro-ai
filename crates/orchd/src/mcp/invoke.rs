@@ -121,7 +121,17 @@ where
     let start = Instant::now();
 
     // ---- Phase 2: network. NO `Db`/`MutexGuard` reference is alive here. ----
-    let session = match connect_fn(server, bearer).await {
+    //
+    // (S-IDEA D12): the connect/`initialize` handshake is bounded by `server.timeout_ms` exactly
+    // like the `tools/call` RPC below — a peer that accepts the connection but never completes
+    // `initialize` (dead peer, silent firewall drop, overloaded stdio child) must not hang this
+    // task forever. An elapsed connect maps to the SAME `McpError::Timeout` the `tools/call`
+    // timeout branch produces, so `classify_error_kind` reports `"timeout"` either way.
+    let connect_result = match tokio::time::timeout(timeout, connect_fn(server, bearer)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(bpa_mcp::McpError::Timeout),
+    };
+    let session = match connect_result {
         Ok(session) => session,
         Err(e) => {
             let new = failed_invocation(
@@ -368,6 +378,28 @@ mod tests {
                 account_id: None,
                 enabled: true,
                 timeout_ms: 5_000,
+                max_retries: 2,
+            })
+            .unwrap()
+    }
+
+    async fn add_server_with_timeout_ms(db: &Arc<Mutex<Db>>, timeout_ms: i64) -> McpServerRow {
+        db.lock()
+            .await
+            .add_mcp_server(NewMcpServer {
+                name: "Prowl".to_string(),
+                transport: McpTransport::Http,
+                url: Some("https://example.com/mcp".to_string()),
+                command: None,
+                args: vec![],
+                env: Default::default(),
+                scope: McpScope::Global,
+                project_id: None,
+                auth_kind: McpAuthKind::None,
+                secret_ref: None,
+                account_id: None,
+                enabled: true,
+                timeout_ms,
                 max_retries: 2,
             })
             .unwrap()
@@ -784,6 +816,56 @@ mod tests {
             .list_artifacts(None, Some(&server.id), None)
             .unwrap()
             .is_empty());
+    }
+
+    // ---- connect handshake never resolves (S-IDEA D12): a stalled peer that accepts the
+    // connection but never completes `initialize` must not hang the caller forever — the connect
+    // step is bounded by `server.timeout_ms`, exactly like the `tools/call` RPC already is. ----
+
+    #[tokio::test]
+    async fn call_tool_connect_that_never_resolves_times_out_not_hangs() {
+        let db = new_db();
+        let server = add_server_with_timeout_ms(&db, 50).await;
+        add_tool(&db, &server.id, "search").await;
+
+        // A `connect_fn` whose future never resolves — models a peer that accepts the TCP/stdio
+        // connection but stalls forever inside the MCP `initialize` round-trip.
+        let connect_fn = |_server: McpServerRow, _bearer: Option<String>| {
+            std::future::pending::<Result<FakeSession, McpError>>()
+        };
+
+        let err = call_tool(&db, &server.id, "search", "{}", None, connect_fn)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdMcpError::Mcp(McpError::Timeout)),
+            "a connect that never resolves must time out as McpError::Timeout, got: {err:?}"
+        );
+
+        let invocations = db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap();
+        assert_eq!(
+            invocations.len(),
+            1,
+            "a connect-timeout is still a terminal failed attempt — exactly one invocation row"
+        );
+        assert!(!invocations[0].ok);
+        assert_eq!(
+            invocations[0].error_kind.as_deref(),
+            Some("timeout"),
+            "classify_error_kind must map the connect-timeout the same as a tools/call timeout"
+        );
+        assert!(
+            db.lock()
+                .await
+                .list_artifacts(None, Some(&server.id), None)
+                .unwrap()
+                .is_empty(),
+            "a connect that never produced a session must never write an artifact"
+        );
     }
 
     // ---- stdio-exec consent gate on the PER-CALL reconnect (S-EXT §6/D6/D10, task T16, closes
