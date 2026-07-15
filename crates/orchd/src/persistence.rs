@@ -153,12 +153,20 @@ impl Db {
         Ok(db)
     }
 
-    /// Force a WAL checkpoint, flushing the write-ahead log into the main database file
-    /// (graceful-shutdown helper; spec §5 "flush + WAL checkpoint on graceful shutdown").
-    /// Best-effort: any failure is a typed error, never a panic.
+    /// Best-effort WAL checkpoint on graceful shutdown: fold as much of the write-ahead log into
+    /// the main database file as possible so the next boot's WAL replay stays small (spec §5).
+    ///
+    /// Uses **PASSIVE** mode, NOT `TRUNCATE`/`RESTART`. PASSIVE checkpoints every frame it can
+    /// without ever waiting on a reader/writer lock and returns immediately; TRUNCATE additionally
+    /// waits for all readers to finish so it can zero the WAL file, and that wait can BLOCK — under
+    /// a slow CI runner (a lingering WAL holder / filesystem timing) the drain's `TRUNCATE` hung
+    /// past the e2e shutdown timeout, deterministically reddening `phase2`. A checkpoint documented
+    /// as "best-effort" must never block the graceful-shutdown ack, so PASSIVE is the correct mode:
+    /// correctness is unaffected — SQLite replays any un-checkpointed WAL tail on the next open
+    /// (which the relaunch does anyway). Any failure is a typed error, never a panic.
     pub fn checkpoint(&self) -> Result<(), PersistError> {
         self.conn
-            .pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .pragma_update(None, "wal_checkpoint", "PASSIVE")
             .map_err(classify)?;
         Ok(())
     }
