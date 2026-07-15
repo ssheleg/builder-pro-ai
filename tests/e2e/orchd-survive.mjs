@@ -49,6 +49,7 @@ import {
   pidAlive,
   killProcessGroup,
 } from "./lib/daemon-harness.mjs";
+import { startStubMcpServer } from "./lib/stub-mcp-server.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..", "..");
 const ORCHD_BIN = process.env.BPA_ORCHD ?? path.join(REPO, "target", "debug", "bpa-orchd");
@@ -178,6 +179,53 @@ function encodeOrchdRequest(req) {
       };
     case "GraphListProject":
       return { GraphListProject: { project_id: req.projectId } };
+    // S-EXT MCP (spec §5, appended — order FROZEN append-only) — only the 6 verbs phase6 drives.
+    // `McpTransport`/`McpScope`/`McpAuthKind` are unit-variant entity enums with `#[serde(rename_
+    // all = "camelCase")]` (spec §5 comment: "the new entity structs ... DO carry
+    // #[serde(rename_all="camelCase")]"), so callers pass the already-lowercased wire string
+    // directly (e.g. `"http"`/`"global"`/`"none"`) — verified against the committed
+    // `src/ipc/orchd-types.ts` (`McpTransport = "http" | "stdio"`, `McpScope = "global" |
+    // "project"`, `McpAuthKind = "none" | "bearer" | "oauth"`), same convention as `GraphAddNode`'s
+    // `kind`/`GraphAddEdge`'s `kind` above.
+    case "McpAddServer":
+      return {
+        McpAddServer: {
+          name: req.name,
+          transport: req.transport,
+          url: req.url ?? null,
+          command: req.command ?? null,
+          args: req.args ?? null,
+          env: req.env ?? null,
+          scope: req.scope,
+          project_id: req.projectId ?? null,
+          auth_kind: req.authKind,
+          timeout_ms: req.timeoutMs ?? null,
+          max_retries: req.maxRetries ?? null,
+        },
+      };
+    case "TrustGrantConsent":
+      return { TrustGrantConsent: { server_id: req.serverId, kind: req.kind } };
+    case "McpConnect":
+      return { McpConnect: { id: req.id } };
+    case "McpListTools":
+      return { McpListTools: { server_id: req.serverId } };
+    case "McpCallTool":
+      return {
+        McpCallTool: {
+          server_id: req.serverId,
+          tool_name: req.toolName,
+          args_json: req.argsJson,
+          project_id: req.projectId ?? null,
+        },
+      };
+    case "McpListArtifacts":
+      return {
+        McpListArtifacts: {
+          project_id: req.projectId ?? null,
+          server_id: req.serverId ?? null,
+          limit: req.limit ?? null,
+        },
+      };
     default:
       throw new Error(`encodeOrchdRequest: unsupported request type ${req.t}`);
   }
@@ -251,6 +299,23 @@ function decodeOrchdResponse(value) {
     case "GraphNode":
     case "GraphEdge":
     case "GraphView":
+    // S-EXT MCP (spec §5, appended — order FROZEN append-only): `McpServer`/`McpTool`/
+    // `McpConnectReport`/`McpCallResult`/`McpArtifact` are newtype variants over camelCase-serde
+    // entity structs (same convention as `GraphNode`/`GraphEdge`/`GraphView` above — verified
+    // against `src/ipc/orchd-types.ts`'s generated field names, e.g. `McpConnectReport =
+    // {protocolVersion, toolCount}`, `McpCallResult = {artifactId, invocationId, contentJson,
+    // isError}`, `McpArtifact = {id, invocationId, serverId, toolName, projectId, contentJson,
+    // contentText, isUntrusted, createdAt}`); `McpServers`/`McpTools`/`McpInvocations`/
+    // `McpArtifacts` are the `Vec<...>` newtype siblings, decoded identically.
+    case "McpServer":
+    case "McpServers":
+    case "McpTool":
+    case "McpTools":
+    case "McpConnectReport":
+    case "McpCallResult":
+    case "McpInvocations":
+    case "McpArtifacts":
+    case "McpArtifact":
       return { t: variant, value: inner };
     case "ImportReport":
       return {
@@ -296,6 +361,20 @@ function decodeOrchdPush(value) {
     // snake_case-on-the-wire convention as `GoalsChanged`/`TasksChanged` above.
     case "GraphChanged":
       return { t: "GraphChanged", projectId: inner.project_id };
+    // S-EXT MCP (spec §5, appended — order FROZEN append-only): coarse-invalidation pushes, all
+    // struct variants with snake_case wire fields (same convention as `GoalsChanged`/
+    // `TasksChanged`/`GraphChanged` above). Decoded (not just tolerated) so an unexpected-but-valid
+    // push emitted mid-phase6 (e.g. `McpArtifactsChanged` after `McpCallTool`) never throws —
+    // mirrors this function's own doc comment ("the full enum is decoded ... so an
+    // unexpected-but-valid push never throws mid-test").
+    case "McpServersChanged":
+      return { t: "McpServersChanged", projectId: inner.project_id ?? null };
+    case "McpToolsChanged":
+      return { t: "McpToolsChanged", serverId: inner.server_id };
+    case "McpArtifactsChanged":
+      return { t: "McpArtifactsChanged", projectId: inner.project_id ?? null };
+    case "McpInvocationLogged":
+      return { t: "McpInvocationLogged", serverId: inner.server_id };
     default:
       throw new Error(`decodeOrchdPush: unknown OrchdPush variant ${variant}`);
   }
@@ -414,6 +493,7 @@ const DB_PATH = path.join(APP_SUPPORT_DIR, "orchd.db");
 const cleanup = {
   daemonPid: null,
   conns: [],
+  stubMcpServer: null,
 };
 
 /** Poll `pidAlive` until `pid` exits or `deadlineMs` elapses; throws if it never exits. */
@@ -795,6 +875,146 @@ async function main() {
 
   log("phase5 OK: cross-project graph edge survived restart");
 
+  // ---- phase 6: MCP tool artifact survives restart (S-EXT Phase-1 DoD) ----
+  // Spawn a local stub MCP server (Streamable HTTP) -> register it -> grant connect consent ->
+  // McpConnect (tools cached) -> McpListTools (echo present) -> McpCallTool("echo") -> assert a
+  // persisted artifact -> close the stub (proves the artifact does NOT depend on the MCP server
+  // still being reachable) -> OrchdShutdown{drain:true} -> relaunch -> McpListArtifacts still
+  // returns the artifact with its content intact (durable across restart, spec §9's DoD).
+  log(
+    "phase6: spawn stub MCP server + McpAddServer + TrustGrantConsent + McpConnect + " +
+      "McpListTools + McpCallTool(echo)",
+  );
+
+  const stubMcpServer = await startStubMcpServer();
+  cleanup.stubMcpServer = stubMcpServer;
+  log(`phase6: stub MCP server listening at ${stubMcpServer.url}`);
+
+  const addServerResp = await orchdRequest(conn, {
+    t: "McpAddServer",
+    name: "E2E Stub MCP",
+    transport: "http",
+    url: stubMcpServer.url,
+    command: null,
+    args: null,
+    env: null,
+    scope: "global",
+    projectId: null,
+    authKind: "none",
+    timeoutMs: null,
+    maxRetries: null,
+  });
+  assert.equal(addServerResp.t, "McpServer", `McpAddServer -> ${JSON.stringify(addServerResp)}`);
+  const mcpServerId = addServerResp.value.id;
+  assert.equal(
+    addServerResp.value.url,
+    stubMcpServer.url,
+    "registered server must carry the stub's url verbatim",
+  );
+  assert.equal(addServerResp.value.transport, "http");
+  assert.equal(addServerResp.value.scope, "global");
+  assert.ok(addServerResp.value.enabled, "a freshly added server defaults to enabled");
+
+  const consentResp = await orchdRequest(conn, {
+    t: "TrustGrantConsent",
+    serverId: mcpServerId,
+    kind: "connect",
+  });
+  assert.equal(consentResp.t, "Ack", `TrustGrantConsent -> ${JSON.stringify(consentResp)}`);
+
+  const connectResp = await orchdRequest(conn, { t: "McpConnect", id: mcpServerId });
+  assert.equal(
+    connectResp.t,
+    "McpConnectReport",
+    `McpConnect -> ${JSON.stringify(connectResp)}`,
+  );
+  assert.ok(
+    connectResp.value.toolCount >= 1,
+    `expected >=1 tool advertised by the stub, got ${JSON.stringify(connectResp.value)}`,
+  );
+  assert.ok(
+    connectResp.value.protocolVersion && connectResp.value.protocolVersion.length > 0,
+    "McpConnectReport must carry a negotiated protocol version",
+  );
+
+  const listToolsResp = await orchdRequest(conn, { t: "McpListTools", serverId: mcpServerId });
+  assert.equal(listToolsResp.t, "McpTools", `McpListTools -> ${JSON.stringify(listToolsResp)}`);
+  const echoTool = listToolsResp.value.find((tool) => tool.name === "echo");
+  assert.ok(echoTool, `expected an "echo" tool in ${JSON.stringify(listToolsResp.value)}`);
+  assert.ok(echoTool.enabled, "a freshly cached tool defaults to enabled");
+
+  const callResp = await orchdRequest(conn, {
+    t: "McpCallTool",
+    serverId: mcpServerId,
+    toolName: "echo",
+    argsJson: JSON.stringify({ msg: "restart-survivor" }),
+    projectId: null,
+  });
+  assert.equal(callResp.t, "McpCallResult", `McpCallTool -> ${JSON.stringify(callResp)}`);
+  assert.equal(
+    callResp.value.isError,
+    false,
+    `echo call must not be a tool-level error: ${JSON.stringify(callResp.value)}`,
+  );
+  assert.ok(callResp.value.artifactId, "expected a persisted artifact id");
+  assert.ok(
+    callResp.value.contentJson.includes("restart-survivor"),
+    `expected the echoed message in the call result content: ${callResp.value.contentJson}`,
+  );
+  const mcpArtifactId = callResp.value.artifactId;
+
+  log(
+    `phase6: registered server ${mcpServerId}, connected (protocol ` +
+      `${connectResp.value.protocolVersion}), called echo -> artifact ${mcpArtifactId}`,
+  );
+
+  // Close the stub NOW, before the restart — `McpListArtifacts` below reads straight from
+  // `orchd.db`, never re-touching the MCP server, so the artifact's durability must not depend on
+  // the stub still being reachable after this point.
+  await stubMcpServer.close();
+  cleanup.stubMcpServer = null;
+  log("phase6: stub MCP server closed (artifact durability must not depend on it)");
+
+  await shutdownAndWaitExit(conn);
+  log(`phase6 OK: orchd (pid ${cleanup.daemonPid}) process exited (pre-mcp-restart)`);
+
+  conn = await bootAndConnect();
+  assert.equal(
+    conn.chosenVersion,
+    1,
+    `post-mcp-restart preamble handshake negotiated unexpected version: ${JSON.stringify(conn)}`,
+  );
+
+  const artifactsResp = await orchdRequest(conn, {
+    t: "McpListArtifacts",
+    projectId: null,
+    serverId: mcpServerId,
+    limit: null,
+  });
+  assert.equal(
+    artifactsResp.t,
+    "McpArtifacts",
+    `McpListArtifacts -> ${JSON.stringify(artifactsResp)}`,
+  );
+  const rehydratedArtifact = artifactsResp.value.find((a) => a.id === mcpArtifactId);
+  assert.ok(
+    rehydratedArtifact,
+    `artifact ${mcpArtifactId} lost across orchd restart (artifacts: ` +
+      `${JSON.stringify(artifactsResp.value.map((a) => a.id))})`,
+  );
+  assert.ok(
+    rehydratedArtifact.contentJson.includes("restart-survivor"),
+    `rehydrated artifact lost its content across orchd restart: ${rehydratedArtifact.contentJson}`,
+  );
+  assert.equal(
+    rehydratedArtifact.serverId,
+    mcpServerId,
+    "rehydrated artifact must still reference its source server",
+  );
+  assert.ok(rehydratedArtifact.isUntrusted, "spec D9: every mcp_artifact is is_untrusted=1");
+
+  log("phase6 OK: mcp tool artifact survived restart");
+
   log("ALL PHASES PASSED");
 }
 
@@ -803,6 +1023,15 @@ async function main() {
  * independently best-effort — this is cleanup code, not test assertions.
  */
 async function cleanupAll() {
+  if (cleanup.stubMcpServer != null) {
+    try {
+      await cleanup.stubMcpServer.close();
+    } catch {
+      /* best-effort cleanup */
+    }
+    cleanup.stubMcpServer = null;
+  }
+
   for (const c of cleanup.conns) {
     try {
       c.sock.destroy();
