@@ -10,11 +10,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, Account, AccountAuthKind, Goal, GoalKind, GraphEdge, GraphEdgeKind,
-    GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact, McpAuthKind,
-    McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport, OrchdErrorCode,
-    OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Project, RuleFileState,
-    RuleScope, RuleSetView, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION,
+    encode_orchd_frame, Account, AccountAuthKind, ConnectorOp, Goal, GoalKind, GraphEdge,
+    GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
+    McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
+    OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Project,
+    RuleFileState, RuleScope, RuleSetView, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION,
     ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
@@ -374,6 +374,13 @@ fn expect_accounts(res: OrchdResponse) -> Vec<Account> {
     match res {
         OrchdResponse::Accounts(v) => v,
         other => panic!("expected Accounts, got {other:?}"),
+    }
+}
+
+fn expect_connector_ops(res: OrchdResponse) -> Vec<ConnectorOp> {
+    match res {
+        OrchdResponse::ConnectorOps(v) => v,
+        other => panic!("expected ConnectorOps, got {other:?}"),
     }
 }
 
@@ -1807,6 +1814,30 @@ fn connector_keychain_available() -> bool {
     }
 }
 
+/// RAII Keychain cleanup for a connector account created mid-test (task T13a review). Fires
+/// `bpa_secrets::delete` for the account's `apikey`/`token`/`refresh` refs on drop, so an
+/// assertion panic BETWEEN the `ConnectorAddApiKey` that creates the real Keychain entry and the
+/// explicit `ConnectorDeleteAccount` at the end never leaves a permanent orphan entry in the
+/// developer's/CI runner's real login keychain (service `ai.builderpro.desktop.account`, account
+/// `{uuid}:apikey`). Mirrors `connectors::accounts`'s own `DeleteAccountSecretsOnDrop` — which is
+/// `#[cfg(test)]`-private to that crate, so unreachable from this separate integration-test crate;
+/// a thin owned-id equivalent is duplicated here (owned `String`, since the guard must outlive the
+/// `.await` points and live to the end of the test). Belt-and-suspenders: the tests still exercise
+/// the real `ConnectorDeleteAccount` delete path explicitly; this guard only covers the panic
+/// case. Deleting an already-deleted ref is a harmless no-op (`bpa_secrets::delete` returns
+/// `NotFound`, ignored) — so this never conflicts with the explicit delete.
+struct DeleteAccountSecretsOnDrop {
+    account_id: String,
+}
+
+impl Drop for DeleteAccountSecretsOnDrop {
+    fn drop(&mut self) {
+        for kind in ["apikey", "token", "refresh"] {
+            let _ = bpa_secrets::delete(&bpa_secrets::account_ref(&self.account_id, kind));
+        }
+    }
+}
+
 /// Spawns a minimal loopback REST stub for `ConnectorInvoke` dispatch tests: `GET /ok` replies
 /// `200 {"ok": true}` unconditionally. This only needs to prove the WIRE verb round-trips end to
 /// end (dispatch -> `connectors::adapter::invoke` -> a real HTTP call -> persisted artifact) —
@@ -1852,6 +1883,12 @@ async fn connector_add_api_key_list_accounts_delete_account_dispatch() {
         })
         .await,
     );
+    // RAII cleanup guard installed BEFORE any subsequent assertion (task T13a review): a panic
+    // below must never leave the real Keychain entry orphaned. The explicit ConnectorDeleteAccount
+    // at the end still tests the delete path; this is the panic-case backstop.
+    let _account_cleanup = DeleteAccountSecretsOnDrop {
+        account_id: account.id.clone(),
+    };
     assert_eq!(account.provider, "generic-rest");
     assert_eq!(account.label, "My REST");
     assert_eq!(account.auth_kind, AccountAuthKind::Apikey);
@@ -1918,6 +1955,12 @@ async fn connector_invoke_against_rest_stub_returns_result_and_broadcasts_artifa
         })
         .await,
     );
+    // RAII cleanup guard installed BEFORE any subsequent assertion (task T13a review) — see the
+    // sibling test's comment; the explicit ConnectorDeleteAccount at the end still tests the
+    // delete path, this backstops the panic case.
+    let _account_cleanup = DeleteAccountSecretsOnDrop {
+        account_id: account.id.clone(),
+    };
 
     // c2 connects only after the account-add setup push already landed, so it observes exactly
     // the McpArtifactsChanged push this test is proving.
@@ -1965,6 +2008,56 @@ async fn connector_invoke_against_rest_stub_returns_result_and_broadcasts_artifa
     assert!(artifact.is_untrusted, "spec D9: always untrusted");
     assert_eq!(artifact.account_id.as_deref(), Some(account.id.as_str()));
     assert_eq!(artifact.server_id, None);
+
+    expect_ack(
+        c1.request(OrchdRequest::ConnectorDeleteAccount {
+            id: account.id.clone(),
+        })
+        .await,
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn connector_list_ops_returns_the_generic_rest_adapter_ops() {
+    if !connector_keychain_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+    let mut c1 = Client::connect(&socket).await;
+
+    // ConnectorListOps resolves the account's provider adapter, so it needs a real account row —
+    // an api-key `generic-rest` account is the cheapest (no OAuth flow, no provider registry).
+    let account = expect_account(
+        c1.request(OrchdRequest::ConnectorAddApiKey {
+            provider: "generic-rest".to_string(),
+            label: "My REST".to_string(),
+            api_key: "test-api-key-listops-13".to_string(),
+        })
+        .await,
+    );
+    let _account_cleanup = DeleteAccountSecretsOnDrop {
+        account_id: account.id.clone(),
+    };
+
+    // ---- ConnectorListOps -> ConnectorOps (the generic-rest adapter's get/post ops), NO push ----
+    let ops = expect_connector_ops(
+        c1.request(OrchdRequest::ConnectorListOps {
+            account_id: account.id.clone(),
+        })
+        .await,
+    );
+    let op_names: Vec<&str> = ops.iter().map(|o| o.name.as_str()).collect();
+    assert!(
+        op_names.contains(&"get") && op_names.contains(&"post"),
+        "generic-rest adapter must expose get/post ops, got {op_names:?}"
+    );
 
     expect_ack(
         c1.request(OrchdRequest::ConnectorDeleteAccount {
