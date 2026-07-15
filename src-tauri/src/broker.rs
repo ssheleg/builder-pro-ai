@@ -64,6 +64,16 @@ pub const EV_ORCHD_TASKS_CHANGED: &str = "orchd://tasks-changed";
 pub const EV_ORCHD_RULESET_CHANGED: &str = "orchd://ruleset-changed";
 /// S4 knowledge graph (spec §3, appended — order FROZEN append-only). Payload `{ projectId }`.
 pub const EV_ORCHD_GRAPH_CHANGED: &str = "orchd://graph-changed";
+/// S-EXT MCP coarse-invalidation quartet (spec §5/§8, appended — order FROZEN append-only,
+/// mirrors the `EV_ORCHD_GRAPH_CHANGED` precedent). Payload `{ projectId }` (`projectId` may be
+/// `null` — a global-scope server/artifact change).
+pub const EV_ORCHD_MCP_SERVERS_CHANGED: &str = "orchd://mcp-servers-changed";
+/// Payload `{ serverId }`.
+pub const EV_ORCHD_MCP_TOOLS_CHANGED: &str = "orchd://mcp-tools-changed";
+/// Payload `{ projectId }` (may be `null`, see [`EV_ORCHD_MCP_SERVERS_CHANGED`]).
+pub const EV_ORCHD_MCP_ARTIFACTS_CHANGED: &str = "orchd://mcp-artifacts-changed";
+/// Payload `{ serverId }`.
+pub const EV_ORCHD_MCP_INVOCATION_LOGGED: &str = "orchd://mcp-invocation-logged";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -215,6 +225,27 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
         OrchdPush::GraphChanged { project_id } => BrokerAction::Emit(
             EV_ORCHD_GRAPH_CHANGED,
             serde_json::json!({ "projectId": project_id }),
+        ),
+        // S-EXT MCP (spec §5, appended — order FROZEN append-only), mirrors GraphChanged's
+        // camelCase-reshape precedent above. `project_id` on `McpServersChanged`/
+        // `McpArtifactsChanged` is `Option<String>` (global-scope changes carry `None`); `json!`
+        // serializes that to JSON `null`, which the frontend's coarse-invalidation refetch (T8)
+        // treats as "refresh everything", same as `RuleSetChanged`'s optional `project_id` above.
+        OrchdPush::McpServersChanged { project_id } => BrokerAction::Emit(
+            EV_ORCHD_MCP_SERVERS_CHANGED,
+            serde_json::json!({ "projectId": project_id }),
+        ),
+        OrchdPush::McpToolsChanged { server_id } => BrokerAction::Emit(
+            EV_ORCHD_MCP_TOOLS_CHANGED,
+            serde_json::json!({ "serverId": server_id }),
+        ),
+        OrchdPush::McpArtifactsChanged { project_id } => BrokerAction::Emit(
+            EV_ORCHD_MCP_ARTIFACTS_CHANGED,
+            serde_json::json!({ "projectId": project_id }),
+        ),
+        OrchdPush::McpInvocationLogged { server_id } => BrokerAction::Emit(
+            EV_ORCHD_MCP_INVOCATION_LOGGED,
+            serde_json::json!({ "serverId": server_id }),
         ),
     }
 }
@@ -746,6 +777,81 @@ mod tests {
                 assert_eq!(payload["projectId"], "proj-1");
                 // snake_case key must NOT leak through.
                 assert!(payload.get("project_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    // ── map_orchd_push: S-EXT MCP quartet, one test per OrchdPush::Mcp* variant (spec §5,
+    // S-EXT T7) — mirrors the GoalsChanged/GraphChanged camelCase-payload tests above exactly ──
+
+    #[test]
+    fn orchd_mcp_servers_changed_maps_to_emit_with_camel_case_project_id_payload() {
+        let action = map_orchd_push(OrchdPush::McpServersChanged {
+            project_id: Some("proj-1".to_string()),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_MCP_SERVERS_CHANGED);
+                assert_eq!(payload["projectId"], "proj-1");
+                assert!(payload.get("project_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_mcp_servers_changed_global_scope_has_null_project_id() {
+        let action = map_orchd_push(OrchdPush::McpServersChanged { project_id: None });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_MCP_SERVERS_CHANGED);
+                assert!(payload["projectId"].is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_mcp_tools_changed_maps_to_emit_with_camel_case_server_id_payload() {
+        let action = map_orchd_push(OrchdPush::McpToolsChanged {
+            server_id: "srv-1".to_string(),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_MCP_TOOLS_CHANGED);
+                assert_eq!(payload["serverId"], "srv-1");
+                assert!(payload.get("server_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_mcp_artifacts_changed_maps_to_emit_with_camel_case_project_id_payload() {
+        let action = map_orchd_push(OrchdPush::McpArtifactsChanged {
+            project_id: Some("proj-2".to_string()),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_MCP_ARTIFACTS_CHANGED);
+                assert_eq!(payload["projectId"], "proj-2");
+                assert!(payload.get("project_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_mcp_invocation_logged_maps_to_emit_with_camel_case_server_id_payload() {
+        let action = map_orchd_push(OrchdPush::McpInvocationLogged {
+            server_id: "srv-2".to_string(),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_MCP_INVOCATION_LOGGED);
+                assert_eq!(payload["serverId"], "srv-2");
+                assert!(payload.get("server_id").is_none());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

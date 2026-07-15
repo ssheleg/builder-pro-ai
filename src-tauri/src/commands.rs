@@ -23,13 +23,15 @@
 //! OrchdClientError>` impl below. `err_from_orchd_response` still matches `OrchdResponse::Error`
 //! defensively (belt-and-suspenders, same as `err_from_response` above), never as the only path.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bpa_orchd_proto::{
     DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEdge, GraphEdgeKind,
     GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle, Insight,
-    InsightStatus, OrchdRequest, OrchdResponse, PolicyRules, Project, RuleScope, RuleSetView,
-    TaskSource, TaskStatus,
+    InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport, McpInvocation,
+    McpScope, McpServer, McpTool, McpTransport, OrchdRequest, OrchdResponse, PolicyRules, Project,
+    RuleScope, RuleSetView, TaskSource, TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -726,6 +728,72 @@ fn expect_neighborhood(res: OrchdResponse) -> Result<GraphNeighborhood, CommandE
 fn expect_graph_nodes(res: OrchdResponse) -> Result<Vec<GraphNode>, CommandError> {
     match res {
         OrchdResponse::GraphNodes(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+// ── S-EXT MCP orchd response unwrappers (spec §5, appended) — mirrors the S4 graph block
+// exactly, one unwrapper per `OrchdResponse::Mcp*` variant ────────────────────────────────────
+
+fn expect_mcp_server(res: OrchdResponse) -> Result<McpServer, CommandError> {
+    match res {
+        OrchdResponse::McpServer(s) => Ok(s),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_servers(res: OrchdResponse) -> Result<Vec<McpServer>, CommandError> {
+    match res {
+        OrchdResponse::McpServers(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_tool(res: OrchdResponse) -> Result<McpTool, CommandError> {
+    match res {
+        OrchdResponse::McpTool(t) => Ok(t),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_tools(res: OrchdResponse) -> Result<Vec<McpTool>, CommandError> {
+    match res {
+        OrchdResponse::McpTools(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_connect_report(res: OrchdResponse) -> Result<McpConnectReport, CommandError> {
+    match res {
+        OrchdResponse::McpConnectReport(r) => Ok(r),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_call_result(res: OrchdResponse) -> Result<McpCallResult, CommandError> {
+    match res {
+        OrchdResponse::McpCallResult(r) => Ok(r),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_invocations(res: OrchdResponse) -> Result<Vec<McpInvocation>, CommandError> {
+    match res {
+        OrchdResponse::McpInvocations(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_artifacts(res: OrchdResponse) -> Result<Vec<McpArtifact>, CommandError> {
+    match res {
+        OrchdResponse::McpArtifacts(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_mcp_artifact(res: OrchdResponse) -> Result<McpArtifact, CommandError> {
+    match res {
+        OrchdResponse::McpArtifact(a) => Ok(a),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -1927,6 +1995,275 @@ pub async fn orchd_graph_search(
         state
             .orchd()?
             .request(OrchdRequest::GraphSearch { query, project_id })
+            .await?,
+    )
+}
+
+// ── S-EXT MCP orchd #[tauri::command] surface (spec §5, appended — S-EXT T7) ───────────────────
+//
+// Same one-thin-command-per-verb shape as the S4 graph block above, over the `OrchdRequest::Mcp*`
+// / `TrustGrantConsent` verbs (spec §5's frozen-append-only wire additions). `McpConnect` denied
+// for missing/stale consent surfaces as `OrchdResponse::Error{code: Consent, ..}`, an `McpCallTool`
+// against a disabled tool surfaces as `Error{code: Policy, ..}` — both already flow through
+// `err_from_orchd_response`/`From<OrchdClientError>` into `CommandError::Daemon{code, message}`
+// exactly like every other daemon error, no special-casing needed here (spec §9 doc block above).
+// `mcp_set_server_bearer`'s `token` is passed straight through to the request struct and never
+// touched otherwise — it is not logged, echoed, or included in any `Debug`/tracing output in this
+// module (spec §5: "token NEVER logged/echoed").
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn mcp_add_server(
+    state: State<'_, AppState>,
+    name: String,
+    transport: McpTransport,
+    url: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<BTreeMap<String, String>>,
+    scope: McpScope,
+    project_id: Option<String>,
+    auth_kind: McpAuthKind,
+    timeout_ms: Option<i64>,
+    max_retries: Option<i64>,
+) -> Result<McpServer, CommandError> {
+    expect_mcp_server(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpAddServer {
+                name,
+                transport,
+                url,
+                command,
+                args,
+                env,
+                scope,
+                project_id,
+                auth_kind,
+                timeout_ms,
+                max_retries,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_list_servers(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<McpServer>, CommandError> {
+    expect_mcp_servers(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpListServers { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn mcp_update_server(
+    state: State<'_, AppState>,
+    id: String,
+    name: Option<String>,
+    url: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<BTreeMap<String, String>>,
+    auth_kind: Option<McpAuthKind>,
+    timeout_ms: Option<i64>,
+    max_retries: Option<i64>,
+) -> Result<McpServer, CommandError> {
+    expect_mcp_server(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpUpdateServer {
+                id,
+                name,
+                url,
+                command,
+                args,
+                env,
+                auth_kind,
+                timeout_ms,
+                max_retries,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_set_server_enabled(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<McpServer, CommandError> {
+    expect_mcp_server(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpSetServerEnabled { id, enabled })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_delete_server(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpDeleteServer { id })
+            .await?,
+    )
+}
+
+/// `token` -> Keychain, ref -> DB, on the orchd side; this wrapper never logs or echoes it (spec
+/// §5).
+#[tauri::command]
+pub async fn mcp_set_server_bearer(
+    state: State<'_, AppState>,
+    id: String,
+    token: String,
+) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpSetServerBearer { id, token })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_connect(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<McpConnectReport, CommandError> {
+    expect_mcp_connect_report(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpConnect { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_disconnect(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpDisconnect { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_list_tools(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<Vec<McpTool>, CommandError> {
+    expect_mcp_tools(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpListTools { server_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_set_tool_enabled(
+    state: State<'_, AppState>,
+    tool_id: String,
+    enabled: bool,
+) -> Result<McpTool, CommandError> {
+    expect_mcp_tool(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpSetToolEnabled { tool_id, enabled })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_call_tool(
+    state: State<'_, AppState>,
+    server_id: String,
+    tool_name: String,
+    args_json: String,
+    project_id: Option<String>,
+) -> Result<McpCallResult, CommandError> {
+    expect_mcp_call_result(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpCallTool {
+                server_id,
+                tool_name,
+                args_json,
+                project_id,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_list_invocations(
+    state: State<'_, AppState>,
+    server_id: Option<String>,
+    project_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<McpInvocation>, CommandError> {
+    expect_mcp_invocations(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpListInvocations {
+                server_id,
+                project_id,
+                limit,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_list_artifacts(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    server_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<McpArtifact>, CommandError> {
+    expect_mcp_artifacts(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpListArtifacts {
+                project_id,
+                server_id,
+                limit,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn mcp_get_artifact(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<McpArtifact, CommandError> {
+    expect_mcp_artifact(
+        state
+            .orchd()?
+            .request(OrchdRequest::McpGetArtifact { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn trust_grant_consent(
+    state: State<'_, AppState>,
+    server_id: String,
+    kind: String,
+) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::TrustGrantConsent { server_id, kind })
             .await?,
     )
 }
@@ -4003,6 +4340,126 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             CommandError::Daemon { code, message } => {
                 assert_eq!(code, "Invariant");
                 assert_eq!(message, "node label must not be empty");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    // ── S-EXT MCP orchd_mcp_*/trust_* commands (spec §5, S-EXT T7) ─────────────────────────────
+    //
+    // Same rationale as the S4 graph block above: `mcp_add_server` stands in for the happy-path
+    // shape shared by all 15 (`expect_*(client.request(req).await?)`); the `Consent`/`Policy`
+    // error-code mappings are proven once each, directly, since they are the two NEW
+    // `OrchdErrorCode` variants this slice's daemon side (T5/T6) introduced specifically for the
+    // trust choke-point (spec §6) and are not exercised by any existing sessiond/graph test.
+
+    #[tokio::test]
+    async fn mcp_add_server_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::McpAddServer {
+                name,
+                transport,
+                url,
+                command,
+                args,
+                env,
+                scope,
+                project_id,
+                auth_kind,
+                timeout_ms,
+                max_retries,
+            } => OrchdResponse::McpServer(McpServer {
+                id: "srv-1".into(),
+                name,
+                transport,
+                url,
+                command,
+                args: args.unwrap_or_default(),
+                env: env.unwrap_or_default(),
+                scope,
+                project_id,
+                auth_kind,
+                secret_ref: None,
+                account_id: None,
+                enabled: true,
+                timeout_ms: timeout_ms.unwrap_or(30_000),
+                max_retries: max_retries.unwrap_or(3),
+                protocol_version: None,
+                created_at: 0,
+                updated_at: 0,
+            }),
+            other => panic!("expected McpAddServer, got {other:?}"),
+        })
+        .await;
+
+        let req = OrchdRequest::McpAddServer {
+            name: "prowl".into(),
+            transport: McpTransport::Http,
+            url: Some("https://prowl.chat/mcp".into()),
+            command: None,
+            args: None,
+            env: None,
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::Bearer,
+            timeout_ms: None,
+            max_retries: None,
+        };
+        let res = client.request(req).await.unwrap();
+        let server = expect_mcp_server(res).unwrap();
+        assert_eq!(server.id, "srv-1");
+        assert_eq!(server.name, "prowl");
+        assert_eq!(server.url.as_deref(), Some("https://prowl.chat/mcp"));
+        assert_eq!(server.transport, McpTransport::Http);
+        assert_eq!(server.auth_kind, McpAuthKind::Bearer);
+        assert!(server.enabled);
+    }
+
+    #[tokio::test]
+    async fn mcp_connect_consent_error_response_becomes_command_error_daemon_consent() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Consent,
+            message: "no consent grant for this server's current url".into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::McpConnect { id: "srv-1".into() })
+            .await;
+        // Same `From<OrchdClientError> for CommandError` path as the Invariant test above —
+        // confirm the two S-EXT-only `OrchdErrorCode` variants (spec §5/§6 trust choke-point)
+        // reshape into `CommandError::Daemon` identically to every pre-existing error code.
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Consent");
+                assert_eq!(message, "no consent grant for this server's current url");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_call_tool_policy_error_response_becomes_command_error_daemon_policy() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Policy,
+            message: "tool is disabled".into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::McpCallTool {
+                server_id: "srv-1".into(),
+                tool_name: "echo".into(),
+                args_json: "{}".into(),
+                project_id: None,
+            })
+            .await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Policy");
+                assert_eq!(message, "tool is disabled");
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }
