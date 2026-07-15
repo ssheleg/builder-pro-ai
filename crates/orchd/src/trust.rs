@@ -34,6 +34,19 @@ pub enum Action {
         tool_name: String,
         project_id: Option<String>,
     },
+    /// One `ConnectorInvoke` attempt — a direct-API [`crate::connectors::adapter::ConnectorAdapter`]
+    /// call (spec §6/§7, task T12). Passes through this SAME choke-point "IDENTICALLY to
+    /// `McpCallTool`" (spec §6): same policy scope (spend/rate caps land in T18, exactly like
+    /// `ToolCall`), a `connector_invoke` audit action, and (per T12's own artifact-persistence
+    /// decision — see `connectors::adapter::invoke`'s doc comment) the returned result is treated
+    /// as untrusted content the same way an `mcp_artifact` is (spec D9), even though v1 does not
+    /// persist a durable artifact row for it (the `mcp_artifact`/`mcp_invocation` FK to
+    /// `mcp_server` has no connector-shaped analogue — a schema change, out of this task's scope).
+    ConnectorInvoke {
+        account_id: String,
+        op: String,
+        project_id: Option<String>,
+    },
 }
 
 /// The choke-point's verdict (spec §6).
@@ -54,6 +67,8 @@ const REASON_TOOL_DISABLED: &str = "tool_disabled";
 
 const AUDIT_ACTION_CONNECT: &str = "connect";
 const AUDIT_ACTION_TOOL_CALL: &str = "tool_call";
+/// (task T12, spec §4 `audit_log.action` literal set) — `ConnectorInvoke`'s audit action.
+const AUDIT_ACTION_CONNECTOR_INVOKE: &str = "connector_invoke";
 const AUDIT_DECISION_ALLOW: &str = "allow";
 const AUDIT_DECISION_DENY: &str = "deny";
 
@@ -98,6 +113,14 @@ fn evaluate(db: &Db, action: &Action) -> Result<Decision, OrchdPersistError> {
                 })
             }
         }
+        // (task T12) "same policy scope as ToolCall" (task brief) — but unlike ToolCall there is
+        // no per-account-op allowlist table to consult yet (no `account_op`/equivalent to
+        // `mcp_tool.enabled` exists in the spec §4 schema): Phase 1 always allows, exactly like
+        // `ToolCall` would if every tool were unconditionally enabled. Spend/rate caps (the
+        // `policy` table) are T18, same as `ToolCall`'s own doc comment already states above.
+        // Every call still writes the `connector_invoke` audit row below, allow or (once T18
+        // lands) deny — the choke-point property this module exists for.
+        Action::ConnectorInvoke { .. } => Ok(Decision::Allow),
     }
 }
 
@@ -119,6 +142,24 @@ fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), Orch
             AUDIT_ACTION_TOOL_CALL,
             Some(server_id.clone()),
             Some(tool_name.clone()),
+            project_id.clone(),
+        ),
+        // (task T12) `audit_log` (spec §4 DDL) has no dedicated `account_id`/`op` columns — only
+        // `server_id`/`tool_name`, the two identity columns `Connect`/`ToolCall` already use. The
+        // SAME DDL block that only defines those two columns also lists `'connector_invoke'` as a
+        // legal `action` value, so the schema's own author already intended `server_id`/
+        // `tool_name` to double as the generic "target id"/"operation name" pair for every action
+        // kind, not just MCP ones. Reusing them here (account_id -> server_id, op -> tool_name)
+        // is therefore the spec-intended shape, not a workaround for a frozen schema this task
+        // isn't allowed to change.
+        Action::ConnectorInvoke {
+            account_id,
+            op,
+            project_id,
+        } => (
+            AUDIT_ACTION_CONNECTOR_INVOKE,
+            Some(account_id.clone()),
+            Some(op.clone()),
             project_id.clone(),
         ),
     };
@@ -448,6 +489,74 @@ mod tests {
                 reason: REASON_TOOL_DISABLED.to_string()
             }
         );
+    }
+
+    // ---- ConnectorInvoke (task T12) ----
+
+    #[test]
+    fn connector_invoke_is_allowed_and_audits_with_account_id_and_op() {
+        // Phase 1 has no per-account-op allowlist (spec §4 has no such table) — unconditional
+        // Allow, same as `ToolCall` would be if every tool were enabled. The connector_invoke
+        // audit row is the load-bearing assertion here (spec §6: "every ... connector_invoke ...
+        // appends an audit_log row").
+        let db = new_db();
+
+        let decision = authorize(
+            &db,
+            &Action::ConnectorInvoke {
+                account_id: "acct-123".to_string(),
+                op: "get".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(decision, Decision::Allow);
+
+        let row: (String, String, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT action, server_id, tool_name, decision FROM audit_log \
+                 WHERE action = 'connector_invoke'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "connector_invoke".to_string(),
+                "acct-123".to_string(),
+                "get".to_string(),
+                "allow".to_string(),
+            ),
+            "account_id/op are carried in the reused server_id/tool_name columns (see write_audit's doc comment)"
+        );
+    }
+
+    #[test]
+    fn connector_invoke_carries_project_id_into_the_audit_row() {
+        let db = new_db();
+
+        authorize(
+            &db,
+            &Action::ConnectorInvoke {
+                account_id: "acct-456".to_string(),
+                op: "post".to_string(),
+                project_id: Some("proj-1".to_string()),
+            },
+        )
+        .unwrap();
+
+        let project_id: String = db
+            .conn()
+            .query_row(
+                "SELECT project_id FROM audit_log WHERE action = 'connector_invoke'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(project_id, "proj-1");
     }
 
     #[test]

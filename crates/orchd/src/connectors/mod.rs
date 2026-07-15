@@ -14,8 +14,17 @@
 //! for [`accounts::ConnectorsState::begin_oauth`]'s return type: that struct is a plain 2-field
 //! `{authorize_url, state}` shape with no secret-bearing fields, so there is nothing to gain by
 //! duplicating it.
+//!
+//! [`adapter`] (task T12, spec §7) adds the direct-API `ConnectorAdapter` trait, the `generic-rest`
+//! reference adapter, and `adapter::invoke` — the `ConnectorInvoke` wire verb's implementation,
+//! routed through the SAME `crate::trust::authorize` choke-point + untrusted-result contract as
+//! `mcp::invoke::call_tool`. See that module's own doc comment for the connector artifact-
+//! persistence decision (audit-only in v1 — no `mcp_artifact`/`mcp_invocation` row, because both
+//! tables' `server_id` column is `NOT NULL REFERENCES mcp_server(id)`, spec §4, and a connector
+//! invocation has no MCP server to reference).
 
 pub mod accounts;
+pub mod adapter;
 
 /// `account.auth_kind` (spec §4: `'oauth' | 'apikey'`). A separate type from
 /// `bpa_orchd_proto::AccountAuthKind` (T10's wire enum) for the same reason `mcp::McpAuthKind`

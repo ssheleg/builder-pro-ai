@@ -32,10 +32,19 @@ rusqlite = { workspace = true }
 # unify them into one crate instance; `AsyncHttpClient` is only implemented for oauth2's OWN
 # re-exported `reqwest::Client` (`oauth2::reqwest::ClientBuilder`, not the top-level `reqwest`
 # crate). `accounts.rs` therefore builds its SSRF-guarded token-exchange/refresh HTTP client via
-# `oauth2::reqwest::ClientBuilder` — no direct `reqwest` dependency is declared here, it would be
-# unused (a second, unrelated 0.12 copy of reqwest lands in the build regardless, pulled in
-# transitively by `oauth2` itself).
+# `oauth2::reqwest::ClientBuilder`, NOT the direct `reqwest` dependency below (a second, unrelated
+# 0.12 copy of reqwest lands in the build regardless, pulled in transitively by `oauth2` itself).
 oauth2 = "5.0"
+# Direct-API connector adapter HTTP client (S-EXT spec §7, D2, task T12) —
+# `crates/orchd/src/connectors/adapter.rs`'s `GenericRestAdapter` only. This is the SAME
+# workspace-pinned `reqwest = "0.13"` (rustls, default redirect policy) `bpa-mcp` already depends
+# on for rmcp's transport — Cargo unifies the two into one crate instance, unlike the separate
+# `oauth2`-pinned 0.12 copy above. Deliberately NOT `oauth2::reqwest::ClientBuilder`'s SSRF-guarded
+# client (`redirect(Policy::none())`): a `generic-rest` call's target URL is one the owner typed in
+# themselves for an account they explicitly added, not an IdP endpoint resolved from config the
+# owner never saw — see `GenericRestAdapter`'s own doc comment for the full trust-boundary
+# rationale (spec §7: "redirect policy can be default").
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

@@ -108,10 +108,15 @@ impl std::fmt::Debug for AccountToken {
     }
 }
 
-/// Errors from the connector OAuth/apikey flow driver. `Display`/`Debug` never carry secret bytes:
-/// `TokenExchange`/`Http` wrap the oauth2/reqwest library's OWN error text (HTTP/transport/parse
-/// failure descriptions, never response bodies containing a token — a *successful* exchange never
-/// routes through this variant), and every other variant is a plain non-secret string.
+/// Errors from the connector OAuth/apikey flow driver AND (task T12) the direct-API
+/// [`super::adapter::ConnectorAdapter`] invoke path — one shared error type for the whole
+/// `connectors` module (spec §7's `ConnectorAdapter::invoke` signature names `ConnectorError` as
+/// its error type directly, so T12 extends this enum rather than inventing a parallel one).
+/// `Display`/`Debug` never carry secret bytes: `TokenExchange`/`Http`/`Request` wrap the
+/// oauth2/reqwest library's OWN error text (HTTP/transport/parse failure descriptions, never
+/// response bodies containing a token/bearer — a *successful* call never routes through those
+/// variants, and `UpstreamStatus` carries only the numeric status code, never the response body),
+/// and every other variant is a plain non-secret string.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectorError {
     #[error("unknown OAuth provider: {0}")]
@@ -126,6 +131,30 @@ pub enum ConnectorError {
     Http(String),
     #[error("stored secret is not valid utf-8")]
     SecretNotUtf8,
+    /// (T12) No [`super::adapter::ConnectorAdapter`] is registered for this `account.provider`
+    /// string — distinct from `UnknownProvider` (which is specifically about the OAuth
+    /// IdP-config registry `begin_oauth`/`token_for` consult; an `apikey` account, which never
+    /// touches that registry at all, can still fail here).
+    #[error("no connector adapter for provider: {0}")]
+    NoAdapter(String),
+    /// (T12) `ConnectorAdapter::invoke` was called with an `op` the adapter doesn't recognize.
+    #[error("unknown connector operation: {0}")]
+    UnknownOp(String),
+    /// (T12) `args` was missing a required field or had the wrong shape for `op`.
+    #[error("invalid connector op arguments: {0}")]
+    InvalidArgs(String),
+    /// (T12) The adapter's outbound HTTP request itself failed (DNS/connect/parse) — a
+    /// non-timeout transport failure. Wraps `reqwest::Error`'s own `Display`, never the request
+    /// bearer or body.
+    #[error("connector request failed: {0}")]
+    Request(String),
+    /// (T12) The adapter's outbound HTTP request exceeded its bounded timeout.
+    #[error("connector request timed out")]
+    Timeout,
+    /// (T12) The remote API answered with a non-2xx status. Carries ONLY the numeric status —
+    /// never the response body (spec §6: never log tool/op result content).
+    #[error("connector upstream returned status {0}")]
+    UpstreamStatus(u16),
     #[error(transparent)]
     Persist(#[from] OrchdPersistError),
     #[error(transparent)]
@@ -732,7 +761,10 @@ mod tests {
             !rendered.contains("s3cr3t-bearer-must-not-leak-9f2a"),
             "AccountToken Debug leaked the bearer: {rendered}"
         );
-        assert!(rendered.contains("REDACTED"), "expected redaction marker: {rendered}");
+        assert!(
+            rendered.contains("REDACTED"),
+            "expected redaction marker: {rendered}"
+        );
     }
 
     #[test]
@@ -748,7 +780,10 @@ mod tests {
             !rendered.contains("s3cr3t-client-secret-must-not-leak-c41d"),
             "OAuthProviderConfig Debug leaked the client_secret: {rendered}"
         );
-        assert!(rendered.contains("REDACTED"), "expected redaction marker: {rendered}");
+        assert!(
+            rendered.contains("REDACTED"),
+            "expected redaction marker: {rendered}"
+        );
         // Non-secret fields stay visible for debuggability.
         assert!(rendered.contains("public-client-id"));
         assert!(rendered.contains("idp.example/authorize"));

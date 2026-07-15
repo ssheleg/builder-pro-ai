@@ -436,6 +436,7 @@ dependencies = [
  "bpa-secrets",
  "libc",
  "oauth2",
+ "reqwest 0.13.4",
  "rmcp",
  "rusqlite",
  "schemars 1.2.1",
