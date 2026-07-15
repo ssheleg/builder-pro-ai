@@ -1438,18 +1438,39 @@ async fn dispatch(
         // the row is gone afterward (mirrors `goal_project_id`/`task_project_id`'s pre-delete
         // lookup pattern — here the lookup returns the whole row since the push needs
         // `project_id`, not just an id captured off a raw query).
+        //
+        // Keychain-then-DB ordering (S-EXT whole-branch final-review fix: mirrors
+        // `connectors::accounts::Db::delete_account`'s own "Keychain first, fail-closed"
+        // precedent — see that method's doc comment). The bearer Keychain entry at
+        // `bpa_secrets::mcp_bearer_ref(&id)` is deleted BEFORE the SQL row disappears;
+        // `SecretError::NotFound` is treated as success (idempotent, and expected for the common
+        // case — a server with `auth_kind='none'`/`'oauth'` never had a bearer entry to begin
+        // with, only `McpSetServerBearer` ever wrote one). Any OTHER Keychain failure aborts
+        // before the row is removed, so a live credential never ends up with no DB reference
+        // pointing at it — without this, the DELETE was asymmetric with `ConnectorDeleteAccount`
+        // (which already cleans up its own Keychain entries) and orphaned bearer tokens in the
+        // real Keychain on every server delete. `delete_secret_ignoring_not_found`
+        // (`connectors::accounts`) is private to that module and not reachable here, so the same
+        // match is inlined via `map_secret_err` (already used by `McpSetServerBearer` below for
+        // the mirror-image Keychain write failure).
         OrchdRequest::McpDeleteServer { id } => {
             let db = deps.db.lock().await;
             match db.get_mcp_server(&id) {
-                Ok(server) => match db.delete_mcp_server(&id) {
-                    Ok(()) => {
-                        broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
-                            project_id: server.project_id,
-                        }));
-                        OrchdResponse::Ack
+                Ok(server) => {
+                    match bpa_secrets::delete(&bpa_secrets::mcp_bearer_ref(&id)) {
+                        Ok(()) | Err(bpa_secrets::SecretError::NotFound) => {}
+                        Err(e) => return map_secret_err(e),
                     }
-                    Err(e) => map_err(e),
-                },
+                    match db.delete_mcp_server(&id) {
+                        Ok(()) => {
+                            broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
+                                project_id: server.project_id,
+                            }));
+                            OrchdResponse::Ack
+                        }
+                        Err(e) => map_err(e),
+                    }
+                }
                 Err(e) => map_err(e),
             }
         }

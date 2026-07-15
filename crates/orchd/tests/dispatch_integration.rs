@@ -1826,6 +1826,142 @@ async fn mcp_call_tool_does_not_block_other_db_ops() {
 }
 
 // ================================================================================
+// ---- S-EXT whole-branch final-review fix: `McpDeleteServer` must delete the server's bearer
+// Keychain entry (`bpa_secrets::mcp_bearer_ref(id)`, written by `McpSetServerBearer`) alongside the
+// DB row — a credential-material leak otherwise, and asymmetric with `ConnectorDeleteAccount`
+// (`connectors::accounts::Db::delete_account`, which already cleans up its own Keychain entries).
+// Mirrors `connector_keychain_available`'s round-trip skip-guard rationale below (a precise 4-
+// OSStatus-code probe is `#[cfg(test)]`-private to `bpa_secrets`), scoped to the MCP bearer
+// service/ref shape specifically — the exact Keychain entry this test proves gets cleaned up.
+// ================================================================================
+
+fn mcp_keychain_available() -> bool {
+    // FULL `set → get (assert bytes) → delete` round-trip, NOT set-only — see
+    // `connector_keychain_available`'s own doc comment for why a set-only probe is insufficient.
+    let probe = bpa_secrets::mcp_bearer_ref("dispatch-integration-mcp-probe");
+    let _ = bpa_secrets::delete(&probe); // clear any stray entry from a crashed prior run
+    const PROBE_BYTES: &[u8] = b"probe-roundtrip-marker";
+    let skip = |reason: String| {
+        eprintln!(
+            "SKIP mcp dispatch keychain-backed test: {reason} — graceful skip, not a pass. Run \
+             locally with an unlocked login keychain (or a CI keychain on the search list) to \
+             exercise the full assertion."
+        );
+        let _ = bpa_secrets::delete(&probe);
+        false
+    };
+    if let Err(e) = bpa_secrets::set(&probe, PROBE_BYTES) {
+        return skip(format!("login keychain unavailable ({e})"));
+    }
+    match bpa_secrets::get(&probe) {
+        Ok(bytes) if bytes == PROBE_BYTES => {}
+        Ok(_) => return skip("probe get returned the wrong bytes (keychain misconfigured)".into()),
+        Err(e) => {
+            return skip(format!(
+                "probe get failed after a successful set ({e} — keychain likely not on the search \
+                 list)"
+            ));
+        }
+    }
+    if let Err(e) = bpa_secrets::delete(&probe) {
+        return skip(format!(
+            "probe delete failed after a successful set+get ({e})"
+        ));
+    }
+    true
+}
+
+/// RAII Keychain cleanup for the bearer entry `McpSetServerBearer` writes mid-test, mirroring
+/// `DeleteAccountSecretsOnDrop`'s rationale one section down: a panic between that write and the
+/// explicit `McpDeleteServer` below must never leave a permanent orphan entry in the developer's/
+/// CI runner's real login keychain (service `ai.builderpro.desktop.mcp`, account = server id).
+/// Deleting an already-deleted ref is a harmless no-op — never conflicts with the explicit delete
+/// this test itself exercises.
+struct DeleteMcpBearerOnDrop {
+    server_id: String,
+}
+
+impl Drop for DeleteMcpBearerOnDrop {
+    fn drop(&mut self) {
+        let _ = bpa_secrets::delete(&bpa_secrets::mcp_bearer_ref(&self.server_id));
+    }
+}
+
+#[tokio::test]
+async fn mcp_delete_server_deletes_the_bearer_keychain_entry_no_orphan() {
+    if !mcp_keychain_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+
+    // A bearer-authed server: `McpAddServer` (http, `auth_kind` starts `None` — matches the wire's
+    // real create flow) then `McpSetServerBearer` writes the token to Keychain AND flips
+    // `auth_kind` to `Bearer` in the DB (see that dispatch arm's own doc comment). The url is never
+    // dialed (no `McpConnect` in this test), so it doesn't need a live stub behind it.
+    let server = expect_mcp_server(
+        c1.request(OrchdRequest::McpAddServer {
+            name: "Bearer Stub".to_string(),
+            transport: McpTransport::Http,
+            url: Some("http://127.0.0.1:9/mcp".to_string()),
+            command: None,
+            args: None,
+            env: None,
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            timeout_ms: None,
+            max_retries: None,
+        })
+        .await,
+    );
+    // RAII cleanup guard installed BEFORE the Keychain write below (mirrors
+    // `DeleteAccountSecretsOnDrop`'s own placement rationale): a panic between the write and the
+    // explicit `McpDeleteServer` at the end still must never leave a permanent orphan entry.
+    let _bearer_cleanup = DeleteMcpBearerOnDrop {
+        server_id: server.id.clone(),
+    };
+
+    expect_ack(
+        c1.request(OrchdRequest::McpSetServerBearer {
+            id: server.id.clone(),
+            token: "bearer-token-must-not-orphan-7f2a".to_string(),
+        })
+        .await,
+    );
+
+    // Keychain genuinely holds the bearer now.
+    let stored = bpa_secrets::get(&bpa_secrets::mcp_bearer_ref(&server.id)).unwrap();
+    assert_eq!(stored, b"bearer-token-must-not-orphan-7f2a");
+
+    expect_ack(
+        c1.request(OrchdRequest::McpDeleteServer {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+
+    // The DB row is gone (existing coverage elsewhere) — what THIS test proves is that the
+    // Keychain entry is gone too, closing the S-EXT final-review credential-leak finding:
+    // `McpDeleteServer` deleted the DB row but left this entry orphaned in the real Keychain.
+    let after_delete = bpa_secrets::get(&bpa_secrets::mcp_bearer_ref(&server.id));
+    assert!(
+        matches!(after_delete, Err(bpa_secrets::SecretError::NotFound)),
+        "McpDeleteServer must remove the bearer Keychain entry too (asymmetric with \
+         ConnectorDeleteAccount/delete_account, which already cleans up its own) — got \
+         {after_delete:?}"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+// ================================================================================
 // ---- S-EXT Connector dispatch (task T13a, spec §5/§6/§7): real per-verb socket dispatch,
 // replacing T10's temporary stub arm (`OrchdResponse::Error{code:Io, message:"connector dispatch
 // not yet implemented"}` for all 7 `Connector*` verbs). Keychain-backed verbs
