@@ -482,12 +482,17 @@ function orchdConnect(sockPath) {
 
 let nextOrchdId = 1;
 
-function orchdRequest(conn, req, id = nextOrchdId++) {
+// Default per-request timeout (10s) catches a genuinely hung daemon fast. A few requests are
+// legitimately slower than a normal round trip — chiefly `OrchdShutdown{drain:true}`, which flushes
+// scrollback rings + domain state to SQLite before acking; under CI's `-O0` + coverage-instrumented
+// (`cargo-llvm-cov`) build that drain can exceed 10s on a loaded macOS runner. Those callers pass a
+// larger `timeoutMs` explicitly rather than globally loosening the hang-detection budget.
+function orchdRequest(conn, req, id = nextOrchdId++, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       conn.pending = conn.pending.filter((p) => p.id !== id);
       reject(new Error(`orchd request ${req.t} timed out`));
-    }, 10000);
+    }, timeoutMs);
     conn.pending.push({
       id,
       resolve: (v) => {
@@ -600,10 +605,13 @@ async function bootAndConnect() {
  * actually exit. Drops every tracked connection afterward (they're all stale once the daemon
  * process is gone). */
 async function shutdownAndWaitExit(conn) {
-  const shutdownAck = await orchdRequest(conn, { t: "OrchdShutdown", drain: true });
+  // 60s: the drain-and-persist can run well past a normal request under CI instrumentation (see
+  // `orchdRequest`'s doc comment). Local/dev acks in well under a second; the generous ceiling only
+  // absorbs the slow-runner tail, it does not mask a real hang (a truly wedged drain still fails).
+  const shutdownAck = await orchdRequest(conn, { t: "OrchdShutdown", drain: true }, undefined, 60000);
   assert.equal(shutdownAck.t, "Ack", `OrchdShutdown{drain:true} -> ${JSON.stringify(shutdownAck)}`);
   const daemonPid = cleanup.daemonPid;
-  await waitForExit(daemonPid, 10000, "orchd");
+  await waitForExit(daemonPid, 30000, "orchd");
   for (const c of cleanup.conns) {
     try {
       c.sock.destroy();
