@@ -22,6 +22,13 @@ pub mod mcp;
 /// and a later task's `socket_server` dispatch will too (e.g. `TrustGrantConsent`).
 pub mod trust;
 
+/// Connector OAuth account layer (S-EXT spec §4 `account` table, §5/§7, D5, task T11): `account`
+/// CRUD + the OAuth 2.1 authorization-code+PKCE flow driver (`oauth2` crate) + API-key accounts,
+/// tokens in Keychain, only refs in the DB. `pub` — same reasoning as `mcp` above (this module's
+/// own `AccountRow`/`NewAccount`/`AccountAuthKind` types, plus `ConnectorsState`, need to stay
+/// independently nameable for a later task's `socket_server` dispatch wiring, T13a).
+pub mod connectors;
+
 mod boot;
 /// Knowledge-graph node/edge persistence (S4 spec §4 schema v2, §5 persistence + invariants).
 /// Crate-private — `persistence::Db`'s CRUD/getter surface (`conn()`, `ensure_project_active`,

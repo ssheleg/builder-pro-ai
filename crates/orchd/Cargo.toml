@@ -21,6 +21,21 @@ bpa-protocol = { workspace = true }
 bpa-secrets = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
+# Connector OAuth 2.1 authorization-code+PKCE flow driver (S-EXT spec §3/§7, D5, task T11) —
+# `crates/orchd/src/connectors/accounts.rs` only; the MCP-server-OAuth consumer (if it lands)
+# prefers rmcp's own `transport::auth` per D5 instead of this crate. Default features only
+# (`reqwest` async client + `rustls-tls`) — NEVER add `reqwest-blocking` (D5: async reqwest only;
+# a blocking HTTP call on an async executor thread would stall the whole daemon exactly like the
+# DB-lock-across-network-await bug T6 already fixed once). `oauth2` 5.0.0 pins its OWN `reqwest =
+# "0.12"` (verified against its published Cargo.toml) — a full major version behind this
+# workspace's `reqwest = "0.13"` pin (used by `bpa-mcp` for rmcp's transport) — so Cargo does NOT
+# unify them into one crate instance; `AsyncHttpClient` is only implemented for oauth2's OWN
+# re-exported `reqwest::Client` (`oauth2::reqwest::ClientBuilder`, not the top-level `reqwest`
+# crate). `accounts.rs` therefore builds its SSRF-guarded token-exchange/refresh HTTP client via
+# `oauth2::reqwest::ClientBuilder` — no direct `reqwest` dependency is declared here, it would be
+# unused (a second, unrelated 0.12 copy of reqwest lands in the build regardless, pulled in
+# transitively by `oauth2` itself).
+oauth2 = "5.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -39,5 +54,11 @@ tempfile = { workspace = true }
 # `tests/test_streamable_http_protocol_version.rs` axum-wiring pattern exactly (verified against
 # the vendored crate source — feature set / axum version pinned to match rmcp's own dev-deps).
 rmcp = { version = "2.2", features = ["server", "transport-streamable-http-server"] }
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# `json` added (task T11, `connectors/accounts.rs`'s own unit tests): a tiny loopback OAuth
+# token-endpoint stub (`spawn_token_stub`) needs `axum::Json` to emit a real
+# `Content-Type: application/json` response — required by `oauth2`'s own response validation
+# (`endpoint.rs::check_response_body`: a PRESENT Content-Type header must start with
+# `application/json`, though a missing one is tolerated) — matching a real token endpoint's shape
+# rather than a header-free approximation.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 schemars = "1"
