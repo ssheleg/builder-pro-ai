@@ -561,6 +561,10 @@ const cleanup = {
   // ed yet, so `cleanupAll()` can best-effort clean up the REAL Keychain entry it created even if a
   // mid-phase assertion throws before the happy-path deletion runs (see phase7 below).
   connectorAccountId: null,
+  // Same, for the throwaway keychain-availability probe account phase7 creates FIRST (also a REAL
+  // Keychain entry) — normally deleted within a couple of lines, but tracked for the tiny window
+  // between its create and its delete so a delete failure never orphans it either.
+  connectorProbeAccountId: null,
 };
 
 /** Poll `pidAlive` until `pid` exits or `deadlineMs` elapses; throws if it never exits. */
@@ -1082,25 +1086,100 @@ async function main() {
 
   log("phase6 OK: mcp tool artifact survived restart");
 
-  // ---- phase 7: CONNECTOR invoke artifact survives restart (S-EXT Phase-2 DoD, spec §9's DoD
-  // extended from the MCP path (phase6) to the CONNECTOR path: spec §6 "ConnectorInvoke passes
-  // through trust::authorize IDENTICALLY to McpCallTool ... every mcp_artifact from McpCallTool
-  // AND ConnectorInvoke is is_untrusted=1"). Spawn a local stub generic-rest target -> Connector
-  // AddApiKey (writes a REAL Keychain entry — see the HOME/Keychain symlink comment above this
-  // file's `cleanup` declaration) -> capture the account id -> ConnectorInvoke(op="post") against
-  // the stub with a planted marker in the body (args shape verified against
-  // `crates/orchd/src/connectors/adapter.rs::GenericRestAdapter::invoke`: `post` reads
-  // `args["url"]` + JSON-encodes `args["body"]`) -> assert McpCallResult{isError:false} + a
-  // persisted artifact whose content carries the stub's OWN echoed marker (proving the adapter's
-  // real HTTP round trip, not a canned local value) -> close the stub (mirrors phase6: artifact
-  // durability must not depend on the connector target still being reachable) -> OrchdShutdown
-  // {drain:true} -> relaunch -> McpListArtifacts still returns the artifact with its content
-  // intact -> ConnectorDeleteAccount (cleans up the DB row AND the real Keychain entry,
-  // `connectors::accounts::Db::delete_account`).
+  // ---- phase 7: CONNECTOR invoke artifact survives restart (S-EXT Phase-2 DoD, spec §9) —
+  // extracted into `connectorInvokePhase` (see its doc comment) so its keychain-availability probe
+  // can RETURN early with a LOUD graceful skip on a headless CI runner whose login keychain is
+  // locked, WITHOUT failing the run — while still running the full survival assertions whenever the
+  // keychain is writable (every local dev run, and any CI runner with an unlocked keychain). ----
+  conn = await connectorInvokePhase(conn);
+
+  log("ALL PHASES PASSED");
+}
+
+/**
+ * Phase 7: a CONNECTOR (`generic-rest`) invocation result persists as a durable artifact that
+ * survives an orchd restart (S-EXT Phase-2 DoD, spec §9 — the connector-path analogue of phase6's
+ * MCP path: spec §6 "ConnectorInvoke passes through trust::authorize IDENTICALLY to McpCallTool ...
+ * every mcp_artifact from McpCallTool AND ConnectorInvoke is is_untrusted=1").
+ *
+ * Extracted from `main` (rather than inlined like phases 0–6) for ONE reason: it is the only phase
+ * that drives `ConnectorAddApiKey`, which writes a REAL macOS login-Keychain entry through the
+ * daemon (`bpa_secrets` -> `security_framework::passwords::*`). On a headless CI runner (this phase
+ * runs in CI via `final-suite.sh` stage 9) the login keychain can be locked/unavailable, in which
+ * case the daemon returns a keychain-shaped `Error` (NOT an `Account`) rather than hanging (the
+ * `Library/Keychains` symlink set up above prevents the hang, not the error). So this phase begins
+ * with a keychain-availability PROBE — a throwaway `ConnectorAddApiKey`, immediately deleted — and,
+ * if the keychain is unavailable, LOUDLY skips (a visible `SKIP` log line, never a silent vacuous
+ * pass) and RETURNs early, mirroring the Rust integration suite's own `connector_keychain_
+ * available()` probe-and-skip (`crates/orchd/tests/dispatch_integration.rs`). When the keychain IS
+ * writable the FULL phase runs and its survival assertions are NOT weakened.
+ *
+ * Steps (keychain available): spawn a local stub generic-rest target -> `ConnectorAddApiKey`
+ * (real Keychain entry) -> capture the account id -> `ConnectorInvoke(op="post")` against the stub
+ * with a planted marker in the body (args shape verified against `crates/orchd/src/connectors/
+ * adapter.rs::GenericRestAdapter::invoke`: `post` reads `args["url"]` + JSON-encodes `args["body"]`)
+ * -> assert `McpCallResult{isError:false}` + a persisted artifact whose content carries the stub's
+ * OWN echoed marker (proving the adapter's real HTTP round trip, not a canned local value) -> close
+ * the stub (mirrors phase6: artifact durability must not depend on the connector target still being
+ * reachable) -> `OrchdShutdown{drain:true}` -> relaunch -> `McpListArtifacts` still returns the
+ * artifact with its content/account/untrusted flags intact -> `ConnectorDeleteAccount` (cleans up
+ * the DB row AND the real Keychain entry, `connectors::accounts::Db::delete_account`).
+ *
+ * Returns the (possibly relaunched) connection; `main` does not use it afterward, but returning it
+ * keeps the reassignment contract honest for a future caller.
+ */
+async function connectorInvokePhase(conn) {
   log(
-    "phase7: spawn stub generic-rest server + ConnectorAddApiKey(generic-rest) + " +
-      "ConnectorInvoke(post)",
+    "phase7: keychain probe + spawn stub generic-rest server + ConnectorAddApiKey(generic-rest) " +
+      "+ ConnectorInvoke(post)",
   );
+
+  // ---- keychain-availability probe (headless-CI guard, mirrors the Rust suite's
+  // `connector_keychain_available()`): a throwaway `ConnectorAddApiKey`. An `Account` back => the
+  // login keychain is writable in this environment; delete the probe account and run the real
+  // phase. An `Error` response (keychain-shaped `Error{Io}`) OR a request error/timeout =>
+  // keychain unavailable (a locked/headless CI login keychain) => LOUD graceful skip + early
+  // return, so the CI gate stays green WITHOUT ever masking a real failure when the keychain IS
+  // present. ----
+  const probeApiKey = `e2e-keychain-probe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let probeResp;
+  try {
+    probeResp = await orchdRequest(conn, {
+      t: "ConnectorAddApiKey",
+      provider: "generic-rest",
+      label: "E2E Keychain Probe",
+      apiKey: probeApiKey,
+    });
+  } catch (e) {
+    log(
+      "SKIP phase7: login keychain unavailable in this environment (headless CI) — graceful " +
+        `skip, not a pass (probe request errored: ${e.message})`,
+    );
+    return conn;
+  }
+  if (probeResp.t !== "Account") {
+    log(
+      "SKIP phase7: login keychain unavailable in this environment (headless CI) — graceful " +
+        `skip, not a pass (probe -> ${JSON.stringify(probeResp)})`,
+    );
+    return conn;
+  }
+  // Probe succeeded — the keychain IS writable. Delete the throwaway probe account (a REAL Keychain
+  // entry) before the real phase begins; tracked in `cleanup` for the tiny window between its
+  // create and its delete so a delete failure never orphans it in the real login keychain.
+  const probeAccountId = probeResp.value.id;
+  cleanup.connectorProbeAccountId = probeAccountId;
+  const probeDeleteResp = await orchdRequest(conn, {
+    t: "ConnectorDeleteAccount",
+    id: probeAccountId,
+  });
+  assert.equal(
+    probeDeleteResp.t,
+    "Ack",
+    `probe ConnectorDeleteAccount -> ${JSON.stringify(probeDeleteResp)}`,
+  );
+  cleanup.connectorProbeAccountId = null;
+  log("phase7: keychain probe OK (login keychain writable) — running the full connector phase");
 
   const stubRestServer = await startStubRestServer();
   cleanup.stubRestServer = stubRestServer;
@@ -1148,10 +1227,13 @@ async function main() {
   );
   const connectorArtifactId = invokeResp.value.artifactId;
 
-  assert.equal(
-    stubRestServer.lastAuthHeader(),
-    `Bearer ${apiKeyValue}`,
-    "GenericRestAdapter must send the account's api key as Authorization: Bearer <key>",
+  // `assert.ok` on a PRE-COMPUTED boolean (deliberately NOT `assert.equal(actual, expected)`): a
+  // failing `assert.equal` renders BOTH operands into the AssertionError message, which would
+  // print the live api key. Comparing here and passing only a key-free message keeps the secret
+  // out of any failure output (the bearer is still genuinely asserted to have reached the wire).
+  assert.ok(
+    stubRestServer.lastAuthHeader() === `Bearer ${apiKeyValue}`,
+    "GenericRestAdapter must send the account's api key as Authorization: Bearer <key> (value withheld)",
   );
 
   log(`phase7: added account ${accountId}, invoked post -> artifact ${connectorArtifactId}`);
@@ -1239,8 +1321,7 @@ async function main() {
   );
 
   log("phase7 OK: connector invoke artifact survived restart");
-
-  log("ALL PHASES PASSED");
+  return conn;
 }
 
 /**
@@ -1266,24 +1347,29 @@ async function cleanupAll() {
     cleanup.stubRestServer = null;
   }
 
-  // Best-effort safety net: if phase7 created a connector account (a REAL Keychain entry, not
-  // just isolated-tempdir state) but a LATER assertion in that same phase threw before its own
-  // explicit `ConnectorDeleteAccount` ran, clean it up here too — via the most recently tracked
-  // LIVE connection, BEFORE the daemon is torn down below (a dead daemon can't service this
-  // request). A failure here is swallowed: this is cleanup for an already-failing run, not itself
-  // a test assertion; the happy path always clears `connectorAccountId` itself (phase7), so this
-  // branch is normally a no-op.
-  if (cleanup.connectorAccountId != null && cleanup.conns.length > 0) {
+  // Best-effort safety net: if phase7 created a connector account (the real invoke account OR the
+  // throwaway keychain-availability probe — BOTH are REAL Keychain entries, not just isolated-
+  // tempdir state) but a LATER assertion in that same phase threw before its own explicit
+  // `ConnectorDeleteAccount` ran, clean it up here too — via the most recently tracked LIVE
+  // connection, BEFORE the daemon is torn down below (a dead daemon can't service this request). A
+  // failure here is swallowed: this is cleanup for an already-failing run, not itself a test
+  // assertion; the happy path always clears both ids itself (phase7), so this branch is normally a
+  // no-op.
+  const orphanedConnectorAccountIds = [
+    cleanup.connectorAccountId,
+    cleanup.connectorProbeAccountId,
+  ].filter((id) => id != null);
+  if (orphanedConnectorAccountIds.length > 0 && cleanup.conns.length > 0) {
     const liveConn = cleanup.conns[cleanup.conns.length - 1];
-    try {
-      await orchdRequest(liveConn, {
-        t: "ConnectorDeleteAccount",
-        id: cleanup.connectorAccountId,
-      });
-    } catch {
-      /* best-effort cleanup */
+    for (const id of orphanedConnectorAccountIds) {
+      try {
+        await orchdRequest(liveConn, { t: "ConnectorDeleteAccount", id });
+      } catch {
+        /* best-effort cleanup */
+      }
     }
     cleanup.connectorAccountId = null;
+    cleanup.connectorProbeAccountId = null;
   }
 
   for (const c of cleanup.conns) {
