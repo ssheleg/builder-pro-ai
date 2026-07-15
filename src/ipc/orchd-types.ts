@@ -84,7 +84,7 @@ export type McpTool = { id: string, serverId: string, name: string, title: strin
 
 export type McpTransport = "http" | "stdio";
 
-export type OrchdErrorCode = "notFound" | "invariant" | "validation" | "conflict" | "io";
+export type OrchdErrorCode = "notFound" | "invariant" | "validation" | "conflict" | "io" | "consent" | "policy";
 
 export type PolicyRules = { spendCapUsd: number | null, approvalClasses: Array<string>, pathAllowlist: Array<string>, };
 

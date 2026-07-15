@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use bpa_orchd::protocol::{
     encode_orchd_frame, Goal, GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode,
-    GraphNodeKind, GraphView, Idea, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush,
-    OrchdRequest, OrchdResponse, Project, RuleFileState, RuleScope, RuleSetView,
+    GraphNodeKind, GraphView, Idea, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
+    McpScope, McpServer, McpTool, McpTransport, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder,
+    OrchdPush, OrchdRequest, OrchdResponse, Project, RuleFileState, RuleScope, RuleSetView,
     ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
@@ -256,6 +257,79 @@ fn expect_graph_nodes(res: OrchdResponse) -> Vec<GraphNode> {
     }
 }
 
+// ---- S-EXT MCP dispatch response helpers (task T6) ----
+
+fn expect_mcp_server(res: OrchdResponse) -> McpServer {
+    match res {
+        OrchdResponse::McpServer(s) => s,
+        other => panic!("expected McpServer, got {other:?}"),
+    }
+}
+
+fn expect_mcp_tools(res: OrchdResponse) -> Vec<McpTool> {
+    match res {
+        OrchdResponse::McpTools(v) => v,
+        other => panic!("expected McpTools, got {other:?}"),
+    }
+}
+
+fn expect_mcp_tool(res: OrchdResponse) -> McpTool {
+    match res {
+        OrchdResponse::McpTool(t) => t,
+        other => panic!("expected McpTool, got {other:?}"),
+    }
+}
+
+fn expect_mcp_connect_report(res: OrchdResponse) -> McpConnectReport {
+    match res {
+        OrchdResponse::McpConnectReport(r) => r,
+        other => panic!("expected McpConnectReport, got {other:?}"),
+    }
+}
+
+fn expect_mcp_call_result(res: OrchdResponse) -> McpCallResult {
+    match res {
+        OrchdResponse::McpCallResult(r) => r,
+        other => panic!("expected McpCallResult, got {other:?}"),
+    }
+}
+
+fn expect_mcp_artifacts(res: OrchdResponse) -> Vec<McpArtifact> {
+    match res {
+        OrchdResponse::McpArtifacts(v) => v,
+        other => panic!("expected McpArtifacts, got {other:?}"),
+    }
+}
+
+fn expect_error_code(res: OrchdResponse) -> OrchdErrorCode {
+    match res {
+        OrchdResponse::Error { code, .. } => code,
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+/// `McpAddServer` convenience: an `http`, globally-scoped, unauthenticated server pointed at
+/// `url` (the loopback stub's base url from [`spawn_stub_mcp_server`]) — every MCP dispatch test
+/// below that needs "a registered server" uses this.
+async fn add_mcp_server(c: &mut Client, url: &str) -> McpServer {
+    expect_mcp_server(
+        c.request(OrchdRequest::McpAddServer {
+            name: "Stub".to_string(),
+            transport: McpTransport::Http,
+            url: Some(url.to_string()),
+            command: None,
+            args: None,
+            env: None,
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            timeout_ms: None,
+            max_retries: None,
+        })
+        .await,
+    )
+}
+
 /// Test-only convenience: `CreateProject` with a freshly generated (guaranteed-unique)
 /// `workspace_id` — `project_workspace.workspace_id` is UNIQUE table-wide (S3 spec §5.2), so
 /// every project a graph test creates needs its own.
@@ -323,6 +397,74 @@ async fn boot_daemon(socket: &Path) -> tokio::task::JoinHandle<std::io::Result<(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let socket_for_task = socket.to_path_buf();
     tokio::spawn(async move { bpa_orchd::run(socket_for_task, shutdown_tx, shutdown_rx).await })
+}
+
+// ================================================================================
+// ---- S-EXT MCP dispatch (task T6, spec §5/§6): real per-verb socket dispatch + coarse-
+// invalidation pushes. The connect/call tests below drive a REAL loopback rmcp Streamable-HTTP
+// stub MCP server (bound to `127.0.0.1:0`, spec §9's "e2e ... against a local stub MCP server")
+// rather than an in-memory/duplex fake — this exercises the exact production path
+// `socket_server::dispatch` uses: `mcp::connect_session` (`crates/orchd/src/mcp/mod.rs`) ->
+// `bpa_mcp::connect(TransportConfig::Http{url}, bearer)` -> a real rmcp `StreamableHttpClient`
+// transport talking HTTP to this process's own loopback server. Mirrors rmcp 2.2.0's OWN
+// `tests/test_streamable_http_protocol_version.rs` axum-wiring pattern (verified against the
+// vendored crate source) and `bpa-mcp`'s `tests/stub.rs` `#[tool_router(server_handler)]`
+// unit-struct shape (verified working in task T4) — combining the two: T4's proven macro
+// pattern, served over T's proven axum/TcpListener wiring instead of a duplex pair.
+// ================================================================================
+
+#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+struct EchoRequest {
+    /// The message to echo back.
+    msg: String,
+}
+
+/// The loopback stub MCP server: one `echo` tool, mirroring `bpa-mcp`'s own
+/// `tests/stub.rs::StubServer` shape exactly (unit struct + `#[tool_router(server_handler)]`,
+/// which auto-generates the whole `ServerHandler` impl — no manual `call_tool`/`list_tools`
+/// wiring needed).
+#[derive(Debug, Clone, Copy, Default)]
+struct EchoServer;
+
+#[rmcp::tool_router(server_handler)]
+impl EchoServer {
+    #[rmcp::tool(description = "Echo the given message back")]
+    fn echo(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(EchoRequest { msg }): rmcp::handler::server::wrapper::Parameters<
+            EchoRequest,
+        >,
+    ) -> String {
+        msg
+    }
+}
+
+/// Spawns [`EchoServer`] on an OS-assigned loopback TCP port via rmcp's `StreamableHttpService`
+/// mounted into a minimal `axum::Router` (exactly rmcp 2.2.0's own
+/// `test_streamable_http_protocol_version.rs::spawn_server_with_manager` shape) and returns its
+/// base url (`http://127.0.0.1:<port>/mcp`) — the value every test below passes as
+/// `McpAddServer.url`. The server task runs for the remainder of the test process; no explicit
+/// shutdown is needed (dropped along with the tokio runtime when the test function returns,
+/// mirroring how every OTHER spawned task in this file that isn't explicitly `.shutdown()`ed —
+/// e.g. `boot_daemon`'s own task after a test panics — is cleaned up).
+async fn spawn_stub_mcp_server() -> String {
+    let session_manager = std::sync::Arc::new(
+        rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+    );
+    let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
+        || Ok(EchoServer),
+        session_manager,
+        rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default(),
+    );
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback stub mcp server");
+    let addr = listener.local_addr().expect("stub mcp server local_addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    format!("http://{addr}/mcp")
 }
 
 #[tokio::test]
@@ -1170,6 +1312,303 @@ async fn graph_search_returns_matching_nodes_workspace_wide_and_broadcasts_nothi
             .is_none(),
         "GraphSearch is a read verb and must broadcast nothing"
     );
+
+    c1.shutdown(boot).await;
+}
+
+// ---- S-EXT MCP dispatch (task T6) ----
+
+#[tokio::test]
+async fn mcp_add_server_returns_server_and_broadcasts_mcp_servers_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    assert_eq!(server.url.as_deref(), Some(stub_url.as_str()));
+    assert_eq!(server.transport, McpTransport::Http);
+    assert_eq!(server.scope, McpScope::Global);
+    assert!(server.enabled, "a freshly added server defaults to enabled");
+    assert!(!server.id.is_empty());
+
+    match c2.recv_push().await {
+        OrchdPush::McpServersChanged { project_id } => {
+            assert_eq!(
+                project_id, None,
+                "a global-scope server pushes project_id: None"
+            )
+        }
+        other => panic!("expected McpServersChanged, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn mcp_connect_without_consent_is_error_consent() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+
+    let res = c1
+        .request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await;
+    assert_eq!(
+        expect_error_code(res),
+        OrchdErrorCode::Consent,
+        "a connect attempt with no consent_grant at all must deny with Error{{Consent}}"
+    );
+
+    // The trust choke-point denies BEFORE any network call — no tools were ever cached.
+    let tools = expect_mcp_tools(
+        c1.request(OrchdRequest::McpListTools {
+            server_id: server.id.clone(),
+        })
+        .await,
+    );
+    assert!(
+        tools.is_empty(),
+        "a denied connect must never reach the stub server or cache tools"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn mcp_connect_after_consent_returns_report_and_broadcasts_tools_changed_and_lists_echo() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+
+    // c2 connects only AFTER the server-add + consent-grant pushes already landed, so the only
+    // push it can observe below is the McpToolsChanged this test is actually proving.
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let report = expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+    assert!(
+        report.tool_count >= 1,
+        "the stub server advertises at least the echo tool"
+    );
+    assert!(!report.protocol_version.is_empty());
+
+    match c2.recv_push().await {
+        OrchdPush::McpToolsChanged { server_id } => assert_eq!(server_id, server.id),
+        other => panic!("expected McpToolsChanged, got {other:?}"),
+    }
+
+    let tools = expect_mcp_tools(
+        c1.request(OrchdRequest::McpListTools {
+            server_id: server.id.clone(),
+        })
+        .await,
+    );
+    assert!(
+        tools.iter().any(|t| t.name == "echo"),
+        "expected the stub's echo tool in {tools:?}"
+    );
+    assert!(
+        tools.iter().find(|t| t.name == "echo").unwrap().enabled,
+        "a freshly cached tool defaults to enabled (the per-tool allowlist, spec §4)"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn mcp_call_tool_echo_returns_result_and_broadcasts_artifact_and_invocation_pushes() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+    expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+
+    // c2 connects only after every setup push already landed, so it observes exactly the two
+    // pushes this test is proving.
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let args_json = serde_json::json!({"msg": "hello from T6"}).to_string();
+    let result = expect_mcp_call_result(
+        c1.request(OrchdRequest::McpCallTool {
+            server_id: server.id.clone(),
+            tool_name: "echo".to_string(),
+            args_json,
+            project_id: None,
+        })
+        .await,
+    );
+    assert!(!result.is_error, "echo is not a tool-level error");
+    assert!(!result.artifact_id.is_empty());
+    assert!(!result.invocation_id.is_empty());
+    assert!(
+        result.content_json.contains("hello from T6"),
+        "expected the echoed message in {}",
+        result.content_json
+    );
+
+    let seen = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen.contains(&OrchdPush::McpArtifactsChanged { project_id: None }),
+        "missing McpArtifactsChanged in {seen:?}"
+    );
+    assert!(
+        seen.contains(&OrchdPush::McpInvocationLogged {
+            server_id: server.id.clone()
+        }),
+        "missing McpInvocationLogged in {seen:?}"
+    );
+
+    let artifacts = expect_mcp_artifacts(
+        c1.request(OrchdRequest::McpListArtifacts {
+            project_id: None,
+            server_id: Some(server.id.clone()),
+            limit: None,
+        })
+        .await,
+    );
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].id, result.artifact_id);
+    assert!(artifacts[0].is_untrusted, "spec D9: always untrusted");
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn mcp_call_tool_on_disabled_tool_is_error_policy_and_artifact_count_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+    expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+
+    let tools = expect_mcp_tools(
+        c1.request(OrchdRequest::McpListTools {
+            server_id: server.id.clone(),
+        })
+        .await,
+    );
+    let echo_tool = tools
+        .iter()
+        .find(|t| t.name == "echo")
+        .expect("echo tool must be cached after connect");
+
+    let disabled = expect_mcp_tool(
+        c1.request(OrchdRequest::McpSetToolEnabled {
+            tool_id: echo_tool.id.clone(),
+            enabled: false,
+        })
+        .await,
+    );
+    assert!(!disabled.enabled);
+
+    let before = expect_mcp_artifacts(
+        c1.request(OrchdRequest::McpListArtifacts {
+            project_id: None,
+            server_id: Some(server.id.clone()),
+            limit: None,
+        })
+        .await,
+    )
+    .len();
+
+    let res = c1
+        .request(OrchdRequest::McpCallTool {
+            server_id: server.id.clone(),
+            tool_name: "echo".to_string(),
+            args_json: "{}".to_string(),
+            project_id: None,
+        })
+        .await;
+    assert_eq!(
+        expect_error_code(res),
+        OrchdErrorCode::Policy,
+        "a disabled tool must be denied with Error{{Policy}} before any dispatch"
+    );
+
+    let after = expect_mcp_artifacts(
+        c1.request(OrchdRequest::McpListArtifacts {
+            project_id: None,
+            server_id: Some(server.id.clone()),
+            limit: None,
+        })
+        .await,
+    )
+    .len();
+    assert_eq!(before, after, "a denied call must not write a new artifact");
 
     c1.shutdown(boot).await;
 }

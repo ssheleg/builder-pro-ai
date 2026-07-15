@@ -31,3 +31,13 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Real loopback rmcp Streamable-HTTP stub MCP server for `tests/dispatch_integration.rs` (S-EXT
+# task T6, spec §9: "e2e ... against a local stub MCP server"). Distinct from `bpa-mcp`'s own
+# duplex-transport stub (crates/mcp/tests/stub.rs) — this one binds a real TCP loopback socket so
+# the test drives the exact `mcp::connect_session -> bpa_mcp::connect -> rmcp HTTP client` path
+# `socket_server::dispatch` uses in production, not an in-memory fake. Mirrors rmcp 2.2.0's own
+# `tests/test_streamable_http_protocol_version.rs` axum-wiring pattern exactly (verified against
+# the vendored crate source — feature set / axum version pinned to match rmcp's own dev-deps).
+rmcp = { version = "2.2", features = ["server", "transport-streamable-http-server"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+schemars = "1"

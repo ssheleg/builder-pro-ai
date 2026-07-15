@@ -47,6 +47,7 @@ use bpa_orchd_proto::{
 };
 
 use crate::export;
+use crate::mcp::{self, OrchdMcpError};
 use crate::persistence::{Db, OrchdPersistError};
 use crate::ruleset_files;
 
@@ -65,9 +66,15 @@ type Broadcaster = bpa_daemon_core::broadcast::Broadcaster<OrchdFrame>;
 
 /// Shared dependency bundle handed to the server and every per-client task.
 ///
-/// `db` is `Arc<Mutex<Db>>` (not `Arc<Db>`) because [`Db`] holds a `rusqlite::Connection` and is
-/// `Send + !Sync`: the async Mutex both makes it shareable across the per-client tasks and
-/// serializes access to the single connection (mirrors `bpa_sessiond::socket_server::ServerDeps`).
+/// `db` is `Arc<Mutex<Db>>` (not `Arc<Db>`) because [`Db`] holds a `rusqlite::Connection`: the
+/// async Mutex both makes it shareable across the per-client tasks and serializes access to the
+/// single connection (mirrors `bpa_sessiond::socket_server::ServerDeps`). [`Db`] also carries an
+/// `unsafe impl Sync` (see its own doc comment in `persistence.rs`, added by task T6) — needed
+/// because `McpConnect`/`McpCallTool` below hold a live `&Db` across an internal network
+/// `.await` (`mcp::lifecycle::connect`/`mcp::invoke::call_tool`), and `tokio::spawn`'s `Send`
+/// bound on the per-connection task otherwise requires it; the `Sync` impl relies ENTIRELY on
+/// this `Arc<Mutex<Db>>` being the only place a `Db` is ever shared — see that doc comment
+/// before adding any other way to reach a `Db`.
 pub struct ServerDeps {
     pub db: Arc<Mutex<Db>>,
     /// Human-readable daemon build string echoed in the accepted preamble reply.
@@ -313,6 +320,71 @@ fn map_err(e: OrchdPersistError) -> OrchdResponse {
     OrchdResponse::Error {
         code,
         message: e.to_string(),
+    }
+}
+
+/// Maps an `OrchdMcpError` (S-EXT §6, T5's `mcp::lifecycle::connect`/`mcp::invoke::call_tool`
+/// error type — NOT a wire type itself, see that type's own doc comment) onto the wire
+/// `OrchdResponse::Error` shape (spec §5/§6, task T6). `ConsentRequired` is the trust
+/// choke-point's Connect-side denial (spec D10: no valid `consent_grant` for the server's CURRENT
+/// url) — surfaces as `Error{Consent}` (a dedicated `OrchdErrorCode` this task adds) so a client
+/// can show the consent dialog specifically, rather than a generic failure. `ToolDisabled` is the
+/// ToolCall-side denial (a disabled/unrecognized tool, the per-tool allowlist, spec §6) —
+/// surfaces as `Error{Policy}` (also new this task). Every other MCP-level failure (`Mcp`/
+/// `Secret`) has no richer wire code yet — mirrors [`map_err`]'s own `Sql -> Io` precedent.
+/// `Persist` delegates straight to [`map_err`] since it already wraps an `OrchdPersistError` —
+/// reusing its NotFound/Invariant/Validation/Conflict mapping rather than flattening every
+/// persistence failure down to `Io`.
+fn map_mcp_err(e: OrchdMcpError) -> OrchdResponse {
+    let message = e.to_string();
+    match e {
+        OrchdMcpError::ConsentRequired => OrchdResponse::Error {
+            code: OrchdErrorCode::Consent,
+            message,
+        },
+        OrchdMcpError::ToolDisabled => OrchdResponse::Error {
+            code: OrchdErrorCode::Policy,
+            message,
+        },
+        OrchdMcpError::Persist(inner) => map_err(inner),
+        OrchdMcpError::Mcp(_) | OrchdMcpError::Secret(_) => OrchdResponse::Error {
+            code: OrchdErrorCode::Io,
+            message,
+        },
+    }
+}
+
+/// Maps a `bpa_secrets::SecretError` (Keychain failure, spec D4) onto the wire
+/// `OrchdResponse::Error` shape (task T6, `McpSetServerBearer`'s Keychain write). No dedicated
+/// wire code exists for a Keychain failure — mirrors [`map_err`]'s own `Sql -> Io` precedent. The
+/// message is `SecretError`'s own `Display` text, which structurally never carries the secret
+/// bytes (see `bpa_secrets::SecretError`'s own doc comment: neither variant holds a `Vec<u8>`).
+fn map_secret_err(e: bpa_secrets::SecretError) -> OrchdResponse {
+    OrchdResponse::Error {
+        code: OrchdErrorCode::Io,
+        message: e.to_string(),
+    }
+}
+
+/// A mutating MCP-server verb's shared reply/push shape (spec §5/§6, task T6):
+/// `McpServersChanged{project_id}` on success — the server's OWN `project_id` (`None` for a
+/// global-scope server). Shared by `McpAddServer`/`McpUpdateServer`/`McpSetServerEnabled` — every
+/// OTHER mcp-server verb below has a reply shape this helper doesn't fit (`McpDeleteServer`
+/// replies a bare `Ack`, mirroring [`goal_project_id`]'s pre-delete-lookup shape;
+/// `McpSetServerBearer` is a two-step Keychain-then-DB write that also replies `Ack`, not the
+/// entity) and is handled inline in its own arm instead.
+fn respond_mcp_server(
+    result: Result<mcp::McpServerRow, OrchdPersistError>,
+    broadcaster: &Broadcaster,
+) -> OrchdResponse {
+    match result {
+        Ok(row) => {
+            broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
+                project_id: row.project_id.clone(),
+            }));
+            OrchdResponse::McpServer(row.into())
+        }
+        Err(e) => map_err(e),
     }
 }
 
@@ -1191,28 +1263,283 @@ async fn dispatch(
                 Err(e) => map_err(e),
             }
         }
-        // S-EXT MCP (spec §5, task T3): wire types landed in `bpa-orchd-proto`, but no dispatch
-        // logic exists here yet — that's T6 (trust choke-point + rmcp client + persistence
-        // wiring). TEMPORARY: this wildcard arm exists ONLY to keep `bpa-orchd` compiling
-        // between T3 and T6; it must be deleted, not extended, when T6 adds the real per-verb
-        // arms above (one arm per variant, mirroring the graph/project/goal/... arms).
-        OrchdRequest::McpAddServer { .. }
-        | OrchdRequest::McpListServers { .. }
-        | OrchdRequest::McpUpdateServer { .. }
-        | OrchdRequest::McpSetServerEnabled { .. }
-        | OrchdRequest::McpDeleteServer { .. }
-        | OrchdRequest::McpSetServerBearer { .. }
-        | OrchdRequest::McpConnect { .. }
-        | OrchdRequest::McpDisconnect { .. }
-        | OrchdRequest::McpListTools { .. }
-        | OrchdRequest::McpSetToolEnabled { .. }
-        | OrchdRequest::McpCallTool { .. }
-        | OrchdRequest::McpListInvocations { .. }
-        | OrchdRequest::McpListArtifacts { .. }
-        | OrchdRequest::McpGetArtifact { .. }
-        | OrchdRequest::TrustGrantConsent { .. } => OrchdResponse::Error {
-            code: OrchdErrorCode::Io,
-            message: "mcp dispatch not yet implemented".into(),
-        },
+        // ---- S-EXT MCP (spec §5/§6, task T6): every mutating server verb below ⇒
+        // `McpServersChanged{project_id}` on success (via `respond_mcp_server` or inline);
+        // `McpConnect` ⇒ `McpToolsChanged{server_id}`; `McpCallTool` ⇒
+        // `McpArtifactsChanged{project_id}` AND `McpInvocationLogged{server_id}`;
+        // `McpSetToolEnabled` ⇒ `McpToolsChanged{server_id}`; `TrustGrantConsent` ⇒
+        // `McpServersChanged{project_id}` (so the UI reflects the new consent state). Every read
+        // verb (`McpListServers`/`McpListTools`/`McpListInvocations`/`McpListArtifacts`/
+        // `McpGetArtifact`) broadcasts nothing. `McpDisconnect` is a Phase-1 no-op (spec: connect-
+        // per-call, no live session to tear down) — `Ack`, no DB access, no push. `Err` ⇒
+        // `map_err`/`map_mcp_err`/`map_secret_err`, nothing broadcast (spec §6: "Failed requests
+        // broadcast NOTHING"). ----
+        OrchdRequest::McpAddServer {
+            name,
+            transport,
+            url,
+            command,
+            args,
+            env,
+            scope,
+            project_id,
+            auth_kind,
+            timeout_ms,
+            max_retries,
+        } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.add_mcp_server(mcp::NewMcpServer {
+                    name,
+                    transport: transport.into(),
+                    url,
+                    command,
+                    args: args.unwrap_or_default(),
+                    env: env.unwrap_or_default(),
+                    scope: scope.into(),
+                    project_id,
+                    auth_kind: auth_kind.into(),
+                    secret_ref: None,
+                    account_id: None,
+                    enabled: true,
+                    timeout_ms: timeout_ms.unwrap_or(30_000),
+                    max_retries: max_retries.unwrap_or(2),
+                })
+            };
+            respond_mcp_server(result, broadcaster)
+        }
+        OrchdRequest::McpListServers { project_id } => {
+            let db = deps.db.lock().await;
+            match db.list_mcp_servers(project_id.as_deref()) {
+                Ok(v) => OrchdResponse::McpServers(v.into_iter().map(Into::into).collect()),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::McpUpdateServer {
+            id,
+            name,
+            url,
+            command,
+            args,
+            env,
+            auth_kind,
+            timeout_ms,
+            max_retries,
+        } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.update_mcp_server(
+                    &id,
+                    mcp::McpServerPatch {
+                        name,
+                        url,
+                        command,
+                        args,
+                        env,
+                        auth_kind: auth_kind.map(Into::into),
+                        secret_ref: None,
+                        account_id: None,
+                        timeout_ms,
+                        max_retries,
+                    },
+                )
+            };
+            respond_mcp_server(result, broadcaster)
+        }
+        OrchdRequest::McpSetServerEnabled { id, enabled } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.set_mcp_server_enabled(&id, enabled)
+            };
+            respond_mcp_server(result, broadcaster)
+        }
+        // `get_mcp_server` resolves the row (and its `project_id`) BEFORE `delete_mcp_server`:
+        // the row is gone afterward (mirrors `goal_project_id`/`task_project_id`'s pre-delete
+        // lookup pattern — here the lookup returns the whole row since the push needs
+        // `project_id`, not just an id captured off a raw query).
+        OrchdRequest::McpDeleteServer { id } => {
+            let db = deps.db.lock().await;
+            match db.get_mcp_server(&id) {
+                Ok(server) => match db.delete_mcp_server(&id) {
+                    Ok(()) => {
+                        broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
+                            project_id: server.project_id,
+                        }));
+                        OrchdResponse::Ack
+                    }
+                    Err(e) => map_err(e),
+                },
+                Err(e) => map_err(e),
+            }
+        }
+        // Existence-checked BEFORE the Keychain write (no stray Keychain entry left behind for
+        // an unknown `id`); the token itself is never bound to a tracing field or an error
+        // message anywhere on this path (spec D4/§5: "token NEVER logged/echoed" —
+        // `bpa_secrets::SecretError`'s own `Display` structurally cannot carry it either, see
+        // [`map_secret_err`]). `secret_ref` is stored as `id` itself — `bpa_secrets::
+        // mcp_bearer_ref(id).account == id` (`crate::mcp::resolve_bearer` derives the Keychain
+        // ref straight from the server id, never from this stored column — this column is the
+        // human/UI-facing "a secret IS stored" marker, spec §4: "Keychain account key for
+        // bearer").
+        OrchdRequest::McpSetServerBearer { id, token } => {
+            let exists = {
+                let db = deps.db.lock().await;
+                db.get_mcp_server(&id)
+            };
+            if let Err(e) = exists {
+                return map_err(e);
+            }
+            if let Err(e) = bpa_secrets::set(&bpa_secrets::mcp_bearer_ref(&id), token.as_bytes()) {
+                return map_secret_err(e);
+            }
+            let db = deps.db.lock().await;
+            let result = db.set_mcp_server_secret_ref(&id, &id).and_then(|_| {
+                db.update_mcp_server(
+                    &id,
+                    mcp::McpServerPatch {
+                        auth_kind: Some(mcp::McpAuthKind::Bearer),
+                        ..Default::default()
+                    },
+                )
+            });
+            match result {
+                Ok(row) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
+                        project_id: row.project_id,
+                    }));
+                    OrchdResponse::Ack
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        // Trust-gated (spec D10): a denied connect (no valid `consent_grant` for the server's
+        // CURRENT url) never reaches the network — `mcp::lifecycle::connect` returns
+        // `OrchdMcpError::ConsentRequired` BEFORE calling `connect_fn`, mapped to `Error{Consent}`
+        // by `map_mcp_err`, no push. `mcp::connect_session` is the SAME production factory
+        // reported in the task-5 handoff — the only transport Phase 1 ships is HTTP (spec D6).
+        OrchdRequest::McpConnect { id } => {
+            let db = deps.db.lock().await;
+            match mcp::lifecycle::connect(&db, &id, mcp::connect_session).await {
+                Ok(report) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpToolsChanged {
+                        server_id: id,
+                    }));
+                    OrchdResponse::McpConnectReport(report)
+                }
+                Err(e) => map_mcp_err(e),
+            }
+        }
+        // Phase-1 connect-per-call (spec: no live session to tear down between calls) — a no-op/
+        // best-effort acknowledgement, no DB access, no push.
+        OrchdRequest::McpDisconnect { .. } => OrchdResponse::Ack,
+        OrchdRequest::McpListTools { server_id } => {
+            let db = deps.db.lock().await;
+            match db.list_mcp_tools(&server_id) {
+                Ok(v) => OrchdResponse::McpTools(v.into_iter().map(Into::into).collect()),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::McpSetToolEnabled { tool_id, enabled } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.set_mcp_tool_enabled(&tool_id, enabled)
+            };
+            match result {
+                Ok(row) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpToolsChanged {
+                        server_id: row.server_id.clone(),
+                    }));
+                    OrchdResponse::McpTool(row.into())
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        // Trust-gated (spec §6): a disabled/unrecognized tool is denied BEFORE any network call,
+        // args parsing, or bearer resolution (`mcp::invoke::call_tool`'s own guarantee) —
+        // `OrchdMcpError::ToolDisabled`, mapped to `Error{Policy}` by `map_mcp_err`, no push, no
+        // invocation/artifact row written. A successful call ALSO writes `mcp_invocation`, even
+        // when the tool's own result is `is_error:true` (a tool-level failure inside an otherwise-
+        // successful RPC) — both pushes still fire, mirroring `mcp::invoke::call_tool`'s own
+        // "the RPC itself completed" distinction.
+        OrchdRequest::McpCallTool {
+            server_id,
+            tool_name,
+            args_json,
+            project_id,
+        } => {
+            let db = deps.db.lock().await;
+            match mcp::invoke::call_tool(
+                &db,
+                &server_id,
+                &tool_name,
+                &args_json,
+                project_id.clone(),
+                mcp::connect_session,
+            )
+            .await
+            {
+                Ok(result) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpArtifactsChanged {
+                        project_id,
+                    }));
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpInvocationLogged {
+                        server_id,
+                    }));
+                    OrchdResponse::McpCallResult(result)
+                }
+                Err(e) => map_mcp_err(e),
+            }
+        }
+        OrchdRequest::McpListInvocations {
+            server_id,
+            project_id,
+            limit,
+        } => {
+            let db = deps.db.lock().await;
+            match db.list_invocations(server_id.as_deref(), project_id.as_deref(), limit) {
+                Ok(v) => OrchdResponse::McpInvocations(v),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::McpListArtifacts {
+            project_id,
+            server_id,
+            limit,
+        } => {
+            let db = deps.db.lock().await;
+            match db.list_artifacts(project_id.as_deref(), server_id.as_deref(), limit) {
+                Ok(v) => OrchdResponse::McpArtifacts(v),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::McpGetArtifact { id } => {
+            let db = deps.db.lock().await;
+            match db.get_artifact(&id) {
+                Ok(a) => OrchdResponse::McpArtifact(a),
+                Err(e) => map_err(e),
+            }
+        }
+        // Direct grant — NOT itself gated by `trust::authorize` (granting consent IS the
+        // gate-setting action, not something that needs to pass through the choke-point it
+        // configures). Phase 1 ships HTTP only (spec D6), so the fingerprint is always the
+        // server's CURRENT url — mirrors `mcp::lifecycle::connect`'s own fingerprint derivation
+        // exactly, which is what makes a subsequent `McpConnect` actually succeed.
+        OrchdRequest::TrustGrantConsent { server_id, kind } => {
+            let db = deps.db.lock().await;
+            let server = match db.get_mcp_server(&server_id) {
+                Ok(s) => s,
+                Err(e) => return map_err(e),
+            };
+            let fingerprint = server.url.clone().unwrap_or_default();
+            match db.grant_consent(&server_id, &kind, &fingerprint) {
+                Ok(()) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
+                        project_id: server.project_id,
+                    }));
+                    OrchdResponse::Ack
+                }
+                Err(e) => map_err(e),
+            }
+        }
     }
 }

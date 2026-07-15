@@ -262,6 +262,17 @@ pub enum OrchdErrorCode {
     Validation,
     Conflict,
     Io,
+    // S-EXT MCP trust choke-point (spec §6, D10, task T6, appended — order FROZEN append-only
+    // like every other block in this file). `Consent`: an `McpConnect` denied because no valid
+    // `consent_grant` exists for the server's CURRENT url (first connect, or a fingerprint
+    // mismatch after the url changed, spec D10) — lets a client show the consent dialog
+    // specifically rather than a generic failure. `Policy`: an `McpCallTool` denied because the
+    // tool is disabled/unrecognized (the per-tool allowlist, spec §6) — surfaced BEFORE any
+    // network/persistence access ever happens (T5's own choke-point guarantee). Neither existed
+    // before this task: `mcp::OrchdMcpError::{ConsentRequired,ToolDisabled}` (T5) had no wire
+    // code to map onto — T5's own doc comment flagged this gap explicitly.
+    Consent,
+    Policy,
 }
 
 // ---- S4 knowledge graph entities (spec §3, appended — order FROZEN append-only) ----

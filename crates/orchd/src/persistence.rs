@@ -69,6 +69,36 @@ pub struct Db {
     conn: Connection,
 }
 
+// SAFETY (S-EXT task T6): `rusqlite::Connection` is `!Sync` purely because of the RUST-LEVEL
+// `RefCell`s it uses internally for its prepared-statement cache — NOT because the underlying
+// SQLite connection itself is unsafe to touch from multiple threads. Every `Connection` this
+// crate opens (`Db::open`/`open_in_memory` above) uses rusqlite's DEFAULT flags — no
+// `SQLITE_OPEN_NOMUTEX` — and the bundled SQLite build (workspace `rusqlite` feature
+// `"bundled"`) defaults to SQLite's "serialized" threading mode, safe for concurrent use from
+// multiple threads at the C level; only the Rust-side `RefCell` state is at risk.
+//
+// The ONLY place this crate ever exposes a `Db` is `socket_server::ServerDeps::db:
+// Arc<tokio::sync::Mutex<Db>>` — every caller MUST `.lock().await` first, and the async `Mutex`
+// guarantees at most one live `&Db`/`&mut Db` at any instant, so the `RefCell`s inside
+// `Connection` are never touched concurrently from two threads, even though tokio's
+// multi-thread runtime may migrate the holding task (and the `Db` value with it) between worker
+// threads across an `.await` point.
+//
+// This is exactly the case `mcp::lifecycle::connect`/`mcp::invoke::call_tool` (task T5) hit: both
+// hold a live `&Db` across an internal network `.await` (DB read before the call, DB write after
+// it), so the future `socket_server::dispatch`'s `McpConnect`/`McpCallTool` arms produce captures
+// a `&Db` across a suspension point. Without this impl, `Db: !Sync` makes that captured `&Db:
+// !Send`, which makes the WHOLE per-connection task `tokio::spawn`s in `serve`'s accept loop
+// `!Send` too — `tokio::spawn` requires `Send + 'static`, so the crate would not compile.
+//
+// Hard crate-wide invariant this impl relies on and must never be violated: `Db` must NEVER be
+// placed behind any OTHER shared-access wrapper (a bare `Arc<Db>`, a second independent `Mutex`,
+// a `&'static Db`, etc.) — doing so would allow two threads to call `&self` methods on the same
+// `Db` concurrently with no synchronization, racing the Rust-level `RefCell`s above (genuine UB,
+// not just a panic, since `RefCell`'s borrow-count `Cell` is not atomic). The single
+// `Arc<Mutex<Db>>` in `socket_server::ServerDeps` is the ONLY sanctioned owner.
+unsafe impl Sync for Db {}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

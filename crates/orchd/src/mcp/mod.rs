@@ -152,6 +152,115 @@ pub struct NewMcpTool {
 }
 
 // ================================================================================
+// ---- wire conversions (S-EXT spec §5, task T6): crate-local persistence rows/enums (this
+// module, T2) <-> the T3 wire entities in `bpa_orchd_proto`. `socket_server::dispatch` is the
+// only caller — every row this crate reads from `mcp_server`/`mcp_tool` is converted here on its
+// way out to a client; every wire enum a client sends in (`McpAddServer`/`McpUpdateServer`) is
+// converted back on its way into a `NewMcpServer`/`McpServerPatch`. Field sets are IDENTICAL 1:1
+// (both mirror the same spec §4 DDL columns — T3's entity doc comment says so explicitly), so
+// every impl below is a plain field-for-field move, no logic. Referenced fully-qualified
+// (`bpa_orchd_proto::McpTransport` etc.) throughout rather than imported bare, since this
+// module's OWN `McpTransport`/`McpScope`/`McpAuthKind` share the exact same short names — bare
+// imports of both would collide.
+// ================================================================================
+
+impl From<bpa_orchd_proto::McpTransport> for McpTransport {
+    fn from(t: bpa_orchd_proto::McpTransport) -> Self {
+        match t {
+            bpa_orchd_proto::McpTransport::Http => McpTransport::Http,
+            bpa_orchd_proto::McpTransport::Stdio => McpTransport::Stdio,
+        }
+    }
+}
+
+impl From<McpTransport> for bpa_orchd_proto::McpTransport {
+    fn from(t: McpTransport) -> Self {
+        match t {
+            McpTransport::Http => bpa_orchd_proto::McpTransport::Http,
+            McpTransport::Stdio => bpa_orchd_proto::McpTransport::Stdio,
+        }
+    }
+}
+
+impl From<bpa_orchd_proto::McpScope> for McpScope {
+    fn from(s: bpa_orchd_proto::McpScope) -> Self {
+        match s {
+            bpa_orchd_proto::McpScope::Global => McpScope::Global,
+            bpa_orchd_proto::McpScope::Project => McpScope::Project,
+        }
+    }
+}
+
+impl From<McpScope> for bpa_orchd_proto::McpScope {
+    fn from(s: McpScope) -> Self {
+        match s {
+            McpScope::Global => bpa_orchd_proto::McpScope::Global,
+            McpScope::Project => bpa_orchd_proto::McpScope::Project,
+        }
+    }
+}
+
+impl From<bpa_orchd_proto::McpAuthKind> for McpAuthKind {
+    fn from(k: bpa_orchd_proto::McpAuthKind) -> Self {
+        match k {
+            bpa_orchd_proto::McpAuthKind::None => McpAuthKind::None,
+            bpa_orchd_proto::McpAuthKind::Bearer => McpAuthKind::Bearer,
+            bpa_orchd_proto::McpAuthKind::Oauth => McpAuthKind::Oauth,
+        }
+    }
+}
+
+impl From<McpAuthKind> for bpa_orchd_proto::McpAuthKind {
+    fn from(k: McpAuthKind) -> Self {
+        match k {
+            McpAuthKind::None => bpa_orchd_proto::McpAuthKind::None,
+            McpAuthKind::Bearer => bpa_orchd_proto::McpAuthKind::Bearer,
+            McpAuthKind::Oauth => bpa_orchd_proto::McpAuthKind::Oauth,
+        }
+    }
+}
+
+impl From<McpServerRow> for bpa_orchd_proto::McpServer {
+    fn from(r: McpServerRow) -> Self {
+        bpa_orchd_proto::McpServer {
+            id: r.id,
+            name: r.name,
+            transport: r.transport.into(),
+            url: r.url,
+            command: r.command,
+            args: r.args,
+            env: r.env,
+            scope: r.scope.into(),
+            project_id: r.project_id,
+            auth_kind: r.auth_kind.into(),
+            secret_ref: r.secret_ref,
+            account_id: r.account_id,
+            enabled: r.enabled,
+            timeout_ms: r.timeout_ms,
+            max_retries: r.max_retries,
+            protocol_version: r.protocol_version,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+impl From<McpToolRow> for bpa_orchd_proto::McpTool {
+    fn from(r: McpToolRow) -> Self {
+        bpa_orchd_proto::McpTool {
+            id: r.id,
+            server_id: r.server_id,
+            name: r.name,
+            title: r.title,
+            description: r.description,
+            input_schema_json: r.input_schema_json,
+            enabled: r.enabled,
+            fetched_at: r.fetched_at,
+        }
+    }
+}
+
+// ================================================================================
 // ---- test/production session seam (S-EXT §3, D2, task T5) ----
 // ================================================================================
 
