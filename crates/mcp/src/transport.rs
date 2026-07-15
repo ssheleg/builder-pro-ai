@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use tokio::process::Command;
 
 /// How to reach an MCP server: a remote **Streamable HTTP** endpoint or a local **stdio**
@@ -24,14 +24,17 @@ pub enum TransportConfig {
     /// D6, Phase 3 / T15).
     ///
     /// `command` is the executable to spawn (absolute path, or resolved via `PATH` — whatever
-    /// [`tokio::process::Command::new`] accepts); `args` are its CLI arguments; `env` are extra
-    /// environment variables applied to the child **as given**.
+    /// [`tokio::process::Command::new`] accepts); `args` are its CLI arguments; `env` is the
+    /// child's **COMPLETE** environment — the child inherits **nothing** from orchd's ambient
+    /// env (the spawn does `env_clear()` before applying `env`, see [`build_stdio_transport`]).
     ///
-    /// `bpa-mcp` does **no env filtering**: the caller is trusted to have already applied any
-    /// policy (denylist, allowlist, secret injection) before constructing this variant. In
-    /// particular, orchd's stdio spawn call site (T16) owns stripping `DYLD_*`/`LD_*` from
-    /// `env` — that denylist does not exist in this crate and must not be added here (it's a
-    /// shared helper used by both orchd's stdio spawn and sessiond's `env_overrides`, spec §6).
+    /// `bpa-mcp` does **no env policy**: the caller supplies the entire environment the child
+    /// should see and is trusted to have already (a) included a safe base — `PATH`/`HOME`/… the
+    /// child needs to run — and (b) applied any filtering (`DYLD_*`/`LD_*` denylist, allowlist,
+    /// secret injection). In particular, orchd's stdio spawn call site (T16) builds this map as
+    /// its own ambient env MERGED with the DB-configured `server.env`, then strips `DYLD_*`/`LD_*`
+    /// from the whole thing — that denylist lives in `bpa_daemon_core::env_filter` (shared with
+    /// sessiond's `env_overrides`, spec §6) and must not be added here.
     Stdio {
         command: String,
         args: Vec<String>,
@@ -60,8 +63,20 @@ pub(crate) fn build_http_transport(
 }
 
 /// Build the child-process transport for a [`TransportConfig::Stdio`] server: spawn `command`
-/// with `args` and `env` (applied as-given — see the variant's doc comment), then hand the
-/// spawned process's stdin/stdout to `rmcp` as an MCP transport.
+/// with `args` and `env`, then hand the spawned process's stdin/stdout to `rmcp` as an MCP
+/// transport.
+///
+/// The child's environment is **exactly** `env` and nothing else: `cmd.env_clear()` runs BEFORE
+/// `cmd.envs(env)`, so the child does NOT inherit orchd's (this process's) ambient environment.
+/// `tokio::process::Command` inherits the parent env by default and `.envs()` only merges on top
+/// of that — without the clear, orchd's own `DYLD_*`/`LD_*` (dev tooling, a compromised launch
+/// profile, an attacker who can influence orchd's launch env) would flow into every stdio MCP
+/// child, completely bypassing the `env` denylist the caller applied. Clearing first makes the
+/// child env fully caller-specified: the caller (orchd, see
+/// `bpa_orchd::mcp::build_transport_config`) owns the COMPLETE env — it is responsible for
+/// including a safe base (PATH/HOME/…) as well as filtering — and this crate does no env policy
+/// itself (see [`TransportConfig::Stdio`]'s own doc comment). Mirrors `bpa-sessiond`'s PTY spawn,
+/// which likewise `env_clear()`s then sets a strict allowlist (`pty_supervisor.rs`).
 ///
 /// Returns the `std::io::Error` from the underlying spawn (e.g. `command` not found or not
 /// executable) unmapped; [`crate::client::connect`] maps it via
@@ -71,11 +86,25 @@ pub(crate) fn build_stdio_transport(
     args: &[String],
     env: &BTreeMap<String, String>,
 ) -> std::io::Result<TokioChildProcess> {
-    let cmd = Command::new(command).configure(|cmd| {
-        cmd.args(args);
-        cmd.envs(env);
-    });
-    TokioChildProcess::new(cmd)
+    TokioChildProcess::new(configure_stdio_command(command, args, env))
+}
+
+/// Build the exact [`tokio::process::Command`] [`build_stdio_transport`] hands to
+/// `rmcp`'s `TokioChildProcess` — `env_clear()` (drop ALL inherited/ambient env) THEN `envs(env)`
+/// (set exactly the caller's map). Extracted so a test can spawn it with `.output()` and inspect
+/// the child's ACTUAL environment (the transport itself consumes stdin/stdout for MCP, so the
+/// child's env can't be observed through `build_stdio_transport`'s return value).
+fn configure_stdio_command(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> Command {
+    let mut cmd = Command::new(command);
+    cmd.args(args);
+    // Clear BEFORE merging: the child gets EXACTLY `env`, never orchd's ambient env.
+    cmd.env_clear();
+    cmd.envs(env);
+    cmd
 }
 
 #[cfg(test)]
@@ -153,5 +182,53 @@ mod tests {
             result.is_err(),
             "expected a spawn error for a missing command"
         );
+    }
+
+    // ---- T16 review (Critical): the child inherits NOTHING from this (orchd's) ambient env —
+    // `configure_stdio_command` `env_clear()`s before applying the caller's map, so a
+    // `DYLD_INSERT_LIBRARIES`/`LD_PRELOAD` sitting in orchd's OWN process env can never leak into
+    // a stdio MCP child. Proven against a REAL spawned process (`/usr/bin/env` prints its actual
+    // environment), mirroring how `bpa-sessiond`'s `pty_supervisor` tests prove its `env_clear`.
+    #[tokio::test]
+    async fn stdio_child_env_is_exactly_the_passed_map_no_ambient_inheritance() {
+        // Plant dangerous + benign markers in THIS process's ambient env (edition 2021 — safe).
+        std::env::set_var("DYLD_INSERT_LIBRARIES", "/evil.dylib");
+        std::env::set_var("LD_PRELOAD", "/evil.so");
+        std::env::set_var("BPA_AMBIENT_MARKER", "should-not-leak-into-child");
+
+        let mut env = BTreeMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+
+        let output = configure_stdio_command("/usr/bin/env", &[], &env)
+            .output()
+            .await
+            .expect("/usr/bin/env should spawn and exit");
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            text.contains("FOO=bar"),
+            "the caller's env must reach the child: {text:?}"
+        );
+        assert!(
+            text.contains("PATH=/usr/bin:/bin"),
+            "the caller's PATH must reach the child: {text:?}"
+        );
+        assert!(
+            !text.contains("DYLD_INSERT_LIBRARIES"),
+            "orchd's ambient DYLD_INSERT_LIBRARIES must NOT leak into the child: {text:?}"
+        );
+        assert!(
+            !text.contains("LD_PRELOAD"),
+            "orchd's ambient LD_PRELOAD must NOT leak into the child: {text:?}"
+        );
+        assert!(
+            !text.contains("BPA_AMBIENT_MARKER"),
+            "no ambient var may leak — the child env is exactly the passed map: {text:?}"
+        );
+
+        std::env::remove_var("DYLD_INSERT_LIBRARIES");
+        std::env::remove_var("LD_PRELOAD");
+        std::env::remove_var("BPA_AMBIENT_MARKER");
     }
 }

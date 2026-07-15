@@ -359,8 +359,11 @@ fn build_transport_config(
                     "mcp_server has no command (transport='stdio' requires one)".to_string(),
                 )
             })?;
-            let mut env = server.env;
-            bpa_daemon_core::env_filter::strip_dangerous_env_map(&mut env);
+            // The child inherits NOTHING on its own (bpa-mcp `env_clear()`s before applying this
+            // map), so orchd must supply the COMPLETE env here: its own ambient env as the base
+            // (for PATH/HOME/… the child needs to run) MERGED with the DB-configured `server.env`,
+            // with the WHOLE result `DYLD_*`/`LD_*`-stripped.
+            let env = build_stdio_env(std::env::vars(), server.env);
             Ok(bpa_mcp::TransportConfig::Stdio {
                 command,
                 args: server.args,
@@ -368,6 +371,30 @@ fn build_transport_config(
             })
         }
     }
+}
+
+/// Build the COMPLETE environment a stdio MCP child receives (task T16 review, Critical fix):
+/// orchd's own `ambient` env as the base, the DB-configured `server_env` merged on top
+/// (`server_env` wins on a key collision — "caller overrides" semantics), then the shared
+/// `DYLD_*`/`LD_*` denylist applied to the ENTIRE result. This guarantees no dynamic-linker
+/// injection var from EITHER source (orchd's ambient env OR the DB-configured server env) can
+/// reach the child, while still handing the child a functional base env (the filtered ambient
+/// PATH/HOME/… survives). Because `bpa_mcp::build_stdio_transport` `env_clear()`s before applying
+/// this map, whatever this function returns IS the child's entire environment — nothing is
+/// inherited implicitly.
+///
+/// `ambient` is a parameter (rather than reading `std::env::vars()` inside) so the merge/filter
+/// logic is unit-testable with a synthetic ambient env; production passes `std::env::vars()`.
+pub(crate) fn build_stdio_env(
+    ambient: impl IntoIterator<Item = (String, String)>,
+    server_env: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut env: BTreeMap<String, String> = ambient.into_iter().collect();
+    // `server_env` overrides the ambient base on any shared key (BTreeMap::extend = insert-or-
+    // replace), matching sessiond's "caller overrides win last" env_overrides semantics.
+    env.extend(server_env);
+    bpa_daemon_core::env_filter::strip_dangerous_env_map(&mut env);
+    env
 }
 
 /// Compute the [`crate::trust::Action`] required to (re)connect `server`'s live session (spec
@@ -635,6 +662,109 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
+    }
+
+    // ---- build_stdio_env: the COMPLETE child env = filtered(ambient ∪ server.env), server wins
+    // (task T16 review Critical — the child inherits nothing on its own, so orchd must supply the
+    // whole env, and NO DYLD_*/LD_* from EITHER source may survive). Pure/synthetic ambient →
+    // deterministic + parallel-safe (no process-global env mutation). ----
+
+    #[test]
+    fn build_stdio_env_merges_filtered_ambient_with_server_env_server_wins() {
+        let ambient = vec![
+            // benign ambient base the child needs — must survive
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), "/home/x".to_string()),
+            // dangerous ambient (orchd's OWN env being poisoned) — must be stripped
+            (
+                "DYLD_INSERT_LIBRARIES".to_string(),
+                "/ambient-evil.dylib".to_string(),
+            ),
+            ("LD_PRELOAD".to_string(), "/ambient-evil.so".to_string()),
+            // a key the server also sets — server must win
+            ("SHARED".to_string(), "ambient-value".to_string()),
+        ];
+        let mut server_env = BTreeMap::new();
+        server_env.insert("FOO".to_string(), "bar".to_string());
+        // dangerous DB-configured server env — must ALSO be stripped
+        server_env.insert("LD_LIBRARY_PATH".to_string(), "/server-evil".to_string());
+        server_env.insert("SHARED".to_string(), "server-value".to_string());
+
+        let env = build_stdio_env(ambient, server_env);
+
+        // benign ambient survives (child stays functional):
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/home/x"));
+        // server.env merged in:
+        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+        // server wins on a shared key ("caller overrides" semantics):
+        assert_eq!(env.get("SHARED").map(String::as_str), Some("server-value"));
+        // NO dynamic-linker vars from EITHER source:
+        assert!(
+            !env.contains_key("DYLD_INSERT_LIBRARIES"),
+            "ambient DYLD must be stripped: {env:?}"
+        );
+        assert!(
+            !env.contains_key("LD_PRELOAD"),
+            "ambient LD_PRELOAD must be stripped: {env:?}"
+        );
+        assert!(
+            !env.contains_key("LD_LIBRARY_PATH"),
+            "server-configured LD_LIBRARY_PATH must be stripped: {env:?}"
+        );
+    }
+
+    // ---- REAL spawned-process proof of the COMPLETE orchd path (task T16 review Critical): plant
+    // DYLD/LD in THIS (orchd-standin) process's ambient env, build the stdio config through
+    // build_transport_config (which reads std::env::vars()), then spawn /usr/bin/env with that env
+    // under env_clear (bpa-mcp's contract, independently proven in crates/mcp/src/transport.rs) and
+    // read the child's ACTUAL environment. Proves ambient DYLD/LD never reach the child while the
+    // filtered ambient base (PATH) does. ----
+    #[tokio::test]
+    async fn stdio_child_gets_filtered_ambient_no_dyld_via_orchd_path() {
+        std::env::set_var("DYLD_INSERT_LIBRARIES", "/ambient-evil.dylib");
+        std::env::set_var("LD_PRELOAD", "/ambient-evil.so");
+        std::env::set_var("BPA_ORCHD_STDIO_ENV_TEST_MARKER", "benign-ambient");
+
+        let mut server_env = BTreeMap::new();
+        server_env.insert("FOO".to_string(), "bar".to_string());
+        let server = stdio_server("/usr/bin/env", server_env);
+
+        let cfg = build_transport_config(server).expect("stdio config must build");
+        let bpa_mcp::TransportConfig::Stdio { env, .. } = cfg else {
+            panic!("expected Stdio config");
+        };
+
+        // Spawn /usr/bin/env with the built env under env_clear — mirrors bpa-mcp's
+        // build_stdio_transport contract (env_clear then envs), which the crate proves itself.
+        let output = tokio::process::Command::new("/usr/bin/env")
+            .env_clear()
+            .envs(&env)
+            .output()
+            .await
+            .expect("/usr/bin/env should spawn and exit");
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            !text.contains("DYLD_INSERT_LIBRARIES"),
+            "orchd's ambient DYLD must NOT reach the stdio child: {text:?}"
+        );
+        assert!(
+            !text.contains("LD_PRELOAD"),
+            "orchd's ambient LD_PRELOAD must NOT reach the stdio child: {text:?}"
+        );
+        assert!(
+            text.contains("BPA_ORCHD_STDIO_ENV_TEST_MARKER=benign-ambient"),
+            "a benign ambient var MUST reach the child (ambient base is included): {text:?}"
+        );
+        assert!(
+            text.contains("FOO=bar"),
+            "the DB-configured server.env must reach the child: {text:?}"
+        );
+
+        std::env::remove_var("DYLD_INSERT_LIBRARIES");
+        std::env::remove_var("LD_PRELOAD");
+        std::env::remove_var("BPA_ORCHD_STDIO_ENV_TEST_MARKER");
     }
 
     // ---- connect_action / fingerprint_for (task T16) ----
