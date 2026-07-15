@@ -7,7 +7,7 @@
 //! client observes the matching coarse push; a FAILED verb broadcasts nothing.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bpa_orchd::protocol::{
     encode_orchd_frame, Goal, GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode,
@@ -132,6 +132,33 @@ impl Client {
         let id = self.next_id;
         self.next_id += 1;
         send_frame(&mut self.stream, &OrchdFrame::Request { id, req }).await;
+        loop {
+            match recv_frame(&mut self.stream).await {
+                OrchdFrame::Response { id: rid, res } => {
+                    assert_eq!(rid, id, "response id must correlate with the request id");
+                    return res;
+                }
+                OrchdFrame::Push(_) => continue,
+                other => panic!("expected a Response or Push frame, got {other:?}"),
+            }
+        }
+    }
+
+    /// Sends a request WITHOUT awaiting its response, returning the correlation id — lets a test
+    /// keep a slow request in-flight on this connection while doing other work on ANOTHER
+    /// connection, then collect the response later via [`Client::recv_response`]. Used by the
+    /// concurrency regression test (T6 review fix) to prove a slow `McpCallTool` doesn't block
+    /// other connections' DB ops.
+    async fn send_request(&mut self, req: OrchdRequest) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        send_frame(&mut self.stream, &OrchdFrame::Request { id, req }).await;
+        id
+    }
+
+    /// Awaits the correlated `Response` for a previously [`Client::send_request`]-ed `id`,
+    /// skipping any interleaved `Push` (same correlation discipline as [`Client::request`]).
+    async fn recv_response(&mut self, id: u64) -> OrchdResponse {
         loop {
             match recv_frame(&mut self.stream).await {
                 OrchdFrame::Response { id: rid, res } => {
@@ -419,12 +446,19 @@ struct EchoRequest {
     msg: String,
 }
 
-/// The loopback stub MCP server: one `echo` tool, mirroring `bpa-mcp`'s own
-/// `tests/stub.rs::StubServer` shape exactly (unit struct + `#[tool_router(server_handler)]`,
-/// which auto-generates the whole `ServerHandler` impl — no manual `call_tool`/`list_tools`
-/// wiring needed).
+/// The loopback stub MCP server: an `echo` tool plus a deliberately-`slow_echo` tool (sleeps
+/// [`SLOW_ECHO_DELAY`] server-side before replying), mirroring `bpa-mcp`'s own
+/// `tests/stub.rs::StubServer` shape (unit struct + `#[tool_router(server_handler)]`, which
+/// auto-generates the whole `ServerHandler` impl — no manual `call_tool`/`list_tools` wiring
+/// needed). `slow_echo` exists only for `mcp_call_tool_does_not_block_other_db_ops` (T6 review
+/// fix): it holds the tool-call's NETWORK phase open long enough to prove orchd is NOT holding
+/// the DB lock across it.
 #[derive(Debug, Clone, Copy, Default)]
 struct EchoServer;
+
+/// How long `slow_echo` sleeps server-side before echoing. Chosen well above the few-ms a
+/// concurrent `ListProjects` needs, so the concurrency assertion has a wide, non-flaky margin.
+const SLOW_ECHO_DELAY: Duration = Duration::from_millis(1500);
 
 #[rmcp::tool_router(server_handler)]
 impl EchoServer {
@@ -435,6 +469,17 @@ impl EchoServer {
             EchoRequest,
         >,
     ) -> String {
+        msg
+    }
+
+    #[rmcp::tool(description = "Echo the given message back after a deliberate server-side delay")]
+    async fn slow_echo(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(EchoRequest { msg }): rmcp::handler::server::wrapper::Parameters<
+            EchoRequest,
+        >,
+    ) -> String {
+        tokio::time::sleep(SLOW_ECHO_DELAY).await;
         msg
     }
 }
@@ -1609,6 +1654,85 @@ async fn mcp_call_tool_on_disabled_tool_is_error_policy_and_artifact_count_uncha
     )
     .len();
     assert_eq!(before, after, "a denied call must not write a new artifact");
+
+    c1.shutdown(boot).await;
+}
+
+/// T6 review fix (S-EXT §6): a slow `McpCallTool` must NOT hold the daemon DB mutex across its
+/// network round-trip — otherwise every OTHER orchd connection's DB op stalls for the whole call
+/// (up to `(1+max_retries)×timeout`, a self-inflicted DoS driven by third-party latency). Proof:
+/// fire a `slow_echo` call (the stub sleeps [`SLOW_ECHO_DELAY`] server-side) on `c1` WITHOUT
+/// awaiting it, then time a plain `ListProjects` DB read on `c2` — it must return in a small
+/// fraction of `SLOW_ECHO_DELAY`, whereas it would block for the full delay if `McpCallTool` held
+/// the lock across its network await. This is the concurrency regression guard for the removed
+/// `unsafe` `Sync` bound on `Db`: the three-phase lock/read → network → lock/write restructure is
+/// what makes both the DoS fix AND `Send`-without-the-unsafe hold.
+#[tokio::test]
+async fn mcp_call_tool_does_not_block_other_db_ops() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+    expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+
+    // c2 connects only after every setup push already landed, so its ListProjects below observes
+    // no interleaved push and returns the response directly.
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // Fire the slow tool call on c1 WITHOUT awaiting it: the stub sleeps SLOW_ECHO_DELAY before
+    // replying, so c1's McpCallTool is now parked in its NETWORK phase — which must hold no DB lock.
+    let slow_id = c1
+        .send_request(OrchdRequest::McpCallTool {
+            server_id: server.id.clone(),
+            tool_name: "slow_echo".to_string(),
+            args_json: serde_json::json!({"msg": "slow"}).to_string(),
+            project_id: None,
+        })
+        .await;
+
+    // While that call is mid-flight, a plain DB read on c2 must complete promptly (it acquires the
+    // daemon DB mutex the slow call is NOT holding during its network sleep).
+    let start = Instant::now();
+    let projects = c2.request(OrchdRequest::ListProjects).await;
+    let elapsed = start.elapsed();
+    match projects {
+        OrchdResponse::Projects(_) => {}
+        other => panic!("expected Projects, got {other:?}"),
+    }
+    assert!(
+        elapsed < SLOW_ECHO_DELAY / 2,
+        "c2's ListProjects took {elapsed:?} — it must not block behind the in-flight slow \
+         McpCallTool (stub sleeps {SLOW_ECHO_DELAY:?}); the DB lock must never be held across the \
+         network await"
+    );
+
+    // Drain the slow call's eventual result so the connection is left clean before shutdown.
+    let slow = expect_mcp_call_result(c1.recv_response(slow_id).await);
+    assert!(!slow.is_error);
+    assert!(
+        slow.content_json.contains("slow"),
+        "expected the echoed message in {}",
+        slow.content_json
+    );
 
     c1.shutdown(boot).await;
 }

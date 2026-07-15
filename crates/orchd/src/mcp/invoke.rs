@@ -3,10 +3,12 @@
 //! for the test/production session seam.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bpa_orchd_proto::McpCallResult;
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use super::{resolve_bearer, McpServerRow, OrchdMcpError, ToolCaller};
 use crate::persistence::{now_ms, Db, NewArtifact, NewInvocation};
@@ -30,8 +32,19 @@ use crate::trust::{self, Action, Decision};
 /// fine") — retries (`server.max_retries`, spec D7) apply only to the `tools/call` RPC itself,
 /// never to reconnecting, and NEVER to a `ToolError` (a tool that ran and failed must not be
 /// blindly re-invoked).
+///
+/// Takes the SHARED `Arc<Mutex<Db>>` (the exact type `socket_server::ServerDeps.db` holds) rather
+/// than a bare `&Db`, and locks it in THREE phases with the network round-trip (connect + the
+/// timeout/retry `tools/call` loop) sandwiched BETWEEN, holding NO `Db` guard across any await
+/// (T6 review fix, S-EXT §6 — same rationale as [`super::lifecycle::connect`]: holding the single
+/// daemon DB mutex across the MCP round-trip would stall every other orchd connection for up to
+/// `(1+max_retries)×timeout`, and was the sole reason `Db` previously needed a hand-written `Sync`
+/// bound). The per-attempt `mcp_invocation` row (spec D8) is still written exactly once — in phase
+/// 3, after the network phase decides the final outcome, on BOTH the success and every failure
+/// path (connect failure, terminal call failure) — just no longer while a guard is alive across
+/// the network.
 pub async fn call_tool<F, Fut, S>(
-    db: &Db,
+    db: &Arc<Mutex<Db>>,
     server_id: &str,
     tool_name: &str,
     args_json: &str,
@@ -43,19 +56,29 @@ where
     Fut: Future<Output = Result<S, bpa_mcp::McpError>>,
     S: ToolCaller,
 {
-    let server = db.get_mcp_server(server_id)?;
+    // ---- Phase 1: lock -> read. Guard dropped at the end of this block, BEFORE any network
+    // await — a disabled/unrecognized tool returns here, never touching the network, never
+    // writing an invocation/artifact row (`trust::authorize`'s deny audit row is written under
+    // this same guard). ----
+    let (server, bearer) = {
+        let guard = db.lock().await;
+        let server = guard.get_mcp_server(server_id)?;
 
-    let decision = trust::authorize(
-        db,
-        &Action::ToolCall {
-            server_id: server.id.clone(),
-            tool_name: tool_name.to_string(),
-            project_id: project_id.clone(),
-        },
-    )?;
-    if matches!(decision, Decision::Deny { .. }) {
-        return Err(OrchdMcpError::ToolDisabled);
-    }
+        let decision = trust::authorize(
+            &guard,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: tool_name.to_string(),
+                project_id: project_id.clone(),
+            },
+        )?;
+        if matches!(decision, Decision::Deny { .. }) {
+            return Err(OrchdMcpError::ToolDisabled);
+        }
+
+        let bearer = resolve_bearer(&server).map_err(|e| OrchdMcpError::Secret(e.to_string()))?;
+        (server, bearer)
+    };
 
     let args: serde_json::Value = serde_json::from_str(args_json).map_err(|e| {
         OrchdMcpError::Mcp(bpa_mcp::McpError::Protocol(format!(
@@ -64,7 +87,6 @@ where
     })?;
     let request_hash = sha256_hex(args_json.as_bytes());
 
-    let bearer = resolve_bearer(&server).map_err(|e| OrchdMcpError::Secret(e.to_string()))?;
     let timeout = Duration::from_millis(server.timeout_ms.max(0) as u64);
     let max_retries = server.max_retries.max(0) as u32;
     let server_id_owned = server.id.clone();
@@ -72,6 +94,7 @@ where
     let started_at = now_ms();
     let start = Instant::now();
 
+    // ---- Phase 2: network. NO `Db`/`MutexGuard` reference is alive here. ----
     let session = match connect_fn(server, bearer).await {
         Ok(session) => session,
         Err(e) => {
@@ -84,7 +107,7 @@ where
                 started_at,
                 &e,
             );
-            record_failed_invocation(db, new, &e)?;
+            record_failed_invocation(db, new, &e).await?;
             return Err(OrchdMcpError::Mcp(e));
         }
     };
@@ -108,10 +131,13 @@ where
 
     let elapsed = start.elapsed();
 
+    // ---- Phase 3: lock -> write. ----
     match outcome {
         Ok(tool_result) => {
             let usage = tool_result.usage;
             let is_error = tool_result.is_error;
+            // Serialization/flattening are pure — done BEFORE re-locking so the guard's scope
+            // stays minimal (just the two inserts).
             let content_json = serde_json::to_string(&tool_result.content).map_err(|e| {
                 OrchdMcpError::Mcp(bpa_mcp::McpError::Protocol(format!(
                     "failed to serialize tool result content: {e}"
@@ -119,28 +145,32 @@ where
             })?;
             let content_text = extract_text(&tool_result.content);
 
-            let invocation = db.insert_invocation(NewInvocation {
-                server_id: server_id_owned.clone(),
-                tool_name: tool_name.to_string(),
-                project_id: project_id.clone(),
-                request_hash,
-                ok: true,
-                error_kind: None,
-                latency_ms: elapsed.as_millis() as i64,
-                cost_usd: usage.and_then(|u| u.cost_usd),
-                input_tokens: usage.and_then(|u| u.input_tokens),
-                output_tokens: usage.and_then(|u| u.output_tokens),
-                started_at,
-            })?;
+            let (artifact_id, invocation_id) = {
+                let guard = db.lock().await;
+                let invocation = guard.insert_invocation(NewInvocation {
+                    server_id: server_id_owned.clone(),
+                    tool_name: tool_name.to_string(),
+                    project_id: project_id.clone(),
+                    request_hash,
+                    ok: true,
+                    error_kind: None,
+                    latency_ms: elapsed.as_millis() as i64,
+                    cost_usd: usage.and_then(|u| u.cost_usd),
+                    input_tokens: usage.and_then(|u| u.input_tokens),
+                    output_tokens: usage.and_then(|u| u.output_tokens),
+                    started_at,
+                })?;
 
-            let artifact = db.insert_artifact(NewArtifact {
-                invocation_id: invocation.id.clone(),
-                server_id: server_id_owned.clone(),
-                tool_name: tool_name.to_string(),
-                project_id,
-                content_json: content_json.clone(),
-                content_text,
-            })?;
+                let artifact = guard.insert_artifact(NewArtifact {
+                    invocation_id: invocation.id.clone(),
+                    server_id: server_id_owned.clone(),
+                    tool_name: tool_name.to_string(),
+                    project_id,
+                    content_json: content_json.clone(),
+                    content_text,
+                })?;
+                (artifact.id, invocation.id)
+            };
 
             tracing::info!(
                 server_id = %server_id_owned,
@@ -151,8 +181,8 @@ where
             );
 
             Ok(McpCallResult {
-                artifact_id: artifact.id,
-                invocation_id: invocation.id,
+                artifact_id,
+                invocation_id,
                 content_json,
                 is_error,
             })
@@ -167,7 +197,7 @@ where
                 started_at,
                 &e,
             );
-            record_failed_invocation(db, new, &e)?;
+            record_failed_invocation(db, new, &e).await?;
             Err(OrchdMcpError::Mcp(e))
         }
     }
@@ -199,9 +229,11 @@ fn failed_invocation(
 
 /// Writes the failed `mcp_invocation` row and a structured warn-level trace — server id/tool
 /// name/error kind only, never the error's own message text (which could, for `ToolError` /
-/// `Auth`, echo server-supplied content derived from the call).
-fn record_failed_invocation(
-    db: &Db,
+/// `Auth`, echo server-supplied content derived from the call). Locks the shared `Db` for the
+/// single sync insert only (T6 review fix): the `MutexGuard` never outlives this call and is
+/// never held across an await.
+async fn record_failed_invocation(
+    db: &Arc<Mutex<Db>>,
     new: NewInvocation,
     err: &bpa_mcp::McpError,
 ) -> Result<(), OrchdMcpError> {
@@ -213,7 +245,7 @@ fn record_failed_invocation(
         error_kind,
         "mcp: tool call failed"
     );
-    db.insert_invocation(new)?;
+    db.lock().await.insert_invocation(new)?;
     Ok(())
 }
 
@@ -274,47 +306,56 @@ mod tests {
 
     use bpa_mcp::{McpError, McpToolResult};
     use serde_json::json;
+    use tokio::sync::Mutex;
 
     use super::*;
     use crate::mcp::test_support::{FakeCallOutcome, FakeSession};
     use crate::mcp::{McpAuthKind, McpScope, McpToolRow, McpTransport, NewMcpServer, NewMcpTool};
 
-    fn new_db() -> Db {
-        Db::open_in_memory().unwrap()
+    /// `call_tool` now takes the SHARED `Arc<Mutex<Db>>` (it locks internally in phases around the
+    /// network await — T6 review fix), so tests build one and lock it themselves for setup /
+    /// assertions, exactly as `socket_server::dispatch` does with `deps.db`.
+    fn new_db() -> Arc<Mutex<Db>> {
+        Arc::new(Mutex::new(Db::open_in_memory().unwrap()))
     }
 
-    fn add_server(db: &Db) -> McpServerRow {
-        db.add_mcp_server(NewMcpServer {
-            name: "Prowl".to_string(),
-            transport: McpTransport::Http,
-            url: Some("https://example.com/mcp".to_string()),
-            command: None,
-            args: vec![],
-            env: Default::default(),
-            scope: McpScope::Global,
-            project_id: None,
-            auth_kind: McpAuthKind::None,
-            secret_ref: None,
-            account_id: None,
-            enabled: true,
-            timeout_ms: 5_000,
-            max_retries: 2,
-        })
-        .unwrap()
+    async fn add_server(db: &Arc<Mutex<Db>>) -> McpServerRow {
+        db.lock()
+            .await
+            .add_mcp_server(NewMcpServer {
+                name: "Prowl".to_string(),
+                transport: McpTransport::Http,
+                url: Some("https://example.com/mcp".to_string()),
+                command: None,
+                args: vec![],
+                env: Default::default(),
+                scope: McpScope::Global,
+                project_id: None,
+                auth_kind: McpAuthKind::None,
+                secret_ref: None,
+                account_id: None,
+                enabled: true,
+                timeout_ms: 5_000,
+                max_retries: 2,
+            })
+            .unwrap()
     }
 
-    fn add_tool(db: &Db, server_id: &str, name: &str) -> McpToolRow {
-        db.upsert_mcp_tools(
-            server_id,
-            vec![NewMcpTool {
-                name: name.to_string(),
-                title: None,
-                description: None,
-                input_schema_json: "{}".to_string(),
-            }],
-        )
-        .unwrap();
-        db.list_mcp_tools(server_id)
+    async fn add_tool(db: &Arc<Mutex<Db>>, server_id: &str, name: &str) -> McpToolRow {
+        let guard = db.lock().await;
+        guard
+            .upsert_mcp_tools(
+                server_id,
+                vec![NewMcpTool {
+                    name: name.to_string(),
+                    title: None,
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                }],
+            )
+            .unwrap();
+        guard
+            .list_mcp_tools(server_id)
             .unwrap()
             .into_iter()
             .find(|t| t.name == name)
@@ -335,8 +376,8 @@ mod tests {
     #[tokio::test]
     async fn call_tool_on_enabled_tool_writes_invocation_and_artifact() {
         let db = new_db();
-        let server = add_server(&db);
-        add_tool(&db, &server.id, "search");
+        let server = add_server(&db).await;
+        add_tool(&db, &server.id, "search").await;
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_closure = call_count.clone();
@@ -358,7 +399,11 @@ mod tests {
         assert!(!result.artifact_id.is_empty());
         assert!(!result.invocation_id.is_empty());
 
-        let invocations = db.list_invocations(Some(&server.id), None, None).unwrap();
+        let invocations = db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap();
         assert_eq!(invocations.len(), 1);
         assert!(invocations[0].ok);
         assert_eq!(invocations[0].error_kind, None);
@@ -368,7 +413,11 @@ mod tests {
             "request_hash is sha256(args_json), never the raw args"
         );
 
-        let artifacts = db.list_artifacts(None, Some(&server.id), None).unwrap();
+        let artifacts = db
+            .lock()
+            .await
+            .list_artifacts(None, Some(&server.id), None)
+            .unwrap();
         assert_eq!(artifacts.len(), 1);
         assert!(artifacts[0].is_untrusted);
         assert_eq!(artifacts[0].content_json, result.content_json);
@@ -380,8 +429,8 @@ mod tests {
     #[tokio::test]
     async fn call_tool_ok_result_with_is_error_true_still_writes_invocation_and_artifact() {
         let db = new_db();
-        let server = add_server(&db);
-        add_tool(&db, &server.id, "search");
+        let server = add_server(&db).await;
+        add_tool(&db, &server.id, "search").await;
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_closure = call_count.clone();
@@ -407,9 +456,17 @@ mod tests {
             "tool-level failure propagates on an otherwise-successful RPC"
         );
 
-        let invocations = db.list_invocations(Some(&server.id), None, None).unwrap();
+        let invocations = db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap();
         assert!(invocations[0].ok, "the RPC itself succeeded");
-        let artifacts = db.list_artifacts(None, Some(&server.id), None).unwrap();
+        let artifacts = db
+            .lock()
+            .await
+            .list_artifacts(None, Some(&server.id), None)
+            .unwrap();
         assert_eq!(
             artifacts.len(),
             1,
@@ -422,9 +479,12 @@ mod tests {
     #[tokio::test]
     async fn call_tool_on_disabled_tool_is_denied_with_no_invocation_or_artifact() {
         let db = new_db();
-        let server = add_server(&db);
-        let tool = add_tool(&db, &server.id, "search");
-        db.set_mcp_tool_enabled(&tool.id, false).unwrap();
+        let server = add_server(&db).await;
+        let tool = add_tool(&db, &server.id, "search").await;
+        db.lock()
+            .await
+            .set_mcp_tool_enabled(&tool.id, false)
+            .unwrap();
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_closure = call_count.clone();
@@ -439,10 +499,14 @@ mod tests {
         assert!(matches!(err, OrchdMcpError::ToolDisabled));
 
         assert!(db
+            .lock()
+            .await
             .list_invocations(Some(&server.id), None, None)
             .unwrap()
             .is_empty());
         assert!(db
+            .lock()
+            .await
             .list_artifacts(None, Some(&server.id), None)
             .unwrap()
             .is_empty());
@@ -453,6 +517,8 @@ mod tests {
         );
 
         let denied: i64 = db
+            .lock()
+            .await
             .conn()
             .query_row(
                 "SELECT COUNT(*) FROM audit_log WHERE action='tool_call' AND decision='deny' \
@@ -469,8 +535,8 @@ mod tests {
     #[tokio::test]
     async fn call_tool_transport_error_records_failed_invocation_no_artifact() {
         let db = new_db();
-        let server = add_server(&db); // max_retries = 2 -> 3 total attempts
-        add_tool(&db, &server.id, "search");
+        let server = add_server(&db).await; // max_retries = 2 -> 3 total attempts
+        add_tool(&db, &server.id, "search").await;
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_closure = call_count.clone();
@@ -492,12 +558,18 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, OrchdMcpError::Mcp(McpError::Transport(_))));
 
-        let invocations = db.list_invocations(Some(&server.id), None, None).unwrap();
+        let invocations = db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap();
         assert_eq!(invocations.len(), 1);
         assert!(!invocations[0].ok);
         assert_eq!(invocations[0].error_kind.as_deref(), Some("transport"));
 
         assert!(db
+            .lock()
+            .await
             .list_artifacts(None, Some(&server.id), None)
             .unwrap()
             .is_empty());
@@ -513,8 +585,8 @@ mod tests {
     #[tokio::test]
     async fn call_tool_retries_transport_error_then_succeeds() {
         let db = new_db();
-        let server = add_server(&db);
-        add_tool(&db, &server.id, "search");
+        let server = add_server(&db).await;
+        add_tool(&db, &server.id, "search").await;
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_closure = call_count.clone();
@@ -536,7 +608,11 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
 
-        let invocations = db.list_invocations(Some(&server.id), None, None).unwrap();
+        let invocations = db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap();
         assert_eq!(invocations.len(), 1, "one row for the final outcome only");
         assert!(invocations[0].ok);
     }
@@ -544,8 +620,8 @@ mod tests {
     #[tokio::test]
     async fn call_tool_tool_error_is_not_retried() {
         let db = new_db();
-        let server = add_server(&db);
-        add_tool(&db, &server.id, "search");
+        let server = add_server(&db).await;
+        add_tool(&db, &server.id, "search").await;
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_closure = call_count.clone();
@@ -572,7 +648,11 @@ mod tests {
             "a ToolError must not be retried"
         );
 
-        let invocations = db.list_invocations(Some(&server.id), None, None).unwrap();
+        let invocations = db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap();
         assert_eq!(invocations.len(), 1);
         assert!(!invocations[0].ok);
         assert_eq!(invocations[0].error_kind.as_deref(), Some("tool_error"));
@@ -583,8 +663,8 @@ mod tests {
     #[tokio::test]
     async fn call_tool_connect_failure_records_failed_invocation() {
         let db = new_db();
-        let server = add_server(&db);
-        add_tool(&db, &server.id, "search");
+        let server = add_server(&db).await;
+        add_tool(&db, &server.id, "search").await;
 
         let connect_fn = |_server: McpServerRow, _bearer: Option<String>| async move {
             Err::<FakeSession, McpError>(McpError::Auth("expired credentials".into()))
@@ -595,11 +675,17 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, OrchdMcpError::Mcp(McpError::Auth(_))));
 
-        let invocations = db.list_invocations(Some(&server.id), None, None).unwrap();
+        let invocations = db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap();
         assert_eq!(invocations.len(), 1);
         assert!(!invocations[0].ok);
         assert_eq!(invocations[0].error_kind.as_deref(), Some("auth"));
         assert!(db
+            .lock()
+            .await
             .list_artifacts(None, Some(&server.id), None)
             .unwrap()
             .is_empty());

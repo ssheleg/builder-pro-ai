@@ -66,15 +66,16 @@ type Broadcaster = bpa_daemon_core::broadcast::Broadcaster<OrchdFrame>;
 
 /// Shared dependency bundle handed to the server and every per-client task.
 ///
-/// `db` is `Arc<Mutex<Db>>` (not `Arc<Db>`) because [`Db`] holds a `rusqlite::Connection`: the
-/// async Mutex both makes it shareable across the per-client tasks and serializes access to the
-/// single connection (mirrors `bpa_sessiond::socket_server::ServerDeps`). [`Db`] also carries an
-/// `unsafe impl Sync` (see its own doc comment in `persistence.rs`, added by task T6) — needed
-/// because `McpConnect`/`McpCallTool` below hold a live `&Db` across an internal network
-/// `.await` (`mcp::lifecycle::connect`/`mcp::invoke::call_tool`), and `tokio::spawn`'s `Send`
-/// bound on the per-connection task otherwise requires it; the `Sync` impl relies ENTIRELY on
-/// this `Arc<Mutex<Db>>` being the only place a `Db` is ever shared — see that doc comment
-/// before adding any other way to reach a `Db`.
+/// `db` is `Arc<Mutex<Db>>` (not `Arc<Db>`) because [`Db`] holds a `rusqlite::Connection` and is
+/// `Send + !Sync`: the async Mutex both makes it shareable across the per-client tasks and
+/// serializes access to the single connection (mirrors `bpa_sessiond::socket_server::ServerDeps`).
+/// Every dispatch arm below locks it for the duration of its DB work and drops the guard before
+/// returning; the MCP arms (`McpConnect`/`McpCallTool`) additionally pass this SHARED handle down
+/// to `mcp::lifecycle::connect`/`mcp::invoke::call_tool`, which lock it themselves in short
+/// phases AROUND their network round-trip so no `Db` guard is ever held across an `.await` (T6
+/// review fix — a held guard there would stall every other orchd connection for the whole MCP
+/// round-trip, and would force a captured `&Db` across a suspension point, making the spawned
+/// per-connection task `!Send`).
 pub struct ServerDeps {
     pub db: Arc<Mutex<Db>>,
     /// Human-readable daemon build string echoed in the accepted preamble reply.
@@ -1418,8 +1419,11 @@ async fn dispatch(
         // by `map_mcp_err`, no push. `mcp::connect_session` is the SAME production factory
         // reported in the task-5 handoff — the only transport Phase 1 ships is HTTP (spec D6).
         OrchdRequest::McpConnect { id } => {
-            let db = deps.db.lock().await;
-            match mcp::lifecycle::connect(&db, &id, mcp::connect_session).await {
+            // Pass the shared `Arc<Mutex<Db>>` directly (NOT a locked guard):
+            // `mcp::lifecycle::connect` locks it itself in two short phases around the network
+            // round-trip, holding NO guard across the MCP awaits (T6 review fix — a held guard
+            // here would stall every other orchd connection for the whole round-trip).
+            match mcp::lifecycle::connect(&deps.db, &id, mcp::connect_session).await {
                 Ok(report) => {
                     broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpToolsChanged {
                         server_id: id,
@@ -1467,9 +1471,11 @@ async fn dispatch(
             args_json,
             project_id,
         } => {
-            let db = deps.db.lock().await;
+            // Pass the shared `Arc<Mutex<Db>>` directly (NOT a locked guard): `mcp::invoke::
+            // call_tool` locks it itself in short phases around the network round-trip + retry
+            // loop, holding NO guard across the MCP awaits (T6 review fix).
             match mcp::invoke::call_tool(
-                &db,
+                &deps.db,
                 &server_id,
                 &tool_name,
                 &args_json,
