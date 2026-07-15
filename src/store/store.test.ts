@@ -14,6 +14,7 @@ import type {
   McpTool,
   Project,
   RuleSetView,
+  Skill,
 } from "../ipc/orchd-types";
 
 const orchdListProjectsMock = vi.fn();
@@ -27,6 +28,7 @@ const mcpListServersMock = vi.fn();
 const mcpListToolsMock = vi.fn();
 const mcpListArtifactsMock = vi.fn();
 const connectorListAccountsMock = vi.fn();
+const skillListMock = vi.fn();
 vi.mock("../ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -39,6 +41,7 @@ vi.mock("../ipc/orchd", () => ({
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
   connectorListAccounts: (...a: unknown[]) => connectorListAccountsMock(...a),
+  skillList: (...a: unknown[]) => skillListMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -74,6 +77,7 @@ describe("useAppStore", () => {
     mcpListToolsMock.mockReset();
     mcpListArtifactsMock.mockReset();
     connectorListAccountsMock.mockReset();
+    skillListMock.mockReset();
     useAppStore.setState(
       {
         sessions: {},
@@ -104,6 +108,7 @@ describe("useAppStore", () => {
         mcpToolsByServer: {},
         mcpArtifacts: [],
         accounts: [],
+        skills: [],
         orchdDown: false,
         orchdIncompatible: false,
         orchdUpgradeDialogOpen: false,
@@ -679,6 +684,20 @@ describe("useAppStore", () => {
     ...over,
   });
 
+  const skill = (over: Partial<Skill> = {}): Skill => ({
+    id: "sk1",
+    name: "My Skill",
+    description: "does a thing",
+    mdPath: "/Users/demo/skills/my-skill/SKILL.md",
+    mdHash: "deadbeef",
+    scope: "global",
+    projectId: null,
+    fileState: "present",
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
   const rulesetView = (over: Partial<RuleSetView> = {}): RuleSetView => ({
     rule: {
       id: "r1",
@@ -934,6 +953,28 @@ describe("useAppStore", () => {
     connectorListAccountsMock.mockRejectedValueOnce(err);
     await useAppStore.getState().refreshAccounts();
     expect(useAppStore.getState().accounts).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  // ---- Skills slice (S-EXT §8, D11, Q14, T17) ----
+
+  it("refreshSkills replaces skills from skillList(null)", async () => {
+    skillListMock.mockResolvedValueOnce([skill()]);
+    await useAppStore.getState().refreshSkills();
+    expect(skillListMock).toHaveBeenCalledWith(null);
+    expect(useAppStore.getState().skills).toEqual([skill()]);
+
+    skillListMock.mockResolvedValueOnce([skill({ id: "sk2", name: "Other" })]);
+    await useAppStore.getState().refreshSkills();
+    // REPLACED, not merged/appended — only the new list survives.
+    expect(useAppStore.getState().skills).toEqual([skill({ id: "sk2", name: "Other" })]);
+  });
+
+  it("refreshSkills surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    skillListMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshSkills();
+    expect(useAppStore.getState().skills).toEqual([]);
     expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 });

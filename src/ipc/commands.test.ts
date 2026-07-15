@@ -20,6 +20,7 @@ import {
   createWorkspace,
   getSessionState,
   pickFolder,
+  pickSkillFile,
   daemonStatus,
   addWorkspaceRoot,
   removeWorkspaceRoot,
@@ -126,6 +127,14 @@ describe("ipc/commands", () => {
     expect(await pickFolder()).toBe("/chosen");
     invokeMock.mockResolvedValueOnce(null);
     expect(await pickFolder()).toBeNull();
+  });
+
+  it("pickSkillFile calls pick_skill_file, resolves string|null (S-EXT §8, D11, T17)", async () => {
+    invokeMock.mockResolvedValueOnce("/Users/demo/skills/demo/SKILL.md");
+    expect(await pickSkillFile()).toBe("/Users/demo/skills/demo/SKILL.md");
+    expect(invokeMock).toHaveBeenCalledWith("pick_skill_file");
+    invokeMock.mockResolvedValueOnce(null);
+    expect(await pickSkillFile()).toBeNull();
   });
 
   it("daemonStatus calls daemon_status with no args, resolves the connected variant", async () => {

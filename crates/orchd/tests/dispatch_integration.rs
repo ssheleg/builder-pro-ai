@@ -14,8 +14,8 @@ use bpa_orchd::protocol::{
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
     McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
     OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Project,
-    RuleFileState, RuleScope, RuleSetView, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION,
-    ORCHD_DAEMON_MAX_VERSION,
+    RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
+    ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -381,6 +381,22 @@ fn expect_connector_ops(res: OrchdResponse) -> Vec<ConnectorOp> {
     match res {
         OrchdResponse::ConnectorOps(v) => v,
         other => panic!("expected ConnectorOps, got {other:?}"),
+    }
+}
+
+// ---- S-EXT Skills dispatch response helpers (task T17) ----
+
+fn expect_skill(res: OrchdResponse) -> Skill {
+    match res {
+        OrchdResponse::Skill(s) => s,
+        other => panic!("expected Skill, got {other:?}"),
+    }
+}
+
+fn expect_skills(res: OrchdResponse) -> Vec<Skill> {
+    match res {
+        OrchdResponse::Skills(v) => v,
+        other => panic!("expected Skills, got {other:?}"),
     }
 }
 
@@ -2095,6 +2111,233 @@ async fn connector_begin_oauth_unregistered_provider_is_error_no_pending_challen
         OrchdErrorCode::Io,
         "ConnectorError has no dedicated wire code yet (mirrors map_secret_err's Sql->Io \
          precedent) — still a genuine Error response, never a fabricated OAuthChallenge"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+// ---- S-EXT Skills dispatch (task T17) ----
+
+/// Writes a minimal SKILL.md (full frontmatter: `name`+`description`) under a fresh tempdir and
+/// returns `(TempDir, absolute path)` — the `TempDir` guard must outlive the path's use (mirrors
+/// `skills::registry::tests::write_skill_md`, one layer up at the socket/dispatch level).
+fn write_skill_md() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("SKILL.md");
+    std::fs::write(
+        &path,
+        "---\nname: Dispatch Skill\ndescription: registered over the wire\n---\n\nBody.\n",
+    )
+    .unwrap();
+    (dir, path.to_string_lossy().to_string())
+}
+
+#[tokio::test]
+async fn skill_add_returns_skill_and_broadcasts_skills_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let (_skill_guard, md_path) = write_skill_md();
+
+    let skill = expect_skill(
+        c1.request(OrchdRequest::SkillAdd {
+            name: None,
+            description: None,
+            md_path: md_path.clone(),
+            scope: SkillScope::Global,
+            project_id: None,
+        })
+        .await,
+    );
+    // name/description omitted on the wire -> parsed from the SKILL.md frontmatter (Q14).
+    assert_eq!(skill.name, "Dispatch Skill");
+    assert_eq!(skill.description, "registered over the wire");
+    assert_eq!(skill.scope, SkillScope::Global);
+    assert_eq!(skill.project_id, None);
+    assert_eq!(
+        skill.file_state,
+        SkillFileState::Present,
+        "freshly added -> the stored hash matches the file that was just read"
+    );
+    assert!(!skill.id.is_empty());
+    assert!(!skill.md_hash.is_empty());
+
+    match c2.recv_push().await {
+        OrchdPush::SkillsChanged { project_id } => {
+            assert_eq!(
+                project_id, None,
+                "a global-scope skill pushes project_id: None"
+            )
+        }
+        other => panic!("expected SkillsChanged, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn skill_add_no_name_and_no_frontmatter_is_error_validation_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let skill_dir = tempfile::tempdir().unwrap();
+    let md_path = skill_dir.path().join("SKILL.md");
+    std::fs::write(&md_path, "# No frontmatter here\n").unwrap();
+
+    let res = c1
+        .request(OrchdRequest::SkillAdd {
+            name: None,
+            description: None,
+            md_path: md_path.to_string_lossy().to_string(),
+            scope: SkillScope::Global,
+            project_id: None,
+        })
+        .await;
+    assert_eq!(expect_error_code(res), OrchdErrorCode::Validation);
+
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "a failed SkillAdd must broadcast nothing (spec §6)"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn skill_list_returns_skills_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let (_skill_guard, md_path) = write_skill_md();
+    let added = expect_skill(
+        c1.request(OrchdRequest::SkillAdd {
+            name: None,
+            description: None,
+            md_path,
+            scope: SkillScope::Global,
+            project_id: None,
+        })
+        .await,
+    );
+    // Drain the SkillAdd's own SkillsChanged push before the read-verb assertion below.
+    c2.recv_push().await;
+
+    let skills = expect_skills(
+        c1.request(OrchdRequest::SkillList { project_id: None })
+            .await,
+    );
+    assert!(
+        skills.iter().any(|s| s.id == added.id),
+        "expected the just-added skill in {skills:?}"
+    );
+
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "a read verb (SkillList) must broadcast nothing"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn skill_delete_returns_ack_and_broadcasts_skills_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let (_skill_guard, md_path) = write_skill_md();
+    let added = expect_skill(
+        c1.request(OrchdRequest::SkillAdd {
+            name: None,
+            description: None,
+            md_path,
+            scope: SkillScope::Global,
+            project_id: None,
+        })
+        .await,
+    );
+    c2.recv_push().await; // drain the SkillAdd push
+
+    expect_ack(
+        c1.request(OrchdRequest::SkillDelete {
+            id: added.id.clone(),
+        })
+        .await,
+    );
+    match c2.recv_push().await {
+        OrchdPush::SkillsChanged { project_id } => assert_eq!(project_id, None),
+        other => panic!("expected SkillsChanged, got {other:?}"),
+    }
+
+    let skills = expect_skills(
+        c1.request(OrchdRequest::SkillList { project_id: None })
+            .await,
+    );
+    assert!(
+        !skills.iter().any(|s| s.id == added.id),
+        "deleted skill must no longer be listed"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn skill_delete_unknown_id_is_error_not_found_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let res = c1
+        .request(OrchdRequest::SkillDelete {
+            id: "missing".to_string(),
+        })
+        .await;
+    assert_eq!(expect_error_code(res), OrchdErrorCode::NotFound);
+
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "a failed SkillDelete must broadcast nothing (spec §6)"
     );
 
     c1.shutdown(boot).await;

@@ -291,6 +291,21 @@ fn sample_oauth_challenge() -> OAuthChallenge {
     }
 }
 
+fn sample_skill() -> Skill {
+    Skill {
+        id: "skill-1".into(),
+        name: "Demo Skill".into(),
+        description: "A demo skill".into(),
+        md_path: "/Users/demo/skills/demo/SKILL.md".into(),
+        md_hash: "deadbeef".into(),
+        scope: SkillScope::Global,
+        project_id: None,
+        file_state: SkillFileState::Present,
+        created_at: 1_720_000_000,
+        updated_at: 1_720_000_100,
+    }
+}
+
 fn all_requests() -> Vec<OrchdRequest> {
     vec![
         OrchdRequest::Ping,
@@ -578,6 +593,26 @@ fn all_requests() -> Vec<OrchdRequest> {
             args_json: "{\"path\":\"/ping\"}".into(),
             project_id: Some("proj-1".into()),
         },
+        OrchdRequest::SkillAdd {
+            name: Some("Demo Skill".into()),
+            description: Some("A demo skill".into()),
+            md_path: "/Users/demo/skills/demo/SKILL.md".into(),
+            scope: SkillScope::Global,
+            project_id: None,
+        },
+        OrchdRequest::SkillAdd {
+            name: None,
+            description: None,
+            md_path: "/Users/demo/skills/demo/SKILL.md".into(),
+            scope: SkillScope::Project,
+            project_id: Some("proj-1".into()),
+        },
+        OrchdRequest::SkillList {
+            project_id: Some("proj-1".into()),
+        },
+        OrchdRequest::SkillDelete {
+            id: "skill-1".into(),
+        },
     ]
 }
 
@@ -643,6 +678,8 @@ fn all_responses() -> Vec<OrchdResponse> {
         OrchdResponse::Accounts(vec![sample_account()]),
         OrchdResponse::OAuthChallenge(sample_oauth_challenge()),
         OrchdResponse::ConnectorOps(vec![sample_connector_op()]),
+        OrchdResponse::Skill(sample_skill()),
+        OrchdResponse::Skills(vec![sample_skill()]),
     ]
 }
 
@@ -679,6 +716,10 @@ fn all_pushes() -> Vec<OrchdPush> {
             server_id: "mcp-1".into(),
         },
         OrchdPush::ConnectorsChanged,
+        OrchdPush::SkillsChanged {
+            project_id: Some("proj-1".into()),
+        },
+        OrchdPush::SkillsChanged { project_id: None },
     ]
 }
 
@@ -988,5 +1029,63 @@ fn connector_accounts_response_json_roundtrips() {
     assert_eq!(
         decoded, original,
         "OrchdResponse::Accounts must JSON round-trip byte-for-byte equal"
+    );
+}
+
+// ---- S-EXT Skills (spec §4/§5, D11, Q14, task T17) ----
+
+#[test]
+fn skill_scope_wire_tags_are_lowercase() {
+    assert_serde_tag(&SkillScope::Global, "global");
+    assert_serde_tag(&SkillScope::Project, "project");
+}
+
+#[test]
+fn skill_file_state_wire_tags_are_lowercase() {
+    assert_serde_tag(&SkillFileState::Present, "present");
+    assert_serde_tag(&SkillFileState::Modified, "modified");
+    assert_serde_tag(&SkillFileState::Missing, "missing");
+}
+
+#[test]
+fn skill_entity_serializes_with_camelcase_keys() {
+    let json = serde_json::to_string(&sample_skill()).expect("serialize Skill");
+    assert!(
+        json.contains("\"mdPath\""),
+        "Skill.md_path must serialize as camelCase `mdPath`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"mdHash\""),
+        "Skill.md_hash must serialize as camelCase `mdHash`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"fileState\""),
+        "Skill.file_state must serialize as camelCase `fileState`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"projectId\""),
+        "Skill.project_id must serialize as camelCase `projectId`; got:\n{json}"
+    );
+    assert!(
+        !json.contains("md_path")
+            && !json.contains("md_hash")
+            && !json.contains("file_state")
+            && !json.contains("project_id"),
+        "generated JSON must not contain snake_case field names; got:\n{json}"
+    );
+}
+
+#[test]
+fn skill_list_response_json_roundtrips() {
+    // Mirrors `connector_accounts_response_json_roundtrips` above: a plain-`serde_json`
+    // round-trip in addition to the CBOR-wire round-trip `every_response_variant_roundtrips`
+    // already exercises.
+    let original = OrchdResponse::Skills(vec![sample_skill()]);
+    let json = serde_json::to_string(&original).expect("serialize OrchdResponse::Skills");
+    let decoded: OrchdResponse =
+        serde_json::from_str(&json).expect("deserialize OrchdResponse::Skills");
+    assert_eq!(
+        decoded, original,
+        "OrchdResponse::Skills must JSON round-trip byte-for-byte equal"
     );
 }

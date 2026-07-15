@@ -102,6 +102,10 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdConnectorsChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdSkillsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdSkillsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
 }));
 
 // T8 (S-EXT §8): ExtPanel is mocked here — its own tests (`components/ext/ExtPanel.test.tsx`)
@@ -138,6 +142,9 @@ const mcpListArtifactsMock = vi.fn().mockResolvedValue([]);
 // S-EXT §8 T13b: the Connectors slice's `refreshAccounts` (`store.ts`) calls straight through to
 // this — mocked here for the same reason as the MCP wrappers above.
 const connectorListAccountsMock = vi.fn().mockResolvedValue([]);
+// S-EXT §8, D11, T17: the Skills slice's `refreshSkills` (`store.ts`) calls straight through to
+// this — mocked here for the same reason as the MCP/Connectors wrappers above.
+const skillListMock = vi.fn().mockResolvedValue([]);
 vi.mock("./ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -155,6 +162,7 @@ vi.mock("./ipc/orchd", () => ({
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
   connectorListAccounts: (...a: unknown[]) => connectorListAccountsMock(...a),
+  skillList: (...a: unknown[]) => skillListMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -277,6 +285,7 @@ beforeEach(() => {
   mcpListToolsMock.mockReset().mockResolvedValue([]);
   mcpListArtifactsMock.mockReset().mockResolvedValue([]);
   connectorListAccountsMock.mockReset().mockResolvedValue([]);
+  skillListMock.mockReset().mockResolvedValue([]);
   useAppStore.setState(
     {
       sessions: {},
@@ -315,7 +324,7 @@ beforeEach(() => {
 });
 
 describe("App", () => {
-  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP + one connectors, S3 T13 + S4 T6 + S-EXT T8/T13b)", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP + one connectors + one skills, S3 T13 + S4 T6 + S-EXT T8/T13b/T17)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -344,6 +353,7 @@ describe("App", () => {
       "orchdMcpToolsChanged",
       "orchdMcpArtifactsChanged",
       "orchdConnectorsChanged",
+      "orchdSkillsChanged",
     ]) {
       expect(typeof cbs[key]).toBe("function");
     }
@@ -1373,5 +1383,16 @@ describe("S-EXT §8 T8: «Расширения» view + MCP event wiring", () =>
       cbs.orchdConnectorsChanged(null);
     });
     expect(connectorListAccountsMock).toHaveBeenCalledWith();
+  });
+
+  it("orchd://skills-changed re-fetches the skills list (S-EXT §8, D11, T17)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    skillListMock.mockClear();
+    await act(async () => {
+      cbs.orchdSkillsChanged({ projectId: null });
+    });
+    expect(skillListMock).toHaveBeenCalledWith(null);
   });
 });

@@ -78,6 +78,10 @@ pub const EV_ORCHD_MCP_INVOCATION_LOGGED: &str = "orchd://mcp-invocation-logged"
 /// FROZEN append-only). No payload (`null`) — the spec §4 `account` table has no `project_id`
 /// column to scope by, same "nothing to name" precedent as `EV_ORCHD_PROJECTS_CHANGED` above.
 pub const EV_ORCHD_CONNECTORS_CHANGED: &str = "orchd://connectors-changed";
+/// S-EXT skills registry coarse-invalidation (spec §5/§8, D11, Q14, appended — order FROZEN
+/// append-only, task T17). Payload `{ projectId }` (may be `null` — a global-scope skill change),
+/// mirrors [`EV_ORCHD_MCP_SERVERS_CHANGED`]'s shape exactly.
+pub const EV_ORCHD_SKILLS_CHANGED: &str = "orchd://skills-changed";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -258,6 +262,12 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
         OrchdPush::ConnectorsChanged => {
             BrokerAction::Emit(EV_ORCHD_CONNECTORS_CHANGED, serde_json::Value::Null)
         }
+        // S-EXT Skills (spec §5, D11, Q14, appended — order FROZEN append-only, task T17):
+        // mirrors `McpServersChanged`'s camelCase-reshape + optional-projectId precedent above.
+        OrchdPush::SkillsChanged { project_id } => BrokerAction::Emit(
+            EV_ORCHD_SKILLS_CHANGED,
+            serde_json::json!({ "projectId": project_id }),
+        ),
     }
 }
 
@@ -878,6 +888,35 @@ mod tests {
             BrokerAction::Emit(event, payload) => {
                 assert_eq!(event, EV_ORCHD_CONNECTORS_CHANGED);
                 assert!(payload.is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    // ── S-EXT Skills (spec §5, D11, Q14, task T17) ──────────────────────────────────────────
+
+    #[test]
+    fn orchd_skills_changed_maps_to_emit_with_camel_case_project_id_payload() {
+        let action = map_orchd_push(OrchdPush::SkillsChanged {
+            project_id: Some("proj-1".to_string()),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_SKILLS_CHANGED);
+                assert_eq!(payload["projectId"], "proj-1");
+                assert!(payload.get("project_id").is_none());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_skills_changed_global_scope_has_null_project_id() {
+        let action = map_orchd_push(OrchdPush::SkillsChanged { project_id: None });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_SKILLS_CHANGED);
+                assert!(payload["projectId"].is_null());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

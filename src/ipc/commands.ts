@@ -119,6 +119,15 @@ export function pickFolder(): Promise<string | null> {
 }
 
 /**
+ * CORE-ONLY (spec §6.1, S-EXT §8, D11, T17): the native file picker `SkillsTab` uses to let the
+ * owner choose an existing SKILL.md (`src-tauri/src/commands.rs::pick_skill_file`), filtered to
+ * `.md` files. Resolves the chosen absolute path, or `null` if the user canceled the dialog.
+ */
+export function pickSkillFile(): Promise<string | null> {
+  return invoke<string | null>("pick_skill_file");
+}
+
+/**
  * Triggers the daemon upgrade (Pv2 §6.2, `src-tauri/src/commands.rs::upgrade_daemon`). The core
  * kickstarts a new daemon and then calls `app.restart()`, which kills this webview process —
  * so this promise NEVER resolves on the happy path. Callers MUST treat this as fire-and-forget

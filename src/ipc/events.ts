@@ -281,3 +281,19 @@ export function onOrchdMcpInvocationLogged(
 export function onOrchdConnectorsChanged(cb: () => void): Promise<UnlistenFn> {
   return listen<null>("orchd://connectors-changed", () => cb());
 }
+
+// ── Skills coarse-invalidation event (S-EXT §5/§8, D11, Q14, T17's `EV_ORCHD_SKILLS_CHANGED`) ──
+
+/** Payload of `orchd://skills-changed`: `projectId` is `null` for a global-scope skill change
+ * (mirrors `McpServersChangedPayload` exactly — the broker reshapes the raw `Option<String>`
+ * straight through, never coerced to a sentinel). */
+export interface SkillsChangedPayload {
+  projectId: string | null;
+}
+
+/** Subscribe to `orchd://skills-changed` — see `SkillsChangedPayload`. */
+export function onOrchdSkillsChanged(
+  cb: (p: SkillsChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SkillsChangedPayload>("orchd://skills-changed", (e) => cb(e.payload));
+}

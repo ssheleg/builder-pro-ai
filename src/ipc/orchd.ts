@@ -32,6 +32,8 @@ import type {
   Project,
   RuleScope,
   RuleSetView,
+  Skill,
+  SkillScope,
   TaskSource,
   TaskStatus,
 } from "./orchd-types";
@@ -648,6 +650,33 @@ export function connectorInvoke(args: {
     argsJson: args.argsJson,
     projectId: args.projectId ?? null,
   });
+}
+
+// ── Skills (S-EXT §5/§8, D11, Q14, T17's skill_* commands) ──────────────────────────────────
+//
+// One thin wrapper per `skill_*` `#[tauri::command]` (`src-tauri/src/commands.rs`, T17), same
+// naming/arg-shape-verbatim convention as every wrapper above. PLUMBING ONLY (D11): this registry
+// has no runtime consumer until the S6b agent org — see `SkillsTab.tsx`'s banner.
+
+/** `name`/`description: null` ⇒ parsed from the SKILL.md frontmatter at `mdPath` (Q14) on the
+ * orchd side; rejects with `CommandError{kind:"daemon",code:"Validation"}` when NEITHER an
+ * explicit override NOR a parseable frontmatter name is available. */
+export function skillAdd(
+  name: string | null,
+  description: string | null,
+  mdPath: string,
+  scope: SkillScope,
+  projectId: string | null,
+): Promise<Skill> {
+  return invoke<Skill>("skill_add", { name, description, mdPath, scope, projectId });
+}
+
+export function skillList(projectId: string | null): Promise<Skill[]> {
+  return invoke<Skill[]>("skill_list", { projectId });
+}
+
+export function skillDelete(id: string): Promise<void> {
+  return invoke<void>("skill_delete", { id });
 }
 
 // ── error mapping ────────────────────────────────────────────────────────────────────────────

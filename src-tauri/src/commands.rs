@@ -31,7 +31,8 @@ use bpa_orchd_proto::{
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle,
     Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
     McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdRequest,
-    OrchdResponse, PolicyRules, Project, RuleScope, RuleSetView, TaskSource, TaskStatus,
+    OrchdResponse, PolicyRules, Project, RuleScope, RuleSetView, Skill, SkillScope, TaskSource,
+    TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -830,6 +831,23 @@ fn expect_connector_ops(res: OrchdResponse) -> Result<Vec<ConnectorOp>, CommandE
     }
 }
 
+// ── S-EXT Skills orchd response unwrappers (spec §5, D11, Q14, appended, task T17) — mirrors the
+// MCP/Connector blocks above exactly, one unwrapper per `OrchdResponse::Skill*` variant ─────────
+
+fn expect_skill(res: OrchdResponse) -> Result<Skill, CommandError> {
+    match res {
+        OrchdResponse::Skill(s) => Ok(s),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_skills(res: OrchdResponse) -> Result<Vec<Skill>, CommandError> {
+    match res {
+        OrchdResponse::Skills(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
 // ── #[tauri::command] surface (spec §6.1) ───────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1065,6 +1083,31 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, CommandError>
     app.dialog().file().pick_folder(move |maybe_path| {
         let _ = tx.send(maybe_path);
     });
+    let chosen = rx.await.map_err(|e| {
+        CommandError::Internal(format!(
+            "dialog channel closed before a result arrived: {e}"
+        ))
+    })?;
+    Ok(chosen.map(|p| p.to_string()))
+}
+
+/// CORE-ONLY (spec §6.1, mirrors `pick_folder` above verbatim — same "the native file dialog must
+/// run in the GUI process, never brokered to the daemon" rationale): the file picker `SkillsTab`
+/// (S-EXT §8, D11, task T17) uses to let the owner choose an existing SKILL.md. Filtered to `.md`
+/// files (`add_filter`) — the owner still picks the exact file, this just narrows the dialog's
+/// default view; `skill_add`'s own `md_path` validation (`bpa_orchd::skills::registry`) is the
+/// actual security boundary, not this filter. Returns the chosen absolute path, or `None` if the
+/// user canceled the dialog.
+#[tauri::command]
+pub async fn pick_skill_file(app: AppHandle) -> Result<Option<String>, CommandError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("SKILL.md", &["md"])
+        .set_title("Выбрать SKILL.md")
+        .pick_file(move |maybe_path| {
+            let _ = tx.send(maybe_path);
+        });
     let chosen = rx.await.map_err(|e| {
         CommandError::Internal(format!(
             "dialog channel closed before a result arrived: {e}"
@@ -2429,6 +2472,60 @@ pub async fn connector_invoke(
                 args_json,
                 project_id,
             })
+            .await?,
+    )
+}
+
+// ── S-EXT Skills orchd #[tauri::command] surface (spec §5/§8, D11, Q14, appended — task T17)
+// ───────────────────────────────────────────────────────────────────────────────────────────
+//
+// Same one-thin-command-per-verb shape as the MCP/Connector blocks above, over the
+// `OrchdRequest::Skill*` verbs (spec §5's frozen-append-only wire additions). PLUMBING ONLY
+// (D11): this registry has no runtime consumer until the S6b agent org — these three commands
+// (add/list/delete) are the entire surface, mirroring `bpa_orchd_proto::Skill`'s own doc comment.
+
+#[tauri::command]
+pub async fn skill_add(
+    state: State<'_, AppState>,
+    name: Option<String>,
+    description: Option<String>,
+    md_path: String,
+    scope: SkillScope,
+    project_id: Option<String>,
+) -> Result<Skill, CommandError> {
+    expect_skill(
+        state
+            .orchd()?
+            .request(OrchdRequest::SkillAdd {
+                name,
+                description,
+                md_path,
+                scope,
+                project_id,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn skill_list(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<Skill>, CommandError> {
+    expect_skills(
+        state
+            .orchd()?
+            .request(OrchdRequest::SkillList { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn skill_delete(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::SkillDelete { id })
             .await?,
     )
 }
@@ -4700,6 +4797,85 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             CommandError::Daemon { code, message } => {
                 assert_eq!(code, "Policy");
                 assert_eq!(message, "connector invoke denied: spend cap exceeded");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    // ── S-EXT Skills orchd `skill_*` commands (spec §5/§8, D11, Q14, task T17) ─────────────────
+    //
+    // Same rationale as the MCP/Connector blocks above: `skill_add` stands in for the happy-path
+    // shape shared by all three verbs (`expect_*(client.request(req).await?)`); a `Validation`
+    // error response (the one `add_skill` actually produces — e.g. no name available from either
+    // an explicit override or the SKILL.md frontmatter) proves the generic `Error->Daemon`
+    // mapping once, directly, mirroring `mcp_connect_consent_error_...`'s style above.
+
+    #[tokio::test]
+    async fn skill_add_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::SkillAdd {
+                name,
+                description,
+                md_path,
+                scope,
+                project_id,
+            } => OrchdResponse::Skill(Skill {
+                id: "skill-1".into(),
+                name: name.unwrap_or_else(|| "Parsed From Frontmatter".into()),
+                description: description.unwrap_or_default(),
+                md_path,
+                md_hash: "deadbeef".into(),
+                scope,
+                project_id,
+                file_state: bpa_orchd_proto::SkillFileState::Present,
+                created_at: 0,
+                updated_at: 0,
+            }),
+            other => panic!("expected SkillAdd, got {other:?}"),
+        })
+        .await;
+
+        let req = OrchdRequest::SkillAdd {
+            name: Some("My Skill".into()),
+            description: Some("does things".into()),
+            md_path: "/tmp/skills/demo/SKILL.md".into(),
+            scope: SkillScope::Global,
+            project_id: None,
+        };
+        let res = client.request(req).await.unwrap();
+        let skill = expect_skill(res).unwrap();
+        assert_eq!(skill.id, "skill-1");
+        assert_eq!(skill.name, "My Skill");
+        assert_eq!(skill.scope, SkillScope::Global);
+        assert_eq!(skill.file_state, bpa_orchd_proto::SkillFileState::Present);
+    }
+
+    #[tokio::test]
+    async fn skill_add_validation_error_response_becomes_command_error_daemon_validation() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Validation,
+            message: "skill: name required (pass it explicitly or via the SKILL.md frontmatter)"
+                .into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::SkillAdd {
+                name: None,
+                description: None,
+                md_path: "/tmp/skills/demo/SKILL.md".into(),
+                scope: SkillScope::Global,
+                project_id: None,
+            })
+            .await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Validation");
+                assert_eq!(
+                    message,
+                    "skill: name required (pass it explicitly or via the SKILL.md frontmatter)"
+                );
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }

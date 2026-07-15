@@ -29,6 +29,12 @@ pub mod trust;
 /// independently nameable for a later task's `socket_server` dispatch wiring, T13a).
 pub mod connectors;
 
+/// Skills registry persistence (S-EXT spec §4 `skill` table, §8, D11, Q14, task T17): SKILL.md
+/// CRUD + frontmatter parsing + files-as-truth status. `pub` — same reasoning as `mcp`/
+/// `connectors` above (this module's own `SkillRow`/`SkillView`/`NewSkill`/`SkillScope` types need
+/// to stay independently nameable for `socket_server`'s `Skill*` dispatch arms, this same task).
+pub mod skills;
+
 mod boot;
 /// Knowledge-graph node/edge persistence (S4 spec §4 schema v2, §5 persistence + invariants).
 /// Crate-private — `persistence::Db`'s CRUD/getter surface (`conn()`, `ensure_project_active`,

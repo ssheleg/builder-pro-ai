@@ -51,6 +51,7 @@ use crate::export;
 use crate::mcp::{self, OrchdMcpError};
 use crate::persistence::{Db, OrchdPersistError};
 use crate::ruleset_files;
+use crate::skills::{self, NewSkill};
 
 /// Per-client bounded outbound queue depth (frames). Overflow (a client that stopped reading) ⇒
 /// drop + disconnect that client rather than buffer unboundedly (mirrors sessiond's
@@ -1752,6 +1753,72 @@ async fn dispatch(
                     OrchdResponse::McpCallResult(result)
                 }
                 Err(e) => map_connector_invoke_err(e),
+            }
+        }
+
+        // ---- S-EXT Skills (spec §4/§5/§8, D11, Q14, task T17): a plumbing-only registry — see
+        // `bpa_orchd_proto::Skill`'s own doc comment ("no runtime consumer until S6b agent org").
+        // `SkillAdd`/`SkillDelete` ⇒ `SkillsChanged{project_id}` on success (mirrors
+        // `McpServersChanged`'s scoping exactly — `project_id: None` for a global-scope skill);
+        // `SkillList` is a READ and broadcasts nothing. `Err` ⇒ `map_err` (every failure mode here
+        // is `OrchdPersistError`, no MCP/connector-specific error family involved), nothing
+        // broadcast (spec §6: "Failed requests broadcast NOTHING"). ----
+        OrchdRequest::SkillAdd {
+            name,
+            description,
+            md_path,
+            scope,
+            project_id,
+        } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.add_skill(NewSkill {
+                    name,
+                    description,
+                    md_path,
+                    scope: match scope {
+                        bpa_orchd_proto::SkillScope::Global => skills::SkillScope::Global,
+                        bpa_orchd_proto::SkillScope::Project => skills::SkillScope::Project,
+                    },
+                    project_id,
+                })
+            };
+            match result {
+                Ok(row) => {
+                    let view = row.into_view();
+                    let project_id = view.skill.project_id.clone();
+                    broadcaster
+                        .broadcast(OrchdFrame::Push(OrchdPush::SkillsChanged { project_id }));
+                    OrchdResponse::Skill(view.into())
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::SkillList { project_id } => {
+            let db = deps.db.lock().await;
+            match db.list_skills(project_id.as_deref()) {
+                Ok(views) => OrchdResponse::Skills(views.into_iter().map(Into::into).collect()),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::SkillDelete { id } => {
+            // `delete_skill` doesn't return the deleted row's `project_id`, and the push payload
+            // needs it (spec §5's `SkillsChanged{project_id}` mirrors `McpServersChanged`'s
+            // shape) — look the row up first, THEN delete, THEN broadcast the scope it actually
+            // affected. Mirrors `McpDeleteServer`'s exact "get_mcp_server, then
+            // delete_mcp_server" shape above, one entity later.
+            let db = deps.db.lock().await;
+            match db.get_skill(&id) {
+                Ok(skill) => match db.delete_skill(&id) {
+                    Ok(()) => {
+                        broadcaster.broadcast(OrchdFrame::Push(OrchdPush::SkillsChanged {
+                            project_id: skill.project_id,
+                        }));
+                        OrchdResponse::Ack
+                    }
+                    Err(e) => map_err(e),
+                },
+                Err(e) => map_err(e),
             }
         }
     }

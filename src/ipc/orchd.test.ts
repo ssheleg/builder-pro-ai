@@ -78,6 +78,9 @@ import {
   connectorDeleteAccount,
   connectorListOps,
   connectorInvoke,
+  skillAdd,
+  skillList,
+  skillDelete,
   describeOrchdError,
 } from "./orchd";
 
@@ -707,6 +710,40 @@ describe("ipc/orchd", () => {
       argsJson: "{}",
       projectId: "p1",
     });
+  });
+
+  // ── Skills (S-EXT §5/§8, D11, Q14, T17) ──────────────────────────────────────────────────
+
+  it("skillAdd sends name/description/mdPath/scope/projectId in T17's skill_add param order", async () => {
+    await skillAdd("My Skill", "does things", "/tmp/skills/demo/SKILL.md", "global", null);
+    expect(invokeMock).toHaveBeenCalledWith("skill_add", {
+      name: "My Skill",
+      description: "does things",
+      mdPath: "/tmp/skills/demo/SKILL.md",
+      scope: "global",
+      projectId: null,
+    });
+  });
+
+  it("skillAdd sends null name/description as-is (parsed from SKILL.md frontmatter on the orchd side)", async () => {
+    await skillAdd(null, null, "/tmp/skills/demo/SKILL.md", "global", null);
+    expect(invokeMock).toHaveBeenCalledWith("skill_add", {
+      name: null,
+      description: null,
+      mdPath: "/tmp/skills/demo/SKILL.md",
+      scope: "global",
+      projectId: null,
+    });
+  });
+
+  it("skillList sends projectId", async () => {
+    await skillList(null);
+    expect(invokeMock).toHaveBeenCalledWith("skill_list", { projectId: null });
+  });
+
+  it("skillDelete sends id", async () => {
+    await skillDelete("s1");
+    expect(invokeMock).toHaveBeenCalledWith("skill_delete", { id: "s1" });
   });
 
   // ── describeOrchdError ────────────────────────────────────────────────────────────────────

@@ -37,6 +37,7 @@ import {
   onOrchdMcpArtifactsChanged,
   onOrchdMcpInvocationLogged,
   onOrchdConnectorsChanged,
+  onOrchdSkillsChanged,
 } from "./events";
 import type { SessionMeta, Workspace } from "./types";
 import type {
@@ -52,6 +53,7 @@ import type {
   McpToolsChangedPayload,
   McpArtifactsChangedPayload,
   McpInvocationLoggedPayload,
+  SkillsChangedPayload,
 } from "./events";
 
 describe("ipc/events", () => {
@@ -318,5 +320,25 @@ describe("ipc/events", () => {
     registered.get("orchd://connectors-changed")!({ payload: null });
     expect(cb).toHaveBeenCalledTimes(1);
     expect(un).toBe(unlisten);
+  });
+
+  // ── Skills coarse-invalidation event (S-EXT §8, D11, Q14, T17) ─────────────────────────────
+
+  it("onOrchdSkillsChanged subscribes to orchd://skills-changed and unwraps {projectId}", async () => {
+    const cb = vi.fn();
+    const un = await onOrchdSkillsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://skills-changed", expect.any(Function));
+    const p: SkillsChangedPayload = { projectId: "p1" };
+    registered.get("orchd://skills-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+    expect(un).toBe(unlisten);
+  });
+
+  it("onOrchdSkillsChanged carries a null projectId through for the global scope", async () => {
+    const cb = vi.fn();
+    await onOrchdSkillsChanged(cb);
+    const p: SkillsChangedPayload = { projectId: null };
+    registered.get("orchd://skills-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
   });
 });

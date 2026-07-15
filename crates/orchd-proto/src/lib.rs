@@ -582,6 +582,61 @@ pub struct OAuthChallenge {
     pub state: String,
 }
 
+// ---- S-EXT Skills entities (spec §4/§5, D11, Q14, task T17, appended — order FROZEN
+// append-only). Plumbing-only registry: SKILL.md-format files are the source of truth, the DB
+// only stores `md_path`/`md_hash` (files-as-truth, mirrors `RuleSet`/`RuleSetView` — D4 of S3).
+// There is NO runtime consumer of this registry yet (that's S6b's agent org) — see D11: "UI
+// lists/adds/removes; a banner states skills run once the agent org ships". Field set mirrors the
+// spec §4 `skill` DDL columns 1:1 (same field names as `bpa_orchd::skills::SkillRow` from this
+// task), with the usual camelCase + ts-rs wire treatment layered on top (mirrors the
+// `McpServer`/`Account` entity blocks byte-for-byte). ----
+
+/// `fileState` is NOT itself a DB column — it is computed FRESH at read time by re-hashing the
+/// SKILL.md file against its stored hash (files-as-truth, mirrors how `RuleSetView` covers the
+/// `ruleset` table the same way). `Skill` intentionally has no `AcknowledgeRuleFile`-style verb to
+/// clear a `Modified` state — this registry has no equivalent "I've seen the external edit"
+/// affordance (out of scope for a plumbing-only slice), so re-adding (or, once a consumer exists,
+/// re-registering) the skill is the only way to refresh the stored hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub md_path: String,
+    pub md_hash: String,
+    pub scope: SkillScope,
+    pub project_id: Option<String>,
+    pub file_state: SkillFileState,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum SkillScope {
+    Global,
+    Project,
+}
+
+/// Files-as-truth read-time classification (mirrors `RuleFileState`'s role for `ruleset`, but a
+/// distinct wire enum with its own — task-17-brief-specified — variant names): `Present` (the
+/// file's current sha256 matches the stored hash), `Modified` (it exists but the hash no longer
+/// matches — hand-edited or replaced outside orchd since it was registered), `Missing` (the file
+/// is gone).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum SkillFileState {
+    Present,
+    Modified,
+    Missing,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -952,6 +1007,29 @@ pub enum OrchdRequest {
         args_json: String,
         project_id: Option<String>,
     },
+    // S-EXT Skills (spec §4/§5, D11, Q14, task T17, appended — order FROZEN append-only):
+    // plumbing-only registry — see `Skill`'s own doc comment above ("no runtime consumer until
+    // S6b agent org").
+    /// → `OrchdResponse::Skill`; pushes `SkillsChanged`. `name`/`description: None` ⇒ parsed from
+    /// the SKILL.md frontmatter at `md_path` (spec §4 comment: "parses SKILL.md frontmatter if
+    /// name/desc omitted"); neither an explicit `name` NOR a parseable frontmatter `name` ⇒
+    /// `Error{Validation}`.
+    SkillAdd {
+        name: Option<String>,
+        description: Option<String>,
+        md_path: String,
+        scope: SkillScope,
+        project_id: Option<String>,
+    },
+    /// → `OrchdResponse::Skills` (global + the given project's, when `project_id: Some` — mirrors
+    /// `McpListServers`'s scoping exactly).
+    SkillList {
+        project_id: Option<String>,
+    },
+    /// → `OrchdResponse::Ack`; pushes `SkillsChanged`.
+    SkillDelete {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1003,6 +1081,9 @@ pub enum OrchdResponse {
     Accounts(Vec<Account>),
     OAuthChallenge(OAuthChallenge),
     ConnectorOps(Vec<ConnectorOp>),
+    // S-EXT Skills (spec §4/§5, D11, Q14, task T17, appended — order FROZEN append-only)
+    Skill(Skill),
+    Skills(Vec<Skill>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1040,6 +1121,10 @@ pub enum OrchdPush {
     // S-EXT Connectors / accounts (spec §5/§7, appended — order FROZEN append-only). No
     // payload: the `account` table (spec §4) has no `project_id` column to scope by.
     ConnectorsChanged,
+    // S-EXT Skills (spec §4/§5, D11, Q14, task T17, appended — order FROZEN append-only).
+    SkillsChanged {
+        project_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

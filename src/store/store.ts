@@ -16,6 +16,7 @@ import type {
   Project,
   RuleScope,
   RuleSetView,
+  Skill,
 } from "../ipc/orchd-types";
 import {
   orchdGetRuleset,
@@ -29,6 +30,7 @@ import {
   mcpListTools,
   mcpListArtifacts,
   connectorListAccounts,
+  skillList,
   describeOrchdError,
 } from "../ipc/orchd";
 
@@ -181,6 +183,10 @@ export interface AppState {
    * `mcpServers`'s whole-store, un-scoped convention exactly (`connectorListAccounts` has no
    * filter either) — replaced wholesale by `refreshAccounts`. */
   accounts: Account[];
+  /** Every skill (global scope — `skillList(null)`; S-EXT §8, D11, T17: the «Расширения»/
+   * «Навыки» tab. PLUMBING ONLY — no runtime consumer until S6b). Mirrors `mcpServers`'s
+   * whole-store, un-scoped convention exactly — replaced wholesale by `refreshSkills`. */
+  skills: Skill[];
 
   /** Honest orchd connectivity (spec §9/§11, mirrors sessiond's `daemonConnected` inverted):
    * `true` while the `orchd://down` event is the most recent connection-state signal seen, `false`
@@ -305,6 +311,9 @@ export interface AppState {
    * `refreshMcpServers` exactly: try/catch -> `showToast(describeOrchdError(e))` on failure,
    * replace on success. */
   refreshAccounts: () => Promise<void>;
+  /** Re-fetch `skills` wholesale (`skillList(null)` — global scope). Mirrors `refreshMcpServers`
+   * exactly: try/catch -> `showToast(describeOrchdError(e))` on failure, replace on success. */
+  refreshSkills: () => Promise<void>;
   /** Set `orchdDown`. See its doc above. */
   setOrchdDown: (v: boolean) => void;
   /** Set `orchdIncompatible`. See its doc above — never auto-clears, mirrors
@@ -380,6 +389,7 @@ export const useAppStore = create<AppState>((set, get) => {
     mcpToolsByServer: {},
     mcpArtifacts: [],
     accounts: [],
+    skills: [],
     orchdDown: false,
     orchdIncompatible: false,
     orchdUpgradeDialogOpen: false,
@@ -623,6 +633,17 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const accounts = await connectorListAccounts();
         set({ accounts });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    // ── Skills slice (S-EXT §8, D11, Q14, T17) ───────────────────────────────────────────────
+
+    refreshSkills: async () => {
+      try {
+        const skills = await skillList(null);
+        set({ skills });
       } catch (e) {
         get().showToast(describeOrchdError(e));
       }

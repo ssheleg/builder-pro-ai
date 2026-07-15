@@ -141,6 +141,27 @@ export type RuleSet = { id: string, scope: RuleScope, projectId: string | null, 
 
 export type RuleSetView = { rule: RuleSet, mdContent: string | null, fileState: RuleFileState, };
 
+/**
+ * `fileState` is NOT itself a DB column — it is computed FRESH at read time by re-hashing the
+ * SKILL.md file against its stored hash (files-as-truth, mirrors how `RuleSetView` covers the
+ * `ruleset` table the same way). `Skill` intentionally has no `AcknowledgeRuleFile`-style verb to
+ * clear a `Modified` state — this registry has no equivalent "I've seen the external edit"
+ * affordance (out of scope for a plumbing-only slice), so re-adding (or, once a consumer exists,
+ * re-registering) the skill is the only way to refresh the stored hash.
+ */
+export type Skill = { id: string, name: string, description: string, mdPath: string, mdHash: string, scope: SkillScope, projectId: string | null, fileState: SkillFileState, createdAt: number, updatedAt: number, };
+
+/**
+ * Files-as-truth read-time classification (mirrors `RuleFileState`'s role for `ruleset`, but a
+ * distinct wire enum with its own — task-17-brief-specified — variant names): `Present` (the
+ * file's current sha256 matches the stored hash), `Modified` (it exists but the hash no longer
+ * matches — hand-edited or replaced outside orchd since it was registered), `Missing` (the file
+ * is gone).
+ */
+export type SkillFileState = "present" | "modified" | "missing";
+
+export type SkillScope = "global" | "project";
+
 export type TaskSource = "idea" | "insight" | "bug" | "plan";
 
 export type TaskStatus = "backlog" | "todo" | "waiting" | "progress" | "testing" | "done";

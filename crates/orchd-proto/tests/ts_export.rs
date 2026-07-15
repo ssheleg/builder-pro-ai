@@ -59,6 +59,9 @@ fn export_and_read() -> String {
     AccountAuthKind::export_all_to(types_ts_dir()).expect("export AccountAuthKind");
     ConnectorOp::export_all_to(types_ts_dir()).expect("export ConnectorOp");
     OAuthChallenge::export_all_to(types_ts_dir()).expect("export OAuthChallenge");
+    Skill::export_all_to(types_ts_dir()).expect("export Skill");
+    SkillScope::export_all_to(types_ts_dir()).expect("export SkillScope");
+    SkillFileState::export_all_to(types_ts_dir()).expect("export SkillFileState");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -501,6 +504,42 @@ fn account_auth_kind_wire_tags_are_camelcase() {
         assert!(
             contains_normalized(&ts, &format!("\"{tag}\"")),
             "AccountAuthKind must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+}
+
+#[test]
+fn skill_uses_camelcase_md_path_md_hash_and_file_state() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "mdPath: string"),
+        "Skill.md_path must serialize as camelCase `mdPath`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "mdHash: string"),
+        "Skill.md_hash must serialize as camelCase `mdHash`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "fileState: SkillFileState"),
+        "Skill.file_state must serialize as camelCase `fileState`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "createdAt: number"),
+        "Skill.created_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("md_path") && !ts.contains("md_hash") && !ts.contains("file_state"),
+        "generated TS must not contain snake_case `md_path`/`md_hash`/`file_state`"
+    );
+}
+
+#[test]
+fn skill_file_state_wire_tags_are_camelcase() {
+    let ts = export_and_read();
+    for tag in ["present", "modified", "missing"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "SkillFileState must include wire tag {tag:?}; got:\n{ts}"
         );
     }
 }
