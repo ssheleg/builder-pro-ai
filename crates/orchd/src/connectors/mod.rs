@@ -76,3 +76,31 @@ pub struct NewAccount {
     pub expires_at: Option<i64>,
     pub refresh_ref: Option<String>,
 }
+
+impl From<AccountAuthKind> for bpa_orchd_proto::AccountAuthKind {
+    fn from(k: AccountAuthKind) -> Self {
+        match k {
+            AccountAuthKind::Oauth => bpa_orchd_proto::AccountAuthKind::Oauth,
+            AccountAuthKind::Apikey => bpa_orchd_proto::AccountAuthKind::Apikey,
+        }
+    }
+}
+
+/// `AccountRow` -> the wire `Account` entity (task T13a, spec §5 dispatch): mirrors
+/// `mcp::McpServerRow`'s own `From` impl shape. Deliberately DROPS `secret_ref`/`refresh_ref` —
+/// see this module's own doc comment ("no UI surface reads a Keychain key name") for why
+/// `bpa_orchd_proto::Account` omits them entirely rather than round-tripping them unused.
+impl From<AccountRow> for bpa_orchd_proto::Account {
+    fn from(r: AccountRow) -> Self {
+        bpa_orchd_proto::Account {
+            id: r.id,
+            provider: r.provider,
+            label: r.label,
+            auth_kind: r.auth_kind.into(),
+            scopes: r.scopes,
+            expires_at: r.expires_at,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}

@@ -10,11 +10,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, Goal, GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode,
-    GraphNodeKind, GraphView, Idea, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
-    McpScope, McpServer, McpTool, McpTransport, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder,
-    OrchdPush, OrchdRequest, OrchdResponse, Project, RuleFileState, RuleScope, RuleSetView,
-    ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
+    encode_orchd_frame, Account, AccountAuthKind, Goal, GoalKind, GraphEdge, GraphEdgeKind,
+    GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact, McpAuthKind,
+    McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport, OrchdErrorCode,
+    OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Project, RuleFileState,
+    RuleScope, RuleSetView, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION,
+    ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,6 +37,31 @@ impl HomeGuard {
     fn set(dir: &Path) -> Self {
         let lock = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var_os("HOME");
+        // Symlink `Library/Keychains` from the REAL `$HOME` into this test's isolated `dir`
+        // (S-EXT task T13a discovery, connector dispatch tests): `bpa_secrets`
+        // (`security_framework::passwords::*`) resolves the default macOS Keychain via a
+        // `$HOME`-derived path. Under a bare synthetic `$HOME` pointing at a fresh, otherwise-
+        // empty tempdir, Security.framework finds no keychain at `<dir>/Library/Keychains` and
+        // attempts to provision a brand-new one — which requires an interactive "choose a
+        // password" prompt that blocks forever in this harness's non-interactive test run
+        // (confirmed empirically: a bare fake `$HOME` hangs `bpa_secrets::set` indefinitely; this
+        // symlink alone makes the identical call return in well under a second). Harmless for
+        // every OTHER test in this file that never touches Keychain — `app_support_dir()`'s own
+        // `Library/Application Support` subtree stays a REAL, freshly isolated directory under
+        // `dir`; only `Library/Keychains` is shared with the real environment, and only as a
+        // symlink to the SAME keychain this test process could already read/write directly (this
+        // grants no new access — it only lets the OS's own default-keychain path resolution find
+        // the keychain that's already there).
+        if let Some(real_home) = &prior {
+            let keychains_link = dir.join("Library/Keychains");
+            if let Some(parent) = keychains_link.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::os::unix::fs::symlink(
+                Path::new(real_home).join("Library/Keychains"),
+                &keychains_link,
+            );
+        }
         std::env::set_var("HOME", dir);
         HomeGuard { _lock: lock, prior }
     }
@@ -332,6 +358,22 @@ fn expect_error_code(res: OrchdResponse) -> OrchdErrorCode {
     match res {
         OrchdResponse::Error { code, .. } => code,
         other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+// ---- S-EXT Connector dispatch response helpers (task T13a) ----
+
+fn expect_account(res: OrchdResponse) -> Account {
+    match res {
+        OrchdResponse::Account(a) => a,
+        other => panic!("expected Account, got {other:?}"),
+    }
+}
+
+fn expect_accounts(res: OrchdResponse) -> Vec<Account> {
+    match res {
+        OrchdResponse::Accounts(v) => v,
+        other => panic!("expected Accounts, got {other:?}"),
     }
 }
 
@@ -1732,6 +1774,234 @@ async fn mcp_call_tool_does_not_block_other_db_ops() {
         slow.content_json.contains("slow"),
         "expected the echoed message in {}",
         slow.content_json
+    );
+
+    c1.shutdown(boot).await;
+}
+
+// ================================================================================
+// ---- S-EXT Connector dispatch (task T13a, spec §5/§6/§7): real per-verb socket dispatch,
+// replacing T10's temporary stub arm (`OrchdResponse::Error{code:Io, message:"connector dispatch
+// not yet implemented"}` for all 7 `Connector*` verbs). Keychain-backed verbs
+// (`ConnectorAddApiKey`/`ConnectorDeleteAccount`/`ConnectorInvoke`) use the same loose-but-honest
+// skip-guard `connectors::accounts`'s own crate-internal test module documents (a precise 4-
+// OSStatus-code probe is `#[cfg(test)]`-private to `bpa_secrets`) — SKIP, not silently pass, when
+// the login keychain is unavailable in this environment.
+// ================================================================================
+
+fn connector_keychain_available() -> bool {
+    let probe = bpa_secrets::account_ref("dispatch-integration-connector-probe", "test");
+    match bpa_secrets::set(&probe, b"probe") {
+        Ok(()) => {
+            let _ = bpa_secrets::delete(&probe);
+            true
+        }
+        Err(e) => {
+            eprintln!(
+                "SKIP connector dispatch test: login keychain unavailable in this environment \
+                 ({e}) — graceful skip, not a pass. Run locally with an unlocked login keychain \
+                 to exercise the full assertion."
+            );
+            false
+        }
+    }
+}
+
+/// Spawns a minimal loopback REST stub for `ConnectorInvoke` dispatch tests: `GET /ok` replies
+/// `200 {"ok": true}` unconditionally. This only needs to prove the WIRE verb round-trips end to
+/// end (dispatch -> `connectors::adapter::invoke` -> a real HTTP call -> persisted artifact) —
+/// `GenericRestAdapter`'s own request-shaping (bearer header, JSON body, error status mapping) is
+/// already covered by `adapter.rs`'s own unit tests (task T12).
+async fn spawn_connector_rest_stub() -> String {
+    let router = axum::Router::new().route(
+        "/ok",
+        axum::routing::get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback connector rest stub");
+    let addr = listener.local_addr().expect("stub local_addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn connector_add_api_key_list_accounts_delete_account_dispatch() {
+    if !connector_keychain_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // ---- ConnectorAddApiKey -> Account, c2 observes ConnectorsChanged ----
+    let account = expect_account(
+        c1.request(OrchdRequest::ConnectorAddApiKey {
+            provider: "generic-rest".to_string(),
+            label: "My REST".to_string(),
+            api_key: "test-api-key-dispatch-42".to_string(),
+        })
+        .await,
+    );
+    assert_eq!(account.provider, "generic-rest");
+    assert_eq!(account.label, "My REST");
+    assert_eq!(account.auth_kind, AccountAuthKind::Apikey);
+    assert!(!account.id.is_empty());
+
+    assert_eq!(
+        c2.recv_push().await,
+        OrchdPush::ConnectorsChanged,
+        "ConnectorAddApiKey must broadcast ConnectorsChanged on success"
+    );
+
+    // ---- ConnectorListAccounts -> Accounts (contains the one just added), NO push ----
+    let accounts = expect_accounts(c1.request(OrchdRequest::ConnectorListAccounts).await);
+    assert!(
+        accounts.iter().any(|a| a.id == account.id),
+        "expected the just-added account in {accounts:?}"
+    );
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "a read verb (ConnectorListAccounts) must broadcast nothing"
+    );
+
+    // ---- ConnectorDeleteAccount -> Ack, c2 observes ConnectorsChanged ----
+    expect_ack(
+        c1.request(OrchdRequest::ConnectorDeleteAccount {
+            id: account.id.clone(),
+        })
+        .await,
+    );
+    assert_eq!(
+        c2.recv_push().await,
+        OrchdPush::ConnectorsChanged,
+        "ConnectorDeleteAccount must broadcast ConnectorsChanged on success"
+    );
+
+    let accounts_after = expect_accounts(c1.request(OrchdRequest::ConnectorListAccounts).await);
+    assert!(
+        !accounts_after.iter().any(|a| a.id == account.id),
+        "deleted account must no longer be listed"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn connector_invoke_against_rest_stub_returns_result_and_broadcasts_artifacts_changed() {
+    if !connector_keychain_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let account = expect_account(
+        c1.request(OrchdRequest::ConnectorAddApiKey {
+            provider: "generic-rest".to_string(),
+            label: "My REST".to_string(),
+            api_key: "test-api-key-invoke-77".to_string(),
+        })
+        .await,
+    );
+
+    // c2 connects only after the account-add setup push already landed, so it observes exactly
+    // the McpArtifactsChanged push this test is proving.
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let stub_base = spawn_connector_rest_stub().await;
+    let args_json = serde_json::json!({"url": format!("{stub_base}/ok")}).to_string();
+    let result = expect_mcp_call_result(
+        c1.request(OrchdRequest::ConnectorInvoke {
+            account_id: account.id.clone(),
+            op: "get".to_string(),
+            args_json,
+            project_id: None,
+        })
+        .await,
+    );
+    assert!(!result.is_error, "the stub answers 200, not a tool error");
+    assert!(!result.artifact_id.is_empty());
+    assert!(!result.invocation_id.is_empty());
+    assert_eq!(
+        result.content_json,
+        serde_json::to_string(&serde_json::json!({"ok": true})).unwrap()
+    );
+
+    assert_eq!(
+        c2.recv_push().await,
+        OrchdPush::McpArtifactsChanged { project_id: None },
+        "ConnectorInvoke must broadcast McpArtifactsChanged on success (reuses the MCP artifact \
+         persistence path, spec §6/D9)"
+    );
+
+    let artifacts = expect_mcp_artifacts(
+        c1.request(OrchdRequest::McpListArtifacts {
+            project_id: None,
+            server_id: None,
+            limit: None,
+        })
+        .await,
+    );
+    let artifact = artifacts
+        .iter()
+        .find(|a| a.id == result.artifact_id)
+        .unwrap_or_else(|| panic!("expected artifact {} in {artifacts:?}", result.artifact_id));
+    assert!(artifact.is_untrusted, "spec D9: always untrusted");
+    assert_eq!(artifact.account_id.as_deref(), Some(account.id.as_str()));
+    assert_eq!(artifact.server_id, None);
+
+    expect_ack(
+        c1.request(OrchdRequest::ConnectorDeleteAccount {
+            id: account.id.clone(),
+        })
+        .await,
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn connector_begin_oauth_unregistered_provider_is_error_no_pending_challenge() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+    let mut c1 = Client::connect(&socket).await;
+
+    // v1 boots with an EMPTY OAuth provider registry (spec §10: no real IdP creds ship with the
+    // app) — `ConnectorBeginOAuth` for a provider nobody registered must fail honestly rather than
+    // fabricate a challenge.
+    let res = c1
+        .request(OrchdRequest::ConnectorBeginOAuth {
+            provider: "prowl".to_string(),
+            label: "My Prowl".to_string(),
+            scopes: None,
+            server_id: None,
+        })
+        .await;
+    assert_eq!(
+        expect_error_code(res),
+        OrchdErrorCode::Io,
+        "ConnectorError has no dedicated wire code yet (mirrors map_secret_err's Sql->Io \
+         precedent) — still a genuine Error response, never a fabricated OAuthChallenge"
     );
 
     c1.shutdown(boot).await;

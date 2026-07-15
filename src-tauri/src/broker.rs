@@ -251,12 +251,10 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
             EV_ORCHD_MCP_INVOCATION_LOGGED,
             serde_json::json!({ "serverId": server_id }),
         ),
-        // TEMPORARY minimal wiring (task T10, spec §5/§7/§8 Phase-2 push): no connector/account
-        // subsystem exists yet to trigger this push (T11/T12 build it, T13a wires the real
-        // `connector_*` commands) — added now purely to keep `cargo build --workspace` green
-        // across T11/T12 rather than leaving the workspace red for two tasks. The mapping itself
-        // (no payload) is already the FINAL shape per spec §5/§8; T13a should not need to touch
-        // this arm, only add the commands that emit `OrchdPush::ConnectorsChanged`.
+        // Finalized (task T10 wired the mapping shape; task T13a landed the `connector_*`
+        // dispatch/commands that actually trigger this push — `ConnectorCompleteOAuth`/
+        // `ConnectorAddApiKey`/`ConnectorDeleteAccount`, spec §5). No payload: the spec §4
+        // `account` table has no `project_id` column to scope by.
         OrchdPush::ConnectorsChanged => {
             BrokerAction::Emit(EV_ORCHD_CONNECTORS_CHANGED, serde_json::Value::Null)
         }

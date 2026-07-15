@@ -245,6 +245,14 @@ fn resolve_adapter(provider: &str) -> Result<GenericRestAdapter, ConnectorError>
     }
 }
 
+/// `ConnectorListOps` (spec §5, task T13a): resolves `provider`'s adapter and returns its op list.
+/// Read-only — no network, no DB, no trust choke-point involvement (mirrors `McpListTools`
+/// reading straight from the cache rather than going through `trust::authorize`; listing what a
+/// provider CAN do is not itself a dispatch/egress action).
+pub fn list_ops(provider: &str) -> Result<Vec<ConnectorOp>, ConnectorError> {
+    Ok(resolve_adapter(provider)?.list_ops())
+}
+
 /// `ConnectorInvoke` (spec §5/§6, task T12): trust-gated, adapter-dispatched direct-API call.
 ///
 /// Trust-gated identically to `mcp::invoke::call_tool` (spec §6: "passes through `trust::

@@ -27,11 +27,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bpa_orchd_proto::{
-    DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEdge, GraphEdgeKind,
-    GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle, Insight,
-    InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport, McpInvocation,
-    McpScope, McpServer, McpTool, McpTransport, OrchdRequest, OrchdResponse, PolicyRules, Project,
-    RuleScope, RuleSetView, TaskSource, TaskStatus,
+    Account, ConnectorOp, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEdge,
+    GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle,
+    Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
+    McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdRequest,
+    OrchdResponse, PolicyRules, Project, RuleScope, RuleSetView, TaskSource, TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -794,6 +794,38 @@ fn expect_mcp_artifacts(res: OrchdResponse) -> Result<Vec<McpArtifact>, CommandE
 fn expect_mcp_artifact(res: OrchdResponse) -> Result<McpArtifact, CommandError> {
     match res {
         OrchdResponse::McpArtifact(a) => Ok(a),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+// ── S-EXT Connector orchd response unwrappers (spec §5, appended, task T13a) — mirrors the MCP
+// block above exactly, one unwrapper per `OrchdResponse::{Account,Accounts,OAuthChallenge,
+// ConnectorOps}` variant ─────────────────────────────────────────────────────────────────────
+
+fn expect_account(res: OrchdResponse) -> Result<Account, CommandError> {
+    match res {
+        OrchdResponse::Account(a) => Ok(a),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_accounts(res: OrchdResponse) -> Result<Vec<Account>, CommandError> {
+    match res {
+        OrchdResponse::Accounts(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_oauth_challenge(res: OrchdResponse) -> Result<OAuthChallenge, CommandError> {
+    match res {
+        OrchdResponse::OAuthChallenge(c) => Ok(c),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_connector_ops(res: OrchdResponse) -> Result<Vec<ConnectorOp>, CommandError> {
+    match res {
+        OrchdResponse::ConnectorOps(v) => Ok(v),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -2264,6 +2296,139 @@ pub async fn trust_grant_consent(
         state
             .orchd()?
             .request(OrchdRequest::TrustGrantConsent { server_id, kind })
+            .await?,
+    )
+}
+
+// ── S-EXT Connectors orchd #[tauri::command] surface (spec §5/§7, appended — task T13a) ────────
+//
+// Same one-thin-command-per-verb shape as the MCP block above, over the `OrchdRequest::Connector*`
+// verbs (spec §5's frozen-append-only wire additions). `connector_add_api_key`'s `api_key` and
+// `connector_complete_oauth`'s `code` are passed straight through to the request struct and never
+// touched otherwise — not logged, echoed, or included in any `Debug`/tracing output in this module
+// (spec §5/§6: never logged/echoed). An unregistered-provider `ConnectorBeginOAuth`, or a
+// spend/rate-cap `ConnectorInvoke` denial (`Error{code:Policy}`), both already flow through
+// `err_from_orchd_response`/`From<OrchdClientError>` into `CommandError::Daemon{code, message}`
+// exactly like every other daemon error — no special-casing needed here (spec §9 doc block above).
+
+#[tauri::command]
+pub async fn connector_begin_oauth(
+    state: State<'_, AppState>,
+    provider: String,
+    label: String,
+    scopes: Option<Vec<String>>,
+    server_id: Option<String>,
+) -> Result<OAuthChallenge, CommandError> {
+    expect_oauth_challenge(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorBeginOAuth {
+                provider,
+                label,
+                scopes,
+                server_id,
+            })
+            .await?,
+    )
+}
+
+/// `code` -> exchanged for tokens on the orchd side (Keychain); this wrapper never logs or echoes
+/// it (spec §5/§6). The webview-facing parameter is named `oauth_state` (not `state`, which is
+/// reserved here for Tauri's own injected `State<'_, AppState>`) — it is `OAuthChallenge.state`,
+/// the CSRF token `ConnectorBeginOAuth` returned, echoed back to complete the PKCE round-trip.
+#[tauri::command]
+pub async fn connector_complete_oauth(
+    state: State<'_, AppState>,
+    oauth_state: String,
+    code: String,
+) -> Result<Account, CommandError> {
+    expect_account(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorCompleteOAuth {
+                state: oauth_state,
+                code,
+            })
+            .await?,
+    )
+}
+
+/// `api_key` -> Keychain, ref -> DB, on the orchd side; this wrapper never logs or echoes it (spec
+/// §5/§6).
+#[tauri::command]
+pub async fn connector_add_api_key(
+    state: State<'_, AppState>,
+    provider: String,
+    label: String,
+    api_key: String,
+) -> Result<Account, CommandError> {
+    expect_account(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorAddApiKey {
+                provider,
+                label,
+                api_key,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn connector_list_accounts(
+    state: State<'_, AppState>,
+) -> Result<Vec<Account>, CommandError> {
+    expect_accounts(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorListAccounts)
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn connector_delete_account(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorDeleteAccount { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn connector_list_ops(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<Vec<ConnectorOp>, CommandError> {
+    expect_connector_ops(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorListOps { account_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn connector_invoke(
+    state: State<'_, AppState>,
+    account_id: String,
+    op: String,
+    args_json: String,
+    project_id: Option<String>,
+) -> Result<McpCallResult, CommandError> {
+    expect_mcp_call_result(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorInvoke {
+                account_id,
+                op,
+                args_json,
+                project_id,
+            })
             .await?,
     )
 }
@@ -4460,6 +4625,81 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             CommandError::Daemon { code, message } => {
                 assert_eq!(code, "Policy");
                 assert_eq!(message, "tool is disabled");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    // ── S-EXT Connector orchd `connector_*` commands (spec §5/§7, S-EXT T13a) ──────────────────
+    //
+    // Same rationale as the MCP block above: `connector_add_api_key` stands in for the happy-path
+    // shape shared by every `connector_*` verb (`expect_*(client.request(req).await?)`); the
+    // `Policy` error-code mapping is proven once, directly, since `ConnectorInvoke`'s spend/rate-
+    // cap denial (spec §6: "connector_invoke passes through trust::authorize IDENTICALLY to
+    // McpCallTool") is the connector-side analogue of `mcp_call_tool_policy_error_...` above and
+    // is not exercised by any existing MCP test.
+
+    #[tokio::test]
+    async fn connector_add_api_key_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::ConnectorAddApiKey {
+                provider,
+                label,
+                api_key,
+            } => {
+                assert_eq!(
+                    api_key, "sk-live-test-do-not-leak-42",
+                    "api_key must round-trip to the wire request unchanged"
+                );
+                OrchdResponse::Account(Account {
+                    id: "acct-1".into(),
+                    provider,
+                    label,
+                    auth_kind: bpa_orchd_proto::AccountAuthKind::Apikey,
+                    scopes: vec![],
+                    expires_at: None,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+            }
+            other => panic!("expected ConnectorAddApiKey, got {other:?}"),
+        })
+        .await;
+
+        let req = OrchdRequest::ConnectorAddApiKey {
+            provider: "generic-rest".into(),
+            label: "My REST".into(),
+            api_key: "sk-live-test-do-not-leak-42".into(),
+        };
+        let res = client.request(req).await.unwrap();
+        let account = expect_account(res).unwrap();
+        assert_eq!(account.id, "acct-1");
+        assert_eq!(account.provider, "generic-rest");
+        assert_eq!(account.label, "My REST");
+        assert_eq!(account.auth_kind, bpa_orchd_proto::AccountAuthKind::Apikey);
+    }
+
+    #[tokio::test]
+    async fn connector_invoke_policy_error_response_becomes_command_error_daemon_policy() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Policy,
+            message: "connector invoke denied: spend cap exceeded".into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::ConnectorInvoke {
+                account_id: "acct-1".into(),
+                op: "get".into(),
+                args_json: "{}".into(),
+                project_id: None,
+            })
+            .await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Policy");
+                assert_eq!(message, "connector invoke denied: spend cap exceeded");
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }

@@ -13,6 +13,7 @@ use tokio::sync::{watch, Mutex};
 
 use bpa_daemon_core::singleton::{assert_socket_path_len, set_socket_mode};
 
+use crate::connectors::accounts::ConnectorsState;
 use crate::persistence::Db;
 use crate::socket_server::{serve, ServerDeps};
 
@@ -174,8 +175,19 @@ pub async fn run(
     ensure_global_ruleset(&db, &app_support);
     let db = Arc::new(Mutex::new(db));
 
+    // S-EXT connector OAuth-account layer (spec §5/§7, task T13a): lives for the daemon's whole
+    // lifetime alongside `db` (its in-flight `begin_oauth` pending-PKCE map must survive across
+    // requests). v1 boots with an EMPTY OAuth provider registry — no real IdP credentials ship
+    // with this app (spec §10: wiring prowl.chat/X/etc is an owner step in the UI, never
+    // fabricated here); `ConnectorBeginOAuth` for an unregistered `provider` honestly fails with a
+    // typed error until an owner (or a later config-file-backed registry, spec D14 Phase 3) calls
+    // `ConnectorsState::register_oauth_provider`. The api-key and generic-rest connector paths
+    // need no provider registry at all and work from a fresh boot.
+    let connectors = Arc::new(ConnectorsState::new());
+
     let deps = Arc::new(ServerDeps::new(
         db.clone(),
+        connectors,
         env!("CARGO_PKG_VERSION").to_string(),
         shutdown_tx,
     ));

@@ -46,6 +46,7 @@ use bpa_orchd_proto::{
     RuleSetView, ORCHD_DAEMON_MAX_VERSION, ORCHD_DAEMON_MIN_VERSION,
 };
 
+use crate::connectors::{self, accounts::ConnectorsState};
 use crate::export;
 use crate::mcp::{self, OrchdMcpError};
 use crate::persistence::{Db, OrchdPersistError};
@@ -59,6 +60,21 @@ pub const CLIENT_OUTQ_CAP: usize = 1024;
 /// Bound on how long connection cleanup waits for the writer task to notice its queue is closed
 /// and exit on its own, before forcibly aborting it (mirrors sessiond's `WRITER_JOIN_TIMEOUT`).
 const WRITER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `ConnectorBeginOAuth`'s redirect URI (spec §5/§10, task T13a). PKCE requires a fixed
+/// `redirect_uri` to be echoed identically on both the `/authorize` request and the token
+/// exchange (RFC 6749 §4.1.3) — `accounts::ConnectorsState::begin_oauth`/`complete_oauth` need
+/// SOME value here to construct a well-formed `authorize_url` and round-trip the exchange, but
+/// actually CAPTURING a browser redirect at this address (a loopback HTTP listener bound at boot,
+/// or a registered `ai.builderpro.desktop://` custom URL scheme) is a frontend/owner concern this
+/// slice does not build — nothing in this codebase listens on this address today. A fixed
+/// loopback placeholder is the honest v1 shape (spec: "v1 can use a localhost loopback
+/// placeholder since the actual browser-redirect capture is a frontend/owner concern"): it makes
+/// the PKCE flow itself correct and testable (state/verifier round-trip against a real IdP-shaped
+/// token endpoint, see `connectors::accounts`'s own tests) without pretending the redirect capture
+/// exists yet. Wiring a real capture mechanism is tracked as a residual Human/owner step (spec
+/// §10) — whoever builds it must update this constant to match.
+const CONNECTOR_OAUTH_REDIRECT: &str = "http://127.0.0.1:0/callback";
 
 /// Registry of every connected client's outbound queue (spec §5, §6): every successful mutating
 /// verb's dispatch arm fans a domain-change push out through this.
@@ -78,6 +94,17 @@ type Broadcaster = bpa_daemon_core::broadcast::Broadcaster<OrchdFrame>;
 /// per-connection task `!Send`).
 pub struct ServerDeps {
     pub db: Arc<Mutex<Db>>,
+    /// Connector OAuth-account layer (S-EXT spec §5/§7, task T13a): the OAuth provider registry
+    /// PLUS the in-flight `begin_oauth` pending-PKCE map (`connectors::accounts` module doc
+    /// comment). Both maps are process-local, `std::sync::Mutex`-guarded, and already safely
+    /// shared internally (see [`ConnectorsState`]'s own doc comment) — a plain `Arc` (no extra
+    /// `tokio::sync::Mutex` wrapper) is enough here, mirroring how `db` needs its OWN async
+    /// `Mutex` (a `rusqlite::Connection` is `!Sync`) while `connectors` does not. Lives for the
+    /// daemon's whole lifetime, constructed once at boot alongside `db` (`boot::run`) — v1 boots
+    /// with an EMPTY provider registry (no real IdP credentials ship with the app); an
+    /// unregistered provider's `ConnectorBeginOAuth` fails with a typed error (honest v1
+    /// behavior, spec §10: wiring a real provider is an owner/config step, never fabricated here).
+    pub connectors: Arc<ConnectorsState>,
     /// Human-readable daemon build string echoed in the accepted preamble reply.
     pub daemon_build: String,
     /// The SAME `watch::Sender` whose receiver drives [`serve`]'s accept loop (and every
@@ -88,9 +115,15 @@ pub struct ServerDeps {
 }
 
 impl ServerDeps {
-    pub fn new(db: Arc<Mutex<Db>>, daemon_build: String, shutdown_tx: watch::Sender<bool>) -> Self {
+    pub fn new(
+        db: Arc<Mutex<Db>>,
+        connectors: Arc<ConnectorsState>,
+        daemon_build: String,
+        shutdown_tx: watch::Sender<bool>,
+    ) -> Self {
         ServerDeps {
             db,
+            connectors,
             daemon_build,
             shutdown_tx,
         }
@@ -364,6 +397,48 @@ fn map_secret_err(e: bpa_secrets::SecretError) -> OrchdResponse {
     OrchdResponse::Error {
         code: OrchdErrorCode::Io,
         message: e.to_string(),
+    }
+}
+
+/// Maps a `connectors::accounts::ConnectorError` (S-EXT spec §5/§7, task T13a — `ConnectorBeginOAuth`/
+/// `ConnectorCompleteOAuth`/`ConnectorAddApiKey`/`ConnectorListOps`'s failure modes: unknown
+/// provider/state, invalid provider config, token exchange, Keychain) onto the wire
+/// `OrchdResponse::Error` shape. Mirrors [`map_secret_err`]'s own "no dedicated wire code yet,
+/// `Sql -> Io` precedent" — none of these failure modes has a richer code today. `Persist`
+/// delegates to [`map_err`] (reuses its NotFound/Invariant/Validation/Conflict mapping rather than
+/// flattening every persistence failure down to `Io`, same rationale as [`map_mcp_err`]'s own
+/// `Persist` arm).
+fn map_connector_err(e: connectors::accounts::ConnectorError) -> OrchdResponse {
+    use connectors::accounts::ConnectorError;
+    match e {
+        ConnectorError::Persist(inner) => map_err(inner),
+        other => OrchdResponse::Error {
+            code: OrchdErrorCode::Io,
+            message: other.to_string(),
+        },
+    }
+}
+
+/// Maps a `connectors::adapter::ConnectorInvokeError` (S-EXT spec §5/§6, task T13a) onto the wire
+/// `OrchdResponse::Error` shape — the `ConnectorInvoke` analogue of [`map_mcp_err`].
+/// `Denied` is the trust choke-point's policy-side denial (spec §6: "connector_invoke passes
+/// through `trust::authorize` IDENTICALLY to `McpCallTool`") — surfaces as `Error{Policy}`, same
+/// wire code `McpCallTool`'s own `ToolDisabled` denial uses, so a client already handling one
+/// handles the other. `Persist` delegates to [`map_err`]. `Adapter` (the adapter itself failed —
+/// unknown provider/op, bad args, transport/timeout/HTTP-status) has no richer code yet, same
+/// `Sql -> Io` precedent as every other unmapped failure family in this file.
+fn map_connector_invoke_err(e: connectors::adapter::ConnectorInvokeError) -> OrchdResponse {
+    use connectors::adapter::ConnectorInvokeError;
+    match e {
+        ConnectorInvokeError::Denied(reason) => OrchdResponse::Error {
+            code: OrchdErrorCode::Policy,
+            message: format!("connector invoke denied: {reason}"),
+        },
+        ConnectorInvokeError::Persist(inner) => map_err(inner),
+        ConnectorInvokeError::Adapter(err) => OrchdResponse::Error {
+            code: OrchdErrorCode::Io,
+            message: err.to_string(),
+        },
     }
 }
 
@@ -1548,20 +1623,134 @@ async fn dispatch(
             }
         }
 
-        // TEMPORARY stub (task T10, spec §5/§7 Phase-2 wire): none of the connector/OAuth
-        // subsystem (account CRUD, PKCE flow, adapter invoke) exists yet — T11/T12 build it,
-        // T13a replaces this arm with the real dispatch. Covers all 7 `Connector*` request
-        // variants; MUST be deleted (not extended) once T13a lands, same discipline as T3's
-        // now-superseded `Mcp*` stub (see git history around commit `019ff11`).
-        OrchdRequest::ConnectorBeginOAuth { .. }
-        | OrchdRequest::ConnectorCompleteOAuth { .. }
-        | OrchdRequest::ConnectorAddApiKey { .. }
-        | OrchdRequest::ConnectorListAccounts
-        | OrchdRequest::ConnectorDeleteAccount { .. }
-        | OrchdRequest::ConnectorListOps { .. }
-        | OrchdRequest::ConnectorInvoke { .. } => OrchdResponse::Error {
-            code: OrchdErrorCode::Io,
-            message: "connector dispatch not yet implemented".into(),
-        },
+        // ---- S-EXT Connectors / accounts (spec §5/§6/§7, task T13a): every mutating verb below
+        // ⇒ `ConnectorsChanged` on success (spec §5's pushes list — no payload, the `account`
+        // table has no `project_id` to scope by); `ConnectorInvoke` additionally ⇒
+        // `McpArtifactsChanged{project_id}` (reuses the SAME artifact/invocation persistence path
+        // as `McpCallTool`, spec §6/D9 — see `connectors::adapter::invoke`'s own doc comment). No
+        // `McpInvocationLogged` push here: that push's wire shape is `{server_id: String}`
+        // (non-optional), and a `ConnectorInvoke` has no `server_id` at all (`account_id` only) —
+        // rather than force a fake server id through it, this dispatch arm simply doesn't send
+        // that push for a connector call; `McpArtifactsChanged` alone is what the artifacts UI
+        // actually refetches on. Every read verb (`ConnectorListAccounts`/`ConnectorListOps`)
+        // broadcasts nothing. `Err` ⇒ `map_connector_err`/`map_connector_invoke_err`, nothing
+        // broadcast (spec §6: "Failed requests broadcast NOTHING"). ----
+        OrchdRequest::ConnectorBeginOAuth {
+            provider,
+            label,
+            scopes,
+            server_id: _,
+        } => {
+            // `server_id` (an optional MCP-server-OAuth link) is unused in v1: `begin_oauth`'s
+            // Phase-2 scope is the standalone connector-account flow only (spec §5/§7) — an
+            // MCP-server-OAuth consumer is a documented future extension, not built here.
+            match deps.connectors.begin_oauth(
+                &provider,
+                &label,
+                &scopes.unwrap_or_default(),
+                CONNECTOR_OAUTH_REDIRECT,
+            ) {
+                Ok(challenge) => OrchdResponse::OAuthChallenge(challenge),
+                Err(e) => map_connector_err(e),
+            }
+        }
+        OrchdRequest::ConnectorCompleteOAuth { state, code } => {
+            // `complete_oauth` locks `deps.db` itself in a short phase AFTER its own network
+            // round-trip (the token exchange) — pass the SHARED handle, not a locked guard, same
+            // T6-review discipline as `McpConnect`/`McpCallTool` above.
+            match deps
+                .connectors
+                .complete_oauth(&deps.db, &state, &code)
+                .await
+            {
+                Ok(row) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::ConnectorsChanged));
+                    OrchdResponse::Account(row.into())
+                }
+                Err(e) => map_connector_err(e),
+            }
+        }
+        OrchdRequest::ConnectorAddApiKey {
+            provider,
+            label,
+            api_key,
+        } => {
+            // No network I/O (`add_apikey` only writes Keychain + the DB row) — lock `db` for the
+            // duration, mirrors every other plain-CRUD dispatch arm above.
+            let result = {
+                let db = deps.db.lock().await;
+                deps.connectors.add_apikey(&db, &provider, &label, &api_key)
+            };
+            match result {
+                Ok(row) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::ConnectorsChanged));
+                    OrchdResponse::Account(row.into())
+                }
+                Err(e) => map_connector_err(e),
+            }
+        }
+        OrchdRequest::ConnectorListAccounts => {
+            let db = deps.db.lock().await;
+            match db.list_accounts() {
+                Ok(v) => OrchdResponse::Accounts(v.into_iter().map(Into::into).collect()),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::ConnectorDeleteAccount { id } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.delete_account(&id)
+            };
+            match result {
+                Ok(()) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::ConnectorsChanged));
+                    OrchdResponse::Ack
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::ConnectorListOps { account_id } => {
+            let account = {
+                let db = deps.db.lock().await;
+                db.get_account(&account_id)
+            };
+            match account {
+                Ok(account) => match connectors::adapter::list_ops(&account.provider) {
+                    Ok(ops) => OrchdResponse::ConnectorOps(ops),
+                    Err(e) => map_connector_err(e),
+                },
+                Err(e) => map_err(e),
+            }
+        }
+        // Reuses the MCP call/artifact/invocation path (spec §6: "connector_invoke passes through
+        // trust::authorize IDENTICALLY to McpCallTool"). `connectors::adapter::invoke` locks
+        // `deps.db` itself in short phases around its own network round-trips (bearer resolution
+        // — which may hit an OAuth refresh endpoint — plus the adapter's own HTTP call), holding
+        // no guard across either await — same T6-review discipline as `McpCallTool` above.
+        OrchdRequest::ConnectorInvoke {
+            account_id,
+            op,
+            args_json,
+            project_id,
+        } => {
+            match connectors::adapter::invoke(
+                &deps.connectors,
+                &deps.db,
+                &account_id,
+                &op,
+                &args_json,
+                project_id.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpArtifactsChanged {
+                        project_id,
+                    }));
+                    OrchdResponse::McpCallResult(result)
+                }
+                Err(e) => map_connector_invoke_err(e),
+            }
+        }
     }
 }
