@@ -62,6 +62,15 @@ pub const CLIENT_OUTQ_CAP: usize = 1024;
 /// and exit on its own, before forcibly aborting it (mirrors sessiond's `WRITER_JOIN_TIMEOUT`).
 const WRITER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// After the shutdown watch flips, [`serve`] waits up to this long for the in-flight per-connection
+/// tasks to finish flushing their queued frames (chiefly the `OrchdShutdown` → `Ack` that the
+/// requesting client is blocked on) before returning — after which `run()` unlinks the socket and
+/// the PROCESS exits, which would otherwise kill those detached writers mid-flush. Without this
+/// drain the shutdown ack races process teardown and is lost on a slow/loaded runner (the CI
+/// `phase2 OrchdShutdown timed out` hang). Generously larger than `WRITER_JOIN_TIMEOUT` so every
+/// connection's own bounded writer-join can complete first.
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// `ConnectorBeginOAuth`'s redirect URI (spec §5/§10, task T13a). PKCE requires a fixed
 /// `redirect_uri` to be echoed identically on both the `/authorize` request and the token
 /// exchange (RFC 6749 §4.1.3) — `accounts::ConnectorsState::begin_oauth`/`complete_oauth` need
@@ -141,6 +150,10 @@ pub async fn serve(
     let broadcaster = Broadcaster::default();
     // Monotonic per-connection id (used only to key the broadcaster registry).
     let mut next_conn_id: u64 = 1;
+    // Track the spawned per-connection tasks so shutdown can wait for their outbound queues to
+    // flush before the process exits (see `SHUTDOWN_DRAIN_TIMEOUT`). The `join_next` arm below
+    // reaps finished connections during normal operation so this stays bounded to live clients.
+    let mut conns: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     let result = loop {
         tokio::select! {
@@ -148,6 +161,9 @@ pub async fn serve(
                 if changed.is_err() || *shutdown.borrow() {
                     break Ok(());
                 }
+            }
+            Some(_joined) = conns.join_next(), if !conns.is_empty() => {
+                // A connection task finished; reaped so `conns` doesn't accumulate handles.
             }
             accepted = listener.accept() => {
                 let stream = match accepted {
@@ -170,7 +186,7 @@ pub async fn serve(
                 let deps = deps.clone();
                 let broadcaster = broadcaster.clone();
                 let client_shutdown = shutdown.clone();
-                tokio::spawn(async move {
+                conns.spawn(async move {
                     if let Err(e) = handle_client(conn_id, stream, deps, broadcaster, client_shutdown).await {
                         tracing::debug!(conn = conn_id, error = %e, "client task ended");
                     }
@@ -178,6 +194,16 @@ pub async fn serve(
             }
         }
     };
+
+    // Shutdown drain: every live connection task shares the same `shutdown` watch that just
+    // flipped, so each is winding down (its dispatch loop breaks, then it bounded-joins its own
+    // writer). Wait for them here — bounded — so the `OrchdShutdown` ack (and any other queued
+    // frame) is flushed to the socket BEFORE `run()` returns and the process exits. Without this,
+    // process teardown races the detached writers and the ack is lost on a slow runner.
+    let _ = tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, async {
+        while conns.join_next().await.is_some() {}
+    })
+    .await;
 
     result
 }
