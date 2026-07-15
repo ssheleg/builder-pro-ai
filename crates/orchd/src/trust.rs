@@ -17,11 +17,13 @@ use crate::persistence::{Db, NewAudit, OrchdPersistError};
 pub enum Action {
     /// First (or repeat) connect to an MCP server. `fingerprint` is the server's URL at the
     /// time of the attempt (spec D10: "fingerprint = URL" for the http transport this Phase 1
-    /// slice ships — spec D6). It is threaded through so a future task can compare it against
-    /// the granted `consent_grant.fingerprint` and re-prompt on mismatch (spec D10: "re-prompt
-    /// if the URL changes") — [`authorize`]'s own check today is existence-only
-    /// ([`Db::has_consent`]), NOT fingerprint-comparing; that re-prompt behavior is not
-    /// implemented by this task.
+    /// slice ships — spec D6). [`authorize`] compares it against the stored
+    /// `consent_grant.fingerprint` ([`Db::get_consent`]) and re-prompts (denies with
+    /// `consent_required`) on mismatch — spec D10: "re-prompt if the URL changes". This closes
+    /// the credential-exfil path where a server row's `url` is repointed (via
+    /// `Db::update_mcp_server`) AFTER consent was granted for a different URL: the stale existence
+    /// check would otherwise still pass and `lifecycle::connect` would send the stored bearer to
+    /// the new URL with no re-consent.
     Connect {
         server_id: String,
         fingerprint: String,
@@ -65,13 +67,20 @@ pub fn authorize(db: &Db, action: &Action) -> Result<Decision, OrchdPersistError
 
 fn evaluate(db: &Db, action: &Action) -> Result<Decision, OrchdPersistError> {
     match action {
-        Action::Connect { server_id, .. } => {
-            if db.has_consent(server_id, "connect")? {
-                Ok(Decision::Allow)
-            } else {
-                Ok(Decision::Deny {
+        Action::Connect {
+            server_id,
+            fingerprint,
+        } => {
+            // Consent is valid ONLY if a grant exists AND its stored fingerprint matches the
+            // CURRENT connect fingerprint (the server's current URL). A grant for a different
+            // URL — e.g. after the server row was repointed post-consent — is NOT valid consent
+            // for this URL (spec D10: "re-prompt if the URL changes"). Same `consent_required`
+            // reason either way, so dispatch maps both to the same re-prompt path.
+            match db.get_consent(server_id, "connect")? {
+                Some(grant) if &grant.fingerprint == fingerprint => Ok(Decision::Allow),
+                _ => Ok(Decision::Deny {
                     reason: REASON_CONSENT_REQUIRED.to_string(),
-                })
+                }),
             }
         }
         Action::ToolCall {
@@ -145,7 +154,9 @@ fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), Orch
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::{McpAuthKind, McpScope, McpServerRow, McpTransport, NewMcpServer, NewMcpTool};
+    use crate::mcp::{
+        McpAuthKind, McpScope, McpServerPatch, McpServerRow, McpTransport, NewMcpServer, NewMcpTool,
+    };
 
     fn new_db() -> Db {
         Db::open_in_memory().unwrap()
@@ -229,6 +240,121 @@ mod tests {
 
         assert_eq!(decision, Decision::Allow);
         assert_eq!(audit_count(&db, &server.id, "allow", None), 1);
+    }
+
+    // ---- D10 fingerprint re-prompt (task-5 review: credential-exfil path) ----
+
+    #[test]
+    fn connect_after_url_change_denies_consent_required_and_audits() {
+        // EXPLOIT: consent granted for url A, then the server row is repointed to url B via
+        // update_mcp_server (a legitimately-patchable field). Without the fingerprint check this
+        // would still Allow and lifecycle::connect would send the stored bearer to url B. With
+        // the fix it must Deny{consent_required} (spec D10: re-prompt on URL change).
+        let db = new_db();
+        let server = add_server(&db);
+        let url_a = server.url.clone().unwrap();
+        db.grant_consent(&server.id, "connect", &url_a).unwrap();
+
+        let mutated = db
+            .update_mcp_server(
+                &server.id,
+                McpServerPatch {
+                    url: Some("https://evil.example.com/mcp".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let url_b = mutated.url.clone().unwrap();
+        assert_ne!(url_a, url_b);
+
+        let decision = authorize(
+            &db,
+            &Action::Connect {
+                server_id: server.id.clone(),
+                fingerprint: url_b,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_CONSENT_REQUIRED.to_string()
+            },
+            "consent for url A must not authorize a connect to url B"
+        );
+        assert_eq!(
+            audit_count(&db, &server.id, "deny", Some("consent_required")),
+            1
+        );
+    }
+
+    #[test]
+    fn connect_with_unchanged_url_after_consent_is_allowed() {
+        let db = new_db();
+        let server = add_server(&db);
+        let url = server.url.clone().unwrap();
+        db.grant_consent(&server.id, "connect", &url).unwrap();
+
+        let decision = authorize(
+            &db,
+            &Action::Connect {
+                server_id: server.id.clone(),
+                fingerprint: url,
+            },
+        )
+        .unwrap();
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn connect_after_re_grant_at_new_url_is_allowed_again() {
+        // Re-consent restores access: after the owner grants consent for the NEW url, a connect
+        // to that url is allowed. Relies on grant_consent's UPSERT (UNIQUE(server_id, kind)).
+        let db = new_db();
+        let server = add_server(&db);
+        db.grant_consent(&server.id, "connect", &server.url.clone().unwrap())
+            .unwrap();
+
+        let mutated = db
+            .update_mcp_server(
+                &server.id,
+                McpServerPatch {
+                    url: Some("https://new.example.com/mcp".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let url_b = mutated.url.clone().unwrap();
+
+        // still denied until re-consent
+        assert_eq!(
+            authorize(
+                &db,
+                &Action::Connect {
+                    server_id: server.id.clone(),
+                    fingerprint: url_b.clone(),
+                },
+            )
+            .unwrap(),
+            Decision::Deny {
+                reason: REASON_CONSENT_REQUIRED.to_string()
+            }
+        );
+
+        // owner re-grants for the new url
+        db.grant_consent(&server.id, "connect", &url_b).unwrap();
+        assert_eq!(
+            authorize(
+                &db,
+                &Action::Connect {
+                    server_id: server.id.clone(),
+                    fingerprint: url_b,
+                },
+            )
+            .unwrap(),
+            Decision::Allow
+        );
     }
 
     // ---- ToolCall ----

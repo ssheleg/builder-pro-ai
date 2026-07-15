@@ -5278,6 +5278,18 @@ pub struct NewAudit {
     pub invocation_id: Option<String>,
 }
 
+/// `consent_grant` row, decoded (spec §4). Crate-local (no wire entity for it yet — `orchd-proto`
+/// has no consent-listing verb). Carries the stored `fingerprint` so `crate::trust` can compare
+/// it against the CURRENT server URL and re-prompt on mismatch (spec D10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsentRow {
+    pub id: String,
+    pub kind: String,
+    pub server_id: String,
+    pub fingerprint: String,
+    pub granted_at: i64,
+}
+
 /// `audit_log` row, decoded (spec §4). See this section's header comment for why this stays a
 /// crate-local type rather than a `bpa_orchd_proto` wire entity.
 #[derive(Debug, Clone, PartialEq)]
@@ -5532,20 +5544,43 @@ impl Db {
         load_artifact(self.conn(), id)
     }
 
-    /// `has_consent` (spec §6/D10, task-5 brief): existence check only — `(server_id, kind)` is
-    /// UNIQUE in `consent_grant`, so this is `true` iff a grant row exists. Phase-1 scope: does
-    /// NOT compare `fingerprint` — spec D10's "re-prompt on URL change" is not implemented by
-    /// this task (see `crate::trust::Action::Connect`'s doc comment).
+    /// `has_consent` (spec §6/D10): existence check only — `(server_id, kind)` is UNIQUE in
+    /// `consent_grant`, so this is `true` iff a grant row exists. Does NOT compare `fingerprint`;
+    /// the trust gate (`crate::trust::authorize`) uses [`Db::get_consent`] instead so it can
+    /// re-prompt on a URL change (spec D10). This existence-only variant is retained for callers
+    /// that only need to know whether *any* grant exists (e.g. a UI "consent granted" badge).
     pub fn has_consent(&self, server_id: &str, kind: &str) -> Result<bool, OrchdPersistError> {
-        let found: Option<i64> = self
+        Ok(self.get_consent(server_id, kind)?.is_some())
+    }
+
+    /// `get_consent` (spec §6/D10, task-5 review fix): the stored grant row for `(server_id,
+    /// kind)`, or `None` if never granted. `crate::trust::authorize` compares the returned
+    /// `fingerprint` against the CURRENT server URL and re-prompts (denies with
+    /// `consent_required`) on mismatch — closing the credential-exfil path where a server row's
+    /// `url` is repointed after consent was granted for a different URL.
+    pub fn get_consent(
+        &self,
+        server_id: &str,
+        kind: &str,
+    ) -> Result<Option<ConsentRow>, OrchdPersistError> {
+        let row = self
             .conn()
             .query_row(
-                "SELECT 1 FROM consent_grant WHERE server_id = ?1 AND kind = ?2",
+                "SELECT id, kind, server_id, fingerprint, granted_at
+                 FROM consent_grant WHERE server_id = ?1 AND kind = ?2",
                 rusqlite::params![server_id, kind],
-                |r| r.get(0),
+                |r| {
+                    Ok(ConsentRow {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        server_id: r.get(2)?,
+                        fingerprint: r.get(3)?,
+                        granted_at: r.get(4)?,
+                    })
+                },
             )
             .optional()?;
-        Ok(found.is_some())
+        Ok(row)
     }
 
     /// `grant_consent` (spec §6/D10, task-5 brief): upserts — `UNIQUE(server_id, kind)` means a
@@ -5822,6 +5857,31 @@ mod trust_persistence_tests {
             )
             .unwrap();
         assert_eq!(count, 1, "upsert must not create a second row");
+    }
+
+    #[test]
+    fn get_consent_returns_stored_fingerprint_or_none() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        assert!(db.get_consent(&server_id, "connect").unwrap().is_none());
+
+        db.grant_consent(&server_id, "connect", "https://example.com/mcp")
+            .unwrap();
+        let row = db.get_consent(&server_id, "connect").unwrap().unwrap();
+        assert_eq!(row.kind, "connect");
+        assert_eq!(row.server_id, server_id);
+        assert_eq!(row.fingerprint, "https://example.com/mcp");
+
+        // a re-grant at a new url updates the fingerprint get_consent returns
+        db.grant_consent(&server_id, "connect", "https://example.com/mcp-v2")
+            .unwrap();
+        assert_eq!(
+            db.get_consent(&server_id, "connect")
+                .unwrap()
+                .unwrap()
+                .fingerprint,
+            "https://example.com/mcp-v2"
+        );
     }
 
     // ---- insert_audit ----

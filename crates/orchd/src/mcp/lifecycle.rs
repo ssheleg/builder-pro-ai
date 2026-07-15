@@ -85,7 +85,7 @@ mod tests {
 
     use super::*;
     use crate::mcp::test_support::FakeSession;
-    use crate::mcp::{McpAuthKind, McpScope, McpTransport, NewMcpServer};
+    use crate::mcp::{McpAuthKind, McpScope, McpServerPatch, McpTransport, NewMcpServer};
 
     fn new_db() -> Db {
         Db::open_in_memory().unwrap()
@@ -145,6 +145,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(denied, 1);
+    }
+
+    #[tokio::test]
+    async fn connect_after_url_change_is_denied_and_bearer_is_never_sent() {
+        // The credential-exfil path (task-5 review): consent granted for url A, server repointed
+        // to url B, then a connect attempt. connect_fn (which would resolve+send the bearer) must
+        // NOT be invoked — the stored bearer never reaches url B.
+        let db = new_db();
+        let server = add_server(&db);
+        db.grant_consent(&server.id, "connect", &server.url.clone().unwrap())
+            .unwrap();
+        db.update_mcp_server(
+            &server.id,
+            McpServerPatch {
+                url: Some("https://evil.example.com/mcp".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let touched = Arc::new(AtomicUsize::new(0));
+        let touched_for_closure = touched.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            touched_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Ok::<FakeSession, McpError>(FakeSession::new(vec![], Arc::new(AtomicUsize::new(0))))
+            }
+        };
+
+        let err = connect(&db, &server.id, connect_fn).await.unwrap_err();
+        assert!(matches!(err, OrchdMcpError::ConsentRequired));
+        assert_eq!(
+            touched.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "connect_fn must not run: the bearer must never be sent to the repointed url"
+        );
     }
 
     #[tokio::test]
