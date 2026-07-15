@@ -122,28 +122,61 @@ mod tests {
     const KEYCHAIN_UNAVAILABLE_CODES: [i32; 4] = [-25308, -25307, -25294, -25291];
 
     /// Probes the login keychain with a disposable entry under the `.test` service prefix and
-    /// reports whether it is usable. Returns `false` (after printing a SKIP notice) only for the
-    /// known "unavailable" codes above; any other failure is a genuine bug and still panics.
+    /// reports whether it is usable. This is a FULL `set → get (assert bytes match) → delete`
+    /// round-trip, NOT a set-only check: Keychain Services treats the "default keychain" and the
+    /// "search list" as independent, so a keychain that a `set` writes to (the default) is not
+    /// necessarily the one a `get`/`delete` resolves (the search list) — a misconfigured CI
+    /// keychain (created + set-default + unlocked but NOT added to the search list) makes `set`
+    /// succeed while `get`/`delete` fail "not found". A set-only probe would report "available"
+    /// and the real test's `get` would then panic; the round-trip catches that case and SKIPs
+    /// loudly instead. Returns `false` (after printing a SKIP notice) for the known "unavailable"
+    /// codes above OR any get/delete/round-trip mismatch; only a genuinely unexpected `set` error
+    /// (not in the unavailable set) still panics.
     fn keychain_available() -> bool {
         let probe = SecretRef {
             service: "ai.builderpro.desktop.test".to_string(),
             account: "keychain-availability-probe".to_string(),
         };
-        match set_generic_password(&probe.service, &probe.account, b"probe") {
-            Ok(()) => {
-                let _ = delete_generic_password(&probe.service, &probe.account);
-                true
-            }
+        // Clean up any stray probe entry from a previously-crashed run before starting.
+        let _ = delete_generic_password(&probe.service, &probe.account);
+
+        const PROBE_BYTES: &[u8] = b"probe-roundtrip-marker";
+        let skip = |reason: &str| {
+            eprintln!(
+                "SKIP bpa_secrets::tests keychain roundtrip: {reason} — graceful skip, not a \
+                 pass. Run locally with an unlocked login keychain (or a CI keychain that is on \
+                 the search list) to exercise the full assertion."
+            );
+            let _ = delete_generic_password(&probe.service, &probe.account);
+            false
+        };
+        match set_generic_password(&probe.service, &probe.account, PROBE_BYTES) {
+            Ok(()) => {}
             Err(err) if KEYCHAIN_UNAVAILABLE_CODES.contains(&err.code()) => {
-                eprintln!(
-                    "SKIP bpa_secrets::tests keychain roundtrip: login keychain unavailable in \
-                     this environment (OSStatus {}) — graceful skip, not a pass. Run locally \
-                     with an unlocked login keychain to exercise the full assertion.",
+                return skip(&format!(
+                    "login keychain unavailable (OSStatus {})",
                     err.code()
-                );
-                false
+                ));
             }
             Err(err) => panic!("unexpected keychain error during availability probe: {err}"),
+        }
+        match get_generic_password(&probe.service, &probe.account) {
+            Ok(bytes) if bytes == PROBE_BYTES => {}
+            Ok(_) => return skip("probe get returned the wrong bytes (keychain misconfigured)"),
+            Err(err) => {
+                return skip(&format!(
+                    "probe get failed after a successful set (OSStatus {} — keychain likely not \
+                     on the search list)",
+                    err.code()
+                ));
+            }
+        }
+        match delete_generic_password(&probe.service, &probe.account) {
+            Ok(()) => true,
+            Err(err) => skip(&format!(
+                "probe delete failed after a successful set+get (OSStatus {})",
+                err.code()
+            )),
         }
     }
 

@@ -10,19 +10,26 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-      - name: unlock keychain (S-EXT: MCP/connector Keychain-gated tests + e2e phase7)
+      - name: "unlock keychain (S-EXT: MCP/connector Keychain-gated tests + e2e phase7)"
         run: |
           # `bpa-secrets`'s unit tests, `crates/orchd`'s connector-account tests
           # (`accounts.rs`/`adapter.rs`), the `no_secrets_in_logs_mcp` integration test, and the
-          # e2e `orchd-survive.mjs` phase7 (`ConnectorAddApiKey`) all write real macOS Keychain
-          # entries via `security-framework`. Every one of those already has its own
-          # `keychain_available()`-probe-and-skip guard, so a locked/absent keychain never fails
-          # the gate — but a graceful skip forfeits real CI coverage of that whole surface. Create
-          # a throwaway keychain with a known password, make it the default + unlocked for the rest
-          # of this job, so CI actually EXERCISES the Keychain path instead of silently skipping it
-          # every run. Standard recipe (matches fastlane's create-keychain action); the runner VM is
-          # torn down after the job, so no explicit cleanup is needed.
+          # e2e `orchd-survive.mjs` phase7 (`ConnectorAddApiKey` + `ConnectorInvoke`) all write AND
+          # read real macOS Keychain entries via `security-framework`. Every one of those already
+          # has its own probe-and-skip guard, so a locked/absent keychain never fails the gate —
+          # but a graceful skip forfeits real CI coverage of that whole surface. Create a throwaway
+          # keychain, make it default + unlocked, AND — critically — ADD IT TO THE SEARCH LIST.
+          # Keychain Services treats "default keychain" and "search list" as INDEPENDENT: an
+          # unqualified `add-generic-password` (what `bpa_secrets::set` does) writes to the DEFAULT,
+          # but an unqualified `find`/`delete` (what `bpa_secrets::get`/`delete` do) resolve the
+          # SEARCH LIST. Without the search-list line, `set` succeeds while `get`/`delete` fail
+          # "not found" — so the (now-hardened, set->get->delete round-trip) probes would SKIP and
+          # CI would forfeit coverage silently. The search-list line prepends `ci.keychain-db`
+          # while preserving the runner's existing user keychains (login.keychain-db, …). Standard
+          # recipe (matches fastlane's create-keychain action); the runner VM is torn down after
+          # the job, so no explicit cleanup is needed.
           security create-keychain -p "" ci.keychain-db
+          security list-keychains -d user -s ci.keychain-db $(security list-keychains -d user | sed 's/[",]//g')
           security default-keychain -s ci.keychain-db
           security unlock-keychain -p "" ci.keychain-db
           security set-keychain-settings -lut 21600 ci.keychain-db
@@ -79,13 +86,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-      - name: unlock keychain (S-EXT: MCP/connector Keychain-gated tests under instrumentation)
+      - name: "unlock keychain (S-EXT: MCP/connector Keychain-gated tests under instrumentation)"
         run: |
-          # Same rationale as the `gates` job's identical step: `cargo llvm-cov`'s instrumented
-          # run re-executes every Keychain-gated test (bpa-secrets, connectors::accounts,
-          # no_secrets_in_logs_mcp) under this job's own process — give it a writable default
-          # keychain so the coverage measurement exercises the real path too, not the skip guard.
+          # Same rationale as the `gates` job's identical step (see there for the full "default vs
+          # search list" explanation): `cargo llvm-cov`'s instrumented run re-executes every
+          # Keychain-gated test (bpa-secrets, connectors::accounts, no_secrets_in_logs_mcp) under
+          # this job's own process — give it a writable default keychain THAT IS ALSO ON THE SEARCH
+          # LIST so `get`/`delete` resolve it and the coverage measurement exercises the real path,
+          # not the skip guard.
           security create-keychain -p "" ci.keychain-db
+          security list-keychains -d user -s ci.keychain-db $(security list-keychains -d user | sed 's/[",]//g')
           security default-keychain -s ci.keychain-db
           security unlock-keychain -p "" ci.keychain-db
           security set-keychain-settings -lut 21600 ci.keychain-db

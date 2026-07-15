@@ -734,21 +734,45 @@ mod tests {
     // this deliberately looser (but equally honest, always-loud) equivalent). ----
 
     fn keychain_available() -> bool {
+        // FULL `set → get (assert bytes) → delete` round-trip, NOT set-only: Keychain Services'
+        // "default keychain" and "search list" are independent, so a keychain a `set` writes to is
+        // not necessarily the one a `get`/`delete` resolves. A CI keychain that was created +
+        // set-default + unlocked but NOT added to the search list makes `set` succeed while
+        // `get`/`delete` fail "not found" — a set-only probe would report "available" and the real
+        // test's `get` would then panic. The round-trip catches that and SKIPs loudly instead.
         let probe = bpa_secrets::account_ref("connectors-accounts-probe", "test");
-        match bpa_secrets::set(&probe, b"probe") {
-            Ok(()) => {
-                let _ = bpa_secrets::delete(&probe);
-                true
+        let _ = bpa_secrets::delete(&probe); // clear any stray entry from a crashed prior run
+        const PROBE_BYTES: &[u8] = b"probe-roundtrip-marker";
+        let skip = |reason: String| {
+            eprintln!(
+                "SKIP connectors::accounts keychain-backed test: {reason} — graceful skip, not a \
+                 pass. Run locally with an unlocked login keychain (or a CI keychain on the \
+                 search list) to exercise the full assertion."
+            );
+            let _ = bpa_secrets::delete(&probe);
+            false
+        };
+        if let Err(e) = bpa_secrets::set(&probe, PROBE_BYTES) {
+            return skip(format!("login keychain unavailable ({e})"));
+        }
+        match bpa_secrets::get(&probe) {
+            Ok(bytes) if bytes == PROBE_BYTES => {}
+            Ok(_) => {
+                return skip("probe get returned the wrong bytes (keychain misconfigured)".into())
             }
             Err(e) => {
-                eprintln!(
-                    "SKIP connectors::accounts keychain-backed test: login keychain unavailable \
-                     in this environment ({e}) — graceful skip, not a pass. Run locally with an \
-                     unlocked login keychain to exercise the full assertion."
-                );
-                false
+                return skip(format!(
+                    "probe get failed after a successful set ({e} — keychain likely not on the \
+                     search list)"
+                ));
             }
         }
+        if let Err(e) = bpa_secrets::delete(&probe) {
+            return skip(format!(
+                "probe delete failed after a successful set+get ({e})"
+            ));
+        }
+        true
     }
 
     #[test]

@@ -1836,21 +1836,43 @@ async fn mcp_call_tool_does_not_block_other_db_ops() {
 // ================================================================================
 
 fn connector_keychain_available() -> bool {
+    // FULL `set → get (assert bytes) → delete` round-trip, NOT set-only: Keychain Services'
+    // "default keychain" and "search list" are independent, so a keychain a `set` writes to is not
+    // necessarily the one a `get`/`delete` resolves. A CI keychain created + set-default + unlocked
+    // but NOT added to the search list makes `set` succeed while `get`/`delete` fail "not found" —
+    // a set-only probe would report "available" and the real dispatch test's read-back would then
+    // panic. The round-trip catches that and SKIPs loudly instead.
     let probe = bpa_secrets::account_ref("dispatch-integration-connector-probe", "test");
-    match bpa_secrets::set(&probe, b"probe") {
-        Ok(()) => {
-            let _ = bpa_secrets::delete(&probe);
-            true
-        }
+    let _ = bpa_secrets::delete(&probe); // clear any stray entry from a crashed prior run
+    const PROBE_BYTES: &[u8] = b"probe-roundtrip-marker";
+    let skip = |reason: String| {
+        eprintln!(
+            "SKIP connector dispatch test: {reason} — graceful skip, not a pass. Run locally with \
+             an unlocked login keychain (or a CI keychain on the search list) to exercise the \
+             full assertion."
+        );
+        let _ = bpa_secrets::delete(&probe);
+        false
+    };
+    if let Err(e) = bpa_secrets::set(&probe, PROBE_BYTES) {
+        return skip(format!("login keychain unavailable ({e})"));
+    }
+    match bpa_secrets::get(&probe) {
+        Ok(bytes) if bytes == PROBE_BYTES => {}
+        Ok(_) => return skip("probe get returned the wrong bytes (keychain misconfigured)".into()),
         Err(e) => {
-            eprintln!(
-                "SKIP connector dispatch test: login keychain unavailable in this environment \
-                 ({e}) — graceful skip, not a pass. Run locally with an unlocked login keychain \
-                 to exercise the full assertion."
-            );
-            false
+            return skip(format!(
+                "probe get failed after a successful set ({e} — keychain likely not on the search \
+                 list)"
+            ));
         }
     }
+    if let Err(e) = bpa_secrets::delete(&probe) {
+        return skip(format!(
+            "probe delete failed after a successful set+get ({e})"
+        ));
+    }
+    true
 }
 
 /// RAII Keychain cleanup for a connector account created mid-test (task T13a review). Fires

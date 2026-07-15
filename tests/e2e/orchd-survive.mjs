@@ -1108,11 +1108,15 @@ async function main() {
  * runs in CI via `final-suite.sh` stage 9) the login keychain can be locked/unavailable, in which
  * case the daemon returns a keychain-shaped `Error` (NOT an `Account`) rather than hanging (the
  * `Library/Keychains` symlink set up above prevents the hang, not the error). So this phase begins
- * with a keychain-availability PROBE — a throwaway `ConnectorAddApiKey`, immediately deleted — and,
- * if the keychain is unavailable, LOUDLY skips (a visible `SKIP` log line, never a silent vacuous
- * pass) and RETURNs early, mirroring the Rust integration suite's own `connector_keychain_
- * available()` probe-and-skip (`crates/orchd/tests/dispatch_integration.rs`). When the keychain IS
- * writable the FULL phase runs and its survival assertions are NOT weakened.
+ * with a keychain-availability PROBE that is a FULL round-trip: `ConnectorAddApiKey` (a Keychain
+ * WRITE) -> `ConnectorInvoke` (a Keychain READ via `bpa_secrets::get`) -> `ConnectorDeleteAccount`
+ * (a Keychain DELETE). A set-only probe would NOT catch a keychain that is writable-but-not-on-
+ * the-search-list (WRITE goes to the default keychain, READ/DELETE resolve the search list — they
+ * are independent in Keychain Services), so the read leg is essential. If ANY leg fails, this
+ * phase LOUDLY skips (a visible `SKIP` log line, never a silent vacuous pass) and RETURNs early,
+ * mirroring the Rust integration suite's own hardened `connector_keychain_available()`
+ * probe-and-skip (`crates/orchd/tests/dispatch_integration.rs`). When the keychain is fully usable
+ * the FULL phase runs and its survival assertions are NOT weakened.
  *
  * Steps (keychain available): spawn a local stub generic-rest target -> `ConnectorAddApiKey`
  * (real Keychain entry) -> capture the account id -> `ConnectorInvoke(op="post")` against the stub
@@ -1134,13 +1138,25 @@ async function connectorInvokePhase(conn) {
       "+ ConnectorInvoke(post)",
   );
 
-  // ---- keychain-availability probe (headless-CI guard, mirrors the Rust suite's
-  // `connector_keychain_available()`): a throwaway `ConnectorAddApiKey`. An `Account` back => the
-  // login keychain is writable in this environment; delete the probe account and run the real
-  // phase. An `Error` response (keychain-shaped `Error{Io}`) OR a request error/timeout =>
-  // keychain unavailable (a locked/headless CI login keychain) => LOUD graceful skip + early
-  // return, so the CI gate stays green WITHOUT ever masking a real failure when the keychain IS
-  // present. ----
+  // The stub REST server starts BEFORE the probe so the probe can exercise a FULL keychain
+  // round-trip (see below), not just a write.
+  const stubRestServer = await startStubRestServer();
+  cleanup.stubRestServer = stubRestServer;
+  log(`phase7: stub generic-rest server listening at ${stubRestServer.url}`);
+
+  // ---- keychain-availability probe (headless-CI guard, mirrors the Rust suite's hardened
+  // `connector_keychain_available()`): a FULL round-trip — `ConnectorAddApiKey` (a Keychain
+  // WRITE) THEN `ConnectorInvoke` (a Keychain READ via `accounts::token_for` ->
+  // `bpa_secrets::get`) THEN `ConnectorDeleteAccount` (a Keychain DELETE). A set-only probe is
+  // NOT enough: Keychain Services treats the "default keychain" and the "search list" as
+  // independent, so a CI keychain that was created + set-default + unlocked but NOT added to the
+  // search list makes the WRITE succeed while the READ/DELETE fail "not found". A set-only probe
+  // would report "available" and the real phase's own `ConnectorInvoke` read-back would then FAIL
+  // the gate. `ConnectorListAccounts` does NOT help — it reads DB rows, never the Keychain — so
+  // the read MUST go through `ConnectorInvoke` (the only wire verb that resolves the stored
+  // secret). Any failure at any step (write, read, or delete) => LOUD graceful skip + early
+  // return, so the gate stays green WITHOUT ever masking a real failure when the keychain IS
+  // fully usable. ----
   const probeApiKey = `e2e-keychain-probe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let probeResp;
   try {
@@ -1153,22 +1169,59 @@ async function connectorInvokePhase(conn) {
   } catch (e) {
     log(
       "SKIP phase7: login keychain unavailable in this environment (headless CI) — graceful " +
-        `skip, not a pass (probe request errored: ${e.message})`,
+        `skip, not a pass (probe write request errored: ${e.message})`,
     );
+    await stubRestServer.close();
+    cleanup.stubRestServer = null;
     return conn;
   }
   if (probeResp.t !== "Account") {
     log(
       "SKIP phase7: login keychain unavailable in this environment (headless CI) — graceful " +
-        `skip, not a pass (probe -> ${JSON.stringify(probeResp)})`,
+        `skip, not a pass (probe write -> ${JSON.stringify(probeResp)})`,
     );
+    await stubRestServer.close();
+    cleanup.stubRestServer = null;
     return conn;
   }
-  // Probe succeeded — the keychain IS writable. Delete the throwaway probe account (a REAL Keychain
-  // entry) before the real phase begins; tracked in `cleanup` for the tiny window between its
-  // create and its delete so a delete failure never orphans it in the real login keychain.
   const probeAccountId = probeResp.value.id;
   cleanup.connectorProbeAccountId = probeAccountId;
+  // Read-back leg: `ConnectorInvoke` resolves the just-written secret via `bpa_secrets::get`. On a
+  // broken search list the WRITE above succeeded but this READ fails (the daemon returns an
+  // `Error`, not a `McpCallResult`) — exactly the case a set-only probe would miss.
+  let probeInvokeResp;
+  try {
+    probeInvokeResp = await orchdRequest(conn, {
+      t: "ConnectorInvoke",
+      accountId: probeAccountId,
+      op: "get",
+      argsJson: JSON.stringify({ url: stubRestServer.url }),
+      projectId: null,
+    });
+  } catch (e) {
+    log(
+      "SKIP phase7: keychain WRITE succeeded but READ-BACK errored (keychain likely not on the " +
+        `search list) — graceful skip, not a pass (probe read request errored: ${e.message})`,
+    );
+    await orchdRequest(conn, { t: "ConnectorDeleteAccount", id: probeAccountId }).catch(() => {});
+    cleanup.connectorProbeAccountId = null;
+    await stubRestServer.close();
+    cleanup.stubRestServer = null;
+    return conn;
+  }
+  if (probeInvokeResp.t !== "McpCallResult") {
+    log(
+      "SKIP phase7: keychain WRITE succeeded but READ-BACK failed (keychain likely not on the " +
+        `search list) — graceful skip, not a pass (probe read -> ${JSON.stringify(probeInvokeResp)})`,
+    );
+    await orchdRequest(conn, { t: "ConnectorDeleteAccount", id: probeAccountId }).catch(() => {});
+    cleanup.connectorProbeAccountId = null;
+    await stubRestServer.close();
+    cleanup.stubRestServer = null;
+    return conn;
+  }
+  // Full round-trip proven writable + readable. Delete the throwaway probe account (a REAL Keychain
+  // DELETE — the third leg) before the real phase begins.
   const probeDeleteResp = await orchdRequest(conn, {
     t: "ConnectorDeleteAccount",
     id: probeAccountId,
@@ -1179,11 +1232,10 @@ async function connectorInvokePhase(conn) {
     `probe ConnectorDeleteAccount -> ${JSON.stringify(probeDeleteResp)}`,
   );
   cleanup.connectorProbeAccountId = null;
-  log("phase7: keychain probe OK (login keychain writable) — running the full connector phase");
-
-  const stubRestServer = await startStubRestServer();
-  cleanup.stubRestServer = stubRestServer;
-  log(`phase7: stub generic-rest server listening at ${stubRestServer.url}`);
+  log(
+    "phase7: keychain probe OK (login keychain write + read-back + delete all succeeded) — " +
+      "running the full connector phase",
+  );
 
   const apiKeyValue = `e2e-key-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const addAccountResp = await orchdRequest(conn, {
