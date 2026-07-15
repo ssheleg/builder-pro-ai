@@ -14,6 +14,12 @@
 //! (no backfill — new subsystem) — the `mcp_server`/`mcp_tool` persistence this task (S-EXT T2)
 //! actually implements lives in the sibling `crate::mcp::registry` module; the other seven
 //! tables' CRUD lands in later S-EXT tasks.
+//! Schema v4 (S-IDEA spec §4, LOCKED DDL, task T2) appends ONE additive table, `research_run` —
+//! a thin idea↔invocation↔artifact provenance link (D2: the actual ResearchArtifact IS the
+//! pre-existing `mcp_artifact` row a run's tool call produces, no blob duplication) as ONE
+//! `Migration { upto: 4 }` step. Its CRUD + the D11 boot-reconcile query live in the sibling
+//! `crate::research` module, mirroring how `crate::mcp::registry`/`crate::graph` build their own
+//! `impl Db` blocks on top of this file's `conn()`/`now_ms()`/`OrchdPersistError` seam.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -30,8 +36,9 @@ use uuid::Uuid;
 
 /// Current schema/migration version stored in `PRAGMA user_version` (spec §5.1; S4 spec §4 D1
 /// bumps this 1→2 for the additive knowledge-graph tables; S-EXT spec §4 bumps this 2→3 for the
-/// additive MCP/connectors/skills/trust tables).
-pub const SCHEMA_VERSION: i64 = 3;
+/// additive MCP/connectors/skills/trust tables; S-IDEA spec §4 D7 bumps this 3→4 for the
+/// additive `research_run` table).
+pub const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -220,6 +227,10 @@ impl Db {
             bpa_daemon_core::migrate::Migration {
                 upto: 3,
                 apply: migrate_v3,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 4,
+                apply: migrate_v4,
             },
         ];
         bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
@@ -540,6 +551,44 @@ pub(crate) fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
          -- additive only; a v2->v3 upgrade of an existing orchd.db with live projects creates
          -- these tables and seeds nothing (no backfill needed — new subsystem).
          -- user_version → 3"#,
+    )
+}
+
+/// v3 -> v4: `orchd.db` schema v4 (S-IDEA spec §4, LOCKED DDL — transcribed verbatim, including
+/// the spec's own inline comments, so this body and the spec text can be diffed directly). Adds
+/// ONE additive table, `research_run` — a thin idea↔invocation↔artifact provenance link a
+/// research run leaves behind (D2: the actual ResearchArtifact IS the pre-existing `mcp_artifact`
+/// row the run's `tools/call` produces, S-EXT schema v3 — no blob duplication, one source of
+/// truth). Its CRUD + the D11 boot-reconcile query live in the sibling `crate::research` module.
+pub(crate) fn migrate_v4(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        r#"-- Research runs: idea + MCP server/tool + args -> pending|running|done|failed
+         CREATE TABLE research_run (
+           id             TEXT PRIMARY KEY,             -- uuid v4
+           idea_id        TEXT NOT NULL,                -- FK -> idea(id) ON DELETE CASCADE
+           server_id      TEXT NOT NULL,                -- FK -> mcp_server(id) ON DELETE CASCADE (the research MCP server)
+           tool_name      TEXT NOT NULL,               -- the owner-chosen tool on that server
+           args_json      TEXT NOT NULL DEFAULT '{}',   -- the invocation args (owner-supplied; NOT a secret)
+           status         TEXT NOT NULL DEFAULT 'pending', -- 'pending'|'running'|'done'|'failed'
+           invocation_id  TEXT,                          -- FK -> mcp_invocation(id); set on 'done'. Best-effort on 'failed':
+                                                         --   NULL for policy_cap_exceeded/consent (no invocation row written),
+                                                         --   and NULL for the Mcp(_) failure family too — call_tool records an
+                                                         --   mcp_invocation for those but does NOT return its id (shipped error
+                                                         --   type carries no id; see §6). Accepted partial-provenance: a failed
+                                                         --   run's record is its error_kind, not an invocation link.
+           artifact_id    TEXT,                          -- FK -> mcp_artifact(id); set on 'done' ONLY
+           error_kind     TEXT,                          -- set on 'failed' (e.g. 'policy_cap_exceeded','tool_error','transport','timeout','interrupted'); NEVER a secret/arg/tool-output
+           created_at     INTEGER NOT NULL,
+           updated_at     INTEGER NOT NULL,
+           FOREIGN KEY(idea_id)   REFERENCES idea(id)       ON DELETE CASCADE,
+           FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
+           CHECK ( status IN ('pending','running','done','failed') ),
+           CHECK ( (status='done') = (artifact_id IS NOT NULL) )   -- a done run has an artifact; others don't
+         );
+         CREATE INDEX research_run_by_idea ON research_run(idea_id, created_at);
+         -- Idempotent-migration note: additive table only; a v3->v4 upgrade of a live orchd.db
+         -- creates this table and seeds nothing.
+         -- user_version → 4"#,
     )
 }
 
@@ -2799,6 +2848,8 @@ mod tests {
         "consent_grant",
         "policy",
         "audit_log",
+        // S-IDEA spec §4 (schema v4, additive): research-run provenance link.
+        "research_run",
     ];
 
     fn table_exists(conn: &Connection, name: &str) -> bool {
@@ -2816,20 +2867,21 @@ mod tests {
     }
 
     #[test]
-    fn open_in_memory_creates_schema_v3_with_every_table() {
+    fn open_in_memory_creates_schema_v4_with_every_table() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(user_version(db.conn()), 3);
+        // S-IDEA spec §4 bumped SCHEMA_VERSION 3->4 (additive, `research_run` only).
+        assert_eq!(user_version(db.conn()), 4);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
     }
 
     #[test]
-    fn open_on_disk_creates_schema_v3_with_every_table() {
+    fn open_on_disk_creates_schema_v4_with_every_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orchd.db");
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(db.conn()), 3);
+        assert_eq!(user_version(db.conn()), 4);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
@@ -2856,7 +2908,7 @@ mod tests {
         std::fs::write(&path, b"not a sqlite database").unwrap();
 
         let db = Db::open(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 3);
+        assert_eq!(user_version(db.conn()), 4);
 
         let found = std::fs::read_dir(dir.path()).unwrap().any(|e| {
             e.unwrap()

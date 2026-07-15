@@ -218,7 +218,7 @@ async fn second_instance_flock_refusal() {
 }
 
 #[tokio::test]
-async fn fresh_boot_creates_schema_v3_and_global_ruleset() {
+async fn fresh_boot_creates_schema_v4_and_global_ruleset() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
     let home_dir = tempfile::tempdir().unwrap();
@@ -249,7 +249,7 @@ async fn fresh_boot_creates_schema_v3_and_global_ruleset() {
         .conn()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 4);
 
     for table in [
         "project",
@@ -271,6 +271,8 @@ async fn fresh_boot_creates_schema_v3_and_global_ruleset() {
         "consent_grant",
         "policy",
         "audit_log",
+        // S-IDEA spec §4 (schema v4, additive): research-run provenance link.
+        "research_run",
     ] {
         let exists: bool = db
             .conn()

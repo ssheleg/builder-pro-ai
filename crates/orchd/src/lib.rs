@@ -35,6 +35,13 @@ pub mod connectors;
 /// to stay independently nameable for `socket_server`'s `Skill*` dispatch arms, this same task).
 pub mod skills;
 
+/// Research-run persistence (S-IDEA spec §4/§6 schema v4, D11, task T2): the idea↔invocation↔
+/// artifact provenance link a research run leaves behind + the boot-reconcile of interrupted
+/// runs. `pub` — same reasoning as `mcp`/`connectors`/`skills` above (this module's own
+/// `ResearchRunRow`/`NewResearchRun`/`ResearchStatus` types need to stay independently nameable
+/// for a later task's `socket_server` dispatch wiring, T5, and the run driver, T4).
+pub mod research;
+
 mod boot;
 /// Knowledge-graph node/edge persistence (S4 spec §4 schema v2, §5 persistence + invariants).
 /// Crate-private — `persistence::Db`'s CRUD/getter surface (`conn()`, `ensure_project_active`,

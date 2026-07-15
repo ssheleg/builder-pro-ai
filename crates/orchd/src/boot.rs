@@ -151,6 +151,24 @@ fn ensure_global_ruleset_inner(db: &Db, app_support: &Path) -> std::io::Result<(
     Ok(())
 }
 
+/// Boot-reconcile of interrupted research runs (S-IDEA spec D11): flips every non-terminal
+/// (`pending`/`running`) `research_run` row to `failed{interrupted}` — the AUTHORITATIVE
+/// backstop for the async run driver's detached `tokio::spawn` task (a later task, T4), which is
+/// NOT tracked by the shutdown drain's `JoinSet` and so can be lost outright on a crash/restart/
+/// drain mid-run. Best-effort: logs the affected count on success, logs (never panics) on
+/// failure — mirrors [`ensure_global_ruleset`]'s honest-degradation stance (state ensured at
+/// every boot, but never boot-blocking).
+fn reconcile_interrupted(db: &Db) {
+    match db.reconcile_interrupted_research_runs() {
+        Ok(0) => tracing::info!("boot-reconcile: no interrupted research runs found"),
+        Ok(count) => tracing::warn!(
+            count,
+            "boot-reconcile: flipped interrupted research runs to failed"
+        ),
+        Err(e) => tracing::error!(error = %e, "failed to reconcile interrupted research runs"),
+    }
+}
+
 /// Boot core: bind the listener, open the DB, ensure the global ruleset, run [`serve`] until
 /// `shutdown` flips to `true` (or the listener errors), then drain. Returns once fully drained.
 ///
@@ -173,6 +191,7 @@ pub async fn run(
     let app_support = app_support_dir();
     let db = open_db_degrading(&app_support);
     ensure_global_ruleset(&db, &app_support);
+    reconcile_interrupted(&db);
     let db = Arc::new(Mutex::new(db));
 
     // S-EXT connector OAuth-account layer (spec §5/§7, task T13a): lives for the daemon's whole
@@ -258,6 +277,23 @@ mod tests {
         assert_eq!(
             count, 1,
             "second ensure call must not duplicate the global row"
+        );
+    }
+
+    /// S-IDEA spec D11: boot-reconcile must run cleanly (no panic, zero affected rows) on a
+    /// fresh DB that has never had a research run — mirrors
+    /// `ensure_global_ruleset_writes_file_and_row_idempotently`'s "call the boot wrapper
+    /// directly, assert the DB state it leaves behind" shape.
+    #[test]
+    fn reconcile_interrupted_research_runs_on_fresh_db_is_a_noop() {
+        let db = Db::open_in_memory().unwrap();
+
+        reconcile_interrupted(&db); // must not panic
+
+        let count = db.reconcile_interrupted_research_runs().unwrap();
+        assert_eq!(
+            count, 0,
+            "a fresh db has no interrupted research runs to reconcile"
         );
     }
 
