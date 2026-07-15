@@ -1602,16 +1602,18 @@ async fn dispatch(
         }
         // Direct grant — NOT itself gated by `trust::authorize` (granting consent IS the
         // gate-setting action, not something that needs to pass through the choke-point it
-        // configures). Phase 1 ships HTTP only (spec D6), so the fingerprint is always the
-        // server's CURRENT url — mirrors `mcp::lifecycle::connect`'s own fingerprint derivation
-        // exactly, which is what makes a subsequent `McpConnect` actually succeed.
+        // configures). `kind` is `'connect'` (http, fingerprint = URL) or `'stdio_exec'` (stdio,
+        // task T16, fingerprint = the resolved-binary/command-args hash) — `mcp::fingerprint_for`
+        // is the SAME function `mcp::connect_action` calls at authorize time, so a grant made
+        // here and a later `McpConnect`/`McpCallTool` authorize check always agree on what "the
+        // current fingerprint" is.
         OrchdRequest::TrustGrantConsent { server_id, kind } => {
             let db = deps.db.lock().await;
             let server = match db.get_mcp_server(&server_id) {
                 Ok(s) => s,
                 Err(e) => return map_err(e),
             };
-            let fingerprint = server.url.clone().unwrap_or_default();
+            let fingerprint = mcp::fingerprint_for(&server, &kind);
             match db.grant_consent(&server_id, &kind, &fingerprint) {
                 Ok(()) => {
                     broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {

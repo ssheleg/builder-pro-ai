@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use super::{cache, resolve_bearer, McpServerRow, OrchdMcpError, ToolCaller};
 use crate::persistence::Db;
-use crate::trust::{self, Action, Decision};
+use crate::trust::{self, Decision};
 
 /// Connect to `server_id`'s MCP server (spec D10: trust-gated on a persisted `consent_grant`,
 /// `kind='connect'`). On success, returns the negotiated protocol version + the number of tools
@@ -50,18 +50,12 @@ where
         let guard = db.lock().await;
         let server = guard.get_mcp_server(server_id)?;
 
-        // Phase 1 ships HTTP only (spec D6): the fingerprint is the server's URL, matching spec
-        // D10 ("fingerprint = url (http) ... at grant time"). `add_mcp_server`'s own CHECK
-        // invariant guarantees `url` is `Some` whenever `transport='http'`, so this never
-        // silently fingerprints an empty string for a real http server.
-        let fingerprint = server.url.clone().unwrap_or_default();
-        let decision = trust::authorize(
-            &guard,
-            &Action::Connect {
-                server_id: server.id.clone(),
-                fingerprint,
-            },
-        )?;
+        // http -> the pre-existing `connect`/URL-fingerprint gate (unchanged, spec D10); stdio ->
+        // the distinct `stdio_exec` process-spawn gate (spec §6/D6/D10, task T16, closes BL-22).
+        // `super::connect_action` is the SAME helper `invoke::call_tool` uses for its own
+        // per-call reconnect, so a stdio spawn can never bypass this gate via either path.
+        let action = super::connect_action(&server);
+        let decision = trust::authorize(&guard, &action)?;
         if matches!(decision, Decision::Deny { .. }) {
             return Err(OrchdMcpError::ConsentRequired);
         }
@@ -304,5 +298,157 @@ mod tests {
             .list_mcp_tools(&server.id)
             .unwrap()
             .is_empty());
+    }
+
+    // ---- stdio-exec consent gate (S-EXT §6/D6/D10, task T16, closes BL-22) ----
+
+    async fn add_stdio_server(db: &Arc<Mutex<Db>>, command: &str) -> McpServerRow {
+        db.lock()
+            .await
+            .add_mcp_server(NewMcpServer {
+                name: "local-mcp".to_string(),
+                transport: McpTransport::Stdio,
+                url: None,
+                command: Some(command.to_string()),
+                args: vec![],
+                env: Default::default(),
+                scope: McpScope::Global,
+                project_id: None,
+                auth_kind: McpAuthKind::None,
+                secret_ref: None,
+                account_id: None,
+                enabled: true,
+                timeout_ms: 5_000,
+                max_retries: 2,
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stdio_connect_without_stdio_exec_consent_is_denied_and_never_spawns() {
+        let db = new_db();
+        let server = add_stdio_server(&db, "/nonexistent/mcp-server").await;
+
+        let touched = Arc::new(AtomicUsize::new(0));
+        let touched_for_closure = touched.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            touched_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Ok::<FakeSession, McpError>(FakeSession::new(vec![], Arc::new(AtomicUsize::new(0))))
+            }
+        };
+
+        let err = connect(&db, &server.id, connect_fn).await.unwrap_err();
+        assert!(matches!(err, OrchdMcpError::ConsentRequired));
+        assert_eq!(
+            touched.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a denied stdio connect must never call connect_fn (never spawn the process)"
+        );
+
+        let denied: i64 = db
+            .lock()
+            .await
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action='stdio_spawn' AND decision='deny' \
+                 AND reason='stdio_exec_required'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(denied, 1);
+    }
+
+    #[tokio::test]
+    async fn stdio_connect_after_stdio_exec_consent_caches_tools_and_spawns() {
+        let db = new_db();
+        let server = add_stdio_server(&db, "/nonexistent/mcp-server").await;
+        let fingerprint = crate::trust::stdio_exec_fingerprint("/nonexistent/mcp-server", &[]);
+        db.lock()
+            .await
+            .grant_consent(&server.id, "stdio_exec", &fingerprint)
+            .unwrap();
+
+        let touched = Arc::new(AtomicUsize::new(0));
+        let touched_for_closure = touched.clone();
+        let tool = McpTool {
+            name: "run".to_string(),
+            title: None,
+            description: None,
+            input_schema: json!({"type": "object"}),
+        };
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            touched_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tool = tool.clone();
+            async move {
+                Ok::<FakeSession, McpError>(FakeSession::new(
+                    vec![tool],
+                    Arc::new(AtomicUsize::new(0)),
+                ))
+            }
+        };
+
+        let report = connect(&db, &server.id, connect_fn).await.unwrap();
+        assert_eq!(report.tool_count, 1);
+        assert_eq!(
+            touched.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a granted stdio connect must call connect_fn exactly once"
+        );
+
+        let allowed: i64 = db
+            .lock()
+            .await
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action='stdio_spawn' AND decision='allow'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(allowed, 1);
+    }
+
+    #[tokio::test]
+    async fn stdio_connect_after_command_change_denies_and_never_spawns() {
+        // Mirrors the http url-repointing exploit test above: consent granted for command A,
+        // the server row is repointed to command B, then a connect attempt. connect_fn must NOT
+        // run — a stale grant for command A must not authorize spawning command B.
+        let db = new_db();
+        let server = add_stdio_server(&db, "/bin/original-tool").await;
+        {
+            let guard = db.lock().await;
+            let fp_a = crate::trust::stdio_exec_fingerprint("/bin/original-tool", &[]);
+            guard
+                .grant_consent(&server.id, "stdio_exec", &fp_a)
+                .unwrap();
+            guard
+                .update_mcp_server(
+                    &server.id,
+                    McpServerPatch {
+                        command: Some("/bin/swapped-tool".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        let touched = Arc::new(AtomicUsize::new(0));
+        let touched_for_closure = touched.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            touched_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Ok::<FakeSession, McpError>(FakeSession::new(vec![], Arc::new(AtomicUsize::new(0))))
+            }
+        };
+
+        let err = connect(&db, &server.id, connect_fn).await.unwrap_err();
+        assert!(matches!(err, OrchdMcpError::ConsentRequired));
+        assert_eq!(
+            touched.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "connect_fn must not run: a grant for command A must not authorize spawning command B"
+        );
     }
 }

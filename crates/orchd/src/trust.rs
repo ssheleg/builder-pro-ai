@@ -9,8 +9,23 @@
 //!
 //! Phase-1 policy scope (task-5 brief): consent-gated connect + per-tool allowlist on
 //! `tool_call`. Spend/rate caps (the `policy` table) are S-EXT T18 — not implemented here.
+//!
+//! Task T16 adds [`Action::StdioSpawn`] (spec §6/D6/D10, closes BL-22): spawning a stdio MCP
+//! server's process is code execution, so it is gated by a DISTINCT `stdio_exec` consent grant
+//! rather than reusing `Connect`'s `'connect'` kind — a grant for a remote HTTP server's URL must
+//! never double as authorization to run an arbitrary local binary. Both `mcp::lifecycle::connect`
+//! (the explicit `McpConnect` verb) AND `mcp::invoke::call_tool` (Phase-1's per-call reconnect —
+//! there is no persisted session to check once) authorize through this SAME action before ever
+//! invoking a stdio `connect_fn`, so a spawn can never bypass the gate via either path.
 
 use crate::persistence::{Db, NewAudit, OrchdPersistError};
+
+/// `consent_grant.kind` (spec §4) for a remote HTTP MCP server's first-connect consent.
+pub(crate) const CONSENT_KIND_CONNECT: &str = "connect";
+/// `consent_grant.kind` (spec §4) for a stdio MCP server's process-spawn consent — distinct from
+/// [`CONSENT_KIND_CONNECT`] because spawning a local process is code execution (spec §6, BL-22),
+/// not merely dialing a remote endpoint.
+pub(crate) const CONSENT_KIND_STDIO_EXEC: &str = "stdio_exec";
 
 /// The action being authorized (spec §6).
 #[derive(Debug, Clone)]
@@ -25,6 +40,19 @@ pub enum Action {
     /// check would otherwise still pass and `lifecycle::connect` would send the stored bearer to
     /// the new URL with no re-consent.
     Connect {
+        server_id: String,
+        fingerprint: String,
+    },
+    /// Spawning a stdio MCP server's local process (spec §6/D6/D10, task T16, closes BL-22):
+    /// spawning a process from a registry entry is code execution, so it requires a DISTINCT
+    /// `stdio_exec` consent grant rather than reusing `Connect`'s `'connect'` kind.
+    /// `fingerprint` is [`stdio_exec_fingerprint`]'s output for the server's CURRENT
+    /// `command`/`args` at the time of the attempt — [`authorize`] compares it against the
+    /// stored `consent_grant.fingerprint` and re-prompts (denies) on mismatch, mirroring
+    /// `Connect`'s own URL re-prompt: if the command changes (or, when the binary itself can be
+    /// read, if its bytes change — a supply-chain swap at the same path) after consent was
+    /// granted, the stale grant no longer authorizes the NEW spawn.
+    StdioSpawn {
         server_id: String,
         fingerprint: String,
     },
@@ -58,6 +86,11 @@ pub enum Decision {
 /// `consent_grant`/`audit_log` reason literal for a `Connect` with no matching consent grant
 /// (spec §4 `consent_grant.kind = 'connect'`).
 const REASON_CONSENT_REQUIRED: &str = "consent_required";
+/// `audit_log` reason literal for a `StdioSpawn` with no matching `stdio_exec` consent grant, or
+/// a fingerprint mismatch (the command/binary changed since consent was granted) — kept distinct
+/// from [`REASON_CONSENT_REQUIRED`] so an audit-log reader can tell "needs to approve a remote
+/// connect" apart from "needs to approve running a local binary" at a glance.
+const REASON_STDIO_EXEC_REQUIRED: &str = "stdio_exec_required";
 /// `audit_log` reason literal for a `ToolCall` on a tool that is not an explicit per-server
 /// allowlist member (spec §4 `mcp_tool.enabled` comment: "per-tool allowlist"). Also used for a
 /// `tool_name` this server has no cached row for at all — an unrecognized tool is, by
@@ -65,6 +98,10 @@ const REASON_CONSENT_REQUIRED: &str = "consent_required";
 const REASON_TOOL_DISABLED: &str = "tool_disabled";
 
 const AUDIT_ACTION_CONNECT: &str = "connect";
+/// (task T16, spec §4 `audit_log.action` literal set already anticipates this exact literal) —
+/// `StdioSpawn`'s audit action, distinct from `AUDIT_ACTION_CONNECT` so an stdio process spawn is
+/// never indistinguishable from an http connect in the audit trail.
+const AUDIT_ACTION_STDIO_SPAWN: &str = "stdio_spawn";
 const AUDIT_ACTION_TOOL_CALL: &str = "tool_call";
 /// (task T12, spec §4 `audit_log.action` literal set) — `ConnectorInvoke`'s audit action.
 const AUDIT_ACTION_CONNECTOR_INVOKE: &str = "connector_invoke";
@@ -90,10 +127,25 @@ fn evaluate(db: &Db, action: &Action) -> Result<Decision, OrchdPersistError> {
             // URL — e.g. after the server row was repointed post-consent — is NOT valid consent
             // for this URL (spec D10: "re-prompt if the URL changes"). Same `consent_required`
             // reason either way, so dispatch maps both to the same re-prompt path.
-            match db.get_consent(server_id, "connect")? {
+            match db.get_consent(server_id, CONSENT_KIND_CONNECT)? {
                 Some(grant) if &grant.fingerprint == fingerprint => Ok(Decision::Allow),
                 _ => Ok(Decision::Deny {
                     reason: REASON_CONSENT_REQUIRED.to_string(),
+                }),
+            }
+        }
+        Action::StdioSpawn {
+            server_id,
+            fingerprint,
+        } => {
+            // Same shape as `Connect` above, but keyed on the DISTINCT `stdio_exec` consent kind
+            // (spec §6/D6/D10, task T16) — a grant for this server's `connect` consent (if it
+            // even has one; `scope`/`transport` make the two mutually exclusive in practice) does
+            // NOT authorize spawning its process, and vice versa.
+            match db.get_consent(server_id, CONSENT_KIND_STDIO_EXEC)? {
+                Some(grant) if &grant.fingerprint == fingerprint => Ok(Decision::Allow),
+                _ => Ok(Decision::Deny {
+                    reason: REASON_STDIO_EXEC_REQUIRED.to_string(),
                 }),
             }
         }
@@ -133,6 +185,12 @@ fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), Orch
         Action::Connect { server_id, .. } => {
             (AUDIT_ACTION_CONNECT, Some(server_id.clone()), None, None)
         }
+        Action::StdioSpawn { server_id, .. } => (
+            AUDIT_ACTION_STDIO_SPAWN,
+            Some(server_id.clone()),
+            None,
+            None,
+        ),
         Action::ToolCall {
             server_id,
             tool_name,
@@ -189,6 +247,64 @@ fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), Orch
         invocation_id: None,
     })?;
     Ok(())
+}
+
+/// Compute the `stdio_exec` consent fingerprint for a stdio MCP server's `command`/`args` (spec
+/// D10: "fingerprint = command + sha256 of the resolved binary"). Both the `TrustGrantConsent`
+/// dispatch handler (grant time) and [`Action::StdioSpawn`]'s construction (authorize time, via
+/// `mcp::connect_action`) call this SAME function on the SAME server row's CURRENT
+/// `command`/`args`, so a grant and a later authorize check can never silently diverge.
+///
+/// Prefers hashing the ACTUAL RESOLVED BINARY's bytes (`command`, taken literally if it contains
+/// a `/`, else searched for on `$PATH` — mirroring how the OS resolves a bare command name), not
+/// just the command string: that's what makes this catch a supply-chain swap where the owner
+/// consented to `/usr/local/bin/foo` and the file at that exact path later got replaced with a
+/// different binary — the command string alone never changes, only the bytes do, and "re-prompt
+/// on binary change" (spec D10) means the byte-level swap specifically, not merely the command
+/// line.
+///
+/// Falls back to hashing `command` NUL-joined with `args` when the binary can't be resolved/read
+/// at fingerprint-compute time (honest degradation, not a hard failure — e.g. consent is being
+/// granted for a server whose binary isn't installed yet, or `command` is intentionally
+/// PATH-relative and this daemon's `$PATH` differs between grant-time and connect-time). The
+/// fallback still detects a command/args change; it just can't detect an in-place binary swap at
+/// an unresolvable path. The `"bin:"`/`"cmd:"` prefix keeps the two schemes from ever colliding
+/// with each other by construction.
+pub(crate) fn stdio_exec_fingerprint(command: &str, args: &[String]) -> String {
+    match read_resolved_binary(command) {
+        Some(bytes) => format!("bin:{}", sha256_hex(&bytes)),
+        None => {
+            // NUL-separated so `["ab"], ["c"]` cannot collide with `["a"], ["bc"]` — a bare
+            // concatenation could.
+            let mut buf = command.as_bytes().to_vec();
+            for a in args {
+                buf.push(0);
+                buf.extend_from_slice(a.as_bytes());
+            }
+            format!("cmd:{}", sha256_hex(&buf))
+        }
+    }
+}
+
+/// Resolve `command` to a file and read its bytes — `None` on any failure (not found, not a
+/// regular file, permission denied, ...), which [`stdio_exec_fingerprint`] treats as "fall back
+/// to the command-string scheme", never as a hard error (spec D7-style honest degradation: a
+/// fingerprint must always be computable, never block the flow with an I/O error).
+fn read_resolved_binary(command: &str) -> Option<Vec<u8>> {
+    let path = if command.contains('/') {
+        std::path::PathBuf::from(command)
+    } else {
+        let path_var = std::env::var_os("PATH")?;
+        std::env::split_paths(&path_var)
+            .map(|dir| dir.join(command))
+            .find(|p| p.is_file())?
+    };
+    std::fs::read(&path).ok()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[cfg(test)]
@@ -587,5 +703,219 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
             .unwrap();
         assert_eq!(total, 2, "one deny + one allow, no missing/duplicate rows");
+    }
+
+    // ---- StdioSpawn (task T16, S-EXT §6/D6/D10, closes BL-22) ----
+
+    fn add_stdio_server(db: &Db, command: &str, args: Vec<String>) -> McpServerRow {
+        db.add_mcp_server(NewMcpServer {
+            name: "local-mcp".to_string(),
+            transport: McpTransport::Stdio,
+            url: None,
+            command: Some(command.to_string()),
+            args,
+            env: Default::default(),
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            secret_ref: None,
+            account_id: None,
+            enabled: true,
+            timeout_ms: 30_000,
+            max_retries: 2,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn stdio_spawn_without_consent_denies_and_audits_as_stdio_spawn() {
+        let db = new_db();
+        let server = add_stdio_server(&db, "/nonexistent/foo", vec![]);
+        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[]);
+
+        let decision = authorize(
+            &db,
+            &Action::StdioSpawn {
+                server_id: server.id.clone(),
+                fingerprint,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_STDIO_EXEC_REQUIRED.to_string()
+            }
+        );
+
+        let row: (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT action, decision FROM audit_log WHERE server_id = ?1",
+                rusqlite::params![server.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("stdio_spawn".to_string(), "deny".to_string()),
+            "the audit action for a stdio connect must read 'stdio_spawn', never 'connect'"
+        );
+    }
+
+    #[test]
+    fn stdio_spawn_after_stdio_exec_consent_is_allowed_and_audits() {
+        let db = new_db();
+        let server = add_stdio_server(&db, "/nonexistent/foo", vec!["--flag".to_string()]);
+        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &["--flag".to_string()]);
+        db.grant_consent(&server.id, CONSENT_KIND_STDIO_EXEC, &fingerprint)
+            .unwrap();
+
+        let decision = authorize(
+            &db,
+            &Action::StdioSpawn {
+                server_id: server.id.clone(),
+                fingerprint,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(decision, Decision::Allow);
+        let allowed: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action='stdio_spawn' AND decision='allow'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(allowed, 1);
+    }
+
+    #[test]
+    fn a_connect_consent_grant_does_not_authorize_a_stdio_spawn() {
+        // The two consent kinds are namespaced separately (spec §6/D10): granting 'connect' for
+        // an (unrelated) fingerprint string must not satisfy a 'stdio_exec' check even if the
+        // fingerprint text happened to match by coincidence.
+        let db = new_db();
+        let server = add_stdio_server(&db, "/nonexistent/foo", vec![]);
+        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[]);
+        db.grant_consent(&server.id, CONSENT_KIND_CONNECT, &fingerprint)
+            .unwrap();
+
+        let decision = authorize(
+            &db,
+            &Action::StdioSpawn {
+                server_id: server.id.clone(),
+                fingerprint,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_STDIO_EXEC_REQUIRED.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stdio_spawn_after_command_change_denies_stdio_exec_required_reprompt() {
+        // EXPLOIT mirror of the http url-repointing test above: consent granted for command A,
+        // the server row is repointed to command B via update_mcp_server, then a spawn attempt
+        // with command B's fingerprint. Without the fingerprint check this would still Allow and
+        // a DIFFERENT binary would run under a stale grant.
+        let db = new_db();
+        let server = add_stdio_server(&db, "/bin/original-tool", vec![]);
+        let fp_a = stdio_exec_fingerprint("/bin/original-tool", &[]);
+        db.grant_consent(&server.id, CONSENT_KIND_STDIO_EXEC, &fp_a)
+            .unwrap();
+
+        db.update_mcp_server(
+            &server.id,
+            McpServerPatch {
+                command: Some("/bin/swapped-tool".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fp_b = stdio_exec_fingerprint("/bin/swapped-tool", &[]);
+        assert_ne!(fp_a, fp_b);
+
+        let decision = authorize(
+            &db,
+            &Action::StdioSpawn {
+                server_id: server.id.clone(),
+                fingerprint: fp_b,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_STDIO_EXEC_REQUIRED.to_string()
+            },
+            "consent for command A must not authorize a spawn of command B"
+        );
+    }
+
+    // ---- stdio_exec_fingerprint (task T16) ----
+
+    #[test]
+    fn stdio_exec_fingerprint_fallback_is_deterministic_and_distinguishes_command_and_args() {
+        let a = stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()]);
+        let a_again = stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()]);
+        assert_eq!(
+            a, a_again,
+            "same command+args must hash to the same fingerprint"
+        );
+
+        let different_command = stdio_exec_fingerprint("/nonexistent/bar", &["x".to_string()]);
+        assert_ne!(a, different_command);
+
+        let different_args = stdio_exec_fingerprint("/nonexistent/foo", &["y".to_string()]);
+        assert_ne!(a, different_args);
+
+        // NUL-separated join: ["ab"],["c"] must not collide with ["a"],["bc"].
+        let split_ab_c = stdio_exec_fingerprint("cmd", &["ab".to_string(), "c".to_string()]);
+        let split_a_bc = stdio_exec_fingerprint("cmd", &["a".to_string(), "bc".to_string()]);
+        assert_ne!(split_ab_c, split_a_bc);
+    }
+
+    #[test]
+    fn stdio_exec_fingerprint_uses_cmd_fallback_prefix_for_an_unresolvable_command() {
+        let fp = stdio_exec_fingerprint("/definitely/not/a/real/path/bpa-test", &[]);
+        assert!(
+            fp.starts_with("cmd:"),
+            "an unresolvable command must use the command-string fallback scheme: {fp}"
+        );
+    }
+
+    #[test]
+    fn stdio_exec_fingerprint_hashes_the_actual_resolved_binary_bytes() {
+        // Proves the "ideal" scheme (spec D10: "sha256 of the resolved binary") actually detects
+        // a supply-chain swap at the SAME path: same absolute path, different file content ⇒
+        // different fingerprint, even though the command string never changed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-server-bin");
+        std::fs::write(&path, b"original binary bytes").unwrap();
+        let command = path.to_str().unwrap();
+
+        let fp_before = stdio_exec_fingerprint(command, &[]);
+        assert!(
+            fp_before.starts_with("bin:"),
+            "a readable file at an absolute path must use the resolved-binary scheme: {fp_before}"
+        );
+
+        std::fs::write(&path, b"swapped binary bytes (attacker payload)").unwrap();
+        let fp_after = stdio_exec_fingerprint(command, &[]);
+
+        assert_ne!(
+            fp_before, fp_after,
+            "swapping the binary's bytes at the SAME path must change the fingerprint"
+        );
     }
 }

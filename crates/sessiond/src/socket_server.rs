@@ -1216,7 +1216,13 @@ fn resolve_session_spec(
         }
     }
 
-    // ---- Caller overrides win last (spec §7 env_overrides). ----
+    // ---- Caller overrides win last (spec §7 env_overrides), but NEVER a dynamic-linker
+    // injection var (`DYLD_*`/`LD_*` — closes BL-1, S-EXT §6 task T16): stripped from the
+    // caller-supplied overrides BEFORE they're merged into the child env, via the SAME shared
+    // denylist orchd's stdio spawn uses (`bpa_daemon_core::env_filter`) — one implementation, no
+    // second unfiltered path.
+    let mut env_overrides = env_overrides;
+    bpa_daemon_core::env_filter::strip_dangerous_env(&mut env_overrides);
     for (k, v) in env_overrides {
         env.retain(|(ek, _)| ek != &k);
         env.push((k, v));
@@ -1410,6 +1416,44 @@ mod tests {
         })
         .await
         .expect("timed out waiting for daemon reply (handshake regression?)")
+    }
+
+    // ---- BL-1 (S-EXT §6, task T16): `env_overrides` must never be able to inject a
+    // dynamic-linker var into the resolved child env. `resolve_session_spec` is pure/sync, so a
+    // plain `#[test]` exercises it directly — no server/PTY needed. ----
+    #[test]
+    fn env_overrides_strips_dyld_and_ld_vars_but_keeps_benign_overrides() {
+        let runtime_root = std::path::Path::new("/tmp");
+        let spec = resolve_session_spec(
+            runtime_root,
+            "ws-test".into(),
+            Some("/bin/sh".into()), // basename "sh" — classify_shell returns None, no runtime_root I/O
+            Some("/tmp".into()),
+            vec![
+                ("DYLD_INSERT_LIBRARIES".into(), "/evil.dylib".into()),
+                ("LD_PRELOAD".into(), "/evil.so".into()),
+                ("FOO".into(), "bar".into()),
+            ],
+            80,
+            24,
+        )
+        .expect("resolve_session_spec should succeed for an existing cwd");
+
+        assert!(
+            !spec.env.iter().any(|(k, _)| k == "DYLD_INSERT_LIBRARIES"),
+            "DYLD_INSERT_LIBRARIES must never reach the resolved child env: {:?}",
+            spec.env
+        );
+        assert!(
+            !spec.env.iter().any(|(k, _)| k == "LD_PRELOAD"),
+            "LD_PRELOAD must never reach the resolved child env: {:?}",
+            spec.env
+        );
+        assert!(
+            spec.env.iter().any(|(k, v)| k == "FOO" && v == "bar"),
+            "a benign override must still apply: {:?}",
+            spec.env
+        );
     }
 
     #[tokio::test]

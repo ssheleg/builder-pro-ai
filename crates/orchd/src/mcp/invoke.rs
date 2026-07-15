@@ -76,6 +76,22 @@ where
             return Err(OrchdMcpError::ToolDisabled);
         }
 
+        // (S-EXT §6/D6/D10, task T16): Phase-1 has no persisted session — EVERY call reconnects
+        // (doc comment above: "connect-per-call is fine"), and for a stdio server "reconnect"
+        // means spawning a NEW local process. The per-tool allowlist check above says nothing
+        // about whether spawning is currently authorized, so a stdio server needs its OWN
+        // `stdio_exec` gate here too — otherwise `McpCallTool` would be a second, ungated spawn
+        // path bypassing the one `McpConnect`/`lifecycle::connect` enforces. `super::
+        // connect_action` is the SAME helper `lifecycle::connect` uses, so both paths agree on
+        // exactly what's required. HTTP is unchanged (no new gate: `connect_action` only matters
+        // for `McpTransport::Stdio` below).
+        if server.transport == super::McpTransport::Stdio {
+            let spawn_decision = trust::authorize(&guard, &super::connect_action(&server))?;
+            if matches!(spawn_decision, Decision::Deny { .. }) {
+                return Err(OrchdMcpError::ConsentRequired);
+            }
+        }
+
         let bearer = resolve_bearer(&server).map_err(|e| OrchdMcpError::Secret(e.to_string()))?;
         (server, bearer)
     };
@@ -695,6 +711,143 @@ mod tests {
             .list_artifacts(None, Some(&server.id), None)
             .unwrap()
             .is_empty());
+    }
+
+    // ---- stdio-exec consent gate on the PER-CALL reconnect (S-EXT §6/D6/D10, task T16, closes
+    // BL-22): Phase-1 has no persisted session, so `McpCallTool` reconnects on every call — for a
+    // stdio server that means a NEW process spawn per call, which must be gated exactly like the
+    // explicit `McpConnect` path (`mcp::lifecycle::connect`'s own tests cover that path). ----
+
+    async fn add_stdio_server(db: &Arc<Mutex<Db>>, command: &str) -> McpServerRow {
+        db.lock()
+            .await
+            .add_mcp_server(NewMcpServer {
+                name: "local-mcp".to_string(),
+                transport: McpTransport::Stdio,
+                url: None,
+                command: Some(command.to_string()),
+                args: vec![],
+                env: Default::default(),
+                scope: McpScope::Global,
+                project_id: None,
+                auth_kind: McpAuthKind::None,
+                secret_ref: None,
+                account_id: None,
+                enabled: true,
+                timeout_ms: 5_000,
+                max_retries: 2,
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stdio_call_tool_without_stdio_exec_consent_is_denied_and_never_spawns() {
+        let db = new_db();
+        let server = add_stdio_server(&db, "/nonexistent/mcp-server").await;
+        add_tool(&db, &server.id, "run").await;
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_closure = call_count.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            let call_count = call_count_for_closure.clone();
+            async move { Ok::<FakeSession, McpError>(FakeSession::new(vec![], call_count)) }
+        };
+
+        let err = call_tool(&db, &server.id, "run", "{}", None, connect_fn)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdMcpError::ConsentRequired),
+            "an un-consented stdio tool call must deny with ConsentRequired, not dispatch: {err:?}"
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "a denied stdio call must never spawn the process (connect_fn must not run)"
+        );
+        assert!(
+            db.lock()
+                .await
+                .list_invocations(Some(&server.id), None, None)
+                .unwrap()
+                .is_empty(),
+            "a spawn-denied call writes no mcp_invocation row"
+        );
+
+        let denied: i64 = db
+            .lock()
+            .await
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action='stdio_spawn' AND decision='deny' \
+                 AND reason='stdio_exec_required'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(denied, 1);
+    }
+
+    #[tokio::test]
+    async fn stdio_call_tool_after_stdio_exec_consent_spawns_and_succeeds() {
+        let db = new_db();
+        let server = add_stdio_server(&db, "/nonexistent/mcp-server").await;
+        add_tool(&db, &server.id, "run").await;
+        let fingerprint = crate::trust::stdio_exec_fingerprint("/nonexistent/mcp-server", &[]);
+        db.lock()
+            .await
+            .grant_consent(&server.id, "stdio_exec", &fingerprint)
+            .unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_closure = call_count.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            let call_count = call_count_for_closure.clone();
+            async move {
+                Ok::<FakeSession, McpError>(
+                    FakeSession::new(vec![], call_count)
+                        .with_outcomes(vec![FakeCallOutcome::Ok(sample_result())]),
+                )
+            }
+        };
+
+        let result = call_tool(&db, &server.id, "run", "{}", None, connect_fn)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stdio_call_tool_http_server_is_unaffected_no_extra_gate() {
+        // Regression (task T16 brief: "an http server's 'connect' consent path stays
+        // unchanged") — an http server's per-call reconnect has never been gated by a Connect
+        // check and still isn't; only the enabled-tool allowlist applies.
+        let db = new_db();
+        let server = add_server(&db).await;
+        add_tool(&db, &server.id, "search").await;
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_closure = call_count.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            let call_count = call_count_for_closure.clone();
+            async move {
+                Ok::<FakeSession, McpError>(
+                    FakeSession::new(vec![], call_count)
+                        .with_outcomes(vec![FakeCallOutcome::Ok(sample_result())]),
+                )
+            }
+        };
+
+        let result = call_tool(&db, &server.id, "search", "{}", None, connect_fn)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "an http tool call needs no consent grant at all — unchanged behavior"
+        );
     }
 
     // ---- helper unit tests ----

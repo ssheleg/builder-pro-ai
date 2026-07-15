@@ -307,11 +307,19 @@ impl ToolCaller for bpa_mcp::McpSession {
     }
 }
 
-/// Production [`ToolCaller`] factory (S-EXT §3, D2, D6): builds a live session over Streamable
-/// HTTP — the only transport Phase 1 ships (spec D6; a `Stdio` arm lands in T15 behind an
-/// execution-consent gate). Passed as the `connect_fn` argument to
-/// [`lifecycle::connect`]/[`invoke::call_tool`] in production; tests inject a fake factory
-/// instead so neither module needs network/rmcp to test.
+/// Production [`ToolCaller`] factory (S-EXT §3, D2, D6, task T16): builds a live session over
+/// either transport a [`McpServerRow`] can name — Streamable HTTP (Phase 1, spec D6) or a stdio
+/// child process (Phase 3, spec D6, gated by [`connect_action`]'s `StdioSpawn` consent BEFORE
+/// this function is ever called — see `lifecycle::connect`/`invoke::call_tool`). Passed as the
+/// `connect_fn` argument to [`lifecycle::connect`]/[`invoke::call_tool`] in production; tests
+/// inject a fake factory instead so neither module needs network/rmcp to test.
+///
+/// The stdio arm strips `DYLD_*`/`LD_*` from `server.env` via the SAME shared denylist
+/// `bpa-sessiond`'s `env_overrides` path uses (`bpa_daemon_core::env_filter`, task T16, closes
+/// BL-1) BEFORE it ever reaches [`bpa_mcp::TransportConfig::Stdio`] — `bpa-mcp` itself does no
+/// filtering by design (see [`bpa_mcp::TransportConfig::Stdio`]'s own doc comment), so this call
+/// site is the ONLY place a stdio server's env gets sanitized; skipping this step would open a
+/// second, unfiltered dynamic-linker-injection spawn path alongside sessiond's.
 ///
 /// Takes `server` BY VALUE (a clone of the already-loaded row), not by reference:
 /// `lifecycle::connect`/`invoke::call_tool`'s own `connect_fn` generic bound is
@@ -324,12 +332,80 @@ pub async fn connect_session(
     server: McpServerRow,
     bearer: Option<String>,
 ) -> Result<bpa_mcp::McpSession, bpa_mcp::McpError> {
-    let url = server.url.ok_or_else(|| {
-        bpa_mcp::McpError::Protocol(
-            "mcp_server has no url (only http transport ships in Phase 1)".to_string(),
-        )
-    })?;
-    bpa_mcp::connect(bpa_mcp::TransportConfig::Http { url }, bearer).await
+    let cfg = build_transport_config(server)?;
+    bpa_mcp::connect(cfg, bearer).await
+}
+
+/// Pure half of [`connect_session`]: pick + build the [`bpa_mcp::TransportConfig`] for `server`,
+/// WITHOUT ever touching the network or spawning a process. Split out from `connect_session`
+/// specifically so the env-filtering step (task T16, the whole point of this function existing)
+/// is unit-testable on its own — asserting what env a stdio spawn WOULD use — without needing a
+/// live Tokio child process or rmcp handshake in the test.
+fn build_transport_config(
+    server: McpServerRow,
+) -> Result<bpa_mcp::TransportConfig, bpa_mcp::McpError> {
+    match server.transport {
+        McpTransport::Http => {
+            let url = server.url.ok_or_else(|| {
+                bpa_mcp::McpError::Protocol(
+                    "mcp_server has no url (transport='http' requires one)".to_string(),
+                )
+            })?;
+            Ok(bpa_mcp::TransportConfig::Http { url })
+        }
+        McpTransport::Stdio => {
+            let command = server.command.ok_or_else(|| {
+                bpa_mcp::McpError::Protocol(
+                    "mcp_server has no command (transport='stdio' requires one)".to_string(),
+                )
+            })?;
+            let mut env = server.env;
+            bpa_daemon_core::env_filter::strip_dangerous_env_map(&mut env);
+            Ok(bpa_mcp::TransportConfig::Stdio {
+                command,
+                args: server.args,
+                env,
+            })
+        }
+    }
+}
+
+/// Compute the [`crate::trust::Action`] required to (re)connect `server`'s live session (spec
+/// §6/D10, task T16). Both `lifecycle::connect` (the explicit `McpConnect` verb) and
+/// `invoke::call_tool` (Phase-1's per-call reconnect — there is no persisted session to check
+/// once, spec: "connect-per-call is fine") call this SAME function immediately before ever
+/// invoking [`connect_session`], so a stdio spawn can never reach [`bpa_mcp::connect`] via either
+/// path without first passing through the SAME consent gate.
+///
+/// `Http` reuses the pre-existing `connect`-kind gate (URL fingerprint, unchanged — task T16
+/// changes nothing about the http path, spec: "http server's 'connect' consent path stays
+/// unchanged"). `Stdio` uses the distinct `stdio_exec` consent kind (spec §6/D6/D10) with
+/// [`crate::trust::stdio_exec_fingerprint`]'s fingerprint over the CURRENT `command`/`args` —
+/// see [`fingerprint_for`], which both this function and `TrustGrantConsent`'s dispatch handler
+/// (grant time) call, so a grant and a later authorize check are always computed identically.
+pub(crate) fn connect_action(server: &McpServerRow) -> crate::trust::Action {
+    match server.transport {
+        McpTransport::Http => crate::trust::Action::Connect {
+            server_id: server.id.clone(),
+            fingerprint: fingerprint_for(server, crate::trust::CONSENT_KIND_CONNECT),
+        },
+        McpTransport::Stdio => crate::trust::Action::StdioSpawn {
+            server_id: server.id.clone(),
+            fingerprint: fingerprint_for(server, crate::trust::CONSENT_KIND_STDIO_EXEC),
+        },
+    }
+}
+
+/// Compute the connect/spawn-consent fingerprint for `server` under consent `kind` (`'connect'`
+/// | `'stdio_exec'`, spec §4 `consent_grant.kind`) — shared by [`connect_action`] (authorize
+/// time) and `socket_server`'s `TrustGrantConsent` dispatch handler (grant time), so both always
+/// derive the SAME value from the SAME server row and can never silently diverge (task T16).
+pub(crate) fn fingerprint_for(server: &McpServerRow, kind: &str) -> String {
+    if kind == crate::trust::CONSENT_KIND_STDIO_EXEC {
+        crate::trust::stdio_exec_fingerprint(server.command.as_deref().unwrap_or(""), &server.args)
+    } else {
+        server.url.clone().unwrap_or_default()
+    }
 }
 
 /// Resolve `server`'s bearer token from Keychain when `auth_kind == Bearer` (spec D4: secrets
@@ -462,5 +538,150 @@ pub(crate) mod test_support {
         fn protocol_version(&self) -> String {
             self.protocol_version.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trust::Action;
+
+    fn stdio_server(command: &str, env: BTreeMap<String, String>) -> McpServerRow {
+        McpServerRow {
+            id: "srv-1".to_string(),
+            name: "local".to_string(),
+            transport: McpTransport::Stdio,
+            url: None,
+            command: Some(command.to_string()),
+            args: vec!["--flag".to_string()],
+            env,
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            secret_ref: None,
+            account_id: None,
+            enabled: true,
+            timeout_ms: 30_000,
+            max_retries: 2,
+            protocol_version: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn http_server(url: &str) -> McpServerRow {
+        McpServerRow {
+            id: "srv-2".to_string(),
+            name: "remote".to_string(),
+            transport: McpTransport::Http,
+            url: Some(url.to_string()),
+            command: None,
+            args: vec![],
+            env: BTreeMap::new(),
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            secret_ref: None,
+            account_id: None,
+            enabled: true,
+            timeout_ms: 30_000,
+            max_retries: 2,
+            protocol_version: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    // ---- build_transport_config: DYLD/LD denylist at the stdio spawn call site (task T16,
+    // closes the "second unfiltered spawn path" gap alongside sessiond's BL-1 fix) ----
+
+    #[test]
+    fn build_transport_config_stdio_strips_dyld_and_ld_but_keeps_benign_env() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "DYLD_INSERT_LIBRARIES".to_string(),
+            "/evil.dylib".to_string(),
+        );
+        env.insert("LD_PRELOAD".to_string(), "/evil.so".to_string());
+        env.insert("FOO".to_string(), "bar".to_string());
+        let server = stdio_server("/usr/bin/true", env);
+
+        let cfg = build_transport_config(server).expect("stdio config must build");
+        match cfg {
+            bpa_mcp::TransportConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "/usr/bin/true");
+                assert_eq!(args, vec!["--flag".to_string()]);
+                assert!(
+                    !env.contains_key("DYLD_INSERT_LIBRARIES"),
+                    "DYLD_INSERT_LIBRARIES must never reach a stdio spawn's env: {env:?}"
+                );
+                assert!(
+                    !env.contains_key("LD_PRELOAD"),
+                    "LD_PRELOAD must never reach a stdio spawn's env: {env:?}"
+                );
+                assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+            }
+            other => panic!("expected Stdio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_transport_config_http_is_unaffected_by_env_filtering() {
+        let server = http_server("https://example.com/mcp");
+        let cfg = build_transport_config(server).expect("http config must build");
+        match cfg {
+            bpa_mcp::TransportConfig::Http { url } => {
+                assert_eq!(url, "https://example.com/mcp")
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    // ---- connect_action / fingerprint_for (task T16) ----
+
+    #[test]
+    fn connect_action_for_http_is_connect_kind_with_url_fingerprint() {
+        let server = http_server("https://example.com/mcp");
+        match connect_action(&server) {
+            Action::Connect {
+                server_id,
+                fingerprint,
+            } => {
+                assert_eq!(server_id, "srv-2");
+                assert_eq!(fingerprint, "https://example.com/mcp");
+            }
+            other => panic!("expected Action::Connect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_action_for_stdio_is_stdio_spawn_kind_with_command_fingerprint() {
+        let server = stdio_server("/usr/bin/true", BTreeMap::new());
+        match connect_action(&server) {
+            Action::StdioSpawn {
+                server_id,
+                fingerprint,
+            } => {
+                assert_eq!(server_id, "srv-1");
+                assert_eq!(
+                    fingerprint,
+                    crate::trust::stdio_exec_fingerprint("/usr/bin/true", &["--flag".to_string()])
+                );
+            }
+            other => panic!("expected Action::StdioSpawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fingerprint_for_grant_time_matches_connect_action_at_authorize_time() {
+        // The load-bearing property: `TrustGrantConsent`'s dispatch handler (grant time) and
+        // `connect_action` (authorize time) must derive the IDENTICAL fingerprint from the same
+        // server row, or a freshly-granted consent would immediately fail its own re-check.
+        let server = stdio_server("/usr/bin/true", BTreeMap::new());
+        let granted = fingerprint_for(&server, crate::trust::CONSENT_KIND_STDIO_EXEC);
+        let Action::StdioSpawn { fingerprint, .. } = connect_action(&server) else {
+            panic!("expected Action::StdioSpawn");
+        };
+        assert_eq!(granted, fingerprint);
     }
 }

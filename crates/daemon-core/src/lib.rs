@@ -8,6 +8,7 @@
 
 pub mod broadcast;
 pub mod dirs;
+pub mod env_filter;
 pub mod handshake;
 pub mod logging;
 pub mod migrate;
