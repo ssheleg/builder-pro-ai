@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../../store/store";
+import type { McpArtifact } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
@@ -75,6 +76,64 @@ function formatTimestamp(ms: number): string {
 }
 
 /**
+ * One artifact's row + expandable read-only content viewer (S-EXT §8, T18; extracted for S-IDEA
+ * §7/T6 reuse — `ResearchPane`'s done-run viewer renders THIS component over its own
+ * `mcpGetArtifact(artifact_id)` fetch rather than re-implementing the untrusted-banner/content
+ * markup). `source` is caller-resolved (server name, connector account id, or any other caller-
+ * chosen label) — this component has no opinion on how it was derived. `defaultOpen` (default
+ * `false`) mirrors `ArtifactsTab`'s own collapsed-by-default convention; a caller that already
+ * fetched the artifact because the owner explicitly asked to see it (`ResearchPane`) passes `true`
+ * so the content renders open on first mount, no extra click needed.
+ *
+ * `isUntrusted` is unconditional per row — EVERY `mcp_artifact` this codebase creates is
+ * `is_untrusted:true` by construction (spec D9) — so the banner is rendered off the artifact's own
+ * field, never derived from anything the producing server claims.
+ */
+export function ArtifactViewer(props: {
+  artifact: McpArtifact;
+  source: string;
+  defaultOpen?: boolean;
+}): JSX.Element {
+  const { artifact, source, defaultOpen = false } = props;
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+
+  return (
+    <div data-testid={`artifact-row-${artifact.id}`} style={rowStyle}>
+      <div style={rowHeaderStyle}>
+        <span data-testid={`artifact-tool-${artifact.id}`} style={titleTextStyle}>
+          {artifact.toolName}
+        </span>
+        <span data-testid={`artifact-source-${artifact.id}`} style={metaStyle}>
+          {source}
+        </span>
+        {artifact.projectId !== null && (
+          <span style={metaStyle}>проект: {artifact.projectId}</span>
+        )}
+        <span style={metaStyle}>{formatTimestamp(artifact.createdAt)}</span>
+        {artifact.isUntrusted && (
+          <span data-testid={`artifact-untrusted-${artifact.id}`} style={untrustedBannerStyle}>
+            ⚠ непроверенные данные
+          </span>
+        )}
+        <button
+          type="button"
+          data-testid={`artifact-toggle-${artifact.id}`}
+          onClick={() => setIsOpen((v) => !v)}
+          style={textButtonStyle}
+        >
+          {isOpen ? "скрыть" : "показать содержимое"}
+        </button>
+      </div>
+      {isOpen && (
+        <pre data-testid={`artifact-content-${artifact.id}`} style={preStyle}>
+          {artifact.contentText ?? artifact.contentJson}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/**
  * «Артефакты» tab (S-EXT §8, T18): the durable `mcp_artifact` list (spec §4/§5) — every result
  * from `McpCallTool`/`ConnectorInvoke` persists here, `isUntrusted:true` by construction (spec
  * D9), so the «непроверенные данные» banner is unconditional per row, mirroring
@@ -95,8 +154,6 @@ export function ArtifactsTab(): JSX.Element {
   const mcpServers = useAppStore((s) => s.mcpServers);
   const refreshMcpArtifacts = useAppStore((s) => s.refreshMcpArtifacts);
 
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-
   useEffect(() => {
     void refreshMcpArtifacts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -104,10 +161,6 @@ export function ArtifactsTab(): JSX.Element {
 
   const serverNames: Record<string, string> = {};
   for (const s of mcpServers) serverNames[s.id] = s.name;
-
-  function toggle(id: string): void {
-    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
 
   return (
     <div data-testid="artifacts-tab">
@@ -122,47 +175,9 @@ export function ArtifactsTab(): JSX.Element {
               artifact.serverId !== null
                 ? (serverNames[artifact.serverId] ?? artifact.serverId)
                 : (artifact.accountId ?? "—");
-            const isOpen = expanded[artifact.id] === true;
             return (
-              <div
-                key={artifact.id}
-                data-testid={`artifact-row-${artifact.id}`}
-                role="listitem"
-                style={rowStyle}
-              >
-                <div style={rowHeaderStyle}>
-                  <span data-testid={`artifact-tool-${artifact.id}`} style={titleTextStyle}>
-                    {artifact.toolName}
-                  </span>
-                  <span data-testid={`artifact-source-${artifact.id}`} style={metaStyle}>
-                    {source}
-                  </span>
-                  {artifact.projectId !== null && (
-                    <span style={metaStyle}>проект: {artifact.projectId}</span>
-                  )}
-                  <span style={metaStyle}>{formatTimestamp(artifact.createdAt)}</span>
-                  {artifact.isUntrusted && (
-                    <span
-                      data-testid={`artifact-untrusted-${artifact.id}`}
-                      style={untrustedBannerStyle}
-                    >
-                      ⚠ непроверенные данные
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    data-testid={`artifact-toggle-${artifact.id}`}
-                    onClick={() => toggle(artifact.id)}
-                    style={textButtonStyle}
-                  >
-                    {isOpen ? "скрыть" : "показать содержимое"}
-                  </button>
-                </div>
-                {isOpen && (
-                  <pre data-testid={`artifact-content-${artifact.id}`} style={preStyle}>
-                    {artifact.contentText ?? artifact.contentJson}
-                  </pre>
-                )}
+              <div key={artifact.id} role="listitem">
+                <ArtifactViewer artifact={artifact} source={source} />
               </div>
             );
           })}

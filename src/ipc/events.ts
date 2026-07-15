@@ -305,3 +305,23 @@ export function onOrchdSkillsChanged(
 export function onOrchdPoliciesChanged(cb: () => void): Promise<UnlistenFn> {
   return listen<null>("orchd://policies-changed", () => cb());
 }
+
+// ── S-IDEA research coarse-invalidation event (spec §5/§8, task T6, `EV_ORCHD_RESEARCH_RUNS_CHANGED`) ──
+
+/** Payload of `orchd://research-runs-changed` (`broker.rs`'s `map_orchd_push` reshapes the raw
+ * `OrchdPush::ResearchRunsChanged{idea_id: Option<String>}` straight through to `{ideaId}`,
+ * mirroring `RulesetChangedPayload`/`McpServersChangedPayload`'s nullable-scope shape exactly).
+ * The run driver (`crates/orchd/src/research/mod.rs`) only ever broadcasts `Some(idea_id)` in
+ * practice — every transition it drives names the one idea whose run changed — but the wire type
+ * is `Option<String>`, so this is modeled defensively as possibly `null` rather than asserted
+ * non-null. */
+export interface ResearchRunsChangedPayload {
+  ideaId: string | null;
+}
+
+/** Subscribe to `orchd://research-runs-changed` — see `ResearchRunsChangedPayload`. */
+export function onOrchdResearchRunsChanged(
+  cb: (p: ResearchRunsChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ResearchRunsChangedPayload>("orchd://research-runs-changed", (e) => cb(e.payload));
+}

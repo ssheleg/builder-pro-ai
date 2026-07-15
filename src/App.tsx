@@ -28,6 +28,7 @@ import {
   onOrchdConnectorsChanged,
   onOrchdSkillsChanged,
   onOrchdPoliciesChanged,
+  onOrchdResearchRunsChanged,
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
@@ -230,6 +231,16 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // Trust policy-cap coarse-invalidation event (S-EXT §4/§6/§8, BL-22, T18): same
     // unconditional-refresh precedent as `ConnectorsChanged`/`SkillsChanged` above.
     track(onOrchdPoliciesChanged(() => void useAppStore.getState().refreshPolicies()));
+    // S-IDEA research coarse-invalidation event (spec §5/§8, task T6): same unconditional-refresh
+    // precedent as the MCP/Connectors/Skills/Trust events above — no "idea currently open" gating
+    // to mirror. `ideaId` is defensively treated as possibly `null` (see
+    // `ResearchRunsChangedPayload`'s doc, `events.ts`) even though the run driver only ever
+    // broadcasts a concrete idea id in practice.
+    track(
+      onOrchdResearchRunsChanged((p) => {
+        if (p.ideaId !== null) void useAppStore.getState().refreshResearchRuns(p.ideaId);
+      }),
+    );
     // orchd connection state (spec §9): a DIRECT 1:1 mapping (see
     // `broker.rs::map_orchd_conn_state`'s doc) — unlike the sessiond trio there is no
     // reconnect-tracking scheme, `orchd://down`/`orchd://up` just flip `orchdDown`.

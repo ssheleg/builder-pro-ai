@@ -9,6 +9,24 @@ const orchdSetIdeaLifecycleMock = vi.fn();
 const orchdDeleteIdeaMock = vi.fn();
 const orchdListIdeasMock = vi.fn();
 const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+// S-IDEA §7, T6: IdeasList now transitively mounts ResearchRunDialog/ResearchPane/
+// FormInsightDialog/SpawnProjectFromIdea (research button, badge/pane toggle, orphan spawn
+// button) — every ipc wrapper THOSE components import must resolve here too, even though most of
+// IdeasList's OWN tests below never exercise those code paths (mirrors `App.test.tsx`'s
+// whole-descendant-tree mock discipline).
+const researchStartRunMock = vi.fn();
+const researchListRunsMock = vi.fn();
+const mcpListToolsMock = vi.fn();
+const mcpGetArtifactMock = vi.fn();
+const trustListPoliciesMock = vi.fn();
+const orchdCreateInsightMock = vi.fn();
+const orchdSetInsightFitVerdictMock = vi.fn();
+const orchdSetInsightStatusMock = vi.fn();
+const orchdCreateTaskMock = vi.fn();
+const orchdGraphNeighborhoodMock = vi.fn();
+const orchdListGoalsMock = vi.fn();
+const orchdGraphListProjectMock = vi.fn();
+const orchdCreateProjectMock = vi.fn();
 
 vi.mock("../ipc/orchd", () => ({
   orchdCreateIdea: (...a: unknown[]) => orchdCreateIdeaMock(...a),
@@ -17,12 +35,32 @@ vi.mock("../ipc/orchd", () => ({
   orchdSetIdeaLifecycle: (...a: unknown[]) => orchdSetIdeaLifecycleMock(...a),
   orchdDeleteIdea: (...a: unknown[]) => orchdDeleteIdeaMock(...a),
   orchdListIdeas: (...a: unknown[]) => orchdListIdeasMock(...a),
+  researchStartRun: (...a: unknown[]) => researchStartRunMock(...a),
+  researchListRuns: (...a: unknown[]) => researchListRunsMock(...a),
+  mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
+  mcpGetArtifact: (...a: unknown[]) => mcpGetArtifactMock(...a),
+  trustListPolicies: (...a: unknown[]) => trustListPoliciesMock(...a),
+  orchdCreateInsight: (...a: unknown[]) => orchdCreateInsightMock(...a),
+  orchdSetInsightFitVerdict: (...a: unknown[]) => orchdSetInsightFitVerdictMock(...a),
+  orchdSetInsightStatus: (...a: unknown[]) => orchdSetInsightStatusMock(...a),
+  orchdCreateTask: (...a: unknown[]) => orchdCreateTaskMock(...a),
+  orchdGraphNeighborhood: (...a: unknown[]) => orchdGraphNeighborhoodMock(...a),
+  orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
+  orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
+  orchdCreateProject: (...a: unknown[]) => orchdCreateProjectMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
+}));
+
+const pickFolderMock = vi.fn();
+const createWorkspaceMock = vi.fn();
+vi.mock("../ipc/commands", () => ({
+  pickFolder: (...a: unknown[]) => pickFolderMock(...a),
+  createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
 }));
 
 import { IdeasList } from "./IdeasList";
 import { useAppStore } from "../store/store";
-import type { Idea, Project } from "../ipc/orchd-types";
+import type { Idea, Project, ResearchRun } from "../ipc/orchd-types";
 
 const projectId = "proj-1";
 
@@ -32,6 +70,21 @@ function makeIdea(over: Partial<Idea> & { id: string }): Idea {
     title: "идея",
     body: "тело идеи",
     lifecycle: "captured",
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  };
+}
+
+function makeResearchRun(over: Partial<ResearchRun> & { id: string; ideaId: string }): ResearchRun {
+  return {
+    serverId: "s1",
+    toolName: "search",
+    argsJson: "{}",
+    status: "pending",
+    invocationId: null,
+    artifactId: null,
+    errorKind: null,
     createdAt: 1,
     updatedAt: 1,
     ...over,
@@ -59,7 +112,27 @@ beforeEach(() => {
   orchdDeleteIdeaMock.mockReset().mockResolvedValue(undefined);
   orchdListIdeasMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
-  useAppStore.setState({ ideas: [], projects: [], toast: null, orchdDown: false }, false);
+  researchStartRunMock.mockReset();
+  researchListRunsMock.mockReset().mockResolvedValue([]);
+  mcpListToolsMock.mockReset().mockResolvedValue([]);
+  mcpGetArtifactMock.mockReset();
+  trustListPoliciesMock.mockReset().mockResolvedValue([]);
+  orchdCreateInsightMock.mockReset();
+  orchdSetInsightFitVerdictMock.mockReset();
+  orchdSetInsightStatusMock.mockReset();
+  orchdCreateTaskMock.mockReset();
+  orchdGraphNeighborhoodMock.mockReset().mockResolvedValue({ rootId: "n", nodes: [], edges: [] });
+  orchdListGoalsMock.mockReset().mockResolvedValue([]);
+  orchdGraphListProjectMock
+    .mockReset()
+    .mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
+  orchdCreateProjectMock.mockReset();
+  pickFolderMock.mockReset();
+  createWorkspaceMock.mockReset();
+  useAppStore.setState(
+    { ideas: [], projects: [], toast: null, orchdDown: false, researchRunsByIdea: {}, mcpServers: [] },
+    false,
+  );
 });
 
 describe("IdeasList", () => {
@@ -241,5 +314,110 @@ describe("IdeasList", () => {
 
     fireEvent.click(attachButton);
     expect(orchdSetIdeaProjectMock).not.toHaveBeenCalled();
+  });
+
+  // ── S-IDEA §7, T6: research flow ───────────────────────────────────────────────────────────
+
+  it("eagerly fetches research runs (refreshResearchRuns -> researchListRuns) for every rendered idea, once", async () => {
+    const idea1 = makeIdea({ id: "i1" });
+    const idea2 = makeIdea({ id: "i2" });
+    useAppStore.setState({ ideas: [idea1, idea2] }, false);
+
+    render(<IdeasList projectId={projectId} />);
+
+    await waitFor(() => expect(researchListRunsMock).toHaveBeenCalledWith("i1"));
+    await waitFor(() => expect(researchListRunsMock).toHaveBeenCalledWith("i2"));
+  });
+
+  it("«Исследовать» opens ResearchRunDialog for that idea", () => {
+    const idea = makeIdea({ id: "i1" });
+    useAppStore.setState({ ideas: [idea] }, false);
+
+    render(<IdeasList projectId={projectId} />);
+    expect(screen.queryByTestId("research-run-dialog")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("idea-research-i1"));
+    expect(screen.getByTestId("research-run-dialog")).toBeTruthy();
+  });
+
+  it("shows a research-run status badge reflecting the latest (newest-first) run, and none when there are no runs", () => {
+    const idea = makeIdea({ id: "i1" });
+    useAppStore.setState(
+      {
+        ideas: [idea],
+        researchRunsByIdea: {
+          i1: [
+            makeResearchRun({ id: "r2", ideaId: "i1", status: "done" }),
+            makeResearchRun({ id: "r1", ideaId: "i1", status: "pending" }),
+          ],
+        },
+      },
+      false,
+    );
+
+    render(<IdeasList projectId={projectId} />);
+    expect(screen.getByTestId("idea-research-badge-i1").textContent).toMatch(/готово/i);
+  });
+
+  it("no research-run badge is rendered when the idea has no runs yet", () => {
+    const idea = makeIdea({ id: "i1" });
+    useAppStore.setState({ ideas: [idea], researchRunsByIdea: { i1: [] } }, false);
+
+    render(<IdeasList projectId={projectId} />);
+    expect(screen.queryByTestId("idea-research-badge-i1")).toBeNull();
+  });
+
+  it('the "исследования" toggle shows/hides the ResearchPane for that idea', () => {
+    const idea = makeIdea({ id: "i1" });
+    useAppStore.setState(
+      { ideas: [idea], researchRunsByIdea: { i1: [makeResearchRun({ id: "r1", ideaId: "i1" })] } },
+      false,
+    );
+
+    render(<IdeasList projectId={projectId} />);
+    expect(screen.queryByTestId("research-pane")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("idea-research-toggle-i1"));
+    expect(screen.getByTestId("research-pane")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("idea-research-toggle-i1"));
+    expect(screen.queryByTestId("research-pane")).toBeNull();
+  });
+
+  it("an orphan row renders the SpawnProjectFromIdea button; a non-orphan row never does", () => {
+    const orphan = makeIdea({ id: "orphan1", projectId: null });
+    useAppStore.setState({ ideas: [orphan] }, false);
+    render(<IdeasList projectId={null} />);
+    expect(screen.getByTestId("spawn-project-orphan1")).toBeTruthy();
+    cleanup();
+
+    const owned = makeIdea({ id: "i1" });
+    useAppStore.setState({ ideas: [owned] }, false);
+    render(<IdeasList projectId={projectId} />);
+    expect(screen.queryByTestId("spawn-project-i1")).toBeNull();
+  });
+
+  it("while orchdDown: «Исследовать» is disabled and clicking it never opens the dialog", () => {
+    const idea = makeIdea({ id: "i1" });
+    useAppStore.setState({ ideas: [idea], orchdDown: true }, false);
+
+    render(<IdeasList projectId={projectId} />);
+    const researchButton = screen.getByTestId("idea-research-i1") as HTMLButtonElement;
+    expect(researchButton.disabled).toBe(true);
+
+    fireEvent.click(researchButton);
+    expect(screen.queryByTestId("research-run-dialog")).toBeNull();
+  });
+
+  it("while orchdDown: an orphan row's «Создать проект» button is disabled", () => {
+    const orphan = makeIdea({ id: "orphan1", projectId: null });
+    useAppStore.setState({ ideas: [orphan], orchdDown: true }, false);
+
+    render(<IdeasList projectId={null} />);
+    const spawnButton = screen.getByTestId("spawn-project-orphan1") as HTMLButtonElement;
+    expect(spawnButton.disabled).toBe(true);
+
+    fireEvent.click(spawnButton);
+    expect(pickFolderMock).not.toHaveBeenCalled();
   });
 });

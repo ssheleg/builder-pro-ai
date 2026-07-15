@@ -36,6 +36,9 @@ import {
   orchdSetTaskRank,
   orchdDeleteTask,
   orchdListTasks,
+  researchStartRun,
+  researchListRuns,
+  researchGetRun,
   orchdGetRuleset,
   orchdUpsertRuleset,
   orchdAcknowledgeRuleFile,
@@ -329,6 +332,28 @@ describe("ipc/orchd", () => {
   it("orchdListTasks sends projectId", async () => {
     await orchdListTasks(null);
     expect(invokeMock).toHaveBeenCalledWith("orchd_list_tasks", { projectId: null });
+  });
+
+  // ── research (S-IDEA §5/§6, task T6) ──────────────────────────────────────────────────────
+
+  it("researchStartRun sends ideaId/serverId/toolName/argsJson", async () => {
+    await researchStartRun("i1", "s1", "search", '{"q":"hello"}');
+    expect(invokeMock).toHaveBeenCalledWith("research_start_run", {
+      ideaId: "i1",
+      serverId: "s1",
+      toolName: "search",
+      argsJson: '{"q":"hello"}',
+    });
+  });
+
+  it("researchListRuns sends ideaId", async () => {
+    await researchListRuns("i1");
+    expect(invokeMock).toHaveBeenCalledWith("research_list_runs", { ideaId: "i1" });
+  });
+
+  it("researchGetRun sends id", async () => {
+    await researchGetRun("r1");
+    expect(invokeMock).toHaveBeenCalledWith("research_get_run", { id: "r1" });
   });
 
   // ── ruleset ────────────────────────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ import type {
   McpTool,
   Policy,
   Project,
+  ResearchRun,
   RuleScope,
   RuleSetView,
   Skill,
@@ -37,6 +38,7 @@ import {
   skillList,
   trustListPolicies,
   trustListAudit,
+  researchListRuns,
   describeOrchdError,
 } from "../ipc/orchd";
 
@@ -157,6 +159,11 @@ export interface AppState {
    * Mirrors `goalsByProject` exactly — absence means "not yet fetched", replaced per-key by
    * `refreshTasks(projectId)`. */
   tasksByProject: Record<string, DomainTask[]>;
+  /** An idea's research runs, newest-first (S-IDEA §5/§7/§10, task T6), keyed by `ideaId`.
+   * Mirrors `goalsByProject`/`tasksByProject` exactly — absence means "not yet fetched", replaced
+   * per-key by `refreshResearchRuns(ideaId)`; a `ResearchRunsChanged{ideaId}` push never touches
+   * any OTHER idea's entry. */
+  researchRunsByIdea: Record<string, ResearchRun[]>;
   /** A project's knowledge graph (S4 §7), keyed by `projectId`. Mirrors `goalsByProject`/
    * `tasksByProject` exactly — absence means "not yet fetched", replaced wholesale per-key by
    * `refreshGraph(projectId)`; a `GraphChanged{projectId}` push never touches any OTHER project's
@@ -303,6 +310,9 @@ export interface AppState {
   /** Re-fetch ONE project's task list, replacing only `tasksByProject[projectId]`. Mirrors
    * `refreshGoals` exactly. */
   refreshTasks: (projectId: string) => Promise<void>;
+  /** Re-fetch ONE idea's research runs, replacing only `researchRunsByIdea[ideaId]`. Mirrors
+   * `refreshGoals`/`refreshTasks` exactly. */
+  refreshResearchRuns: (ideaId: string) => Promise<void>;
   /** Re-fetch ONE project's knowledge graph, replacing only `graphByProject[projectId]`. Mirrors
    * `refreshGoals`/`refreshTasks` exactly. */
   refreshGraph: (projectId: string) => Promise<void>;
@@ -408,6 +418,7 @@ export const useAppStore = create<AppState>((set, get) => {
     ideas: [],
     insights: [],
     tasksByProject: {},
+    researchRunsByIdea: {},
     graphByProject: {},
     rulesets: {},
     mcpServers: [],
@@ -600,6 +611,15 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const tasks = await orchdListTasks(projectId);
         set((s) => ({ tasksByProject: { ...s.tasksByProject, [projectId]: tasks } }));
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshResearchRuns: async (ideaId) => {
+      try {
+        const runs = await researchListRuns(ideaId);
+        set((s) => ({ researchRunsByIdea: { ...s.researchRunsByIdea, [ideaId]: runs } }));
       } catch (e) {
         get().showToast(describeOrchdError(e));
       }

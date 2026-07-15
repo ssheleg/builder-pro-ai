@@ -16,6 +16,7 @@ import type {
   McpTool,
   Policy,
   Project,
+  ResearchRun,
   RuleSetView,
   Skill,
 } from "../ipc/orchd-types";
@@ -25,6 +26,7 @@ const orchdListGoalsMock = vi.fn();
 const orchdListIdeasMock = vi.fn();
 const orchdListInsightsMock = vi.fn();
 const orchdListTasksMock = vi.fn();
+const researchListRunsMock = vi.fn();
 const orchdGraphListProjectMock = vi.fn();
 const orchdGetRulesetMock = vi.fn();
 const mcpListServersMock = vi.fn();
@@ -41,6 +43,7 @@ vi.mock("../ipc/orchd", () => ({
   orchdListIdeas: (...a: unknown[]) => orchdListIdeasMock(...a),
   orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
   orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
+  researchListRuns: (...a: unknown[]) => researchListRunsMock(...a),
   orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
   mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
@@ -80,6 +83,7 @@ describe("useAppStore", () => {
     orchdListIdeasMock.mockReset();
     orchdListInsightsMock.mockReset();
     orchdListTasksMock.mockReset();
+    researchListRunsMock.mockReset();
     orchdGraphListProjectMock.mockReset();
     orchdGetRulesetMock.mockReset();
     mcpListServersMock.mockReset();
@@ -114,6 +118,7 @@ describe("useAppStore", () => {
         ideas: [],
         insights: [],
         tasksByProject: {},
+        researchRunsByIdea: {},
         graphByProject: {},
         rulesets: {},
         mcpServers: [],
@@ -632,6 +637,21 @@ describe("useAppStore", () => {
     ...over,
   });
 
+  const researchRun = (over: Partial<ResearchRun> = {}): ResearchRun => ({
+    id: "r1",
+    ideaId: "i1",
+    serverId: "s1",
+    toolName: "search",
+    argsJson: "{}",
+    status: "pending",
+    invocationId: null,
+    artifactId: null,
+    errorKind: null,
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
   const graphView = (over: Partial<GraphView> = {}): GraphView => ({
     nodes: [],
     edges: [],
@@ -857,6 +877,33 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().tasksByProject["p2"]).toEqual([
       task({ id: "t2", projectId: "p2" }),
     ]);
+  });
+
+  it("refreshResearchRuns(ideaId) updates ONLY the named idea's runs, leaving others untouched", async () => {
+    useAppStore.setState(
+      { researchRunsByIdea: { i2: [researchRun({ id: "r2", ideaId: "i2" })] } },
+      false,
+    );
+
+    researchListRunsMock.mockResolvedValueOnce([researchRun({ id: "r1", ideaId: "i1" })]);
+    await useAppStore.getState().refreshResearchRuns("i1");
+
+    expect(researchListRunsMock).toHaveBeenCalledWith("i1");
+    expect(useAppStore.getState().researchRunsByIdea["i1"]).toEqual([
+      researchRun({ id: "r1", ideaId: "i1" }),
+    ]);
+    // A DIFFERENT idea's entry (i2) must be untouched by an i1 refresh.
+    expect(useAppStore.getState().researchRunsByIdea["i2"]).toEqual([
+      researchRun({ id: "r2", ideaId: "i2" }),
+    ]);
+  });
+
+  it("refreshResearchRuns surfaces a rejection as a toast, leaving researchRunsByIdea untouched", async () => {
+    const err = { kind: "disconnected" };
+    researchListRunsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshResearchRuns("i1");
+    expect(useAppStore.getState().researchRunsByIdea["i1"]).toBeUndefined();
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 
   it("refreshGraph(projectId) replaces ONLY the named project's graph, leaving others untouched", async () => {

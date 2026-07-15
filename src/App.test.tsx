@@ -114,6 +114,10 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdPoliciesChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdResearchRunsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdResearchRunsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
 }));
 
 // T8 (S-EXT §8): ExtPanel is mocked here — its own tests (`components/ext/ExtPanel.test.tsx`)
@@ -132,6 +136,7 @@ const orchdListGoalsMock = vi.fn().mockResolvedValue([]);
 const orchdListIdeasMock = vi.fn().mockResolvedValue([]);
 const orchdListInsightsMock = vi.fn().mockResolvedValue([]);
 const orchdListTasksMock = vi.fn().mockResolvedValue([]);
+const researchListRunsMock = vi.fn().mockResolvedValue([]);
 const orchdGraphListProjectMock = vi.fn().mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
 const orchdGetRulesetMock = vi.fn();
 // T18: ProjectPanel (rendered once view === "project") imports these directly from the same
@@ -164,6 +169,7 @@ vi.mock("./ipc/orchd", () => ({
   orchdListIdeas: (...a: unknown[]) => orchdListIdeasMock(...a),
   orchdListInsights: (...a: unknown[]) => orchdListInsightsMock(...a),
   orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
+  researchListRuns: (...a: unknown[]) => researchListRunsMock(...a),
   orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
   orchdAddProjectWorkspace: (...a: unknown[]) => orchdAddProjectWorkspaceMock(...a),
@@ -328,6 +334,7 @@ beforeEach(() => {
       ideas: [],
       insights: [],
       tasksByProject: {},
+      researchRunsByIdea: {},
       graphByProject: {},
       rulesets: {},
       mcpServers: [],
@@ -346,7 +353,7 @@ beforeEach(() => {
 });
 
 describe("App", () => {
-  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP + one connectors + one skills, S3 T13 + S4 T6 + S-EXT T8/T13b/T17)", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP + one connectors + one skills + one research, S3 T13 + S4 T6 + S-EXT T8/T13b/T17 + S-IDEA T6)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -376,6 +383,7 @@ describe("App", () => {
       "orchdMcpArtifactsChanged",
       "orchdConnectorsChanged",
       "orchdSkillsChanged",
+      "orchdResearchRunsChanged",
     ]) {
       expect(typeof cbs[key]).toBe("function");
     }
@@ -1158,6 +1166,35 @@ describe("S3 T13: orchd domain event wiring", () => {
       cbs.orchdInsightsChanged(null);
     });
     expect(orchdListInsightsMock).toHaveBeenCalledWith(null);
+  });
+
+  it("orchd://research-runs-changed refreshes ONLY the named idea's runs, unconditionally (S-IDEA §5/§8, T6)", async () => {
+    researchListRunsMock.mockResolvedValue([
+      {
+        id: "r1", ideaId: "i1", serverId: "s1", toolName: "search", argsJson: "{}",
+        status: "pending", invocationId: null, artifactId: null, errorKind: null,
+        createdAt: 1, updatedAt: 1,
+      },
+    ]);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.orchdResearchRunsChanged({ ideaId: "i1" });
+    });
+    expect(researchListRunsMock).toHaveBeenCalledWith("i1");
+    expect(useAppStore.getState().researchRunsByIdea["i1"]).toHaveLength(1);
+  });
+
+  it("orchd://research-runs-changed with a null ideaId is a defensive no-op (never fetches)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    researchListRunsMock.mockClear();
+    await act(async () => {
+      cbs.orchdResearchRunsChanged({ ideaId: null });
+    });
+    expect(researchListRunsMock).not.toHaveBeenCalled();
   });
 
   it('orchd://ruleset-changed builds the "global" key for the global scope', async () => {

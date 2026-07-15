@@ -39,6 +39,7 @@ import {
   onOrchdConnectorsChanged,
   onOrchdSkillsChanged,
   onOrchdPoliciesChanged,
+  onOrchdResearchRunsChanged,
 } from "./events";
 import type { SessionMeta, Workspace } from "./types";
 import type {
@@ -55,6 +56,7 @@ import type {
   McpArtifactsChangedPayload,
   McpInvocationLoggedPayload,
   SkillsChangedPayload,
+  ResearchRunsChangedPayload,
 } from "./events";
 
 describe("ipc/events", () => {
@@ -352,5 +354,25 @@ describe("ipc/events", () => {
     registered.get("orchd://policies-changed")!({ payload: null });
     expect(cb).toHaveBeenCalledTimes(1);
     expect(un).toBe(unlisten);
+  });
+
+  // ── S-IDEA research coarse-invalidation event (spec §5/§8, task T6) ────────────────────────
+
+  it("onOrchdResearchRunsChanged subscribes to orchd://research-runs-changed and unwraps {ideaId}", async () => {
+    const cb = vi.fn();
+    const un = await onOrchdResearchRunsChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://research-runs-changed", expect.any(Function));
+    const p: ResearchRunsChangedPayload = { ideaId: "i1" };
+    registered.get("orchd://research-runs-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
+    expect(un).toBe(unlisten);
+  });
+
+  it("onOrchdResearchRunsChanged carries a null ideaId through defensively", async () => {
+    const cb = vi.fn();
+    await onOrchdResearchRunsChanged(cb);
+    const p: ResearchRunsChangedPayload = { ideaId: null };
+    registered.get("orchd://research-runs-changed")!({ payload: p });
+    expect(cb).toHaveBeenCalledWith(p);
   });
 });

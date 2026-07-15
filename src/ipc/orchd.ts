@@ -33,6 +33,7 @@ import type {
   PolicyRules,
   PolicyScope,
   Project,
+  ResearchRun,
   RuleScope,
   RuleSetView,
   Skill,
@@ -276,6 +277,34 @@ export function orchdDeleteTask(id: string): Promise<void> {
 
 export function orchdListTasks(projectId: string | null): Promise<DomainTask[]> {
   return invoke<DomainTask[]>("orchd_list_tasks", { projectId });
+}
+
+// ── research (S-IDEA §5/§6, task T6) — thin proxies over the 3 net-new research verbs ──────────
+//
+// Named WITHOUT the `orchd_` prefix, matching `commands.rs`'s own naming choice for this trio
+// (spec §3 module-layout table: "research_start_run / research_list_runs / research_get_run
+// (proxy)") — same argument-shaped-verbatim convention as every wrapper above.
+
+/** Starts a research run (spec §6): inserts `research_run{pending}` and returns it immediately —
+ * the run's terminal state (`done`/`failed`) arrives later via `orchd://research-runs-changed`
+ * (`onOrchdResearchRunsChanged`, `./events.ts`), NOT this call's resolved value. */
+export function researchStartRun(
+  ideaId: string,
+  serverId: string,
+  toolName: string,
+  argsJson: string,
+): Promise<ResearchRun> {
+  return invoke<ResearchRun>("research_start_run", { ideaId, serverId, toolName, argsJson });
+}
+
+/** Runs for one idea, newest first (spec §5). Plain read — never triggers a push. */
+export function researchListRuns(ideaId: string): Promise<ResearchRun[]> {
+  return invoke<ResearchRun[]>("research_list_runs", { ideaId });
+}
+
+/** One run by id (spec §5). Plain read — never triggers a push. */
+export function researchGetRun(id: string): Promise<ResearchRun> {
+  return invoke<ResearchRun>("research_get_run", { id });
 }
 
 // ── ruleset ──────────────────────────────────────────────────────────────────────────────────

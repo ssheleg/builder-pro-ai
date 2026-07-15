@@ -8,7 +8,10 @@ import {
   orchdDeleteIdea,
   describeOrchdError,
 } from "../ipc/orchd";
-import type { Idea, IdeaLifecycle } from "../ipc/orchd-types";
+import type { Idea, IdeaLifecycle, ResearchRun, ResearchStatus } from "../ipc/orchd-types";
+import { ResearchRunDialog } from "./idea/ResearchRunDialog";
+import { ResearchPane } from "./idea/ResearchPane";
+import { SpawnProjectFromIdea } from "./idea/SpawnProjectFromIdea";
 import { theme } from "../theme";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
@@ -34,6 +37,16 @@ const LIFECYCLE_LABEL: Record<IdeaLifecycle, string> = {
   inDev: "в разработке",
   shipped: "выпущена",
   archived: "архив",
+};
+
+/** Mirrors `ResearchPane`'s identical label map (S-IDEA §7) — each component keeps its own copy,
+ * matching this codebase's established per-component-label convention (no shared labels module,
+ * see e.g. `LIFECYCLE_LABEL`/`FIT_VERDICT_LABEL` precedents). */
+const RESEARCH_STATUS_LABEL: Record<ResearchStatus, string> = {
+  pending: "ожидание",
+  running: "выполняется",
+  done: "готово",
+  failed: "ошибка",
 };
 
 const listStyle: CSSProperties = {
@@ -123,6 +136,16 @@ const orphanRowStyle: CSSProperties = {
   flex: "1 1 100%",
 };
 
+const researchBadgeStyle: CSSProperties = {
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  padding: "1px 6px",
+  borderRadius: 999,
+  border: `1px solid ${theme.colors.border}`,
+  color: theme.colors.text,
+  flexShrink: 0,
+};
+
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
@@ -139,6 +162,11 @@ interface IdeaRowProps {
   /** `orchdDown` (spec §10): while `true`, every mutating control on this row is disabled — see
    * `IdeasList`'s own doc comment. */
   disabled: boolean;
+  /** This idea's research runs, newest-first (S-IDEA §7, T6) — `IdeasList` derives it from the
+   * store's `researchRunsByIdea` map and passes it down as a plain prop (never re-selected here
+   * via `useAppStore`, which would risk the same fresh-array-per-render infinite-loop pitfall
+   * `ResearchPane` guards against — see that component's own doc comment). */
+  researchRuns: ResearchRun[];
   onTitleCommit: (id: string, title: string) => Promise<void>;
   onBodyCommit: (id: string, body: string) => Promise<void>;
   onLifecycleChange: (id: string, lifecycle: IdeaLifecycle) => void;
@@ -148,13 +176,24 @@ interface IdeaRowProps {
 
 /** One idea row (design-system.md "Lifecycle chip" atom). Title/body edit state is local
  * (in-flight, not-yet-committed) exactly like `GoalTree`'s `GoalRow` — a rejected mutation reverts
- * to the store's copy rather than lying about what was saved. */
+ * to the store's copy rather than lying about what was saved.
+ *
+ * S-IDEA §7 (T6) additions: «Исследовать» opens `ResearchRunDialog`; a toggle reveals/hides the
+ * per-idea `ResearchPane`; a research-run status badge shows the LATEST (index 0 — the backend
+ * returns runs newest-first) run's status, omitted entirely when there are no runs yet (absence,
+ * not a placeholder dash, per this codebase's "absence means not yet meaningful" convention). An
+ * orphan row (no project) additionally renders `SpawnProjectFromIdea`'s own self-contained
+ * button. Honest degradation (T8 discipline): «Исследовать» is `disabled={disabled}` — mirrors
+ * every other mutating control on this row; the pane-visibility toggle is a pure view toggle (no
+ * wrapper call of its own), so it stays enabled even while the daemon is down.
+ */
 function IdeaRow(props: IdeaRowProps): JSX.Element {
   const {
     idea,
     isOrphan,
     projects,
     disabled,
+    researchRuns,
     onTitleCommit,
     onBodyCommit,
     onLifecycleChange,
@@ -165,6 +204,8 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
   const [title, setTitle] = useState(idea.title);
   const [body, setBody] = useState(idea.body);
   const [attachTo, setAttachTo] = useState("");
+  const [researchDialogOpen, setResearchDialogOpen] = useState(false);
+  const [researchExpanded, setResearchExpanded] = useState(false);
 
   useEffect(() => {
     setTitle(idea.title);
@@ -187,7 +228,10 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
     await onBodyCommit(idea.id, body);
   }
 
+  const latestRun = researchRuns[0] ?? null;
+
   return (
+    <>
     <div data-testid={`idea-row-${idea.id}`} style={rowStyle}>
       <input
         data-testid={`idea-title-input-${idea.id}`}
@@ -227,6 +271,29 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
       >
         Удалить
       </button>
+      <button
+        type="button"
+        data-testid={`idea-research-${idea.id}`}
+        disabled={disabled}
+        onClick={() => setResearchDialogOpen(true)}
+        style={textButtonStyle}
+      >
+        Исследовать
+      </button>
+      {latestRun && (
+        <span data-testid={`idea-research-badge-${idea.id}`} style={researchBadgeStyle}>
+          {RESEARCH_STATUS_LABEL[latestRun.status]}
+        </span>
+      )}
+      <button
+        type="button"
+        data-testid={`idea-research-toggle-${idea.id}`}
+        onClick={() => setResearchExpanded((v) => !v)}
+        style={textButtonStyle}
+      >
+        {researchExpanded ? "скрыть исследования" : `исследования (${researchRuns.length})`}
+      </button>
+      {isOrphan && <SpawnProjectFromIdea idea={idea} />}
       <textarea
         data-testid={`idea-body-input-${idea.id}`}
         aria-label="Описание идеи"
@@ -265,6 +332,11 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         </div>
       )}
     </div>
+    {researchExpanded && <ResearchPane idea={idea} disabled={disabled} />}
+    {researchDialogOpen && (
+      <ResearchRunDialog idea={idea} onClose={() => setResearchDialogOpen(false)} />
+    )}
+    </>
   );
 }
 
@@ -293,6 +365,12 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
   const refreshIdeas = useAppStore((s) => s.refreshIdeas);
   const showToast = useAppStore((s) => s.showToast);
   const orchdDown = useAppStore((s) => s.orchdDown);
+  // Select the STABLE outer map, then derive each row's array as a plain expression below —
+  // never `useAppStore((s) => s.researchRunsByIdea[id] ?? [])` per row, which would return a
+  // brand-new `[]` literal every render and infinite-loop `useSyncExternalStore` (see
+  // `ResearchPane`'s identical doc comment on this exact pitfall).
+  const researchRunsByIdea = useAppStore((s) => s.researchRunsByIdea);
+  const refreshResearchRuns = useAppStore((s) => s.refreshResearchRuns);
 
   const [createTitle, setCreateTitle] = useState("");
   const [createBody, setCreateBody] = useState("");
@@ -302,6 +380,20 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
     .sort((a, b) => b.createdAt - a.createdAt);
 
   const isOrphanView = projectId === null;
+
+  // Eagerly populate `researchRunsByIdea` for every idea rendered here (S-IDEA §7, T6) — mirrors
+  // `ProjectPanel`'s own-mount-fetch role for `IdeasList`/`InsightsList` (that component's doc
+  // comment: those two have no mount-fetch of their own, they only populate via a push or the
+  // parent's explicit refresh) and `ToolsBrowser`'s "if not already cached, fetch" per-row guard —
+  // without this, the research-run badge/pane would silently stay empty until SOME push happened
+  // to fire for an idea nobody had opened `ResearchPane` for yet.
+  const rowIds = rows.map((i) => i.id).join(",");
+  useEffect(() => {
+    for (const idea of rows) {
+      if (!(idea.id in researchRunsByIdea)) void refreshResearchRuns(idea.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowIds]);
 
   async function handleTitleCommit(id: string, title: string): Promise<void> {
     try {
@@ -405,6 +497,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
             isOrphan={isOrphanView}
             projects={projects}
             disabled={orchdDown}
+            researchRuns={researchRunsByIdea[idea.id] ?? []}
             onTitleCommit={handleTitleCommit}
             onBodyCommit={handleBodyCommit}
             onLifecycleChange={(id, lifecycle) => void handleLifecycleChange(id, lifecycle)}
