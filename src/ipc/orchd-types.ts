@@ -5,6 +5,30 @@ export type Account = { id: string, provider: string, label: string, authKind: A
 export type AccountAuthKind = "oauth" | "apikey";
 
 /**
+ * `audit_log` row (spec §4/§6, BL-22, task T18): every trust-choke-point decision, allow or
+ * deny, surfaced to the Журнал/audit UI. `reason`/every other field NEVER carries secrets or
+ * tool-call arguments (spec §6) — only the fixed action/decision/reason vocabulary
+ * `crate::trust::authorize` writes (request content lives in the matching invocation's own
+ * request-hash field, a sha256, never here).
+ */
+export type AuditRow = { id: string, at: number, 
+/**
+ * One of a fixed action-literal vocabulary (spec §4): a connect/disconnect, a stdio
+ * process spawn, an MCP tool call, a direct-API connector invoke, a consent grant, or a
+ * policy-cap denial.
+ */
+action: string, serverId: string | null, toolName: string | null, projectId: string | null, 
+/**
+ * `'allow'|'deny'`.
+ */
+decision: string, 
+/**
+ * e.g. consent required, tool disabled, rate limit exceeded, spend cap exceeded; `None` on
+ * an `'allow'` row.
+ */
+reason: string | null, invocationId: string | null, };
+
+/**
  * One operation a `ConnectorAdapter` (spec §7) exposes for a given account's provider.
  */
 export type ConnectorOp = { name: string, description: string | null, };
@@ -123,7 +147,27 @@ export type OAuthChallenge = { authorizeUrl: string, state: string, };
 
 export type OrchdErrorCode = "notFound" | "invariant" | "validation" | "conflict" | "io" | "consent" | "policy";
 
+/**
+ * `policy` row (spec §4): a spend/rate cap at one of three scopes. `None` cap fields mean
+ * "unlimited" for that dimension — a `Policy` with BOTH fields `None` is a legal (if pointless)
+ * row. See [`PolicyScope`] for the scope/reference-id pairing rule.
+ */
+export type Policy = { id: string, scope: PolicyScope, 
+/**
+ * The project or server this policy applies to — `Some` for a project- or server-scoped
+ * policy, `None` for the single global-scope policy (spec §4: null for global).
+ */
+refId: string | null, spendCapUsd: number | null, ratePerMin: number | null, createdAt: number, updatedAt: number, };
+
 export type PolicyRules = { spendCapUsd: number | null, approvalClasses: Array<string>, pathAllowlist: Array<string>, };
+
+/**
+ * `policy.scope` (spec §4/§6, BL-22): which axis a cap applies to. `crate::trust`'s
+ * effective-policy resolution (task T18) is MOST-SPECIFIC-wins — `Server` overrides `Project`
+ * overrides `Global` — the whole matching row wins outright, not a per-field merge (see
+ * `trust::resolve_policy`'s own doc comment for the full rationale).
+ */
+export type PolicyScope = "global" | "project" | "server";
 
 export type Project = { id: string, name: string, description: string, status: ProjectStatus, 
 /**

@@ -49,7 +49,7 @@ use bpa_orchd_proto::{
 use crate::connectors::{self, accounts::ConnectorsState};
 use crate::export;
 use crate::mcp::{self, OrchdMcpError};
-use crate::persistence::{Db, OrchdPersistError};
+use crate::persistence::{Db, NewPolicy, OrchdPersistError};
 use crate::ruleset_files;
 use crate::skills::{self, NewSkill};
 
@@ -364,9 +364,10 @@ fn map_err(e: OrchdPersistError) -> OrchdResponse {
 /// choke-point's Connect-side denial (spec D10: no valid `consent_grant` for the server's CURRENT
 /// url) — surfaces as `Error{Consent}` (a dedicated `OrchdErrorCode` this task adds) so a client
 /// can show the consent dialog specifically, rather than a generic failure. `ToolDisabled` is the
-/// ToolCall-side denial (a disabled/unrecognized tool, the per-tool allowlist, spec §6) —
-/// surfaces as `Error{Policy}` (also new this task). Every other MCP-level failure (`Mcp`/
-/// `Secret`) has no richer wire code yet — mirrors [`map_err`]'s own `Sql -> Io` precedent.
+/// ToolCall-side allowlist denial (a disabled/unrecognized tool, spec §6) and
+/// `PolicyCapExceeded` (task T18) is a spend/rate cap breach — BOTH surface as `Error{Policy}`
+/// (also new this task); only the message text tells them apart. Every other MCP-level failure
+/// (`Mcp`/`Secret`) has no richer wire code yet — mirrors [`map_err`]'s own `Sql -> Io` precedent.
 /// `Persist` delegates straight to [`map_err`] since it already wraps an `OrchdPersistError` —
 /// reusing its NotFound/Invariant/Validation/Conflict mapping rather than flattening every
 /// persistence failure down to `Io`.
@@ -377,7 +378,10 @@ fn map_mcp_err(e: OrchdMcpError) -> OrchdResponse {
             code: OrchdErrorCode::Consent,
             message,
         },
-        OrchdMcpError::ToolDisabled => OrchdResponse::Error {
+        // `PolicyCapExceeded` (task T18, spec §6/BL-22 — a spend/rate cap breach) maps to the
+        // SAME `Error{Policy}` wire code as `ToolDisabled` (the per-tool allowlist denial); only
+        // the message differs (see `OrchdMcpError::PolicyCapExceeded`'s own doc comment).
+        OrchdMcpError::ToolDisabled | OrchdMcpError::PolicyCapExceeded(_) => OrchdResponse::Error {
             code: OrchdErrorCode::Policy,
             message,
         },
@@ -1818,6 +1822,51 @@ async fn dispatch(
                     }
                     Err(e) => map_err(e),
                 },
+                Err(e) => map_err(e),
+            }
+        }
+
+        // ---- S-EXT Trust: policy caps + audit log (spec §4/§5/§6, BL-22, task T18) ----
+        // `TrustSetPolicy` ⇒ `PoliciesChanged` on success (no payload — see `OrchdPush::
+        // PoliciesChanged`'s own doc comment: a policy change can be global/project/server
+        // scoped, so there's no single natural id to name coarsely). `TrustListPolicies`/
+        // `TrustListAudit` are READS and broadcast nothing. `Err` ⇒ `map_err` (every failure mode
+        // here is `OrchdPersistError` — `upsert_policy`'s own scope/ref_id validation surfaces as
+        // `Validation`), nothing broadcast (spec §6: "Failed requests broadcast NOTHING"). ----
+        OrchdRequest::TrustSetPolicy {
+            scope,
+            ref_id,
+            spend_cap_usd,
+            rate_per_min,
+        } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.upsert_policy(NewPolicy {
+                    scope,
+                    ref_id,
+                    spend_cap_usd,
+                    rate_per_min,
+                })
+            };
+            match result {
+                Ok(policy) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::PoliciesChanged));
+                    OrchdResponse::Policy(policy)
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::TrustListPolicies => {
+            let db = deps.db.lock().await;
+            match db.list_policies() {
+                Ok(v) => OrchdResponse::Policies(v),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::TrustListAudit { limit } => {
+            let db = deps.db.lock().await;
+            match db.list_audit(limit) {
+                Ok(v) => OrchdResponse::AuditRows(v),
                 Err(e) => map_err(e),
             }
         }

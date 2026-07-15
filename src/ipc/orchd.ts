@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceId } from "./commands";
 import type {
   Account,
+  AuditRow,
   ConnectorOp,
   DomainTask,
   FitVerdict,
@@ -28,7 +29,9 @@ import type {
   McpTool,
   McpTransport,
   OAuthChallenge,
+  Policy,
   PolicyRules,
+  PolicyScope,
   Project,
   RuleScope,
   RuleSetView,
@@ -677,6 +680,34 @@ export function skillList(projectId: string | null): Promise<Skill[]> {
 
 export function skillDelete(id: string): Promise<void> {
   return invoke<void>("skill_delete", { id });
+}
+
+// ── Trust: policy caps + audit log (S-EXT §4/§5/§6, BL-22, T18's trust_* commands) ─────────────
+//
+// One thin wrapper per `trust_*` `#[tauri::command]` (`src-tauri/src/commands.rs`, T18), same
+// naming/arg-shape-verbatim convention as every wrapper above.
+
+/** UPSERT keyed by `(scope, refId)` (spec §4) — `scope:"global"` requires `refId: null`,
+ * `scope:"project"|"server"` requires `refId` set; rejects with
+ * `CommandError{kind:"daemon",code:"Validation"}` on a mismatch, BEFORE any row is written.
+ * `null` cap fields mean "unlimited" for that dimension. */
+export function trustSetPolicy(
+  scope: PolicyScope,
+  refId: string | null,
+  spendCapUsd: number | null,
+  ratePerMin: number | null,
+): Promise<Policy> {
+  return invoke<Policy>("trust_set_policy", { scope, refId, spendCapUsd, ratePerMin });
+}
+
+export function trustListPolicies(): Promise<Policy[]> {
+  return invoke<Policy[]>("trust_list_policies");
+}
+
+/** Newest-first, optionally capped at `limit` — every trust-choke-point decision, allow or
+ * deny, for the Журнал/audit UI. */
+export function trustListAudit(limit: number | null): Promise<AuditRow[]> {
+  return invoke<AuditRow[]>("trust_list_audit", { limit });
 }
 
 // ── error mapping ────────────────────────────────────────────────────────────────────────────

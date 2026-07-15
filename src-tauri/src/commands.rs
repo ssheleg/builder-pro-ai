@@ -27,12 +27,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bpa_orchd_proto::{
-    Account, ConnectorOp, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEdge,
+    Account, AuditRow, ConnectorOp, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEdge,
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle,
     Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
     McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdRequest,
-    OrchdResponse, PolicyRules, Project, RuleScope, RuleSetView, Skill, SkillScope, TaskSource,
-    TaskStatus,
+    OrchdResponse, Policy, PolicyRules, PolicyScope, Project, RuleScope, RuleSetView, Skill,
+    SkillScope, TaskSource, TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -844,6 +844,31 @@ fn expect_skill(res: OrchdResponse) -> Result<Skill, CommandError> {
 fn expect_skills(res: OrchdResponse) -> Result<Vec<Skill>, CommandError> {
     match res {
         OrchdResponse::Skills(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+// ── S-EXT Trust orchd response unwrappers (spec §4/§5/§6, BL-22, appended, task T18) — mirrors
+// the Skills block above exactly, one unwrapper per `OrchdResponse::{Policy,Policies,AuditRows}`
+// variant ─────────────────────────────────────────────────────────────────────────────────────
+
+fn expect_policy(res: OrchdResponse) -> Result<Policy, CommandError> {
+    match res {
+        OrchdResponse::Policy(p) => Ok(p),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_policies(res: OrchdResponse) -> Result<Vec<Policy>, CommandError> {
+    match res {
+        OrchdResponse::Policies(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_audit_rows(res: OrchdResponse) -> Result<Vec<AuditRow>, CommandError> {
+    match res {
+        OrchdResponse::AuditRows(v) => Ok(v),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -2526,6 +2551,66 @@ pub async fn skill_delete(state: State<'_, AppState>, id: String) -> Result<(), 
         state
             .orchd()?
             .request(OrchdRequest::SkillDelete { id })
+            .await?,
+    )
+}
+
+// ── S-EXT Trust orchd #[tauri::command] surface (spec §4/§5/§6, BL-22, appended — task T18)
+// ───────────────────────────────────────────────────────────────────────────────────────────
+//
+// Same one-thin-command-per-verb shape as the MCP/Connector/Skills blocks above, over the
+// `OrchdRequest::Trust*` verbs (spec §5's frozen-append-only wire additions). A spend/rate-cap
+// denial on `mcp_call_tool`/`connector_invoke` (above) already surfaces as
+// `CommandError{kind:"daemon",code:"Policy"}` through the existing `err_from_orchd_response`
+// path — no special-casing needed here; these three commands are the caps CONFIGURATION +
+// audit-log READ surface only.
+
+/// UPSERT keyed by `(scope, refId)` (spec §4) — `scope:"global"` requires `refId: null`,
+/// `scope:"project"|"server"` requires `refId: Some(<id>)`; a mismatch rejects with
+/// `CommandError{kind:"daemon",code:"Validation"}` BEFORE any row is written. `None` cap fields
+/// mean "unlimited" for that dimension.
+#[tauri::command]
+pub async fn trust_set_policy(
+    state: State<'_, AppState>,
+    scope: PolicyScope,
+    ref_id: Option<String>,
+    spend_cap_usd: Option<f64>,
+    rate_per_min: Option<i64>,
+) -> Result<Policy, CommandError> {
+    expect_policy(
+        state
+            .orchd()?
+            .request(OrchdRequest::TrustSetPolicy {
+                scope,
+                ref_id,
+                spend_cap_usd,
+                rate_per_min,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn trust_list_policies(state: State<'_, AppState>) -> Result<Vec<Policy>, CommandError> {
+    expect_policies(
+        state
+            .orchd()?
+            .request(OrchdRequest::TrustListPolicies)
+            .await?,
+    )
+}
+
+/// Newest-first, optionally capped at `limit` (spec §4 `audit_log`) — every trust-choke-point
+/// decision, allow or deny, for the Журнал/audit UI.
+#[tauri::command]
+pub async fn trust_list_audit(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<AuditRow>, CommandError> {
+    expect_audit_rows(
+        state
+            .orchd()?
+            .request(OrchdRequest::TrustListAudit { limit })
             .await?,
     )
 }

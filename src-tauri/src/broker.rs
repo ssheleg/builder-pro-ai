@@ -82,6 +82,11 @@ pub const EV_ORCHD_CONNECTORS_CHANGED: &str = "orchd://connectors-changed";
 /// append-only, task T17). Payload `{ projectId }` (may be `null` — a global-scope skill change),
 /// mirrors [`EV_ORCHD_MCP_SERVERS_CHANGED`]'s shape exactly.
 pub const EV_ORCHD_SKILLS_CHANGED: &str = "orchd://skills-changed";
+/// S-EXT trust policy-cap coarse-invalidation (spec §4/§5/§6, BL-22, appended — order FROZEN
+/// append-only, task T18). No payload (`null`) — a policy change can be global/project/server
+/// scoped, so there's no single natural `projectId`/`serverId` to name coarsely, same
+/// "nothing to name" precedent as [`EV_ORCHD_CONNECTORS_CHANGED`].
+pub const EV_ORCHD_POLICIES_CHANGED: &str = "orchd://policies-changed";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -268,6 +273,11 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
             EV_ORCHD_SKILLS_CHANGED,
             serde_json::json!({ "projectId": project_id }),
         ),
+        // S-EXT Trust (spec §4/§5/§6, BL-22, appended — order FROZEN append-only, task T18): no
+        // payload, mirrors `ConnectorsChanged`'s "nothing to name" precedent.
+        OrchdPush::PoliciesChanged => {
+            BrokerAction::Emit(EV_ORCHD_POLICIES_CHANGED, serde_json::Value::Null)
+        }
     }
 }
 
@@ -917,6 +927,21 @@ mod tests {
             BrokerAction::Emit(event, payload) => {
                 assert_eq!(event, EV_ORCHD_SKILLS_CHANGED);
                 assert!(payload["projectId"].is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    // ── S-EXT Trust (spec §4/§5/§6, BL-22, task T18) — mirrors the ConnectorsChanged
+    // null-payload precedent above exactly ──────────────────────────────────────────────────
+
+    #[test]
+    fn orchd_policies_changed_maps_to_emit_with_null_payload() {
+        let action = map_orchd_push(OrchdPush::PoliciesChanged);
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_POLICIES_CHANGED);
+                assert!(payload.is_null());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

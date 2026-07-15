@@ -5,6 +5,8 @@ import { ServersTab } from "./ServersTab";
 import { ToolsBrowser } from "./ToolsBrowser";
 import { ConnectorsTab } from "./ConnectorsTab";
 import { SkillsTab } from "./SkillsTab";
+import { InvocationLog } from "./InvocationLog";
+import { ArtifactsTab } from "./ArtifactsTab";
 import { theme } from "../../theme";
 
 type TabKey = "servers" | "tools" | "connectors" | "log" | "artifacts" | "skills";
@@ -17,12 +19,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "artifacts", label: "Артефакты" },
   { key: "skills", label: "Навыки" },
 ];
-
-/** Tabs not yet built (S-EXT §8: Журнал/Артефакты land in later tasks — T18 per the brief;
- * «Коннекторы» shipped in T13b, «Навыки» shipped in T17). Rendering a stub rather than omitting
- * the tab keeps the full planned surface visible/navigable now, honestly labelled as
- * not-yet-built. */
-const STUB_TABS = new Set<TabKey>(["log", "artifacts"]);
 
 const panelStyle: CSSProperties = {
   flex: 1,
@@ -52,24 +48,18 @@ const contentStyle: CSSProperties = {
   padding: 16,
 };
 
-function ComingSoonStub(props: { label: string }): JSX.Element {
-  return (
-    <div data-testid="ext-tab-stub" style={{ color: theme.colors.textDim, fontSize: 13 }}>
-      «{props.label}» — скоро
-    </div>
-  );
-}
-
 /**
- * «Расширения» top-level view (S-EXT §8, T8): the MCP servers/tools/connectors/skills management
- * panel, mirrors `ProjectPanel`'s tab pattern (`TABS: {key,label}[]`, ONE tab mounted at a time,
- * `activeTab` local state) + its honest-degradation discipline (the shared `<OrchdDownBanner/>`
- * renders above the tab bar whenever `orchdDown`, matching `ProjectPanel`'s placement exactly).
+ * «Расширения» top-level view (S-EXT §8): the MCP servers/tools/connectors/skills/trust
+ * management panel, mirrors `ProjectPanel`'s tab pattern (`TABS: {key,label}[]`, ONE tab mounted
+ * at a time, `activeTab` local state) + its honest-degradation discipline (the shared
+ * `<OrchdDownBanner/>` renders above the tab bar whenever `orchdDown`, matching `ProjectPanel`'s
+ * placement exactly).
  *
- * «Серверы» (`ServersTab`), «Инструменты» (`ToolsBrowser`, T8), «Коннекторы» (`ConnectorsTab`,
- * T13b) and «Навыки» (`SkillsTab`, T17 — plumbing only, no runtime consumer until S6b, see that
- * component's own doc comment) are built — the remaining two tabs render a `ComingSoonStub` (see
- * `STUB_TABS`) rather than being omitted, so the full planned surface is visible/navigable now.
+ * All six tabs are built: «Серверы» (`ServersTab`), «Инструменты» (`ToolsBrowser`, T8),
+ * «Коннекторы» (`ConnectorsTab`, T13b), «Журнал» (`InvocationLog` — invocations + audit log +
+ * the spend/rate policy-cap editor, T18), «Артефакты» (`ArtifactsTab`, T18) and «Навыки»
+ * (`SkillsTab`, T17 — plumbing only, no runtime consumer until S6b, see that component's own doc
+ * comment).
  *
  * On mount, eagerly `refreshMcpServers()` — mirrors `ProjectPanel`'s own mount-fetch effect
  * (spec §10 "honest state, always": the server list must not silently stay `[]` just because
@@ -122,10 +112,9 @@ export function ExtPanel(): JSX.Element {
         {activeTab === "servers" && <ServersTab />}
         {activeTab === "tools" && <ToolsBrowser />}
         {activeTab === "connectors" && <ConnectorsTab />}
+        {activeTab === "log" && <InvocationLog />}
+        {activeTab === "artifacts" && <ArtifactsTab />}
         {activeTab === "skills" && <SkillsTab />}
-        {STUB_TABS.has(activeTab) && (
-          <ComingSoonStub label={TABS.find((t) => t.key === activeTab)!.label} />
-        )}
       </div>
     </div>
   );

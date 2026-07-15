@@ -1,9 +1,32 @@
 //! Tool cache translation (S-EXT spec §3: "tool_cache read/write; staleness; list_changed
-//! invalidation"). Phase-1 scope (task-5 brief) only needs the read/write half: translating a
-//! freshly `list_tools()`-fetched set into the `mcp_tool` cache-write shape ([`NewMcpTool`], via
-//! `Db::upsert_mcp_tools` — T2), which [`super::lifecycle::connect`] calls on every successful
-//! connect. Staleness tracking and `list_changed`-triggered invalidation are explicitly Phase 3
-//! (spec D14) and are NOT implemented here yet.
+//! invalidation"). Translates a freshly `list_tools()`-fetched set into the `mcp_tool` cache-write
+//! shape ([`NewMcpTool`], via `Db::upsert_mcp_tools` — T2, a full REPLACE, not a merge), which
+//! [`super::lifecycle::connect`] calls on every successful connect.
+//!
+//! **`tools/list_changed` — honest handling (task T18, spec §3):** `bpa_mcp::client::connect`
+//! opens a session with `().serve(transport)` (the unit `()` `ClientHandler` — see that
+//! function's own doc comment), which has no `on_tool_list_changed` override; and Phase-1's
+//! architecture (task-5 brief: "connect-per-call is fine") never holds a session open between
+//! calls in the first place — `mcp::invoke::call_tool` opens a FRESH session per `tools/call` and
+//! `McpConnect` opens a fresh one per explicit connect, each torn down at the end of that one
+//! request. There is therefore no LIVE, long-lived connection over which a server could ever push
+//! an async `notifications/tools/list_changed` for this daemon to observe in the first place —
+//! implementing `ClientHandler::on_tool_list_changed` here would be dead code with nothing to
+//! ever call it, an inert handler that FALSELY implies live behavior.
+//!
+//! The honest alternative this task takes instead: **the cache is refreshed on every
+//! `McpConnect`** — `super::lifecycle::connect` always does a fresh `list_tools()` immediately
+//! after the handshake and REPLACES the cached set wholesale (`connect_replaces_a_previously_
+//! cached_tool_set`, that module's own test), and `socket_server::dispatch`'s `McpConnect` arm
+//! pushes `McpToolsChanged{server_id}` on every success so the frontend's tool list re-fetches
+//! too. In the connect-per-call model this is not a workaround: a server's list_changed
+//! notification only ever matters to a client that's ABOUT to read the tool list again, and every
+//! `McpConnect` already does exactly that read, unconditionally. The residual gap — a change that
+//! happens on the SERVER between two `McpConnect`/`tools/call` attempts is invisible until the
+//! next explicit `McpConnect` — is real but narrow (no persistent session exists to have observed
+//! it live either way) and is tracked as **BL-70** (a persistent-session architecture + a live
+//! `tools/list_changed` subscription is a follow-up for whenever Phase-1's connect-per-call model
+//! is revisited, e.g. alongside S6b's agent org).
 
 use super::NewMcpTool;
 

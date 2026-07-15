@@ -1,0 +1,353 @@
+import { useEffect, useState, type CSSProperties, type JSX } from "react";
+import { useAppStore } from "../../store/store";
+import { trustSetPolicy, describeOrchdError } from "../../ipc/orchd";
+import type { McpInvocation, Policy, PolicyScope } from "../../ipc/orchd-types";
+import { theme } from "../../theme";
+
+const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+
+const sectionStyle: CSSProperties = {
+  marginBottom: 20,
+};
+
+const sectionTitleStyle: CSSProperties = {
+  fontSize: 13,
+  fontWeight: 700,
+  marginBottom: 8,
+  color: theme.colors.text,
+};
+
+const tableStyle: CSSProperties = {
+  width: "100%",
+  borderCollapse: "collapse",
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+};
+
+const thStyle: CSSProperties = {
+  textAlign: "left",
+  padding: "4px 8px",
+  borderBottom: `1px solid ${theme.colors.border}`,
+  color: theme.colors.textDim,
+  fontWeight: 600,
+  whiteSpace: "nowrap",
+};
+
+const tdStyle: CSSProperties = {
+  padding: "4px 8px",
+  borderBottom: `1px solid ${theme.colors.border}`,
+  color: theme.colors.text,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  maxWidth: 220,
+};
+
+const okStyle: CSSProperties = {
+  color: theme.colors.statusRunning,
+  fontWeight: 700,
+};
+
+const errStyle: CSSProperties = {
+  color: theme.colors.statusExited,
+  fontWeight: 700,
+};
+
+const createFormStyle: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+  padding: "8px 12px",
+  marginBottom: 12,
+  border: `1px dashed ${theme.colors.border}`,
+  borderRadius: 8,
+  alignItems: "center",
+};
+
+const createInputStyle: CSSProperties = {
+  flex: "1 1 140px",
+  minWidth: 0,
+  fontFamily: MONO_FONT,
+  fontSize: 12,
+  color: theme.colors.text,
+  background: theme.colors.bg,
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 4,
+  padding: "3px 6px",
+};
+
+const selectStyle: CSSProperties = {
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  color: theme.colors.text,
+  background: theme.colors.bg,
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 4,
+  padding: "2px 4px",
+  flexShrink: 0,
+};
+
+const textButtonStyle: CSSProperties = {
+  border: `1px solid ${theme.colors.border}`,
+  background: "transparent",
+  color: theme.colors.text,
+  cursor: "pointer",
+  fontSize: 11,
+  borderRadius: 4,
+  padding: "2px 8px",
+  flexShrink: 0,
+  whiteSpace: "nowrap",
+};
+
+const primaryButtonStyle: CSSProperties = {
+  ...textButtonStyle,
+  color: theme.colors.bg,
+  background: theme.colors.accent,
+  borderColor: theme.colors.accent,
+};
+
+const emptyStyle: CSSProperties = {
+  color: theme.colors.textDim,
+  fontSize: 12,
+};
+
+const SCOPE_LABEL: Record<PolicyScope, string> = {
+  global: "глобально",
+  project: "проект",
+  server: "сервер",
+};
+
+function formatTimestamp(ms: number): string {
+  return new Date(ms).toLocaleString();
+}
+
+function sourceLabel(inv: McpInvocation, serverNames: Record<string, string>): string {
+  if (inv.serverId !== null) return serverNames[inv.serverId] ?? inv.serverId;
+  if (inv.accountId !== null) return inv.accountId;
+  return "—";
+}
+
+/**
+ * «Журнал» tab (S-EXT §8, T18): the invocation log (`mcpListInvocations`, spec §5) + the
+ * append-only audit log (`trustListAudit`, spec §4/§6, BL-22) + a spend/rate policy-cap editor
+ * (`trustListPolicies`/`trustSetPolicy`).
+ *
+ * On mount, eagerly `refreshInvocations()`/`refreshAuditRows()`/`refreshPolicies()` (mirrors
+ * `ExtPanel`'s own mount-fetch discipline for `mcpServers` — spec §10 "honest state, always").
+ * Re-fetches invocations on `orchd://mcp-invocation-logged` (bound in `App.tsx`) and policies on
+ * `orchd://policies-changed`.
+ *
+ * The policy editor's `trustSetPolicy` control is `disabled={orchdDown}` (spec §8 honest
+ * degradation, mirrors every other mutating control in this panel) — the invocation/audit tables
+ * are read-only and unaffected by `orchdDown`.
+ */
+export function InvocationLog(): JSX.Element {
+  const invocations = useAppStore((s) => s.invocations);
+  const auditRows = useAppStore((s) => s.auditRows);
+  const policies = useAppStore((s) => s.policies);
+  const mcpServers = useAppStore((s) => s.mcpServers);
+  const orchdDown = useAppStore((s) => s.orchdDown);
+  const refreshInvocations = useAppStore((s) => s.refreshInvocations);
+  const refreshAuditRows = useAppStore((s) => s.refreshAuditRows);
+  const refreshPolicies = useAppStore((s) => s.refreshPolicies);
+  const showToast = useAppStore((s) => s.showToast);
+
+  const [scope, setScope] = useState<PolicyScope>("global");
+  const [refId, setRefId] = useState("");
+  const [spendCapUsd, setSpendCapUsd] = useState("");
+  const [ratePerMin, setRatePerMin] = useState("");
+
+  useEffect(() => {
+    void refreshInvocations();
+    void refreshAuditRows();
+    void refreshPolicies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const serverNames: Record<string, string> = {};
+  for (const s of mcpServers) serverNames[s.id] = s.name;
+
+  const refIdRequired = scope !== "global";
+  const setBlocked = refIdRequired && refId.trim() === "";
+
+  async function handleSetPolicy(): Promise<void> {
+    if (setBlocked) return;
+    const spend = spendCapUsd.trim() === "" ? null : Number(spendCapUsd);
+    const rate = ratePerMin.trim() === "" ? null : Number(ratePerMin);
+    if ((spend !== null && Number.isNaN(spend)) || (rate !== null && Number.isNaN(rate))) {
+      showToast("предел должен быть числом");
+      return;
+    }
+    try {
+      await trustSetPolicy(scope, refIdRequired ? refId.trim() : null, spend, rate);
+      setRefId("");
+      setSpendCapUsd("");
+      setRatePerMin("");
+      await refreshPolicies();
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  return (
+    <div data-testid="invocation-log">
+      <div style={sectionStyle}>
+        <div style={sectionTitleStyle}>Лимиты (spend/rate)</div>
+        <div style={createFormStyle}>
+          <select
+            data-testid="policy-scope"
+            aria-label="Область"
+            value={scope}
+            onChange={(e) => setScope(e.target.value as PolicyScope)}
+            style={selectStyle}
+          >
+            <option value="global">глобально</option>
+            <option value="project">проект</option>
+            <option value="server">сервер</option>
+          </select>
+          <input
+            data-testid="policy-ref-id"
+            aria-label="ID проекта или сервера"
+            placeholder={scope === "global" ? "не требуется" : "id проекта/сервера"}
+            value={refId}
+            disabled={scope === "global"}
+            onChange={(e) => setRefId(e.target.value)}
+            style={createInputStyle}
+          />
+          <input
+            data-testid="policy-spend-cap"
+            aria-label="Лимит расходов, USD"
+            placeholder="лимит $ (пусто = без лимита)"
+            value={spendCapUsd}
+            onChange={(e) => setSpendCapUsd(e.target.value)}
+            style={createInputStyle}
+          />
+          <input
+            data-testid="policy-rate-per-min"
+            aria-label="Лимит вызовов в минуту"
+            placeholder="вызовов/мин (пусто = без лимита)"
+            value={ratePerMin}
+            onChange={(e) => setRatePerMin(e.target.value)}
+            style={createInputStyle}
+          />
+          <button
+            type="button"
+            data-testid="policy-set-submit"
+            disabled={orchdDown || setBlocked}
+            onClick={() => void handleSetPolicy()}
+            style={{ ...primaryButtonStyle, opacity: orchdDown || setBlocked ? 0.5 : 1 }}
+          >
+            задать лимит
+          </button>
+        </div>
+
+        {policies.length === 0 ? (
+          <div data-testid="policies-empty" style={emptyStyle}>
+            лимиты не заданы
+          </div>
+        ) : (
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>область</th>
+                <th style={thStyle}>id</th>
+                <th style={thStyle}>лимит $</th>
+                <th style={thStyle}>вызовов/мин</th>
+              </tr>
+            </thead>
+            <tbody>
+              {policies.map((p: Policy) => (
+                <tr key={p.id} data-testid={`policy-row-${p.id}`}>
+                  <td style={tdStyle}>{SCOPE_LABEL[p.scope]}</td>
+                  <td style={tdStyle}>{p.refId ?? "—"}</td>
+                  <td style={tdStyle}>{p.spendCapUsd ?? "—"}</td>
+                  <td style={tdStyle}>{p.ratePerMin ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div style={sectionStyle}>
+        <div style={sectionTitleStyle}>Вызовы</div>
+        {invocations.length === 0 ? (
+          <div data-testid="invocations-empty" style={emptyStyle}>
+            нет вызовов
+          </div>
+        ) : (
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>источник</th>
+                <th style={thStyle}>инструмент</th>
+                <th style={thStyle}>статус</th>
+                <th style={thStyle}>задержка, мс</th>
+                <th style={thStyle}>стоимость, $</th>
+                <th style={thStyle}>время</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invocations.map((inv) => (
+                <tr key={inv.id} data-testid={`invocation-row-${inv.id}`}>
+                  <td style={tdStyle}>{sourceLabel(inv, serverNames)}</td>
+                  <td style={tdStyle}>{inv.toolName}</td>
+                  <td style={tdStyle}>
+                    <span
+                      data-testid={`invocation-status-${inv.id}`}
+                      style={inv.ok ? okStyle : errStyle}
+                    >
+                      {inv.ok ? "ok" : (inv.errorKind ?? "err")}
+                    </span>
+                  </td>
+                  <td style={tdStyle}>{inv.latencyMs}</td>
+                  <td style={tdStyle} data-testid={`invocation-cost-${inv.id}`}>
+                    {inv.costUsd ?? "—"}
+                  </td>
+                  <td style={tdStyle}>{formatTimestamp(inv.startedAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div style={sectionStyle}>
+        <div style={sectionTitleStyle}>Аудит</div>
+        {auditRows.length === 0 ? (
+          <div data-testid="audit-rows-empty" style={emptyStyle}>
+            нет записей аудита
+          </div>
+        ) : (
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>действие</th>
+                <th style={thStyle}>решение</th>
+                <th style={thStyle}>причина</th>
+                <th style={thStyle}>время</th>
+              </tr>
+            </thead>
+            <tbody>
+              {auditRows.map((row) => (
+                <tr key={row.id} data-testid={`audit-row-${row.id}`}>
+                  <td style={tdStyle}>{row.action}</td>
+                  <td style={tdStyle}>
+                    <span
+                      data-testid={`audit-decision-${row.id}`}
+                      style={row.decision === "allow" ? okStyle : errStyle}
+                    >
+                      {row.decision}
+                    </span>
+                  </td>
+                  <td style={tdStyle}>{row.reason ?? "—"}</td>
+                  <td style={tdStyle}>{formatTimestamp(row.at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}

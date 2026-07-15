@@ -24,8 +24,10 @@ import {
   onOrchdMcpServersChanged,
   onOrchdMcpToolsChanged,
   onOrchdMcpArtifactsChanged,
+  onOrchdMcpInvocationLogged,
   onOrchdConnectorsChanged,
   onOrchdSkillsChanged,
+  onOrchdPoliciesChanged,
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
@@ -214,6 +216,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       onOrchdMcpToolsChanged((p) => void useAppStore.getState().refreshMcpTools(p.serverId)),
     );
     track(onOrchdMcpArtifactsChanged(() => void useAppStore.getState().refreshMcpArtifacts()));
+    // `orchd://mcp-invocation-logged` (S-EXT §8, T18: the «Журнал» tab) — same unconditional-
+    // refresh precedent as the MCP trio above; the store's `invocations` slice is whole-store,
+    // un-scoped, so any server's newly-logged invocation refetches the whole list.
+    track(onOrchdMcpInvocationLogged(() => void useAppStore.getState().refreshInvocations()));
     // Connectors coarse-invalidation event (S-EXT §8, T13b): same unconditional-refresh
     // precedent as the MCP trio above — no "Коннекторы tab currently open" gating to mirror.
     track(onOrchdConnectorsChanged(() => void useAppStore.getState().refreshAccounts()));
@@ -221,6 +227,9 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // precedent as the MCP/Connectors events above — no "Навыки tab currently open" gating to
     // mirror.
     track(onOrchdSkillsChanged(() => void useAppStore.getState().refreshSkills()));
+    // Trust policy-cap coarse-invalidation event (S-EXT §4/§6/§8, BL-22, T18): same
+    // unconditional-refresh precedent as `ConnectorsChanged`/`SkillsChanged` above.
+    track(onOrchdPoliciesChanged(() => void useAppStore.getState().refreshPolicies()));
     // orchd connection state (spec §9): a DIRECT 1:1 mapping (see
     // `broker.rs::map_orchd_conn_state`'s doc) — unlike the sessiond trio there is no
     // reconnect-tracking scheme, `orchd://down`/`orchd://up` just flip `orchdDown`.

@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bpa_orchd_proto::{
-    DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
-    InsightStatus, McpArtifact, McpInvocation, PolicyRules, Project, ProjectStatus, RuleScope,
-    RuleSet, TaskSource, TaskStatus,
+    AuditRow, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, Idea, IdeaLifecycle, Insight,
+    InsightStatus, McpArtifact, McpInvocation, Policy, PolicyRules, PolicyScope, Project,
+    ProjectStatus, RuleScope, RuleSet, TaskSource, TaskStatus,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
@@ -502,6 +502,10 @@ pub(crate) fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
            FOREIGN KEY(server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
            UNIQUE(server_id, kind)
          );
+         -- (task T18, S-EXT §6/BL-22 — this table's CRUD lands in T18; the two CHECKs below
+         -- correct-in-place the unreleased v3 DDL the same way T12 review corrected
+         -- mcp_invocation/mcp_artifact's server_id/account_id nullability, rather than a new
+         -- schema-version step: no real orchd.db has ever populated this still-CRUD-less table)
          CREATE TABLE policy (
            id             TEXT PRIMARY KEY,
            scope          TEXT NOT NULL,                 -- 'global' | 'project' | 'server'
@@ -509,7 +513,9 @@ pub(crate) fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
            spend_cap_usd  REAL,                          -- null = unlimited
            rate_per_min   INTEGER,                       -- null = unlimited
            created_at     INTEGER NOT NULL,
-           updated_at     INTEGER NOT NULL
+           updated_at     INTEGER NOT NULL,
+           CHECK ( scope IN ('global','project','server') ),
+           CHECK ( (scope='global') = (ref_id IS NULL) )
          );
          CREATE TABLE audit_log (
            id             TEXT PRIMARY KEY,
@@ -5234,15 +5240,16 @@ mod ruleset_tests {
 // concerns" reason (task-5 brief: "Modify: ... persistence.rs (invocation/artifact/consent/audit
 // CRUD)").
 //
-// `insert_invocation`/`insert_artifact`/`list_invocations`/`list_artifacts`/`get_artifact`
-// return `bpa_orchd_proto::{McpInvocation, McpArtifact}` directly (the wire entities T3 already
-// defined) rather than inventing parallel `*Row` structs — mirrors this file's OWN established
-// convention for `Project`/`Goal`/`Idea`/`Insight`/`DomainTask`/`RuleSet` (all wire types,
-// returned directly by this file's CRUD), unlike `crate::mcp::{McpServerRow, McpToolRow}` (T2),
-// which predates T3's wire types and had nothing to reuse yet. `audit_log` has no wire entity
-// yet (`TrustListAudit` hasn't landed — `orchd-proto`'s S-EXT block stops at
-// `TrustGrantConsent`), so `AuditRow` stays crate-local for now, the same way `McpServerRow` did
-// before T3.
+// `insert_invocation`/`insert_artifact`/`list_invocations`/`list_artifacts`/`get_artifact`/
+// `insert_audit`/`list_audit`/`upsert_policy`/`list_policies`/`get_policy` all return
+// `bpa_orchd_proto::{McpInvocation, McpArtifact, AuditRow, Policy}` directly (the wire entities)
+// rather than inventing parallel `*Row` structs — mirrors this file's OWN established convention
+// for `Project`/`Goal`/`Idea`/`Insight`/`DomainTask`/`RuleSet` (all wire types, returned directly
+// by this file's CRUD), unlike `crate::mcp::{McpServerRow, McpToolRow}` (T2), which predates
+// T3's wire types and had nothing to reuse yet. `audit_log`'s `AuditRow` WAS crate-local (no
+// `TrustListAudit` verb existed yet) until task T18 added the wire entity and this section
+// switched `insert_audit` over to it — the same migration `McpServerRow` itself never needed
+// since T3 landed before this section did.
 
 /// Input to [`Db::insert_invocation`] (spec §4 `mcp_invocation`; `id` assigned here via uuid
 /// v4). `started_at` is caller-supplied — unlike every OTHER table's `created_at` in this file
@@ -5305,6 +5312,18 @@ pub struct NewAudit {
     pub invocation_id: Option<String>,
 }
 
+/// Input to [`Db::upsert_policy`] (spec §4 `policy`, task T18, BL-22): `id`/`created_at`/
+/// `updated_at` are assigned/stamped by the upsert itself. `scope`/`ref_id` together identify
+/// WHICH row this call targets (the upsert key) — see [`PolicyScope`]'s own doc for the pairing
+/// rule `upsert_policy` validates before writing.
+#[derive(Debug, Clone)]
+pub struct NewPolicy {
+    pub scope: PolicyScope,
+    pub ref_id: Option<String>,
+    pub spend_cap_usd: Option<f64>,
+    pub rate_per_min: Option<i64>,
+}
+
 /// `consent_grant` row, decoded (spec §4). Crate-local (no wire entity for it yet — `orchd-proto`
 /// has no consent-listing verb). Carries the stored `fingerprint` so `crate::trust` can compare
 /// it against the CURRENT server URL and re-prompt on mismatch (spec D10).
@@ -5315,21 +5334,6 @@ pub struct ConsentRow {
     pub server_id: String,
     pub fingerprint: String,
     pub granted_at: i64,
-}
-
-/// `audit_log` row, decoded (spec §4). See this section's header comment for why this stays a
-/// crate-local type rather than a `bpa_orchd_proto` wire entity.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AuditRow {
-    pub id: String,
-    pub at: i64,
-    pub action: String,
-    pub server_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub project_id: Option<String>,
-    pub decision: String,
-    pub reason: Option<String>,
-    pub invocation_id: Option<String>,
 }
 
 struct McpInvocationRawRow {
@@ -5453,6 +5457,103 @@ fn load_artifact(conn: &Connection, id: &str) -> Result<McpArtifact, OrchdPersis
         .optional()?
         .ok_or(OrchdPersistError::NotFound)?;
     Ok(raw.into_entity())
+}
+
+const AUDIT_COLUMNS: &str =
+    "id, at, action, server_id, tool_name, project_id, decision, reason, invocation_id";
+
+/// Decodes one `audit_log` row directly into the wire [`AuditRow`] (task T18 — see this
+/// section's header comment for why `insert_audit`/`list_audit` return the wire type directly
+/// rather than a crate-local `*Row`).
+fn decode_audit_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRow> {
+    Ok(AuditRow {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        action: r.get(2)?,
+        server_id: r.get(3)?,
+        tool_name: r.get(4)?,
+        project_id: r.get(5)?,
+        decision: r.get(6)?,
+        reason: r.get(7)?,
+        invocation_id: r.get(8)?,
+    })
+}
+
+fn load_audit(conn: &Connection, id: &str) -> Result<AuditRow, OrchdPersistError> {
+    let sql = format!("SELECT {AUDIT_COLUMNS} FROM audit_log WHERE id = ?1");
+    conn.query_row(&sql, rusqlite::params![id], decode_audit_row)
+        .optional()?
+        .ok_or(OrchdPersistError::NotFound)
+}
+
+// ---- policy enum <-> TEXT helpers (spec §4 CHECK literal, task T18) — mirrors
+// `mcp::registry::encode_scope`/`decode_scope`'s exact shape. ----
+
+fn encode_policy_scope(s: &PolicyScope) -> &'static str {
+    match s {
+        PolicyScope::Global => "global",
+        PolicyScope::Project => "project",
+        PolicyScope::Server => "server",
+    }
+}
+
+fn decode_policy_scope(s: &str) -> Result<PolicyScope, OrchdPersistError> {
+    match s {
+        "global" => Ok(PolicyScope::Global),
+        "project" => Ok(PolicyScope::Project),
+        "server" => Ok(PolicyScope::Server),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt policy.scope value: {other}"
+        ))),
+    }
+}
+
+const POLICY_COLUMNS: &str =
+    "id, scope, ref_id, spend_cap_usd, rate_per_min, created_at, updated_at";
+
+struct PolicyRawRow {
+    id: String,
+    scope: String,
+    ref_id: Option<String>,
+    spend_cap_usd: Option<f64>,
+    rate_per_min: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl PolicyRawRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            scope: r.get(1)?,
+            ref_id: r.get(2)?,
+            spend_cap_usd: r.get(3)?,
+            rate_per_min: r.get(4)?,
+            created_at: r.get(5)?,
+            updated_at: r.get(6)?,
+        })
+    }
+
+    fn into_entity(self) -> Result<Policy, OrchdPersistError> {
+        Ok(Policy {
+            id: self.id,
+            scope: decode_policy_scope(&self.scope)?,
+            ref_id: self.ref_id,
+            spend_cap_usd: self.spend_cap_usd,
+            rate_per_min: self.rate_per_min,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+fn load_policy(conn: &Connection, id: &str) -> Result<Policy, OrchdPersistError> {
+    let sql = format!("SELECT {POLICY_COLUMNS} FROM policy WHERE id = ?1");
+    let raw = conn
+        .query_row(&sql, rusqlite::params![id], PolicyRawRow::from_row)
+        .optional()?
+        .ok_or(OrchdPersistError::NotFound)?;
+    raw.into_entity()
 }
 
 impl Db {
@@ -5670,26 +5771,204 @@ impl Db {
                 new.invocation_id,
             ],
         )?;
-        let row = tx.query_row(
-            "SELECT id, at, action, server_id, tool_name, project_id, decision, reason, \
-             invocation_id FROM audit_log WHERE id = ?1",
-            rusqlite::params![id],
-            |r| {
-                Ok(AuditRow {
-                    id: r.get(0)?,
-                    at: r.get(1)?,
-                    action: r.get(2)?,
-                    server_id: r.get(3)?,
-                    tool_name: r.get(4)?,
-                    project_id: r.get(5)?,
-                    decision: r.get(6)?,
-                    reason: r.get(7)?,
-                    invocation_id: r.get(8)?,
-                })
-            },
-        )?;
+        let row = load_audit(&tx, &id)?;
         tx.commit()?;
         Ok(row)
+    }
+
+    /// `list_audit` (spec §5 `TrustListAudit`, task T18): newest-first, optionally capped at
+    /// `limit` — mirrors `list_invocations`'s own `?1 IS NULL OR ...`-optional-filter /
+    /// `ORDER BY ... DESC, id` / `LIMIT ?N` idiom (here there is no filter column to make
+    /// optional, just the cap).
+    pub fn list_audit(&self, limit: Option<i64>) -> Result<Vec<AuditRow>, OrchdPersistError> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id FROM audit_log ORDER BY at DESC, id LIMIT ?1")?;
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![limit.unwrap_or(i64::MAX)], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        ids.iter().map(|id| load_audit(self.conn(), id)).collect()
+    }
+
+    /// `upsert_policy` (spec §4 `policy`, task T18, BL-22): UPSERT keyed by `(scope, ref_id)` —
+    /// re-setting a policy for the same scope/reference replaces its caps in place rather than
+    /// creating a second row. Validates the scope/`ref_id` pairing (`Global` ⇒ `ref_id: None`;
+    /// `Project`/`Server` ⇒ `ref_id: Some(_)`) BEFORE writing — the DB's own two `CHECK`s (spec
+    /// §4) are the same invariant as defense-in-depth, but a clean `Validation` error here (like
+    /// every other hand-validated verb in this file) beats surfacing a raw `Sql` constraint
+    /// failure to the caller.
+    ///
+    /// Implemented as an explicit read-then-write (a `SELECT ... WHERE scope = ?1 AND ref_id IS
+    /// ?2` existence check, then `UPDATE` or `INSERT`) inside one transaction, NOT a SQL `ON
+    /// CONFLICT` upsert: `ref_id` is `NULL` for the single global-scope row, and SQL's own NULL
+    /// semantics make `NULL <> NULL` in a UNIQUE constraint (so two `INSERT`s with `ref_id: NULL`
+    /// would never collide, defeating a plain `ON CONFLICT(scope, ref_id)`), while `... IS ?2`
+    /// here correctly treats `NULL` as equal to `NULL`. Race-safe because it is: every caller
+    /// reaches this through the SAME single `Arc<Mutex<Db>>` guard every other mutating verb in
+    /// this daemon holds around its own read-then-write (see `mcp::invoke::call_tool`'s own doc
+    /// comment on that invariant) — there is no concurrent SQL access to this connection to race
+    /// against.
+    pub fn upsert_policy(&self, new: NewPolicy) -> Result<Policy, OrchdPersistError> {
+        match new.scope {
+            PolicyScope::Global if new.ref_id.is_some() => {
+                return Err(OrchdPersistError::Validation(
+                    "policy.ref_id must be omitted for scope 'global'".to_string(),
+                ));
+            }
+            PolicyScope::Project | PolicyScope::Server if new.ref_id.is_none() => {
+                return Err(OrchdPersistError::Validation(
+                    "policy.ref_id is required for scope 'project'/'server'".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        let tx = self.conn().unchecked_transaction()?;
+        let now = now_ms();
+        let scope_text = encode_policy_scope(&new.scope);
+        let existing_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM policy WHERE scope = ?1 AND ref_id IS ?2",
+                rusqlite::params![scope_text, new.ref_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let id = match existing_id {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE policy SET spend_cap_usd = ?1, rate_per_min = ?2, updated_at = ?3 \
+                     WHERE id = ?4",
+                    rusqlite::params![new.spend_cap_usd, new.rate_per_min, now, id],
+                )?;
+                id
+            }
+            None => {
+                let id = Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO policy
+                       (id, scope, ref_id, spend_cap_usd, rate_per_min, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    rusqlite::params![
+                        id,
+                        scope_text,
+                        new.ref_id,
+                        new.spend_cap_usd,
+                        new.rate_per_min,
+                        now,
+                    ],
+                )?;
+                id
+            }
+        };
+        let row = load_policy(&tx, &id)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// `list_policies` (task T18): every configured policy, deterministically ordered (`scope`
+    /// then `ref_id` then `id` — `NULL` `ref_id` — the single global row — sorts first).
+    pub fn list_policies(&self) -> Result<Vec<Policy>, OrchdPersistError> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id FROM policy ORDER BY scope, ref_id, id")?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        ids.iter().map(|id| load_policy(self.conn(), id)).collect()
+    }
+
+    /// `get_policy` (task T18, `crate::trust::resolve_policy`'s building block): the row at
+    /// EXACTLY `(scope, ref_id)`, or `None` if no policy has been configured at that scope.
+    pub fn get_policy(
+        &self,
+        scope: PolicyScope,
+        ref_id: Option<&str>,
+    ) -> Result<Option<Policy>, OrchdPersistError> {
+        let id: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT id FROM policy WHERE scope = ?1 AND ref_id IS ?2",
+                rusqlite::params![encode_policy_scope(&scope), ref_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        id.map(|id| load_policy(self.conn(), &id)).transpose()
+    }
+
+    /// Count of `mcp_invocation` rows started at or after `since_ms`, scoped by `scope`/`ref_id`
+    /// (task T18, spec §6 rate-limit check): `Global` counts every invocation (MCP tool calls
+    /// AND connector invokes share this one table); `Project`/`Server` filter to the matching
+    /// `project_id`/`server_id` column. The CURRENT (not-yet-dispatched) attempt this check is
+    /// gating is never included — `crate::trust::authorize` runs BEFORE the row for this
+    /// attempt would be written (spec §6: pre-dispatch).
+    pub fn count_invocations_since(
+        &self,
+        scope: PolicyScope,
+        ref_id: Option<&str>,
+        since_ms: i64,
+    ) -> Result<i64, OrchdPersistError> {
+        let sql = match scope {
+            PolicyScope::Global => "SELECT COUNT(*) FROM mcp_invocation WHERE started_at >= ?1",
+            PolicyScope::Project => {
+                "SELECT COUNT(*) FROM mcp_invocation WHERE started_at >= ?1 AND project_id = ?2"
+            }
+            PolicyScope::Server => {
+                "SELECT COUNT(*) FROM mcp_invocation WHERE started_at >= ?1 AND server_id = ?2"
+            }
+        };
+        let count = match scope {
+            PolicyScope::Global => {
+                self.conn()
+                    .query_row(sql, rusqlite::params![since_ms], |r| r.get(0))?
+            }
+            PolicyScope::Project | PolicyScope::Server => {
+                self.conn()
+                    .query_row(sql, rusqlite::params![since_ms, ref_id], |r| r.get(0))?
+            }
+        };
+        Ok(count)
+    }
+
+    /// Sum of `mcp_invocation.cost_usd` since `since_ms`, scoped by `scope`/`ref_id` (task T18,
+    /// spec §6 spend-cap check): `COALESCE(SUM(...), 0)` so an empty window (or a window whose
+    /// invocations never reported a cost) sums to `0.0`, never SQL `NULL` — a NULL `cost_usd` is
+    /// the honest default (spec §4: "null unless server reports usage"), so a scope where NO
+    /// invocation has ever reported a cost sums to `0.0` and can never trip a spend cap on its
+    /// own (task T18 brief: "the spend cap binds ONLY when servers report cost"). Mirrors
+    /// [`Db::count_invocations_since`]'s scope-filter shape exactly.
+    pub fn sum_cost_since(
+        &self,
+        scope: PolicyScope,
+        ref_id: Option<&str>,
+        since_ms: i64,
+    ) -> Result<f64, OrchdPersistError> {
+        let sql = match scope {
+            PolicyScope::Global => {
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM mcp_invocation WHERE started_at >= ?1"
+            }
+            PolicyScope::Project => {
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM mcp_invocation \
+                 WHERE started_at >= ?1 AND project_id = ?2"
+            }
+            PolicyScope::Server => {
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM mcp_invocation \
+                 WHERE started_at >= ?1 AND server_id = ?2"
+            }
+        };
+        let sum = match scope {
+            PolicyScope::Global => {
+                self.conn()
+                    .query_row(sql, rusqlite::params![since_ms], |r| r.get(0))?
+            }
+            PolicyScope::Project | PolicyScope::Server => {
+                self.conn()
+                    .query_row(sql, rusqlite::params![since_ms, ref_id], |r| r.get(0))?
+            }
+        };
+        Ok(sum)
     }
 }
 
@@ -6050,5 +6329,212 @@ mod trust_persistence_tests {
         assert_eq!(row.server_id.as_deref(), Some(server_id.as_str()));
         assert_eq!(row.decision, "deny");
         assert_eq!(row.reason.as_deref(), Some("consent_required"));
+    }
+
+    #[test]
+    fn list_audit_is_newest_first_and_respects_limit() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        for i in 0..3 {
+            db.insert_audit(NewAudit {
+                action: "tool_call".to_string(),
+                server_id: Some(server_id.clone()),
+                tool_name: Some(format!("tool-{i}")),
+                project_id: None,
+                decision: "allow".to_string(),
+                reason: None,
+                invocation_id: None,
+            })
+            .unwrap();
+            // `insert_audit` stamps `at` via `now_ms()` internally (not caller-supplied, unlike
+            // `NewInvocation.started_at`) — a tiny real sleep guarantees three DISTINCT
+            // millisecond timestamps so "newest first" has a deterministic order to assert
+            // against, rather than racing millisecond-resolution clock granularity.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let all = db.list_audit(None).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].tool_name.as_deref(), Some("tool-2"), "newest first");
+
+        let capped = db.list_audit(Some(2)).unwrap();
+        assert_eq!(capped.len(), 2);
+    }
+
+    // ---- upsert_policy / list_policies / get_policy (task T18, BL-22) ----
+
+    #[test]
+    fn upsert_policy_inserts_then_updates_in_place_on_re_set() {
+        let db = new_db();
+        let created = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Global,
+                ref_id: None,
+                spend_cap_usd: Some(10.0),
+                rate_per_min: Some(60),
+            })
+            .unwrap();
+        assert_eq!(created.scope, PolicyScope::Global);
+        assert_eq!(created.ref_id, None);
+        assert_eq!(created.spend_cap_usd, Some(10.0));
+        assert_eq!(created.rate_per_min, Some(60));
+
+        let updated = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Global,
+                ref_id: None,
+                spend_cap_usd: Some(20.0),
+                rate_per_min: None,
+            })
+            .unwrap();
+        assert_eq!(
+            updated.id, created.id,
+            "re-setting the same scope must UPDATE the existing row, not insert a second one"
+        );
+        assert_eq!(updated.spend_cap_usd, Some(20.0));
+        assert_eq!(
+            updated.rate_per_min, None,
+            "null clears a previously-set cap"
+        );
+
+        let all = db.list_policies().unwrap();
+        assert_eq!(all.len(), 1, "upsert must never create a duplicate row");
+    }
+
+    #[test]
+    fn upsert_policy_project_and_server_scopes_are_independent_rows() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let project = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Project,
+                ref_id: Some("proj-1".to_string()),
+                spend_cap_usd: Some(5.0),
+                rate_per_min: None,
+            })
+            .unwrap();
+        let server = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Server,
+                ref_id: Some(server_id.clone()),
+                spend_cap_usd: None,
+                rate_per_min: Some(10),
+            })
+            .unwrap();
+        assert_ne!(project.id, server.id);
+
+        let all = db.list_policies().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn upsert_policy_rejects_a_global_scope_with_a_ref_id() {
+        let db = new_db();
+        let err = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Global,
+                ref_id: Some("proj-1".to_string()),
+                spend_cap_usd: None,
+                rate_per_min: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Validation(_)), "{err:?}");
+    }
+
+    #[test]
+    fn upsert_policy_rejects_a_project_scope_without_a_ref_id() {
+        let db = new_db();
+        let err = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Project,
+                ref_id: None,
+                spend_cap_usd: None,
+                rate_per_min: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Validation(_)), "{err:?}");
+    }
+
+    #[test]
+    fn get_policy_returns_none_for_an_unconfigured_scope() {
+        let db = new_db();
+        assert_eq!(db.get_policy(PolicyScope::Global, None).unwrap(), None);
+        assert_eq!(
+            db.get_policy(PolicyScope::Project, Some("proj-1")).unwrap(),
+            None
+        );
+    }
+
+    // ---- count_invocations_since / sum_cost_since (task T18, BL-22) ----
+
+    #[test]
+    fn count_invocations_since_scopes_by_server_project_and_global() {
+        let db = new_db();
+        let server_a = add_server(&db);
+        let server_b = add_server(&db);
+
+        let mut in_proj = new_invocation(&server_a);
+        in_proj.project_id = Some("proj-1".to_string());
+        in_proj.started_at = 10_000;
+        db.insert_invocation(in_proj).unwrap();
+
+        let mut on_b = new_invocation(&server_b);
+        on_b.started_at = 10_000;
+        db.insert_invocation(on_b).unwrap();
+
+        // Server-scoped: only server_a's row.
+        assert_eq!(
+            db.count_invocations_since(PolicyScope::Server, Some(&server_a), 0)
+                .unwrap(),
+            1
+        );
+        // Project-scoped: only the proj-1 row (server_b's call has no project_id).
+        assert_eq!(
+            db.count_invocations_since(PolicyScope::Project, Some("proj-1"), 0)
+                .unwrap(),
+            1
+        );
+        // Global: both rows.
+        assert_eq!(
+            db.count_invocations_since(PolicyScope::Global, None, 0)
+                .unwrap(),
+            2
+        );
+        // A `since_ms` after both rows excludes everything.
+        assert_eq!(
+            db.count_invocations_since(PolicyScope::Global, None, 20_000)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn sum_cost_since_coalesces_null_cost_to_zero() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        // new_invocation() sets cost_usd: Some(0.01) — override to NULL to prove the honest
+        // "server never reported usage" default sums to 0.0, never SQL NULL/an error.
+        let mut null_cost = new_invocation(&server_id);
+        null_cost.cost_usd = None;
+        null_cost.started_at = 1_000;
+        db.insert_invocation(null_cost).unwrap();
+
+        assert_eq!(
+            db.sum_cost_since(PolicyScope::Server, Some(&server_id), 0)
+                .unwrap(),
+            0.0,
+            "a NULL cost_usd must never make the sum NULL/error — it contributes 0.0"
+        );
+
+        let mut priced = new_invocation(&server_id);
+        priced.cost_usd = Some(2.5);
+        priced.started_at = 2_000;
+        db.insert_invocation(priced).unwrap();
+
+        assert_eq!(
+            db.sum_cost_since(PolicyScope::Server, Some(&server_id), 0)
+                .unwrap(),
+            2.5,
+            "only the reported cost counts; the NULL-cost row still contributes 0.0"
+        );
     }
 }

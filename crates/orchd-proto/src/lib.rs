@@ -637,6 +637,74 @@ pub enum SkillFileState {
     Missing,
 }
 
+// ---- S-EXT Trust entities (spec §4/§5/§6, BL-22, task T18, appended — order FROZEN
+// append-only): the `policy` spend/rate-cap table + the `audit_log` rows surfaced to the
+// Журнал/audit UI. Distinct from the pre-existing `PolicyRules` above (a per-ruleset
+// owner-consent policy, S1, with its OWN unrelated spend-cap field): `Policy` here is the trust
+// CHOKE-POINT's spend/rate cap row (`crate::trust::authorize`, spec §6), keyed by scope + a
+// reference id, not a ruleset. ----
+
+/// `policy` row (spec §4): a spend/rate cap at one of three scopes. `None` cap fields mean
+/// "unlimited" for that dimension — a `Policy` with BOTH fields `None` is a legal (if pointless)
+/// row. See [`PolicyScope`] for the scope/reference-id pairing rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct Policy {
+    pub id: String,
+    pub scope: PolicyScope,
+    /// The project or server this policy applies to — `Some` for a project- or server-scoped
+    /// policy, `None` for the single global-scope policy (spec §4: null for global).
+    pub ref_id: Option<String>,
+    pub spend_cap_usd: Option<f64>,
+    #[ts(type = "number | null")]
+    pub rate_per_min: Option<i64>,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+/// `policy.scope` (spec §4/§6, BL-22): which axis a cap applies to. `crate::trust`'s
+/// effective-policy resolution (task T18) is MOST-SPECIFIC-wins — `Server` overrides `Project`
+/// overrides `Global` — the whole matching row wins outright, not a per-field merge (see
+/// `trust::resolve_policy`'s own doc comment for the full rationale).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum PolicyScope {
+    Global,
+    Project,
+    Server,
+}
+
+/// `audit_log` row (spec §4/§6, BL-22, task T18): every trust-choke-point decision, allow or
+/// deny, surfaced to the Журнал/audit UI. `reason`/every other field NEVER carries secrets or
+/// tool-call arguments (spec §6) — only the fixed action/decision/reason vocabulary
+/// `crate::trust::authorize` writes (request content lives in the matching invocation's own
+/// request-hash field, a sha256, never here).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct AuditRow {
+    pub id: String,
+    #[ts(type = "number")]
+    pub at: i64,
+    /// One of a fixed action-literal vocabulary (spec §4): a connect/disconnect, a stdio
+    /// process spawn, an MCP tool call, a direct-API connector invoke, a consent grant, or a
+    /// policy-cap denial.
+    pub action: String,
+    pub server_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub project_id: Option<String>,
+    /// `'allow'|'deny'`.
+    pub decision: String,
+    /// e.g. consent required, tool disabled, rate limit exceeded, spend cap exceeded; `None` on
+    /// an `'allow'` row.
+    pub reason: Option<String>,
+    pub invocation_id: Option<String>,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -1030,6 +1098,25 @@ pub enum OrchdRequest {
     SkillDelete {
         id: String,
     },
+    // S-EXT Trust: policy caps + audit log (spec §4/§5/§6, BL-22, task T18, appended — order
+    // FROZEN append-only).
+    /// → `OrchdResponse::Policy`; UPSERT keyed by `(scope, ref_id)` (spec §4) — `scope:"global"`
+    /// requires `ref_id: None`, `scope:"project"|"server"` requires `ref_id: Some(<id>)`; a
+    /// mismatch is `Error{Validation}`. `None` cap fields mean "unlimited" for that dimension.
+    /// Pushes `PoliciesChanged`.
+    TrustSetPolicy {
+        scope: PolicyScope,
+        ref_id: Option<String>,
+        spend_cap_usd: Option<f64>,
+        rate_per_min: Option<i64>,
+    },
+    /// → `OrchdResponse::Policies`. Read-only, broadcasts nothing.
+    TrustListPolicies,
+    /// → `OrchdResponse::AuditRows`. Newest-first, optionally capped at `limit`. Read-only,
+    /// broadcasts nothing.
+    TrustListAudit {
+        limit: Option<i64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1084,6 +1171,11 @@ pub enum OrchdResponse {
     // S-EXT Skills (spec §4/§5, D11, Q14, task T17, appended — order FROZEN append-only)
     Skill(Skill),
     Skills(Vec<Skill>),
+    // S-EXT Trust: policy caps + audit log (spec §4/§5/§6, BL-22, task T18, appended — order
+    // FROZEN append-only)
+    Policy(Policy),
+    Policies(Vec<Policy>),
+    AuditRows(Vec<AuditRow>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1125,6 +1217,11 @@ pub enum OrchdPush {
     SkillsChanged {
         project_id: Option<String>,
     },
+    // S-EXT Trust: policy caps (spec §4/§5/§6, BL-22, task T18, appended — order FROZEN
+    // append-only). No payload: a `policy` change can be global/project/server-scoped, so
+    // there's no single natural `project_id`/`server_id` to name coarsely — mirrors
+    // `ConnectorsChanged`'s "nothing to name" precedent.
+    PoliciesChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

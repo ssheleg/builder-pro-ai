@@ -62,6 +62,9 @@ fn export_and_read() -> String {
     Skill::export_all_to(types_ts_dir()).expect("export Skill");
     SkillScope::export_all_to(types_ts_dir()).expect("export SkillScope");
     SkillFileState::export_all_to(types_ts_dir()).expect("export SkillFileState");
+    Policy::export_all_to(types_ts_dir()).expect("export Policy");
+    PolicyScope::export_all_to(types_ts_dir()).expect("export PolicyScope");
+    AuditRow::export_all_to(types_ts_dir()).expect("export AuditRow");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -256,6 +259,8 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "started_at",
         "expires_at",
         "authorize_url",
+        "ref_id",
+        "rate_per_min",
     ] {
         assert!(
             !ts.contains(snake),
@@ -540,6 +545,51 @@ fn skill_file_state_wire_tags_are_camelcase() {
         assert!(
             contains_normalized(&ts, &format!("\"{tag}\"")),
             "SkillFileState must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+}
+
+// ---- S-EXT Trust entity export tests (spec §4/§5/§6, BL-22, task T18) ----
+
+#[test]
+fn policy_and_audit_row_are_present_with_camelcase_fields_and_ts_number_timestamps() {
+    let ts = export_and_read();
+    for expected in ["export type Policy", "export type AuditRow"] {
+        assert!(
+            contains_normalized(&ts, expected),
+            "expected {expected:?} in generated orchd-types.ts; got:\n{ts}"
+        );
+    }
+    assert!(
+        contains_normalized(&ts, "refId: string | null"),
+        "Policy.ref_id must serialize as camelCase `refId`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "spendCapUsd: number | null"),
+        "Policy.spend_cap_usd must serialize as camelCase `spendCapUsd`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "ratePerMin: number | null"),
+        "Policy.rate_per_min (Option<i64>) must serialize as camelCase `ratePerMin`, TS \
+         `number | null`, not `bigint | null`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "invocationId: string | null"),
+        "AuditRow.invocation_id must serialize as camelCase `invocationId`; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("bigint"),
+        "generated orchd-types.ts must never contain `bigint`; got:\n{ts}"
+    );
+}
+
+#[test]
+fn policy_scope_wire_tags_are_camelcase() {
+    let ts = export_and_read();
+    for tag in ["global", "project", "server"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "PolicyScope must include wire tag {tag:?}; got:\n{ts}"
         );
     }
 }

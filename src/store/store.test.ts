@@ -4,14 +4,17 @@ import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
 import type { FsEntry } from "../ipc/fs";
 import type {
   Account,
+  AuditRow,
   DomainTask,
   Goal,
   GraphView,
   Idea,
   Insight,
   McpArtifact,
+  McpInvocation,
   McpServer,
   McpTool,
+  Policy,
   Project,
   RuleSetView,
   Skill,
@@ -27,8 +30,11 @@ const orchdGetRulesetMock = vi.fn();
 const mcpListServersMock = vi.fn();
 const mcpListToolsMock = vi.fn();
 const mcpListArtifactsMock = vi.fn();
+const mcpListInvocationsMock = vi.fn();
 const connectorListAccountsMock = vi.fn();
 const skillListMock = vi.fn();
+const trustListPoliciesMock = vi.fn();
+const trustListAuditMock = vi.fn();
 vi.mock("../ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -40,8 +46,11 @@ vi.mock("../ipc/orchd", () => ({
   mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
+  mcpListInvocations: (...a: unknown[]) => mcpListInvocationsMock(...a),
   connectorListAccounts: (...a: unknown[]) => connectorListAccountsMock(...a),
   skillList: (...a: unknown[]) => skillListMock(...a),
+  trustListPolicies: (...a: unknown[]) => trustListPoliciesMock(...a),
+  trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -76,8 +85,11 @@ describe("useAppStore", () => {
     mcpListServersMock.mockReset();
     mcpListToolsMock.mockReset();
     mcpListArtifactsMock.mockReset();
+    mcpListInvocationsMock.mockReset();
     connectorListAccountsMock.mockReset();
     skillListMock.mockReset();
+    trustListPoliciesMock.mockReset();
+    trustListAuditMock.mockReset();
     useAppStore.setState(
       {
         sessions: {},
@@ -109,6 +121,9 @@ describe("useAppStore", () => {
         mcpArtifacts: [],
         accounts: [],
         skills: [],
+        invocations: [],
+        auditRows: [],
+        policies: [],
         orchdDown: false,
         orchdIncompatible: false,
         orchdUpgradeDialogOpen: false,
@@ -698,6 +713,47 @@ describe("useAppStore", () => {
     ...over,
   });
 
+  const mcpInvocation = (over: Partial<McpInvocation> = {}): McpInvocation => ({
+    id: "inv1",
+    serverId: "s1",
+    accountId: null,
+    toolName: "search",
+    projectId: null,
+    requestHash: "deadbeef",
+    ok: true,
+    errorKind: null,
+    latencyMs: 10,
+    costUsd: null,
+    inputTokens: null,
+    outputTokens: null,
+    startedAt: 1,
+    ...over,
+  });
+
+  const auditRow = (over: Partial<AuditRow> = {}): AuditRow => ({
+    id: "audit1",
+    at: 1,
+    action: "tool_call",
+    serverId: "s1",
+    toolName: "search",
+    projectId: null,
+    decision: "allow",
+    reason: null,
+    invocationId: "inv1",
+    ...over,
+  });
+
+  const policy = (over: Partial<Policy> = {}): Policy => ({
+    id: "policy1",
+    scope: "global",
+    refId: null,
+    spendCapUsd: null,
+    ratePerMin: null,
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
   const rulesetView = (over: Partial<RuleSetView> = {}): RuleSetView => ({
     rule: {
       id: "r1",
@@ -975,6 +1031,58 @@ describe("useAppStore", () => {
     skillListMock.mockRejectedValueOnce(err);
     await useAppStore.getState().refreshSkills();
     expect(useAppStore.getState().skills).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  // ---- Trust slice (S-EXT §4/§6/§8, BL-22, T18) ----
+
+  it("refreshInvocations replaces the whole-store invocations list, calling mcpListInvocations(null, null, null)", async () => {
+    mcpListInvocationsMock.mockResolvedValueOnce([mcpInvocation()]);
+    await useAppStore.getState().refreshInvocations();
+    expect(mcpListInvocationsMock).toHaveBeenCalledWith(null, null, null);
+    expect(useAppStore.getState().invocations).toEqual([mcpInvocation()]);
+  });
+
+  it("refreshInvocations surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    mcpListInvocationsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshInvocations();
+    expect(useAppStore.getState().invocations).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  it("refreshAuditRows replaces the whole-store auditRows list, calling trustListAudit(null)", async () => {
+    trustListAuditMock.mockResolvedValueOnce([auditRow()]);
+    await useAppStore.getState().refreshAuditRows();
+    expect(trustListAuditMock).toHaveBeenCalledWith(null);
+    expect(useAppStore.getState().auditRows).toEqual([auditRow()]);
+  });
+
+  it("refreshAuditRows surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    trustListAuditMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshAuditRows();
+    expect(useAppStore.getState().auditRows).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  it("refreshPolicies replaces policies from trustListPolicies()", async () => {
+    trustListPoliciesMock.mockResolvedValueOnce([policy()]);
+    await useAppStore.getState().refreshPolicies();
+    expect(trustListPoliciesMock).toHaveBeenCalledWith();
+    expect(useAppStore.getState().policies).toEqual([policy()]);
+
+    trustListPoliciesMock.mockResolvedValueOnce([policy({ id: "policy2", scope: "server" })]);
+    await useAppStore.getState().refreshPolicies();
+    // REPLACED, not merged/appended — only the new list survives.
+    expect(useAppStore.getState().policies).toEqual([policy({ id: "policy2", scope: "server" })]);
+  });
+
+  it("refreshPolicies surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    trustListPoliciesMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshPolicies();
+    expect(useAppStore.getState().policies).toEqual([]);
     expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 });

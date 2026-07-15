@@ -5,14 +5,17 @@ import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
 import type { FsEntry } from "../ipc/fs";
 import type {
   Account,
+  AuditRow,
   DomainTask,
   Goal,
   GraphView,
   Idea,
   Insight,
   McpArtifact,
+  McpInvocation,
   McpServer,
   McpTool,
+  Policy,
   Project,
   RuleScope,
   RuleSetView,
@@ -29,8 +32,11 @@ import {
   mcpListServers,
   mcpListTools,
   mcpListArtifacts,
+  mcpListInvocations,
   connectorListAccounts,
   skillList,
+  trustListPolicies,
+  trustListAudit,
   describeOrchdError,
 } from "../ipc/orchd";
 
@@ -187,6 +193,16 @@ export interface AppState {
    * «Навыки» tab. PLUMBING ONLY — no runtime consumer until S6b). Mirrors `mcpServers`'s
    * whole-store, un-scoped convention exactly — replaced wholesale by `refreshSkills`. */
   skills: Skill[];
+  /** Every MCP invocation, unfiltered (S-EXT §8, T18: the «Расширения»/«Журнал» tab). Mirrors
+   * `mcpArtifacts`'s whole-store, un-scoped convention exactly — replaced wholesale by
+   * `refreshInvocations`. */
+  invocations: McpInvocation[];
+  /** Every `audit_log` row, newest-first (S-EXT §4/§6/§8, BL-22, T18: the «Расширения»/
+   * «Журнал» tab's audit view). Replaced wholesale by `refreshAuditRows`. */
+  auditRows: AuditRow[];
+  /** Every configured spend/rate policy (S-EXT §4/§6/§8, BL-22, T18: the «Расширения»/«Журнал»
+   * tab's policy editor). Replaced wholesale by `refreshPolicies`. */
+  policies: Policy[];
 
   /** Honest orchd connectivity (spec §9/§11, mirrors sessiond's `daemonConnected` inverted):
    * `true` while the `orchd://down` event is the most recent connection-state signal seen, `false`
@@ -314,6 +330,15 @@ export interface AppState {
   /** Re-fetch `skills` wholesale (`skillList(null)` — global scope). Mirrors `refreshMcpServers`
    * exactly: try/catch -> `showToast(describeOrchdError(e))` on failure, replace on success. */
   refreshSkills: () => Promise<void>;
+  /** Re-fetch `invocations` wholesale (`mcpListInvocations(null, null, null)` — no filter).
+   * Mirrors `refreshMcpArtifacts` exactly. */
+  refreshInvocations: () => Promise<void>;
+  /** Re-fetch `auditRows` wholesale (`trustListAudit(null)` — no cap). Mirrors
+   * `refreshInvocations` exactly. */
+  refreshAuditRows: () => Promise<void>;
+  /** Re-fetch `policies` wholesale (`trustListPolicies()` has no filter). Mirrors
+   * `refreshMcpServers` exactly. */
+  refreshPolicies: () => Promise<void>;
   /** Set `orchdDown`. See its doc above. */
   setOrchdDown: (v: boolean) => void;
   /** Set `orchdIncompatible`. See its doc above — never auto-clears, mirrors
@@ -390,6 +415,9 @@ export const useAppStore = create<AppState>((set, get) => {
     mcpArtifacts: [],
     accounts: [],
     skills: [],
+    invocations: [],
+    auditRows: [],
+    policies: [],
     orchdDown: false,
     orchdIncompatible: false,
     orchdUpgradeDialogOpen: false,
@@ -644,6 +672,35 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const skills = await skillList(null);
         set({ skills });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    // ── Trust slice (S-EXT §4/§6/§8, BL-22, T18) ─────────────────────────────────────────────
+
+    refreshInvocations: async () => {
+      try {
+        const invocations = await mcpListInvocations(null, null, null);
+        set({ invocations });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshAuditRows: async () => {
+      try {
+        const auditRows = await trustListAudit(null);
+        set({ auditRows });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    refreshPolicies: async () => {
+      try {
+        const policies = await trustListPolicies();
+        set({ policies });
       } catch (e) {
         get().showToast(describeOrchdError(e));
       }

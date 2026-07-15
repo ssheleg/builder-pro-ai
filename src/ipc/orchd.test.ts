@@ -81,6 +81,9 @@ import {
   skillAdd,
   skillList,
   skillDelete,
+  trustSetPolicy,
+  trustListPolicies,
+  trustListAudit,
   describeOrchdError,
 } from "./orchd";
 
@@ -744,6 +747,43 @@ describe("ipc/orchd", () => {
   it("skillDelete sends id", async () => {
     await skillDelete("s1");
     expect(invokeMock).toHaveBeenCalledWith("skill_delete", { id: "s1" });
+  });
+
+  // ── Trust: policy caps + audit log (S-EXT §4/§5/§6, BL-22, T18) ──────────────────────────
+
+  it("trustSetPolicy sends scope/refId/spendCapUsd/ratePerMin in T18's trust_set_policy param order", async () => {
+    await trustSetPolicy("server", "mcp-1", 10, 30);
+    expect(invokeMock).toHaveBeenCalledWith("trust_set_policy", {
+      scope: "server",
+      refId: "mcp-1",
+      spendCapUsd: 10,
+      ratePerMin: 30,
+    });
+  });
+
+  it("trustSetPolicy sends null refId/spendCapUsd/ratePerMin as-is (global scope, unlimited caps)", async () => {
+    await trustSetPolicy("global", null, null, null);
+    expect(invokeMock).toHaveBeenCalledWith("trust_set_policy", {
+      scope: "global",
+      refId: null,
+      spendCapUsd: null,
+      ratePerMin: null,
+    });
+  });
+
+  it("trustListPolicies sends no args", async () => {
+    await trustListPolicies();
+    expect(invokeMock).toHaveBeenCalledWith("trust_list_policies");
+  });
+
+  it("trustListAudit sends limit", async () => {
+    await trustListAudit(50);
+    expect(invokeMock).toHaveBeenCalledWith("trust_list_audit", { limit: 50 });
+  });
+
+  it("trustListAudit sends null limit as-is (no cap)", async () => {
+    await trustListAudit(null);
+    expect(invokeMock).toHaveBeenCalledWith("trust_list_audit", { limit: null });
   });
 
   // ── describeOrchdError ────────────────────────────────────────────────────────────────────

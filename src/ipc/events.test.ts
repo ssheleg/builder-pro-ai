@@ -38,6 +38,7 @@ import {
   onOrchdMcpInvocationLogged,
   onOrchdConnectorsChanged,
   onOrchdSkillsChanged,
+  onOrchdPoliciesChanged,
 } from "./events";
 import type { SessionMeta, Workspace } from "./types";
 import type {
@@ -340,5 +341,16 @@ describe("ipc/events", () => {
     const p: SkillsChangedPayload = { projectId: null };
     registered.get("orchd://skills-changed")!({ payload: p });
     expect(cb).toHaveBeenCalledWith(p);
+  });
+
+  // ── Trust policy-cap coarse-invalidation event (S-EXT §4/§5/§6, BL-22, T18) ────────────────
+
+  it("onOrchdPoliciesChanged subscribes to orchd://policies-changed and calls cb (no payload)", async () => {
+    const cb = vi.fn();
+    const un = await onOrchdPoliciesChanged(cb);
+    expect(listenMock).toHaveBeenCalledWith("orchd://policies-changed", expect.any(Function));
+    registered.get("orchd://policies-changed")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(un).toBe(unlisten);
   });
 });

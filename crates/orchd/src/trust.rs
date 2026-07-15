@@ -8,7 +8,7 @@
 //! request_hash`, a sha256, never here).
 //!
 //! Phase-1 policy scope (task-5 brief): consent-gated connect + per-tool allowlist on
-//! `tool_call`. Spend/rate caps (the `policy` table) are S-EXT T18 — not implemented here.
+//! `tool_call`.
 //!
 //! Task T16 adds [`Action::StdioSpawn`] (spec §6/D6/D10, closes BL-22): spawning a stdio MCP
 //! server's process is code execution, so it is gated by a DISTINCT `stdio_exec` consent grant
@@ -17,8 +17,26 @@
 //! (the explicit `McpConnect` verb) AND `mcp::invoke::call_tool` (Phase-1's per-call reconnect —
 //! there is no persisted session to check once) authorize through this SAME action before ever
 //! invoking a stdio `connect_fn`, so a spawn can never bypass the gate via either path.
+//!
+//! Task T18 adds spend/rate policy caps (spec §6, BL-22): an ADDITIONAL gate on the `ToolCall`/
+//! `ConnectorInvoke` Allow path, checked AFTER the pre-existing per-tool-allowlist check (which
+//! still denies first, unchanged) — [`check_policy_caps`] resolves the effective [`Policy`] for
+//! the attempt ([`resolve_policy`]: server scope overrides project scope overrides the single
+//! global scope, spec §6 "MOST-SPECIFIC-wins") and, if either configured cap is already met or
+//! exceeded over the trailing [`POLICY_WINDOW_MS`] window, denies with `rate_limit_exceeded` or
+//! `spend_cap_exceeded` — audited under the DISTINCT `policy_deny` action (spec §4's own
+//! `audit_log.action` literal set already names it), never under `tool_call`/`connector_invoke`,
+//! so an audit-log reader can tell "this call was rejected" apart from "a cap was breached" at a
+//! glance (mirrors `StdioSpawn`'s own distinct-action precedent above). **Honest degradation**:
+//! `mcp_invocation.cost_usd` is `NULL` unless the MCP/connector server itself reports usage (spec
+//! §4) — [`Db::sum_cost_since`] coalesces that to `0.0`, so the spend cap binds ONLY once a
+//! server actually reports cost. A server that never reports cost can never trip the cap; that is
+//! the honest v1 behavior, not a bug — there is no reliable way to estimate an unreported cost
+//! before the call completes.
 
-use crate::persistence::{Db, NewAudit, OrchdPersistError};
+use bpa_orchd_proto::{Policy, PolicyScope};
+
+use crate::persistence::{now_ms, Db, NewAudit, OrchdPersistError};
 
 /// `consent_grant.kind` (spec §4) for a remote HTTP MCP server's first-connect consent.
 pub(crate) const CONSENT_KIND_CONNECT: &str = "connect";
@@ -95,7 +113,19 @@ const REASON_STDIO_EXEC_REQUIRED: &str = "stdio_exec_required";
 /// allowlist member (spec §4 `mcp_tool.enabled` comment: "per-tool allowlist"). Also used for a
 /// `tool_name` this server has no cached row for at all — an unrecognized tool is, by
 /// definition, not on the allowlist either (fail closed, never fail open on an unknown name).
-const REASON_TOOL_DISABLED: &str = "tool_disabled";
+/// `pub(crate)`: `mcp::invoke::call_tool` (T18) compares a `ToolCall` deny's reason against this
+/// SAME literal to tell "the allowlist denied it" apart from "a policy cap denied it" — see that
+/// function's own doc comment.
+pub(crate) const REASON_TOOL_DISABLED: &str = "tool_disabled";
+/// `audit_log` reason literal for a `ToolCall`/`ConnectorInvoke` denied because the resolved
+/// effective [`Policy`]'s `rate_per_min` cap has already been met over the trailing
+/// [`POLICY_WINDOW_MS`] window (task T18, spec §6, BL-22).
+const REASON_RATE_LIMIT_EXCEEDED: &str = "rate_limit_exceeded";
+/// `audit_log` reason literal for a `ToolCall`/`ConnectorInvoke` denied because the resolved
+/// effective [`Policy`]'s `spend_cap_usd` cap has already been met over the trailing
+/// [`POLICY_WINDOW_MS`] window (task T18, spec §6, BL-22). See this module's own doc comment for
+/// the NULL-cost honesty note this check's binding depends on.
+const REASON_SPEND_CAP_EXCEEDED: &str = "spend_cap_exceeded";
 
 const AUDIT_ACTION_CONNECT: &str = "connect";
 /// (task T16, spec §4 `audit_log.action` literal set already anticipates this exact literal) —
@@ -105,8 +135,20 @@ const AUDIT_ACTION_STDIO_SPAWN: &str = "stdio_spawn";
 const AUDIT_ACTION_TOOL_CALL: &str = "tool_call";
 /// (task T12, spec §4 `audit_log.action` literal set) — `ConnectorInvoke`'s audit action.
 const AUDIT_ACTION_CONNECTOR_INVOKE: &str = "connector_invoke";
+/// (task T18, spec §4 `audit_log.action` literal set already anticipates this exact literal) — a
+/// spend/rate policy-cap denial's audit action, OVERRIDING `AUDIT_ACTION_TOOL_CALL`/
+/// `AUDIT_ACTION_CONNECTOR_INVOKE` in [`write_audit`] regardless of which `Action` triggered it,
+/// so a cap breach is never indistinguishable from an ordinary tool-disabled/allowed row in the
+/// audit trail (mirrors `AUDIT_ACTION_STDIO_SPAWN`'s own distinct-action precedent).
+const AUDIT_ACTION_POLICY_DENY: &str = "policy_deny";
 const AUDIT_DECISION_ALLOW: &str = "allow";
 const AUDIT_DECISION_DENY: &str = "deny";
+
+/// Rolling window (spec §6, task T18): BOTH the rate-limit check ("count `mcp_invocation` rows
+/// ... in the last 60s") and the spend-cap check ("sum `cost_usd` ... over the window") count
+/// over this SAME trailing window, so the two checks can never silently drift onto different
+/// windows. One documented value, per the task brief's own "pick a clear ... window" guidance.
+pub(crate) const POLICY_WINDOW_MS: i64 = 60_000;
 
 /// Single choke-point: every connect / tool-call passes through here before dispatch (spec
 /// D10). ALWAYS writes an `audit_log` row, allow or deny, before returning.
@@ -152,27 +194,102 @@ fn evaluate(db: &Db, action: &Action) -> Result<Decision, OrchdPersistError> {
         Action::ToolCall {
             server_id,
             tool_name,
-            ..
+            project_id,
         } => {
             let tools = db.list_mcp_tools(server_id)?;
             let enabled = tools.iter().any(|t| &t.name == tool_name && t.enabled);
-            if enabled {
-                Ok(Decision::Allow)
-            } else {
-                Ok(Decision::Deny {
+            if !enabled {
+                return Ok(Decision::Deny {
                     reason: REASON_TOOL_DISABLED.to_string(),
-                })
+                });
             }
+            // (task T18) The per-tool allowlist above is UNCHANGED and still denies first — caps
+            // are an ADDITIONAL gate on the Allow path (spec §6), never a replacement for it.
+            check_policy_caps(db, project_id.as_deref(), Some(server_id))
         }
         // (task T12) "same policy scope as ToolCall" (task brief) — but unlike ToolCall there is
         // no per-account-op allowlist table to consult yet (no `account_op`/equivalent to
-        // `mcp_tool.enabled` exists in the spec §4 schema): Phase 1 always allows, exactly like
-        // `ToolCall` would if every tool were unconditionally enabled. Spend/rate caps (the
-        // `policy` table) are T18, same as `ToolCall`'s own doc comment already states above.
-        // Every call still writes the `connector_invoke` audit row below, allow or (once T18
-        // lands) deny — the choke-point property this module exists for.
-        Action::ConnectorInvoke { .. } => Ok(Decision::Allow),
+        // `mcp_tool.enabled` exists in the spec §4 schema), so there is no allowlist-style deny
+        // to check first here — every `ConnectorInvoke` goes straight to the SAME spend/rate cap
+        // gate `ToolCall` uses (task T18, spec §6: "connector_invoke passes through
+        // trust::authorize IDENTICALLY to McpCallTool — same policy scope"). An account has no
+        // `server_id` (only `account_id`, spec §4's `mcp_invocation`/`mcp_artifact` XOR) — a
+        // `ConnectorInvoke` can therefore only ever resolve a project- or global-scope policy,
+        // never a server-scope one (`resolve_policy`'s own doc comment covers this).
+        Action::ConnectorInvoke { project_id, .. } => {
+            check_policy_caps(db, project_id.as_deref(), None)
+        }
     }
+}
+
+/// Resolve the effective [`Policy`] for a `ToolCall`/`ConnectorInvoke` attempt (spec §6, task
+/// T18, BL-22): MOST-SPECIFIC-wins — a server-scope policy row (when `server_id` is `Some` AND a
+/// row is configured for it) wins outright over a project-scope row (when `project_id` is `Some`
+/// AND a row is configured for it), which wins outright over the single global-scope row (if
+/// configured at all).
+///
+/// "Wins outright" means the WHOLE row, not a per-field merge: if the winning row leaves
+/// `rate_per_min` unset, that dimension is unlimited for THIS call even if a less-specific scope
+/// sets one — a per-field merge would make the effective cap depend on which OTHER scopes happen
+/// to have rows configured, a much less predictable rule for an owner configuring caps in the UI
+/// than "the most specific row that exists governs everything about this call."
+///
+/// `server_id: None` (every `ConnectorInvoke`, spec §4: an account has no server_id) simply skips
+/// the server-scope check and falls through to project/global — the SAME resolution order, one
+/// tier shorter. Returns `None` when no policy is configured at ANY applicable scope — the
+/// honest "unbounded by default" starting state (spec §4: caps start `null` = unlimited).
+fn resolve_policy(
+    db: &Db,
+    project_id: Option<&str>,
+    server_id: Option<&str>,
+) -> Result<Option<Policy>, OrchdPersistError> {
+    if let Some(server_id) = server_id {
+        if let Some(row) = db.get_policy(PolicyScope::Server, Some(server_id))? {
+            return Ok(Some(row));
+        }
+    }
+    if let Some(project_id) = project_id {
+        if let Some(row) = db.get_policy(PolicyScope::Project, Some(project_id))? {
+            return Ok(Some(row));
+        }
+    }
+    db.get_policy(PolicyScope::Global, None)
+}
+
+/// Checks the resolved effective policy's rate/spend caps for one `ToolCall`/`ConnectorInvoke`
+/// attempt, pre-dispatch (spec §6, task T18). `Decision::Allow` when no policy applies (spec §4:
+/// unconfigured = unlimited) or neither configured cap is already met/exceeded; otherwise the
+/// FIRST breached cap wins as a `Decision::Deny` — rate checked before spend (an arbitrary but
+/// fixed order, matters only when BOTH caps would breach in the same window, so the resulting
+/// audit row always cites one deterministic reason, never a coin flip between the two).
+fn check_policy_caps(
+    db: &Db,
+    project_id: Option<&str>,
+    server_id: Option<&str>,
+) -> Result<Decision, OrchdPersistError> {
+    let Some(policy) = resolve_policy(db, project_id, server_id)? else {
+        return Ok(Decision::Allow);
+    };
+    let since_ms = now_ms() - POLICY_WINDOW_MS;
+
+    if let Some(rate_per_min) = policy.rate_per_min {
+        let count =
+            db.count_invocations_since(policy.scope.clone(), policy.ref_id.as_deref(), since_ms)?;
+        if count >= rate_per_min {
+            return Ok(Decision::Deny {
+                reason: REASON_RATE_LIMIT_EXCEEDED.to_string(),
+            });
+        }
+    }
+    if let Some(spend_cap_usd) = policy.spend_cap_usd {
+        let spent = db.sum_cost_since(policy.scope.clone(), policy.ref_id.as_deref(), since_ms)?;
+        if spent >= spend_cap_usd {
+            return Ok(Decision::Deny {
+                reason: REASON_SPEND_CAP_EXCEEDED.to_string(),
+            });
+        }
+    }
+    Ok(Decision::Allow)
 }
 
 fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), OrchdPersistError> {
@@ -223,6 +340,22 @@ fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), Orch
     let (decision_text, reason) = match decision {
         Decision::Allow => (AUDIT_DECISION_ALLOW, None),
         Decision::Deny { reason } => (AUDIT_DECISION_DENY, Some(reason.clone())),
+    };
+
+    // (task T18, spec §6/BL-22): a spend/rate POLICY-CAP denial is audited under the DISTINCT
+    // `policy_deny` action — never `tool_call`/`connector_invoke` — regardless of which `Action`
+    // variant triggered it, so a reader can tell "this call itself was rejected" (tool_call/
+    // connector_invoke + deny + tool_disabled) apart from "a cap on this scope was breached"
+    // (policy_deny) at a glance. `Connect`/`StdioSpawn` denials are never reached here (their own
+    // reason literals are `consent_required`/`stdio_exec_required`, never one of these two), so
+    // this override can never misfire on a consent denial.
+    let audit_action = if matches!(
+        reason.as_deref(),
+        Some(REASON_RATE_LIMIT_EXCEEDED) | Some(REASON_SPEND_CAP_EXCEEDED)
+    ) {
+        AUDIT_ACTION_POLICY_DENY
+    } else {
+        audit_action
     };
 
     // Structured tracing on every decision (task-5 brief: "server id, tool name, decision — but
@@ -917,5 +1050,648 @@ mod tests {
             fp_before, fp_after,
             "swapping the binary's bytes at the SAME path must change the fingerprint"
         );
+    }
+
+    // ---- Policy caps (task T18, spec §6, BL-22) ----
+
+    use crate::connectors::{AccountAuthKind, NewAccount};
+    use crate::persistence::{NewInvocation, NewPolicy};
+
+    /// Inserts a real `account` row (pure DB, no Keychain — `secret_ref` is a plain fake ref
+    /// string, mirrors `persistence::trust_persistence_tests::add_account`) with the given `id`,
+    /// so `seed_connector_invocation`'s `mcp_invocation.account_id` FK has a row to reference.
+    fn add_account(db: &Db, id: &str) {
+        db.insert_account(NewAccount {
+            id: id.to_string(),
+            provider: "generic-rest".to_string(),
+            label: "Test REST".to_string(),
+            auth_kind: AccountAuthKind::Apikey,
+            secret_ref: format!("{id}:apikey"),
+            scopes: vec![],
+            expires_at: None,
+            refresh_ref: None,
+        })
+        .unwrap();
+    }
+
+    /// Registers `name` on `server_id` and enables it (the allowlist gate every `ToolCall` in
+    /// this section must clear BEFORE the policy-cap gate is ever reached).
+    fn enable_tool(db: &Db, server_id: &str, name: &str) {
+        db.upsert_mcp_tools(
+            server_id,
+            vec![NewMcpTool {
+                name: name.to_string(),
+                title: None,
+                description: None,
+                input_schema_json: "{}".to_string(),
+            }],
+        )
+        .unwrap();
+    }
+
+    /// Seeds one `ok=true` `mcp_invocation` row `started_at` `ms_ago` milliseconds before now,
+    /// with the given `cost_usd` (`None` mirrors "the server never reported usage", spec §4) —
+    /// the exact shape `check_policy_caps`'s `count_invocations_since`/`sum_cost_since` queries
+    /// count/sum over.
+    fn seed_invocation(
+        db: &Db,
+        server_id: &str,
+        project_id: Option<&str>,
+        cost_usd: Option<f64>,
+        ms_ago: i64,
+    ) {
+        db.insert_invocation(NewInvocation {
+            server_id: Some(server_id.to_string()),
+            account_id: None,
+            tool_name: "search".to_string(),
+            project_id: project_id.map(str::to_string),
+            request_hash: "deadbeef".to_string(),
+            ok: true,
+            error_kind: None,
+            latency_ms: 10,
+            cost_usd,
+            input_tokens: None,
+            output_tokens: None,
+            started_at: now_ms() - ms_ago,
+        })
+        .unwrap();
+    }
+
+    /// Seeds a connector_invoke-shaped invocation (`account_id` set, `server_id` null — spec §4
+    /// XOR), for the `ConnectorInvoke`-is-capped tests below.
+    fn seed_connector_invocation(
+        db: &Db,
+        account_id: &str,
+        project_id: Option<&str>,
+        cost_usd: Option<f64>,
+        ms_ago: i64,
+    ) {
+        db.insert_invocation(NewInvocation {
+            server_id: None,
+            account_id: Some(account_id.to_string()),
+            tool_name: "get".to_string(),
+            project_id: project_id.map(str::to_string),
+            request_hash: "deadbeef".to_string(),
+            ok: true,
+            error_kind: None,
+            latency_ms: 10,
+            cost_usd,
+            input_tokens: None,
+            output_tokens: None,
+            started_at: now_ms() - ms_ago,
+        })
+        .unwrap();
+    }
+
+    // ---- spend-cap breach (ToolCall) ----
+
+    #[test]
+    fn tool_call_spend_cap_breach_denies_with_audit_and_no_dispatch_implication() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: Some(1.0),
+            rate_per_min: None,
+        })
+        .unwrap();
+        // Two prior calls this server, this window, summing to >= the $1.00 cap.
+        seed_invocation(&db, &server.id, None, Some(0.6), 1_000);
+        seed_invocation(&db, &server.id, None, Some(0.5), 2_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_SPEND_CAP_EXCEEDED.to_string()
+            }
+        );
+        // Audited under the DISTINCT `policy_deny` action, not `tool_call`.
+        let row: (String, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT action, decision, reason FROM audit_log WHERE server_id = ?1",
+                rusqlite::params![server.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "policy_deny".to_string(),
+                "deny".to_string(),
+                "spend_cap_exceeded".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn tool_call_under_spend_cap_is_allowed() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: Some(10.0),
+            rate_per_min: None,
+        })
+        .unwrap();
+        seed_invocation(&db, &server.id, None, Some(1.0), 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    // ---- rate-limit (ToolCall) ----
+
+    #[test]
+    fn tool_call_rate_limit_breach_denies_with_audit() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: None,
+            rate_per_min: Some(3),
+        })
+        .unwrap();
+        // 3 prior calls this window == the cap -> the NEXT attempt must deny.
+        for i in 1..=3 {
+            seed_invocation(&db, &server.id, None, None, i * 1_000);
+        }
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_RATE_LIMIT_EXCEEDED.to_string()
+            }
+        );
+        let denied: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action='policy_deny' AND decision='deny' \
+                 AND reason='rate_limit_exceeded'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(denied, 1);
+    }
+
+    #[test]
+    fn tool_call_under_rate_limit_is_allowed() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: None,
+            rate_per_min: Some(5),
+        })
+        .unwrap();
+        for i in 1..=2 {
+            seed_invocation(&db, &server.id, None, None, i * 1_000);
+        }
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn tool_call_rate_limit_only_counts_calls_inside_the_window() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: None,
+            rate_per_min: Some(1),
+        })
+        .unwrap();
+        // Outside the 60s window -> must NOT count toward the cap.
+        seed_invocation(&db, &server.id, None, None, POLICY_WINDOW_MS + 5_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Allow,
+            "a call outside the rolling window must not count toward the rate cap"
+        );
+    }
+
+    // ---- effective-policy resolution: server > project > global (task T18) ----
+
+    #[test]
+    fn effective_policy_prefers_server_scope_over_project_and_global() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        // Global and project both set a rate cap of 1 (would deny after 1 prior call); the
+        // server-scope row sets a MUCH higher cap of 100 and must win outright.
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Global,
+            ref_id: None,
+            spend_cap_usd: None,
+            rate_per_min: Some(1),
+        })
+        .unwrap();
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Project,
+            ref_id: Some("proj-1".to_string()),
+            spend_cap_usd: None,
+            rate_per_min: Some(1),
+        })
+        .unwrap();
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: None,
+            rate_per_min: Some(100),
+        })
+        .unwrap();
+        seed_invocation(&db, &server.id, Some("proj-1"), None, 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: Some("proj-1".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Allow,
+            "the server-scope cap (100) must win outright over project/global (1 each)"
+        );
+    }
+
+    #[test]
+    fn effective_policy_prefers_project_scope_over_global_when_no_server_scope_exists() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Global,
+            ref_id: None,
+            spend_cap_usd: None,
+            rate_per_min: Some(100),
+        })
+        .unwrap();
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Project,
+            ref_id: Some("proj-1".to_string()),
+            spend_cap_usd: None,
+            rate_per_min: Some(1),
+        })
+        .unwrap();
+        seed_invocation(&db, &server.id, Some("proj-1"), None, 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: Some("proj-1".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_RATE_LIMIT_EXCEEDED.to_string()
+            },
+            "with no server-scope row, the project-scope cap (1, already met) must win over the \
+             much higher global cap (100)"
+        );
+    }
+
+    #[test]
+    fn effective_policy_falls_back_to_global_when_no_server_or_project_scope_exists() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Global,
+            ref_id: None,
+            spend_cap_usd: None,
+            rate_per_min: Some(1),
+        })
+        .unwrap();
+        seed_invocation(&db, &server.id, None, None, 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_RATE_LIMIT_EXCEEDED.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn no_configured_policy_at_any_scope_is_allowed() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        // No policy row at any scope -> unbounded (spec §4: caps default to unlimited).
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    // ---- ConnectorInvoke is capped identically (task T18, spec §6) ----
+
+    #[test]
+    fn connector_invoke_spend_cap_breach_denies_with_policy_deny_audit() {
+        let db = new_db();
+        add_account(&db, "acct-1");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Project,
+            ref_id: Some("proj-1".to_string()),
+            spend_cap_usd: Some(1.0),
+            rate_per_min: None,
+        })
+        .unwrap();
+        seed_connector_invocation(&db, "acct-1", Some("proj-1"), Some(1.5), 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ConnectorInvoke {
+                account_id: "acct-1".to_string(),
+                op: "get".to_string(),
+                project_id: Some("proj-1".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_SPEND_CAP_EXCEEDED.to_string()
+            }
+        );
+        let row: (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT action, reason FROM audit_log WHERE decision='deny'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("policy_deny".to_string(), "spend_cap_exceeded".to_string())
+        );
+    }
+
+    #[test]
+    fn connector_invoke_rate_limit_breach_denies() {
+        let db = new_db();
+        add_account(&db, "acct-1");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Global,
+            ref_id: None,
+            spend_cap_usd: None,
+            rate_per_min: Some(1),
+        })
+        .unwrap();
+        seed_connector_invocation(&db, "acct-1", None, None, 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ConnectorInvoke {
+                account_id: "acct-1".to_string(),
+                op: "get".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_RATE_LIMIT_EXCEEDED.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn connector_invoke_under_caps_is_allowed() {
+        let db = new_db();
+        add_account(&db, "acct-1");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Global,
+            ref_id: None,
+            spend_cap_usd: Some(10.0),
+            rate_per_min: Some(5),
+        })
+        .unwrap();
+        seed_connector_invocation(&db, "acct-1", None, Some(1.0), 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ConnectorInvoke {
+                account_id: "acct-1".to_string(),
+                op: "get".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    // ---- NULL-cost honesty (task T18 brief: "caps bind only when the server reports cost") ----
+
+    #[test]
+    fn null_cost_invocations_never_trip_the_spend_cap() {
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            // Strictly positive so a true (COALESCE'd) zero sum does NOT trip it — proves a NULL
+            // sum reads as "genuinely $0 spent", not as "meets a $0 cap" (see the companion test
+            // right below for the latter, deliberately DIFFERENT case).
+            spend_cap_usd: Some(0.01),
+            rate_per_min: None,
+        })
+        .unwrap();
+        // Many prior calls, NONE of which reported a cost (spec §4: cost_usd null unless the
+        // server reports usage) — the honest degradation this task's brief calls out explicitly.
+        for i in 1..=10 {
+            seed_invocation(&db, &server.id, None, None, i * 1_000);
+        }
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Allow,
+            "NULL cost_usd must sum to 0.0, never trip a spend cap on its own — honest \
+             degradation, not a bug"
+        );
+    }
+
+    #[test]
+    fn a_reported_cost_can_trip_even_the_tightest_zero_dollar_cap() {
+        // Companion to the NULL-cost test above: proves the $0.00 cap ISN'T simply inert — it
+        // trips the instant ANY cost is actually reported, distinguishing "no policy signal yet"
+        // from "a real cap of zero".
+        let db = new_db();
+        let server = add_server(&db);
+        enable_tool(&db, &server.id, "search");
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: Some(0.0),
+            rate_per_min: None,
+        })
+        .unwrap();
+        seed_invocation(&db, &server.id, None, Some(0.0001), 1_000);
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_SPEND_CAP_EXCEEDED.to_string()
+            }
+        );
+    }
+
+    // ---- ToolCall's per-tool allowlist still denies FIRST, unaffected by policy caps (spec §6:
+    // caps are an ADDITIONAL gate on the Allow path, never a replacement) ----
+
+    #[test]
+    fn a_disabled_tool_still_denies_as_tool_disabled_even_under_a_generous_policy() {
+        let db = new_db();
+        let server = add_server(&db);
+        db.upsert_mcp_tools(
+            &server.id,
+            vec![NewMcpTool {
+                name: "search".to_string(),
+                title: None,
+                description: None,
+                input_schema_json: "{}".to_string(),
+            }],
+        )
+        .unwrap();
+        let tool = db.list_mcp_tools(&server.id).unwrap().remove(0);
+        db.set_mcp_tool_enabled(&tool.id, false).unwrap();
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: Some(1_000_000.0),
+            rate_per_min: Some(1_000_000),
+        })
+        .unwrap();
+
+        let decision = authorize(
+            &db,
+            &Action::ToolCall {
+                server_id: server.id.clone(),
+                tool_name: "search".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: REASON_TOOL_DISABLED.to_string()
+            },
+            "the allowlist denial must win regardless of how generous the configured policy is"
+        );
+        // The audit action must stay `tool_call` (the allowlist denial), NEVER `policy_deny` —
+        // `write_audit`'s policy_deny override only fires for the two policy-cap reasons.
+        let action: String = db
+            .conn()
+            .query_row(
+                "SELECT action FROM audit_log WHERE server_id = ?1",
+                rusqlite::params![server.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(action, "tool_call");
     }
 }

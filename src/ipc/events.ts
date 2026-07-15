@@ -261,11 +261,9 @@ export function onOrchdMcpArtifactsChanged(
 }
 
 /**
- * Subscribe to `orchd://mcp-invocation-logged` — see `McpInvocationLoggedPayload`. NOT yet bound
- * in `App.tsx` (S-EXT §8 T8): no invocation-log store slice exists until the Журнал tab task
- * wires one — this wrapper ships now (T7 already emits the push) so that later task only needs
- * to bind it, exactly like every other listener in this file is a pure passthrough with zero
- * App-side policy of its own.
+ * Subscribe to `orchd://mcp-invocation-logged` — see `McpInvocationLoggedPayload`. Bound in
+ * `App.tsx` (S-EXT §8, T18) to `refreshInvocations` — the store's whole-store `invocations`
+ * slice this task added.
  */
 export function onOrchdMcpInvocationLogged(
   cb: (p: McpInvocationLoggedPayload) => void,
@@ -296,4 +294,14 @@ export function onOrchdSkillsChanged(
   cb: (p: SkillsChangedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<SkillsChangedPayload>("orchd://skills-changed", (e) => cb(e.payload));
+}
+
+// ── Trust policy-cap coarse-invalidation event (S-EXT §4/§5/§6, BL-22, T18's
+// `EV_ORCHD_POLICIES_CHANGED`) ───────────────────────────────────────────────────────────────
+
+/** Subscribe to `orchd://policies-changed`. Carries no payload — mirrors
+ * `onOrchdConnectorsChanged` (a policy change can be global/project/server scoped, so a full
+ * `refreshPolicies` is the only meaningful reaction). */
+export function onOrchdPoliciesChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://policies-changed", () => cb());
 }

@@ -198,11 +198,11 @@ fn classify_reqwest_error(e: reqwest::Error) -> ConnectorError {
 /// doc comment).
 #[derive(Debug)]
 pub enum ConnectorInvokeError {
-    /// `trust::authorize` denied the `ConnectorInvoke` action. Phase 1 (`trust::evaluate`, this
-    /// task) always evaluates `Action::ConnectorInvoke` to `Decision::Allow` — spend/rate caps
-    /// land in T18 — so this variant has no live caller today, but the match arm exists so this
-    /// flow already has a typed home for that future denial, exactly like `OrchdMcpError::
-    /// ConsentRequired`/`ToolDisabled` did before their own gates existed.
+    /// `trust::authorize` denied the `ConnectorInvoke` action — a spend/rate policy-cap breach
+    /// (task T18, spec §6/BL-22: "connector_invoke passes through trust::authorize IDENTICALLY
+    /// to McpCallTool — same policy scope"). Carries the reason literal
+    /// (`rate_limit_exceeded`/`spend_cap_exceeded`) straight through to the wire error message
+    /// (see `map_connector_invoke_err`).
     Denied(String),
     /// The adapter itself failed (unknown provider/op, bad args, transport/timeout/HTTP-status
     /// error) — see [`ConnectorError`] for the specific cause.

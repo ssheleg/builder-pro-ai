@@ -464,6 +464,14 @@ pub enum OrchdMcpError {
     ConsentRequired,
     /// `trust::authorize` denied a `ToolCall` action (`mcp_tool.enabled=0`, or unrecognized).
     ToolDisabled,
+    /// `trust::authorize` denied a `ToolCall` action for a spend/rate POLICY-CAP breach (task
+    /// T18, spec §6/BL-22) — distinct from [`OrchdMcpError::ToolDisabled`] (the per-tool
+    /// allowlist denial) so the wire error message can honestly name WHICH cap tripped
+    /// (`"rate_limit_exceeded"`/`"spend_cap_exceeded"`, the carried `String`) rather than reusing
+    /// `ToolDisabled`'s fixed "tool disabled" text for an unrelated reason. Still maps to the
+    /// SAME `Error{Policy}` wire code (spec §6) as `ToolDisabled` — a client already handling one
+    /// denial kind handles the other; only the message differs.
+    PolicyCapExceeded(String),
     /// The MCP session/transport itself failed — terminal.
     Mcp(bpa_mcp::McpError),
     /// A Keychain lookup failed while resolving a bearer token. Carries only a description
@@ -479,6 +487,7 @@ impl std::fmt::Display for OrchdMcpError {
         match self {
             OrchdMcpError::ConsentRequired => write!(f, "consent required"),
             OrchdMcpError::ToolDisabled => write!(f, "tool disabled"),
+            OrchdMcpError::PolicyCapExceeded(reason) => write!(f, "policy cap exceeded: {reason}"),
             OrchdMcpError::Mcp(e) => write!(f, "mcp error: {e}"),
             OrchdMcpError::Secret(m) => write!(f, "secret error: {m}"),
             OrchdMcpError::Persist(e) => write!(f, "persistence error: {e}"),

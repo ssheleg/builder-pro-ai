@@ -3,6 +3,13 @@
 //! touches `rmcp::service`/`rmcp::ServiceExt` directly. Everything downstream (orchd, T5+) only
 //! ever sees [`crate::TransportConfig`], [`McpSession`], [`crate::McpTool`],
 //! [`crate::McpToolResult`] and [`crate::McpError`].
+//!
+//! The unit `()` client handler (`RunningService<RoleClient, ()>`) means every `rmcp`
+//! `ClientHandler` callback — including `on_tool_list_changed` — is the trait's no-op default;
+//! no server-pushed `notifications/tools/list_changed` is ever observed here. This is DELIBERATE
+//! for Phase 1's connect-per-call architecture, not an oversight — see
+//! `bpa_orchd::mcp::cache`'s own module doc comment (task T18) for the full honest rationale and
+//! the tracked follow-up (BL-70).
 
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;

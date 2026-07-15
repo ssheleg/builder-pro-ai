@@ -10,11 +10,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, Account, AccountAuthKind, ConnectorOp, Goal, GoalKind, GraphEdge,
+    encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, Goal, GoalKind, GraphEdge,
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
     McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
-    OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Project,
-    RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
+    OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Policy,
+    PolicyScope, Project, RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
     ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
@@ -397,6 +397,29 @@ fn expect_skills(res: OrchdResponse) -> Vec<Skill> {
     match res {
         OrchdResponse::Skills(v) => v,
         other => panic!("expected Skills, got {other:?}"),
+    }
+}
+
+// ---- S-EXT Trust dispatch response helpers (task T18, BL-22) ----
+
+fn expect_policy(res: OrchdResponse) -> Policy {
+    match res {
+        OrchdResponse::Policy(p) => p,
+        other => panic!("expected Policy, got {other:?}"),
+    }
+}
+
+fn expect_policies(res: OrchdResponse) -> Vec<Policy> {
+    match res {
+        OrchdResponse::Policies(v) => v,
+        other => panic!("expected Policies, got {other:?}"),
+    }
+}
+
+fn expect_audit_rows(res: OrchdResponse) -> Vec<AuditRow> {
+    match res {
+        OrchdResponse::AuditRows(v) => v,
+        other => panic!("expected AuditRows, got {other:?}"),
     }
 }
 
@@ -2338,6 +2361,228 @@ async fn skill_delete_unknown_id_is_error_not_found_and_broadcasts_nothing() {
         c2.recv_push_timeout(Duration::from_millis(200)).await,
         None,
         "a failed SkillDelete must broadcast nothing (spec §6)"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+// ---- S-EXT Trust: policy caps + audit log dispatch (task T18, spec §4/§5/§6, BL-22) ----
+
+#[tokio::test]
+async fn trust_set_policy_returns_policy_and_broadcasts_policies_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let policy = expect_policy(
+        c1.request(OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Global,
+            ref_id: None,
+            spend_cap_usd: Some(10.0),
+            rate_per_min: Some(30),
+        })
+        .await,
+    );
+    assert_eq!(policy.scope, PolicyScope::Global);
+    assert_eq!(policy.ref_id, None);
+    assert_eq!(policy.spend_cap_usd, Some(10.0));
+    assert_eq!(policy.rate_per_min, Some(30));
+    assert!(!policy.id.is_empty());
+
+    match c2.recv_push().await {
+        OrchdPush::PoliciesChanged => {}
+        other => panic!("expected PoliciesChanged, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn trust_set_policy_upserts_in_place_on_re_set_for_the_same_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let server = add_mcp_server(&mut c1, "http://127.0.0.1:0/mcp").await;
+    c2.recv_push().await; // drain McpAddServer's own McpServersChanged
+
+    let first = expect_policy(
+        c1.request(OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: Some(5.0),
+            rate_per_min: None,
+        })
+        .await,
+    );
+    c2.recv_push().await; // drain the first PoliciesChanged
+
+    let second = expect_policy(
+        c1.request(OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: Some(50.0),
+            rate_per_min: Some(10),
+        })
+        .await,
+    );
+    match c2.recv_push().await {
+        OrchdPush::PoliciesChanged => {}
+        other => panic!("expected PoliciesChanged, got {other:?}"),
+    }
+
+    assert_eq!(
+        second.id, first.id,
+        "re-setting the same (scope, refId) must UPDATE the existing row, not insert a second"
+    );
+    assert_eq!(second.spend_cap_usd, Some(50.0));
+    assert_eq!(second.rate_per_min, Some(10));
+
+    let all = expect_policies(c1.request(OrchdRequest::TrustListPolicies).await);
+    assert_eq!(
+        all.iter().filter(|p| p.id == first.id).count(),
+        1,
+        "must never end up as two rows"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn trust_set_policy_invalid_scope_ref_id_pairing_is_error_validation_and_broadcasts_nothing()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // Global scope with a ref_id set is an invalid pairing (spec §4: null for global).
+    let res = c1
+        .request(OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Global,
+            ref_id: Some("proj-1".to_string()),
+            spend_cap_usd: None,
+            rate_per_min: None,
+        })
+        .await;
+    assert_eq!(expect_error_code(res), OrchdErrorCode::Validation);
+
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "a failed TrustSetPolicy must broadcast nothing (spec §6)"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn trust_list_policies_returns_configured_policies_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let created = expect_policy(
+        c1.request(OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Project,
+            ref_id: Some("proj-1".to_string()),
+            spend_cap_usd: Some(2.5),
+            rate_per_min: Some(4),
+        })
+        .await,
+    );
+    c2.recv_push().await; // drain TrustSetPolicy's own PoliciesChanged
+
+    let policies = expect_policies(c1.request(OrchdRequest::TrustListPolicies).await);
+    assert!(
+        policies.iter().any(|p| p.id == created.id),
+        "expected the just-set policy in {policies:?}"
+    );
+
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "a read verb (TrustListPolicies) must broadcast nothing"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn trust_list_audit_returns_rows_newest_first_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // An UN-consented McpConnect denies at the trust gate BEFORE any network I/O (spec D10) —
+    // the cheapest real way to produce a genuine `audit_log` row without a live stub MCP server.
+    let server = add_mcp_server(&mut c1, "http://127.0.0.1:0/mcp").await;
+    c2.recv_push().await; // drain McpAddServer's own McpServersChanged
+
+    let res = c1
+        .request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await;
+    assert_eq!(expect_error_code(res), OrchdErrorCode::Consent);
+
+    let rows = expect_audit_rows(
+        c1.request(OrchdRequest::TrustListAudit { limit: None })
+            .await,
+    );
+    let row = rows
+        .iter()
+        .find(|r| r.server_id.as_deref() == Some(server.id.as_str()))
+        .expect("expected an audit row for the denied McpConnect");
+    assert_eq!(row.action, "connect");
+    assert_eq!(row.decision, "deny");
+    assert_eq!(row.reason.as_deref(), Some("consent_required"));
+
+    // `limit` caps the result.
+    let capped = expect_audit_rows(
+        c1.request(OrchdRequest::TrustListAudit { limit: Some(1) })
+            .await,
+    );
+    assert_eq!(capped.len(), 1);
+
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_millis(200)).await,
+        None,
+        "a read verb (TrustListAudit) must broadcast nothing"
     );
 
     c1.shutdown(boot).await;

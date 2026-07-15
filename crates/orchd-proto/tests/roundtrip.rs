@@ -306,6 +306,35 @@ fn sample_skill() -> Skill {
     }
 }
 
+/// Named to avoid colliding with [`sample_policy`] above, which builds `PolicyRules` (the
+/// pre-existing, unrelated per-ruleset owner-consent policy — see `Policy`'s own doc comment for
+/// why the two types coexist).
+fn sample_trust_policy() -> Policy {
+    Policy {
+        id: "policy-1".into(),
+        scope: PolicyScope::Server,
+        ref_id: Some("mcp-1".into()),
+        spend_cap_usd: Some(5.0),
+        rate_per_min: Some(30),
+        created_at: 1_720_000_000,
+        updated_at: 1_720_000_100,
+    }
+}
+
+fn sample_audit_row() -> AuditRow {
+    AuditRow {
+        id: "audit-1".into(),
+        at: 1_720_000_200,
+        action: "policy_deny".into(),
+        server_id: Some("mcp-1".into()),
+        tool_name: Some("search".into()),
+        project_id: Some("proj-1".into()),
+        decision: "deny".into(),
+        reason: Some("rate_limit_exceeded".into()),
+        invocation_id: None,
+    }
+}
+
 fn all_requests() -> Vec<OrchdRequest> {
     vec![
         OrchdRequest::Ping,
@@ -613,6 +642,21 @@ fn all_requests() -> Vec<OrchdRequest> {
         OrchdRequest::SkillDelete {
             id: "skill-1".into(),
         },
+        OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Global,
+            ref_id: None,
+            spend_cap_usd: Some(10.0),
+            rate_per_min: None,
+        },
+        OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some("mcp-1".into()),
+            spend_cap_usd: None,
+            rate_per_min: Some(5),
+        },
+        OrchdRequest::TrustListPolicies,
+        OrchdRequest::TrustListAudit { limit: Some(50) },
+        OrchdRequest::TrustListAudit { limit: None },
     ]
 }
 
@@ -680,6 +724,13 @@ fn all_responses() -> Vec<OrchdResponse> {
         OrchdResponse::ConnectorOps(vec![sample_connector_op()]),
         OrchdResponse::Skill(sample_skill()),
         OrchdResponse::Skills(vec![sample_skill()]),
+        OrchdResponse::Policy(sample_trust_policy()),
+        OrchdResponse::Policies(vec![sample_trust_policy()]),
+        OrchdResponse::AuditRows(vec![sample_audit_row()]),
+        OrchdResponse::Error {
+            code: OrchdErrorCode::Policy,
+            message: "rate_limit_exceeded".into(),
+        },
     ]
 }
 
@@ -720,6 +771,7 @@ fn all_pushes() -> Vec<OrchdPush> {
             project_id: Some("proj-1".into()),
         },
         OrchdPush::SkillsChanged { project_id: None },
+        OrchdPush::PoliciesChanged,
     ]
 }
 
@@ -1088,4 +1140,75 @@ fn skill_list_response_json_roundtrips() {
         decoded, original,
         "OrchdResponse::Skills must JSON round-trip byte-for-byte equal"
     );
+}
+
+// ---- S-EXT Trust entity/verb tests (spec §4/§5/§6, BL-22, task T18) ----
+
+#[test]
+fn policy_scope_server_serializes_lowercase_on_the_wire() {
+    // Discriminating: exact tag equality (a broken `rename_all` producing "Server" fails).
+    assert_serde_tag(&PolicyScope::Server, "server");
+    let frame = OrchdFrame::Request {
+        id: 1,
+        req: OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some("mcp-1".into()),
+            spend_cap_usd: None,
+            rate_per_min: Some(5),
+        },
+    };
+    assert_wire_contains(&frame, "server");
+}
+
+#[test]
+fn policy_response_json_uses_camelcase_ref_id_spend_cap_rate_per_min() {
+    let json = serde_json::to_string(&sample_trust_policy()).expect("serialize Policy");
+    assert!(
+        json.contains("\"refId\""),
+        "Policy.ref_id must serialize as camelCase `refId`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"spendCapUsd\""),
+        "Policy.spend_cap_usd must serialize as camelCase `spendCapUsd`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"ratePerMin\""),
+        "Policy.rate_per_min must serialize as camelCase `ratePerMin`; got:\n{json}"
+    );
+    assert!(
+        !json.contains("ref_id")
+            && !json.contains("spend_cap_usd")
+            && !json.contains("rate_per_min"),
+        "generated JSON must not contain snake_case field names; got:\n{json}"
+    );
+}
+
+#[test]
+fn audit_row_response_json_uses_camelcase_invocation_id_and_carries_the_policy_deny_action() {
+    let json = serde_json::to_string(&sample_audit_row()).expect("serialize AuditRow");
+    assert!(
+        json.contains("\"invocationId\""),
+        "AuditRow.invocation_id must serialize as camelCase `invocationId`; got:\n{json}"
+    );
+    assert!(
+        json.contains("\"policy_deny\""),
+        "AuditRow.action must carry the spec §4 'policy_deny' literal verbatim; got:\n{json}"
+    );
+    assert!(
+        !json.contains("invocation_id"),
+        "generated JSON must not contain snake_case `invocation_id`; got:\n{json}"
+    );
+}
+
+#[test]
+fn trust_set_policy_null_cap_fields_roundtrip_as_unlimited() {
+    // D11-style "absent/null = unlimited" — a policy with both caps `None` is legal (spec §4:
+    // "null = unlimited").
+    let req = OrchdRequest::TrustSetPolicy {
+        scope: PolicyScope::Global,
+        ref_id: None,
+        spend_cap_usd: None,
+        rate_per_min: None,
+    };
+    assert_frame_roundtrip(OrchdFrame::Request { id: 1, req });
 }

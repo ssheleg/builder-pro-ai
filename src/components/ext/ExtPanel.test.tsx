@@ -14,6 +14,12 @@ vi.mock("./ConnectorsTab", () => ({
 vi.mock("./SkillsTab", () => ({
   SkillsTab: () => <div data-testid="marker-skills" />,
 }));
+vi.mock("./InvocationLog", () => ({
+  InvocationLog: () => <div data-testid="marker-log" />,
+}));
+vi.mock("./ArtifactsTab", () => ({
+  ArtifactsTab: () => <div data-testid="marker-artifacts" />,
+}));
 
 const mcpListServersMock = vi.fn();
 vi.mock("../../ipc/orchd", () => ({
@@ -71,12 +77,18 @@ describe("ExtPanel", () => {
     expect(screen.queryByTestId("marker-servers")).toBeNull();
   });
 
-  it("the not-yet-built tabs render a «скоро» stub", () => {
+  it("switching to «Журнал» mounts InvocationLog, unmounting ServersTab (S-EXT §8, T18)", () => {
     render(<ExtPanel />);
-    for (const key of ["log", "artifacts"]) {
-      fireEvent.click(screen.getByTestId(`ext-tab-${key}`));
-      expect(screen.getByTestId("ext-tab-stub")).toBeTruthy();
-    }
+    fireEvent.click(screen.getByTestId("ext-tab-log"));
+    expect(screen.getByTestId("marker-log")).toBeTruthy();
+    expect(screen.queryByTestId("marker-servers")).toBeNull();
+  });
+
+  it("switching to «Артефакты» mounts ArtifactsTab, unmounting ServersTab (S-EXT §8, T18)", () => {
+    render(<ExtPanel />);
+    fireEvent.click(screen.getByTestId("ext-tab-artifacts"));
+    expect(screen.getByTestId("marker-artifacts")).toBeTruthy();
+    expect(screen.queryByTestId("marker-servers")).toBeNull();
   });
 
   it("renders the OrchdDownBanner while orchdDown is true", () => {

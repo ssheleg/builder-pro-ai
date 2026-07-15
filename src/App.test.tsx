@@ -98,12 +98,20 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdMcpArtifactsChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdMcpInvocationLogged: (cb: (p: unknown) => void) => {
+    cbs.orchdMcpInvocationLogged = cb;
+    return Promise.resolve(unlisten);
+  },
   onOrchdConnectorsChanged: (cb: (p: unknown) => void) => {
     cbs.orchdConnectorsChanged = cb;
     return Promise.resolve(unlisten);
   },
   onOrchdSkillsChanged: (cb: (p: unknown) => void) => {
     cbs.orchdSkillsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
+  onOrchdPoliciesChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdPoliciesChanged = cb;
     return Promise.resolve(unlisten);
   },
 }));
@@ -139,12 +147,17 @@ const orchdImportFromFileMock = vi.fn();
 const mcpListServersMock = vi.fn().mockResolvedValue([]);
 const mcpListToolsMock = vi.fn().mockResolvedValue([]);
 const mcpListArtifactsMock = vi.fn().mockResolvedValue([]);
+const mcpListInvocationsMock = vi.fn().mockResolvedValue([]);
 // S-EXT §8 T13b: the Connectors slice's `refreshAccounts` (`store.ts`) calls straight through to
 // this — mocked here for the same reason as the MCP wrappers above.
 const connectorListAccountsMock = vi.fn().mockResolvedValue([]);
 // S-EXT §8, D11, T17: the Skills slice's `refreshSkills` (`store.ts`) calls straight through to
 // this — mocked here for the same reason as the MCP/Connectors wrappers above.
 const skillListMock = vi.fn().mockResolvedValue([]);
+// S-EXT §4/§6/§8, BL-22, T18: the Trust slice's `refreshPolicies`/`refreshAuditRows` (`store.ts`)
+// call straight through to these — mocked here for the same reason as the wrappers above.
+const trustListPoliciesMock = vi.fn().mockResolvedValue([]);
+const trustListAuditMock = vi.fn().mockResolvedValue([]);
 vi.mock("./ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -161,8 +174,11 @@ vi.mock("./ipc/orchd", () => ({
   mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
+  mcpListInvocations: (...a: unknown[]) => mcpListInvocationsMock(...a),
   connectorListAccounts: (...a: unknown[]) => connectorListAccountsMock(...a),
   skillList: (...a: unknown[]) => skillListMock(...a),
+  trustListPolicies: (...a: unknown[]) => trustListPoliciesMock(...a),
+  trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -284,8 +300,11 @@ beforeEach(() => {
   mcpListServersMock.mockReset().mockResolvedValue([]);
   mcpListToolsMock.mockReset().mockResolvedValue([]);
   mcpListArtifactsMock.mockReset().mockResolvedValue([]);
+  mcpListInvocationsMock.mockReset().mockResolvedValue([]);
   connectorListAccountsMock.mockReset().mockResolvedValue([]);
   skillListMock.mockReset().mockResolvedValue([]);
+  trustListPoliciesMock.mockReset().mockResolvedValue([]);
+  trustListAuditMock.mockReset().mockResolvedValue([]);
   useAppStore.setState(
     {
       sessions: {},
@@ -315,6 +334,9 @@ beforeEach(() => {
       mcpToolsByServer: {},
       mcpArtifacts: [],
       accounts: [],
+      invocations: [],
+      auditRows: [],
+      policies: [],
       orchdDown: false,
       orchdIncompatible: false,
       orchdUpgradeDialogOpen: false,
@@ -1394,5 +1416,27 @@ describe("S-EXT §8 T8: «Расширения» view + MCP event wiring", () =>
       cbs.orchdSkillsChanged({ projectId: null });
     });
     expect(skillListMock).toHaveBeenCalledWith(null);
+  });
+
+  it("orchd://mcp-invocation-logged re-fetches the whole-store invocations list (S-EXT §8, T18)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    mcpListInvocationsMock.mockClear();
+    await act(async () => {
+      cbs.orchdMcpInvocationLogged({ serverId: "s1" });
+    });
+    expect(mcpListInvocationsMock).toHaveBeenCalledWith(null, null, null);
+  });
+
+  it("orchd://policies-changed re-fetches the policies list (S-EXT §4/§6/§8, BL-22, T18)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    trustListPoliciesMock.mockClear();
+    await act(async () => {
+      cbs.orchdPoliciesChanged(null);
+    });
+    expect(trustListPoliciesMock).toHaveBeenCalledWith();
   });
 });

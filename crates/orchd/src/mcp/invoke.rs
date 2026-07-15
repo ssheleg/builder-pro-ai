@@ -72,8 +72,18 @@ where
                 project_id: project_id.clone(),
             },
         )?;
-        if matches!(decision, Decision::Deny { .. }) {
-            return Err(OrchdMcpError::ToolDisabled);
+        // (task T18, spec §6/BL-22): the allowlist denial keeps its existing `ToolDisabled`
+        // shape verbatim (`reason == trust::REASON_TOOL_DISABLED`); any OTHER deny reason at this
+        // point is a spend/rate POLICY-CAP breach (`trust::check_policy_caps`, gated ONLY on the
+        // Allow path an enabled tool already took) — carried through as `PolicyCapExceeded` so
+        // the wire error message names WHICH cap tripped instead of reusing "tool disabled" for
+        // an unrelated reason.
+        if let Decision::Deny { reason } = decision {
+            return Err(if reason == trust::REASON_TOOL_DISABLED {
+                OrchdMcpError::ToolDisabled
+            } else {
+                OrchdMcpError::PolicyCapExceeded(reason)
+            });
         }
 
         // (S-EXT §6/D6/D10, task T16): Phase-1 has no persisted session — EVERY call reconnects
@@ -545,6 +555,69 @@ mod tests {
             .query_row(
                 "SELECT COUNT(*) FROM audit_log WHERE action='tool_call' AND decision='deny' \
                  AND reason='tool_disabled'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(denied, 1);
+    }
+
+    // ---- spend/rate policy-cap denial (task T18, spec §6/BL-22): a DIFFERENT `OrchdMcpError`
+    // variant than the allowlist denial above, so the wire error message can name WHICH cap
+    // tripped instead of reusing "tool disabled" ----
+
+    #[tokio::test]
+    async fn call_tool_on_a_rate_capped_server_is_denied_as_policy_cap_exceeded_with_no_dispatch() {
+        let db = new_db();
+        let server = add_server(&db).await;
+        add_tool(&db, &server.id, "search").await;
+        {
+            let guard = db.lock().await;
+            guard
+                .upsert_policy(crate::persistence::NewPolicy {
+                    scope: bpa_orchd_proto::PolicyScope::Server,
+                    ref_id: Some(server.id.clone()),
+                    spend_cap_usd: None,
+                    rate_per_min: Some(0),
+                })
+                .unwrap();
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_closure = call_count.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            let call_count = call_count_for_closure.clone();
+            async move { Ok::<FakeSession, McpError>(FakeSession::new(vec![], call_count)) }
+        };
+
+        let err = call_tool(&db, &server.id, "search", "{}", None, connect_fn)
+            .await
+            .unwrap_err();
+        match err {
+            OrchdMcpError::PolicyCapExceeded(reason) => {
+                assert_eq!(reason, "rate_limit_exceeded")
+            }
+            other => panic!("expected PolicyCapExceeded, got {other:?}"),
+        }
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "a policy-cap-denied call must never dispatch to the session"
+        );
+        assert!(db
+            .lock()
+            .await
+            .list_invocations(Some(&server.id), None, None)
+            .unwrap()
+            .is_empty());
+
+        let denied: i64 = db
+            .lock()
+            .await
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action='policy_deny' AND decision='deny' \
+                 AND reason='rate_limit_exceeded'",
                 [],
                 |r| r.get(0),
             )
