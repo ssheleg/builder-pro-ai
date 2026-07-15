@@ -9,8 +9,8 @@ use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::Value;
 
-use crate::error::{map_connect_err, map_service_err, McpError};
-use crate::transport::{build_http_transport, TransportConfig};
+use crate::error::{map_connect_err, map_service_err, map_spawn_err, McpError};
+use crate::transport::{build_http_transport, build_stdio_transport, TransportConfig};
 use crate::types::{map_call_result, map_tool, McpTool, McpToolResult};
 
 /// A live connection to one MCP server (spec §3). The only ways to obtain one are [`connect`]
@@ -76,13 +76,22 @@ impl McpSession {
     }
 }
 
-/// Connect to an MCP server over `cfg`'s transport, presenting `bearer` (if any) as the bare
-/// authorization token (spec D2 — `rmcp` prepends the `Bearer ` scheme; never pass an
-/// already-prefixed value).
+/// Connect to an MCP server over `cfg`'s transport.
+///
+/// `bearer`, when present, is sent as the bare authorization token for [`TransportConfig::Http`]
+/// (spec D2 — `rmcp` prepends the `Bearer ` scheme; never pass an already-prefixed value). It is
+/// **ignored** for [`TransportConfig::Stdio`]: a local process server has no HTTP request to
+/// attach a bearer to — if it needs credentials at all, they travel via `Stdio.env` instead
+/// (caller's responsibility, same as any other env value).
 pub async fn connect(cfg: TransportConfig, bearer: Option<String>) -> Result<McpSession, McpError> {
     match cfg {
         TransportConfig::Http { url } => {
             let transport = build_http_transport(&url, bearer.as_deref());
+            let running = ().serve(transport).await.map_err(map_connect_err)?;
+            Ok(McpSession::from_running(running))
+        }
+        TransportConfig::Stdio { command, args, env } => {
+            let transport = build_stdio_transport(&command, &args, &env).map_err(map_spawn_err)?;
             let running = ().serve(transport).await.map_err(map_connect_err)?;
             Ok(McpSession::from_running(running))
         }

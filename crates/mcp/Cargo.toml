@@ -13,19 +13,37 @@ path = "src/lib.rs"
 # crate's own stub-server tests (tests/stub.rs). Never enabled for a normal build: orchd talks
 # to MCP servers exclusively through `connect`/`TransportConfig::Http`.
 test-support = []
+# Builds `src/bin/stub_stdio_server.rs` — a REAL child-process MCP server (not an in-memory
+# duplex) used only by `tests/stdio.rs` to prove `TransportConfig::Stdio` end-to-end (S-EXT §3,
+# D6, T15). Pulls in rmcp's `transport-io` (server-side stdio transport) plus the `serde`/
+# `schemars` the stub tool's request struct needs — none of which a production build (orchd,
+# which only ever calls `connect`) requires. Never active for a normal build: turned on only via
+# this crate's own self dev-dependency below, the same trick `test-support` already uses.
+stub-stdio-server = ["rmcp/transport-io", "dep:serde", "dep:schemars"]
+
+[[bin]]
+name = "stub_stdio_server"
+path = "src/bin/stub_stdio_server.rs"
+required-features = ["stub-stdio-server"]
 
 [dependencies]
-rmcp = { version = "2.2", features = ["client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "2.2", features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Optional: only pulled in by the `stub-stdio-server` feature, to build `src/bin/stub_stdio_server.rs`
+# (a `[[bin]]` target only ever sees `[dependencies]`, never `[dev-dependencies]` — declaring
+# these here, gated, is what makes the bin buildable at all).
+serde = { workspace = true, optional = true }
+schemars = { version = "1", optional = true }
 
 [dev-dependencies]
-# Self dev-dependency so `cargo test`/`cargo clippy --all-targets` build this crate's lib with
-# `test-support` active (the standard trick for gating a test-only public surface behind a
-# feature that integration tests, which link the lib as an external crate, can still reach).
-bpa-mcp = { path = ".", features = ["test-support"] }
+# Self dev-dependency so `cargo test`/`cargo clippy --all-targets` build this crate's lib (and
+# its `[[bin]]` targets) with `test-support` + `stub-stdio-server` active (the standard trick for
+# gating a test-only public surface behind a feature that integration tests, which link the lib
+# as an external crate, can still reach).
+bpa-mcp = { path = ".", features = ["test-support", "stub-stdio-server"] }
 rmcp = { version = "2.2", features = ["client", "server", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 serde = { workspace = true }

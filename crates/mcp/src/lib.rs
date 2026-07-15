@@ -2,10 +2,11 @@
 //!
 //! This crate is the ONLY place in Builder Pro AI that imports `rmcp` types. `bpa-orchd` (T5+)
 //! talks to MCP servers exclusively through [`TransportConfig`], [`connect`], [`McpSession`],
-//! [`McpTool`], [`McpToolResult`] and [`McpError`] — never `rmcp::*` directly. Phase 1 ships the
-//! Streamable HTTP transport only (spec D6); a `Stdio` variant lands in a later phase (S-EXT
-//! T15) behind an execution-consent gate, which is why [`TransportConfig`] is `#[non_exhaustive]`
-//! today.
+//! [`McpTool`], [`McpToolResult`] and [`McpError`] — never `rmcp::*` directly. [`TransportConfig`]
+//! supports both the Streamable HTTP transport (Phase 1, spec D6 — the DoD path) and, as of
+//! S-EXT T15, `Stdio` (a local child-process MCP server). It stays `#[non_exhaustive]` because
+//! this crate does not itself gate `Stdio` behind execution consent or filter its env — that's
+//! orchd's job, one layer up (BL-22 consent gate, T16 `DYLD_*`/`LD_*` denylist).
 
 mod client;
 mod error;

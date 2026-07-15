@@ -28,7 +28,7 @@ serde_json = "1"
 # own optional reqwest feature) so Cargo's feature unification gives rmcp's internal reqwest
 # client a TLS backend too — see crates/mcp/Cargo.toml.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
-tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal", "process"] }
 portable-pty = "0.9.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 ciborium = "0.2.2"

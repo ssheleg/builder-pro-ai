@@ -76,6 +76,14 @@ pub(crate) fn map_connect_err(err: ClientInitializeError) -> McpError {
     }
 }
 
+/// Map the `std::io::Error` [`crate::transport::build_stdio_transport`] returns when it fails
+/// to spawn the child process for a [`crate::TransportConfig::Stdio`] server (spec D6, T15) —
+/// e.g. the command doesn't exist or isn't executable. Distinct from [`map_connect_err`], which
+/// only ever sees errors from an already-spawned transport's `initialize` handshake.
+pub(crate) fn map_spawn_err(err: std::io::Error) -> McpError {
+    McpError::Transport(format!("failed to spawn stdio mcp server process: {err}"))
+}
+
 /// Map the error a live [`crate::McpSession`] call (`list_tools`/`call_tool`) returns.
 ///
 /// `ServiceError` is `#[non_exhaustive]` for the same reason as [`ClientInitializeError`]
@@ -181,5 +189,15 @@ mod tests {
         let data = rmcp::model::ErrorData::internal_error("boom", None);
         let mapped = map_connect_err(ClientInitializeError::JsonRpcError(data));
         assert!(matches!(mapped, McpError::Protocol(_)));
+    }
+
+    #[test]
+    fn map_spawn_err_becomes_transport_and_carries_the_io_error_text() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let mapped = map_spawn_err(io_err);
+        match mapped {
+            McpError::Transport(msg) => assert!(msg.contains("no such file"), "{msg}"),
+            other => panic!("expected McpError::Transport, got: {other:?}"),
+        }
     }
 }
