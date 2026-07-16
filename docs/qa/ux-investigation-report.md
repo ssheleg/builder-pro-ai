@@ -12,25 +12,114 @@
 | Эпик | Сценарии | Статус |
 |---|---|---|
 | A — запуск/демоны | A-01 🟡 · A-02 🟡 · A-03 🟡 · A-04 🟡 · A-05 ✅ · A-06 ✅ · A-07 ✅ · A-08 🟡 · A-09 🟡 · A-10 🟡 | 10/10 |
-| B — workspace/файлы/терминал | B-01 ⬜ · B-02 ⬜ · B-03 ⬜ · B-04 ⬜ · B-05 ⬜ · B-06 ⬜ · B-07 ⬜ · B-08 ⬜ · B-09 ⬜ · B-10 ⬜ · B-11 ⬜ · B-12 ⬜ · B-13 ⬜ · B-14 ⬜ | 0/14 |
+| B — workspace/файлы/терминал | B-01 🟡 · B-02 ✅ · B-03 ✅ · B-04 📄 · B-05 🟡 · B-06 🟡 · B-07 🟡 · B-08 🟡 · B-09 ✅ · B-10 ✅ · B-11 ✅ · B-12 🟡 · B-13 🟡 · B-14 ✅ | 14/14 |
 | C — проект | C-01 ✅ · C-02 🟡 · C-03 🟡 · C-04 ✅ · C-05 🟡 · C-06 🟡 · C-07 🔴 · C-08 📄 · C-09 ✅ | 9/9 |
-| D — цели/метрики | D-01 ⬜ · D-02 ⬜ · D-03 ⬜ · D-04 ⬜ · D-05 ⬜ · D-06 ⬜ · D-07 ⬜ | 0/7 |
+| D — цели/метрики | D-01 ✅ · D-02 🟡 · D-03 ✅ · D-04 ✅ · D-05 🟡 · D-06 ✅ · D-07 🟡 | 7/7 |
 | E — идеи (гипотезы) | E-01 ✅ · E-02 ✅ · E-03 ✅ · E-04 ✅ · E-05 🟡 · E-06 ✅ · E-07 🟡 · E-08 🟡 | 8/8 |
 | F — research | F-01 ✅ · F-02 ✅ · F-03 🔴 · F-04 🟡 · F-05 🟡 · F-06 🟡 · F-07 ✅ · F-08 🟡 · F-09 🟡 · F-10 🟡 · F-11 🟡 · F-12 ✅ · F-13 ✅ · F-14 ✅ | 14/14 |
 | G — инсайты | G-01 ✅ · G-02 🟡 · G-03 ✅ · G-04 ✅ · G-05 🟡 · G-06 🟡 · G-07 ✅ · G-08 🟡 | 8/8 |
 | H — задачи (фичи) | H-01 🟡 · H-02 🟡 · H-03 ✅ · H-04 🟡 · H-05 ✅ · H-06 ✅ · H-07 ✅ | 7/7 |
-| I — граф | I-01 ⬜ · I-02 ⬜ · I-03 ⬜ · I-04 ⬜ · I-05 ⬜ · I-06 ⬜ · I-07 ⬜ · I-08 ⬜ · I-09 ⬜ | 0/9 |
-| J — расширения | J-01 ⬜ · J-02 ⬜ · J-03 ⬜ · J-04 ⬜ · J-05 ⬜ · J-06 ⬜ · J-07 ⬜ · J-08 ⬜ | 0/8 |
-| K — кросс-каттинг | K-01 ⬜ · K-02 ⬜ · K-03 ⬜ · K-04 ⬜ · K-05 ⬜ · K-06 ⬜ · K-07 ⬜ | 0/7 |
-| **Итого** | | **56/101** — 26 ✅ · 27 🟡 · 2 🔴 (F-03→BL-89 Critical, C-07→BL-90 Minor) · 1 📄 (C-08 архив UI-недостижим) |
+| I — граф | I-01 🟡 · I-02 🟡 · I-03 🟡 · I-04 ✅ · I-05 ✅ · I-06 ✅ · I-07 🟡 · I-08 ✅ · I-09 🟡 | 9/9 |
+| J — расширения | J-01 🟡 · J-02 🟡 · J-03 ✅ · J-04 🟡 · J-05 🟡 · J-06 🟡 · J-07 🟡 · J-08 🟡 | 8/8 |
+| K — кросс-каттинг | K-01 🟡 · K-02 🟡 · K-03 ✅ · K-04 🟡 · K-05 ✅ · K-06 🟡 · K-07 🟡 | 7/7 |
+| **Итого** | | **101/101 — ЦИКЛ ЗАВЕРШЁН** — 43 ✅ · 54 🟡 · 2 🔴 (F-03→BL-89 Critical, C-07→BL-90 Minor) · 2 📄 (C-08 архив UI-недостижим, B-04 удаление root UI-недостижимо) |
 
-## Реестр вердиктов по подозрениям
+## Итог цикла — приоритизация
 
-| Подозрение | Сценарии | Вердикт | Секция |
-|---|---|---|---|
-| P-01…P-28 | см. каталог §1 | — | — |
-| B-01…B-10 | см. каталог §1 | — | — |
-| F-1…F-8 | см. каталог §1 | — | — |
+101/101 проверено. **Ни одного дефекта потери/повреждения данных в happy-path.** Ядро
+(проект→цель→идея→research→инсайт→задача) поведенчески корректно; почти все 🟡 — про
+**обратную связь, восстановление и индикацию режима**, а не про сломанную логику.
+
+### Tier 0 — Critical (единственный)
+- **F-03 / B-01 → BL-89.** `McpConnect` без таймаута ни на одном слое. Зависший MCP-эндпоинт
+  клинит ВЕСЬ orchd-конвейер (dispatch последователен, одно общее соединение), баннер
+  «недоступен» не появляется, лечится только рестартом orchd. Латентный близнец —
+  **B-02/J-05 → BL-91** (OAuth-обмен без таймаута; в v1 недостижим, оживёт с первым провайдером).
+
+### Tier 1 — Important (чинить до внешнего теста)
+- **Реконнект-регидрация неполна (K-02 + F-10/F-11/P-24) → BL-92.** `onOrchdUp` рефетчит только
+  projects + слайсы открытого проекта; пропускает research-runs, ВСЮ ext-поверхность, audit,
+  global-ruleset. Плюс research-run не имеет polling/manual-refresh и boot-reconcile не шлёт пуш —
+  прерванный run навсегда «выполняется» на экране (в БД `failed{interrupted}`).
+- **Триада молчаливого no-op (P-01/P-02/P-03) → BL-93.** «Новый терминал» / закрыть «×» / «+ Add
+  workspace» — fire-and-forget через `void handler()` без catch: отказ проглочен без toast. P-02
+  хуже — reject пропускает `manager.dispose` → зомби-таб + утечка xterm (и `removeSession` мёртвый).
+- **Молчаливая деградация БД без индикации (A-08/A-09) → BL-94.** Карантин повреждённой orchd.db и
+  in-memory-fallback (диск недоступен) — оба без единого UI-сигнала: юзер видит пустой аккаунт или
+  работает в неперсистентном режиме, теряя сессию при рестарте. Сигнал только в orchd-логе.
+- **Партиал-фейлы без компенсации/идемпотентности (E-07/P-09 + G-08 + P-19) → BL-95.** Spawn-project:
+  обрыв после createProject → осиротевший проект+workspace. «В backlog»: сбой между CreateTask и
+  SetIdeaLifecycle → задача есть, идея застряла `researching`; ретрай плодит дубли. Корень — нет
+  busy-guard от двойного сабмита НИГДЕ (⌘K, CreateProject, ResearchRun, FormInsight, Spawn, +задача).
+- **A-10 (orchd): «Отмена» апгрейд-диалога → тупик → BL-96.** `orchdIncompatible` остаётся, но
+  `orchdDown=false` → ни один баннер флаг не читает → диалог не вернуть до рестарта (у sessiond
+  симметричный возврат есть).
+
+### Tier 2 — capability прошита, но UI-недостижима (решение владельца)
+- **C-08 → архив проекта:** verb+бэкенд+тесты есть, кнопки в UI нет (O-3).
+- **B-04 → удаление workspace-root:** verb+`LastRoot`-guard+тесты есть, кнопки нет.
+- **I-01/P-22 → граф-редактор:** `update_node` готов end-to-end, но узел создаётся с hardcoded
+  «Новый узел», формы title/body/rename/edge-label нет — как редактор знаний это стаб (O-7).
+- **D-07/O-4 → metric_refs:** сквозной бэкенд, но owner-сеттера нет → fit-context всегда пуст.
+- **J-04/O-5 → OAuth:** реестр провайдеров пуст в v1 → «начать OAuth» = гарантированный тупик с
+  копией, читающейся как поломка сервиса (нет пометки «скоро», в отличие от stdio/project-scope).
+
+### Tier 3 — Minor UX-полировка (объединяемо)
+Ревёрт правок идеи (E-05/P-27) vs эталон GoalTree (D-03); toast-clobber + нет ручного закрытия
+(K-01/P-21); сырые англ. Invariant-тексты + UUID в ошибках (C-05/H-05/I-09, вопрос локализации O-2);
+error_kind сырым токеном (F-09); provenance инсайт→задача невидим в UI (H-02/F-7); нет empty-state
+у ряда списков + loading==empty (P-11/P-12/P-13); consent-recovery недискаверабелен (P-20); нет
+per-row сигнала на graph/tool-отказах; import .md переживает rollback (C-07 → BL-90); нет
+виртуализации длинных списков + N+1 refreshResearchRuns (K-06); нет лимитов длины ввода (K-04).
+
+### Документация — правки (📄)
+- **F-1:** `architecture.md:530` врёт про копию баннера «Навыки» → привести к
+  `frontend-conventions.md` (реальная строка = «Навыки — это реестр; они исполняются, когда
+  появится агент-оркестр (S6b).»).
+- **F-3:** спека S-EXT/CHANGELOG overclaim про stdio-транспорт (UI жёстко http).
+- **F-5/BL-61:** locked-копия «у проекта должен остаться workspace» не производится кодом.
+- **B-04/C-08:** доки не отмечают, что удаление root / архив проекта UI-недостижимы.
+- **B-04 логи / B-05:** 72/77 verbs + все command-handlers без tracing — задокументировать как
+  осознанное решение (логируется слоем ниже) или завести на устранение (O-6).
+
+### Открытые вопросы владельцу (из §4 каталога) — блокируют часть Tier-2/3
+O-1 маппинг терминов · O-2 политика ru/en · O-3 архив проекта в UI? · O-4 где редактировать metric_refs? ·
+O-5 OAuth-секцию скрыть/«скоро»? · O-6 per-verb логи — норма? · O-7 граф-редактор — стаб или дефект? ·
+O-8 — на волны цикл разбит, порядок исполнен F→G→E→C→A→H→J→B→I→D→K.
+
+## Реестр вердиктов по подозрениям (итог цикла)
+
+| Подозрение | Вердикт | Действие |
+|---|---|---|
+| P-01 / P-02 / P-03 | подтверждены Important — триада молчаливого no-op; P-02 хуже (зомби-таб даже на успехе, `removeSession` мёртвый код) | BL-93 |
+| P-04 | НЕ баг — промис по контракту не реджектит (B-10 ✅) | — |
+| P-05 | Minor — [Повторить] без busy-фидбека | Tier3 |
+| P-06 | подтверждён — «Обзор»-таб + submit CreateProject + sidebar-attach + OAuth-код не гейтятся, но падают в честный toast | Tier3 |
+| P-07 / P-08 | подтверждены Minor — потеря drag-позиции / фантом ребра при orchdDown; самолечатся на след. refreshGraph | Tier3 |
+| P-09 | подтверждён Important — осиротевший проект; но `ProjectsChanged` его показывает (не «молчание») | BL-95 |
+| P-10 | подтверждён Minor — failed-fetch артефакта = тот же пустой диалог, что «без ресёрча» | Tier3 |
+| P-11 / P-12 / P-13 | подтверждены Minor — нет empty-state / loading==empty / null-навсегда без retry | Tier3 |
+| P-14 / P-15 | подтверждены Minor — HomeGoals молча пропускает грузящийся проект; listOps-отказ = пустой селект | Tier3 |
+| P-16 / P-17 / P-28 | подтверждены Minor — picker-ошибки через describeOrchdError; сырой message; слитые причины clipboard/export | Tier3 |
+| P-18 | НЕ дефект — вердикт без reasoning интенционален (fit_reasoning опционален); архив-причина отдельно | G-07 (📄) |
+| P-19 | подтверждён — busy-guard'а нет НИГДЕ; последствия от 2 идей (Minor) до 2 проектов (Important) | BL-95 |
+| P-20 | подтверждён Minor — consent-recovery недискаверабелен (ConnectDialog в одном месте) | Tier3 |
+| P-21 | подтверждён Important — toast single-slot clobber + нет ручного закрытия | BL-97 (Minor-факт, но частый) / Tier3 |
+| P-22 | подтверждён Important — граф-редактор стаб (нет формы/rename/edge-label) | BL / O-7 |
+| P-23 | подтверждён Minor — нет `orchd://audit-changed`, аудит только на ремоунте | Tier3 |
+| P-24 | подтверждён Important — нет polling/refresh, run застревает визуально | BL-92 |
+| P-25 / P-26 / P-27 | подтверждены Minor — bearer без следа; Cancel не откатывает insight; правки идеи без реверта (vs D-03) | Tier3 |
+| B-01 | 🔴 Critical — McpConnect без таймаута | BL-89 |
+| B-02 | латентный Critical — OAuth-обмен без таймаута, в v1 недостижим | BL-91 |
+| B-03 | приемлемо — TrustGrantConsent не в audit_log (сам акт установки гейта) | — |
+| B-04 / B-05 | подтверждены — ~72/77 verbs + command-handlers без tracing (логируется слоем ниже) | O-6 / 📄 |
+| B-06 | подтверждён Minor — GraphAddEdge post-insert lookup fail → push молча пропущен | Tier3 |
+| B-07 | 🔴 Minor латентный — import .md переживает rollback | BL-90 |
+| B-08 | подтверждён Minor — XOR-CHECK всплывает как Io, не Validation | Tier3 |
+| B-09 | = B-06 | Tier3 |
+| B-10 | подтверждён — sessiond `Push::Error` не эмитится в UI (warn-only) | Tier3 |
+| F-1 | 📄 architecture.md врёт про копию баннера; frontend-conventions прав | док-правка |
+| F-3 / F-5 / F-8 | 📄 подтверждены — stdio overclaim; locked-копия last-workspace не производится; архив UI-недостижим | док-правка |
 
 ## Шаблон секции результата
 
@@ -1524,3 +1613,237 @@ src/components/InsightsList.test.tsx src/components/idea/ResearchPane.test.tsx` 
 - **Что видит пользователь:** тянет self-loop/дубль → toast с англ.-мессиджем + (визуально) ребро осталось до ремоунта/refresh.
 - **Дельта от ожидания:** каталог «`Invariant`/`Conflict` → toast; Тексты» — тексты присутствуют, но mixed ru/en с UUID; + фантом (I-02).
 - **Действие:** BL (Minor): локализовать/причесать backend-message (или маппить в describeOrchdError по коду в человекочитаемый ru — «нельзя связать узел с самим собой» / «такая связь уже есть»); + откат фантома (I-02).
+
+## Волна 4 — эпики D, K (2026-07-16)
+
+# Эпик D — Цели (и метрики): инвестигейт D-01..D-07
+
+> READ-ONLY инвестигейт по каталогу `docs/qa/ux-first-session-scenarios.md` §2 Эпик D.
+> Модель: opus. Все пути прослежены UI-контрол → ipc → wire (proto) → dispatch → persistence.
+> Тесты: `cargo test -p bpa-orchd --lib goal` (29 passed), `npx vitest run GoalTree/HomeGoals/FormInsightDialog/orchd` (132 passed).
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть одной строкой |
+|---|---|---|---|
+| D-01 | ✅ OK | — | Strategic-корень автосоздаётся в `create_project` («Стратегическая цель»), пиннится первым (sort + `list_goals` recursive sort-key), НЕ удаляется/НЕ двигается — ни кнопок в UI, ни на сервере (двойной Invariant + move/delete-guard); title/status правятся осознанно |
+| D-02 | 🟡 UX-GAP | Minor | «+ подцель» создаёт `additional` под кликнутым рядом, title «новая цель», refresh + error→toast + orchdDown-гейт — ВСЁ ок, НО нет autoFocus на новый инпут (в отличие от FileTree, с которым doc-comment заявляет паритет) → «немедленной правки» по факту нет, ряд просто появляется внизу без выделения/скролла |
+| D-03 | ✅ OK | — | **Эталон реверта.** `commit()` при `!ok` делает `setTitle(goal.title)` (revert к серверному); blank→тихий revert; status честен через controlled-read; `useEffect([goal.title])` синкает внешние апдейты — прямой контрпример к P-27 (IdeasList не ревертит) |
+| D-04 | ✅ OK | — | Status честен (controlled), ▲/▼ edge-disabled (`canMoveUp/canMoveDown`), true-swap двумя `move_goal` (ords остаются уникальны). UI-reorder НИКОГДА не меняет `parentId` → cycle-guard (`ancestor_chain_contains`) из UI недостижим → защитный, OK |
+| D-05 | 🟡 UX-GAP | Minor | Confirm `«удалить ветку целиком?»` честно говорит про subtree-delete, но НЕ называет число потомков — в отличие от H-06/TasksList `«удалит N подзадач»` (рекурсивный `countDescendants`). Каскад через FK `ON DELETE CASCADE` + `foreign_keys=ON`; error→toast; orchdDown-гейт |
+| D-06 | ✅ OK | — | Вторая strategic / strategic-with-parent из UI недостижимы: «+ подцель» хардкодит `"additional"`, «add top-level» аффорданса нет. Серверные Invariant’ы (`project already has a strategic goal` + UNIQUE index `goal_one_strategic_per_project`; `strategic must be a root`) — чисто защитные |
+| D-07 | 🟡 UX-GAP | Minor | **O-4: редактора `metric_refs` НЕТ нигде.** `orchdCreateGoal` их не принимает (цели рождаются `'[]'`); `orchdUpdateGoal` принимает `metricRefs`, но ЕДИНСТВЕННЫЕ вызовы (GoalTree) шлют `null`. Бэкенд поддерживает end-to-end (proto/persistence/socket + зелёный round-trip тест), но фронт их не заполняет никогда → единственный потребитель (FormInsightDialog fit-context, `g.metricRefs`) на практике всегда рендерит пусто (ветка `— метрики:` мертва) |
+
+**Итог по эпику:** 4×✅ OK · 3×🟡 UX-GAP (все Minor). Багов нет; доки/спека нигде не переобещали (metrics — открытый вопрос O-4, а не overclaim). Бэкенд целей — крепкий: 29 доменных инвариантов покрыты зелёными тестами.
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где подтверждено |
+|---|---|---|
+| P-27 (несогласованность реверта title/body) | ✅ GoalTree — ЭТАЛОН (ревертит) | D-03; контраст с IdeasList (E-05) |
+| O-4 (где владелец правит metric_refs) | 🟡 подтверждён: UI нет | D-07 |
+| B-04 (пер-верб tracing нет) | ✅ приемлемо (системно) | D-01..D-07 (goal-вербы без tracing, класс B-04) |
+
+---
+
+## D-01 — Новый проект → «Цели»: strategic-корень уже есть, пиннится, не удаляется/не двигается
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** автосоздание — `persistence.rs:1306-1313` (`create_project` в ОДНОЙ tx вставляет strategic `goal`, `STRATEGIC_GOAL_TITLE = "Стратегическая цель"` persistence.rs:604, `metric_refs='[]'`, `parent_id NULL`, `ord 0`) + `crate::graph::seed_strategic_entity_ref` (S4 §5 D6). Тест `create_project_creates_strategic_goal_and_ruleset_row` → **ok** (уже проверялось в C-01). Рендер-пиннинг — `GoalTree.tsx:36-61 buildRows` (сорт: `a.kind==="strategic"?-1:1` затем `ord`, DFS от `parentId=null`) + серверный `list_goals` `WITH RECURSIVE` zero-padded sort-key (`persistence.rs:1729-1742`) гарантирует «единственный `parent_id IS NULL` всегда первым». Non-deletable/non-reorderable в UI: `!isStrategic &&` перед ▲/▼ (GoalTree:231, 243) и «Удалить» (263) — для strategic этих кнопок НЕТ вовсе. Серверные дубль-гарды: `delete_goal` strategic→`Invariant` (persistence.rs:1693-1697, тест `delete_goal_strategic_is_invariant`), `move_goal` strategic→`Invariant` (1640-1644, тест `move_goal_strategic_root_is_invariant`).
+- **Обработка ошибок:** есть, честная. Первый маунт с пустым кэшем → `refreshGoals(projectId)` (GoalTree:308-314); rejection у `refreshGoals` сам сурфейсит toast (store, spec §7). Мутаций на этом сценарии нет.
+- **Логи:** пер-верб tracing на goal-вербах нет (класс B-04, системное решение прошлых волн). Секретов нет.
+- **Что видит пользователь:** открыв «Цели» сразу после создания проекта — корневую строку «Стратегическая цель» (`role="treeitem"`, depth 0) с редактируемым title-инпутом и селектом статуса, но БЕЗ ▲/▼ и БЕЗ «Удалить». `+ подцель` присутствует и на корне. Title/status strategic-корня редактируются осознанно (владелец переименовывает дефолт — doc-коммент create_project «the owner edits it»); это НЕ противоречит «non-deletable/non-reorderable».
+- **Дельта от ожидания:** нет. Каталог D-01 «Стратегическая цель-корень уже есть» — соблюдено; автосоздание происходит внутри `create_project`, не отдельным шагом.
+- **Действие:** ничего.
+
+## D-02 — «Цели» → «+ подцель»: ряд «новая цель» появился
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** `GoalTree.tsx:255-262` (кнопка «+ подцель», `onClick={()=>onAddSubgoal(goal.id)}`) → `handleAddSubgoal(parentId)` (336-343) → `orchdCreateGoal(projectId, parentId, "additional", NEW_SUBGOAL_TITLE="новая цель", "")` → `await refreshGoals(projectId)`. Wire: proto `CreateGoal{project_id,parent_id,kind,title,body}` (lib.rs:782-788) → `socket_server.rs:923-934` → `persistence.rs:create_goal`: `ord = MAX(ord)+1` в группе сиблингов (1532-1536, тест `create_goal_ord_increments_per_sibling_group`) → новый ряд ВНИЗУ детей кликнутого родителя. Тест `GoalTree.test.tsx:97` («+ подцель» зовёт `orchdCreateGoal` с id ряда как parentId + kind «additional» + refresh) → **passed**.
+- **Обработка ошибок:** есть, честная. try/catch → `showToast(describeOrchdError(e))` (340-341). orchdDown-гейт: кнопка `disabled={disabled}` где `disabled=orchdDown` (257, 414; тест «while orchdDown … clicking never calls the wrapper» passed).
+- **Логи:** пер-верб tracing нет (класс B-04). Секретов нет. Push `GoalsChanged{project_id}` на успехе (`respond_goal`, socket_server.rs:515-527) — плюс явный `refreshGoals` для немедленного обновления ФОРМЫ дерева.
+- **Что видит пользователь:** новый ряд «новая цель» (status «активна») появляется как последний ребёнок кликнутого родителя; отступ +1 уровень.
+- **Дельта от ожидания:** **нет autoFocus.** Doc-коммент `NEW_SUBGOAL_TITLE` (GoalTree:20-22) заявляет «the owner renames it inline immediately after, same UX as FileTree's inline-rename-after-create», но FileTree реально ставит `autoFocus` на инпут переименования (`FileTree.tsx:543`), а GoalTree — НЕТ (в компоненте ноль `autoFocus`/`.focus()`/`useRef`). То есть «немедленная правка» по факту не наступает: инпут редактируем, но курсор в него сам не встаёт, выделения/скролла к новому ряду тоже нет — при длинном дереве ряд может уехать за пределы вьюпорта. Каталожное «Ряд появился» выполнено; заявленный самим кодом паритет с FileTree — не выполнен.
+- **Действие:** BL (Minor): при создании подцели ставить autoFocus (+select) на её title-инпут и/или скроллить к ней — закрыть заявленный паритет с FileTree.
+
+## D-03 — «Цели» → править title (blur/Enter): сохранено через push; отказ → toast + РЕВЕРТ
+
+- **Вердикт:** ✅ OK. **Эталон реверта (референс против P-27).**
+- **Проверено:** `GoalRow` держит только in-flight `title` как локальный стейт (GoalTree:180). `commit()` (189-198): trimmed blank → `setTitle(goal.title)` тихий revert (192, никогда не сохраняет пустой title); `trimmed===goal.title` → no-op (195); иначе `const ok = await onTitleCommit(...)`; **`if(!ok) setTitle(goal.title)`** (197) — реверт к серверному значению при отказе. `handleTitleCommit` (318-326) → `orchdUpdateGoal(id, title, null, null, null)`; try→`return true`, catch→`showToast(describeOrchdError(e))`+`return false`. Enter → `blur()` → `onBlur` → `commit()` (208-214). Внешний апдейт не затирается драфтом: `useEffect(()=>setTitle(goal.title),[goal.title])` (185-187).
+- **Обработка ошибок:** есть, честная, С РЕВЕРТОМ. Это тот самый GOOD-паттерн, которого нет в `IdeasList.tsx` (P-27, E-05): там локальный `title`/`body` остаётся = отредактированному и НЕ самозалечивается. Здесь при отказе экран немедленно возвращает серверное значение — никогда не врёт о сохранённом.
+- **Логи:** пер-верб tracing нет (класс B-04). Секретов нет. Title-правка НЕ делает явный `refreshGoals` (осознанно, doc-коммент 286-288: поля доводит до консистентности общий пайп инвалидации `orchd://goals-changed`, форму дерева — только структурные мутации).
+- **Что видит пользователь:** правка сохраняется молча (без toast на успехе); при отказе — toast с честной причиной + инпут откатывается к серверному тексту.
+- **Дельта от ожидания:** нет. Каталог D-03 «Отказ → toast + **реверт к серверному значению**» — соблюдено дословно.
+- **Действие:** ничего. (Заметка по покрытию: сам revert не покрыт отдельным юнит-тестом — ближайший `an Invariant error … surfaces via showToast`, GoalTree.test:192, проверяет toast, но не откат значения; код при этом однозначен.)
+
+## D-04 — «Цели» → смена статуса; ▲/▼: обновилось; reorder на краю disabled; MoveGoal-циклы недостижимы
+
+- **Вердикт:** ✅ OK.
+- **Проверено (статус):** `<select value={goal.status} disabled={disabled} onChange=…>` (GoalTree:217-230) — controlled-read стора. `handleStatusChange` (328-334) → `orchdUpdateGoal(id, null, null, status, null)`; catch→toast. Реверт не нужен: селект отражает `goal.status` из стора, при отказе стор не менялся → селект «сам» показывает старое значение (честно).
+- **Проверено (reorder edge-disabled):** `canMoveUp={!isStrategic && idx>0}`, `canMoveDown={!isStrategic && idx>=0 && idx<siblings.length-1}` (412-413); в `GoalRow` — `disabled={disabled || !canMoveUp}` (236) / `!canMoveDown` (248) + `opacity 0.35`. Тест `edge: ▲ on FIRST … ▼ on LAST are disabled and never call orchdMoveGoal` (GoalTree.test:175) → **passed**. True-swap: `swapWithNeighbor` (364-374) захватывает ОБА `ord` и шлёт ДВА `orchdMoveGoal` (каждый берёт чужой старый ord) — иначе (нет `UNIQUE(parent_id,ord)`) односторонний move оставил бы дубль-ord без tiebreaker (doc-коммент 355-362). Тесты `▲/▼ TRUE-SWAPS via TWO orchdMoveGoal` (140, 161) → **passed**.
+- **Проверено (cycle-guard недостижим из UI):** `move_goal` server-side имеет `ancestor_chain_contains(&tx, new_parent, id)` → `Invariant "cannot move a goal under itself or one of its own descendants"` (persistence.rs:1664-1668, тест `move_goal_under_own_descendant_or_self_is_cycle_invariant`). НО единственный UI-путь к `move_goal` — ▲/▼, а `swapWithNeighbor` шлёт `orchdMoveGoal(goal.id, goal.parentId, …)` — **`parentId` НЕ меняется** (передаётся `goal.parentId`), меняется только `ord` среди сиблингов. Смена родителя из UI невозможна (нет drag-reparent, нет parent-селекта). ⇒ cycle-guard из UI недостижим → чисто защитный сервер-инвариант → OK.
+- **Обработка ошибок:** есть, честная. Каждая мутация в try/catch → toast; orchdDown → все контролы disabled.
+- **Логи:** пер-верб tracing нет (класс B-04). Секретов нет. `refreshGoals` один раз после обоих move (структурная мутация).
+- **Что видит пользователь:** статус меняется; ▲/▼ переставляет соседей; на краю кнопки серые (0.35) и disabled.
+- **Дельта от ожидания:** нет. «MoveGoal-циклы недостижимы из UI» — подтверждено (ответ на каталожный вопрос: да, недостижимы).
+- **Действие:** ничего.
+
+## D-05 — «Цели» → удалить ветку: window.confirm → subtree удалён; отказ → toast
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** `handleDelete` (GoalTree:345-353): `if(!window.confirm(DELETE_CONFIRM_TEXT)) return;` где `DELETE_CONFIRM_TEXT = "удалить ветку целиком?"` (18) → `orchdDeleteGoal(id)` → `await refreshGoals(projectId)`; catch→`showToast(describeOrchdError(e))`. Wire: proto `DeleteGoal{id}` «cascades subtree; deleting the strategic root ⇒ Invariant» (lib.rs:802-805) → `socket_server.rs:966-978` (успех → push `GoalsChanged{project_id}`) → `persistence.rs:delete_goal` (1681-1702): strategic→`Invariant`, иначе FK `goal.parent_id REFERENCES goal(id) ON DELETE CASCADE` сносит весь subtree. `foreign_keys=ON` на ОБОИХ путях (persistence.rs:154 in-memory, 202 on-disk; тест `foreign_keys_are_enforced`). Тесты `delete_goal_cascades_subtree`, `delete_goal_strategic_is_invariant` → **ok**. UI: тест `delete asks for confirmation and only calls orchdDeleteGoal after accepted` (GoalTree.test:119, проверяет точный текст `"удалить ветку целиком?"`) → **passed**.
+- **Обработка ошибок:** есть, честная. confirm→cancel = no-op; отказ мутации → toast; orchdDown → «Удалить» disabled.
+- **Логи:** пер-верб tracing нет (класс B-04). Секретов нет.
+- **Что видит пользователь:** нативный `window.confirm("удалить ветку целиком?")`; после OK — вся ветка (цель + все потомки) исчезает.
+- **Дельта от ожидания:** confirm НЕ называет число потомков. Каталог D-05 «Проверить: Текст confirm внятен (счёт детей?)» — ответ: счёта нет. Контраст с **H-06**: `TasksList.tsx:51-60` `countDescendants` (рекурсивный) + `deleteConfirmText = "удалить задачу? удалит N подзадач"` (54), при 0 детей строка без «подзадач» (тест TasksList.test:156/192). Здесь текст статичен: владелец не видит масштаба удаления (1 цель или 20 — одинаковый текст). Честно про «целиком», но не квантифицировано → несогласованность с эталоном H-06.
+- **Действие:** BL (Minor): привести goal-delete confirm к паттерну H-06 — рекурсивный счёт потомков в тексте («удалит N подцелей»), как в TasksList.
+
+## D-06 — Верб напрямую: вторая strategic / strategic-with-parent → Invariant; достижимо ли из UI
+
+- **Вердикт:** ✅ OK (сервер-инвариант защитный, из UI недостижим).
+- **Проверено (UI недостижимость):** единственный create-путь — «+ подцель» → `orchdCreateGoal(projectId, parentId, "additional", …)` (GoalTree:338) — `kind` ХАРДКОД `"additional"`, `parentId` = id существующего ряда. «Add top-level goal» аффорданса нет вовсе (doc-коммент 280-282: «every additional goal always has a parent, so there is no add-top-level affordance»). `orchdCreateGoal`-обёртка (orchd.ts:120-128) принимает `kind`, но в src нет ни одного вызова с `"strategic"` (grep `orchdCreateGoal` → единственный не-тестовый вызов GoalTree:338). ⇒ из UI ни вторую strategic, ни strategic-with-parent создать нельзя.
+- **Проверено (сервер-гарды):** `create_goal` (persistence.rs:1489-1530): `(Strategic, Some(parent))`→`Invariant "strategic goal must be a root"` (1495-1499, тест `create_goal_strategic_with_parent_is_invariant`); повторная strategic → `COUNT(*) WHERE kind='strategic' > 0`→`Invariant "project already has a strategic goal"` (1519-1530, тест `create_goal_second_strategic_is_invariant`) + жёсткий UNIQUE index `goal_one_strategic_per_project ON goal(project_id) WHERE kind='strategic'` (schema 279). Также `(Additional, None)`→`Invariant "additional goal requires a parent"` (тест `create_goal_additional_without_parent_is_invariant`) и `move_goal` additional→root→`Invariant` (тест `move_goal_additional_to_root_is_invariant`). Все зелёные.
+- **Обработка ошибок:** есть (сервер), честная. Если бы верб дёрнули напрямую — `describeOrchdError`→«недопустимая операция: …» (англ. Invariant-хвост, класс O-2, но путь из UI недостижим).
+- **Логи:** пер-верб tracing нет (класс B-04). Секретов нет.
+- **Что видит пользователь:** из UI — ничего (сценарий не воспроизводим); инвариант охраняет только прямой верб/восстановление БД.
+- **Дельта от ожидания:** нет. Каталог D-06 «Достижимо ли из UI вообще (если нет — ок)» — ответ: недостижимо → OK.
+- **Действие:** ничего.
+
+## D-07 — «Цели» → найти редактор metric_refs (O-4)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (O-4 подтверждён: UI-редактора metric_refs НЕТ.)
+- **Проверено (нет сеттера в UI):** grep всего `src/` по `metric_refs|metricRefs` (не-тест): только `orchd.ts` (обёртка), `orchd-types.ts` (тип `Goal.metricRefs: Array<string>`), `FormInsightDialog.tsx` (потребитель). `orchdCreateGoal` (orchd.ts:120-128) НЕ принимает metric_refs вовсе — цели рождаются `metric_refs='[]'` (persistence.rs:1544, а strategic — 1311). `orchdUpdateGoal` (130-138) ПРИНИМАЕТ `metricRefs: string[] | null`, но ЕДИНСТВЕННЫЕ не-тестовые вызовы — `GoalTree.tsx:320` (`orchdUpdateGoal(id, title, null, null, **null**)`) и `:330` (`orchdUpdateGoal(id, null, null, status, **null**)`) — оба шлют `null`. Ни одного UI-контрола (инпут/чипы/модалка) для metric_refs в дереве целей нет.
+- **Проверено (бэкенд полностью готов, но фронт его не кормит):** proto `UpdateGoal{…, metric_refs: Option<Vec<String>>}` (lib.rs:789-794); `socket_server.rs:936-953` прокидывает `metric_refs.as_deref()` в `db.update_goal`; `persistence.rs:update_goal` (1566-1608) пишет `metric_refs = COALESCE(?5, metric_refs)` — единственный write-path; тест `update_goal_updates_fields_and_metric_refs_round_trip` (persistence.rs:3398, `["m1","m2"]` round-trip) → **ok**. Т.е. цепочка wire→persistence умеет metric_refs, но фронт никогда не передаёт non-null.
+- **Проверено (потребитель на практике всегда пустой):** единственный рендер — `FormInsightDialog.tsx:414` `{g.metricRefs.length > 0 && ` — метрики: ${g.metricRefs.join(", ")}`}` в fit-context «Контекст для оценки» → «Цели проекта». Поскольку metric_refs никогда не заполняются из UI (create — без них, update — всегда null), в реальном приложении `g.metricRefs` всегда `[]` → ветка `— метрики:` **мёртвый код на практике**. Тест `fit-context: fetches and renders the project's goals with metric_refs` (FormInsightDialog.test:163) зелёный, но использует ФИКСТУРУ `metricRefs: ["mrr"]` — состояние, которое приложение своими средствами породить не может.
+- **Обработка ошибок / логи / гейт:** N/A — контрола нет.
+- **Что видит пользователь:** в дереве целей — никакого способа задать/увидеть метрики цели. В fit-context при форминге инсайта «Цели проекта» перечисляет только заголовки целей; строка «— метрики: …» не появляется никогда (реальные metric_refs пусты).
+- **Дельта от ожидания (адъюдикация O-4):** metric_refs спроектированы сквозняком (схема `metric_refs TEXT NOT NULL DEFAULT '[]'` Q12-forward, тип, wire, persistence, update-обёртка, потребитель fit-context), НО owner-facing СЕТТЕР отсутствует целиком → capability инертна, а fit-context-фича с метриками — недостижима в проде. Классификация: **🟡 UX-GAP (Minor)** — ничего не ломается, просто заявленный fit-context-контекст (цели+**метрики**+граф) по метрикам всегда пуст. Правдоподобно — осознанная отсрочка на будущий слайс (тогда ближе к 📄), но по факту v0.7.0 это дыра, требующая решения владельца (O-4: где владелец правит metric_refs?).
+- **Действие:** отметить O-4 как подтверждённый (UI нет). Решение владельца: либо (a) добавить редактор metric_refs в GoalRow (инпут/чипы → `orchdUpdateGoal(id,null,null,null,[...])` — обёртка и бэкенд уже готовы, нужен только UI), либо (b) явно пометить metric_refs как отложенную фичу и убрать/задизейблить metrics-ветку в fit-context, чтобы не создавать впечатление рабочего контекста. До решения — 🟡 UX-GAP.
+
+---
+
+## Что НЕ удалось проверить (и почему)
+
+- **Реальный in-app рендер** (визуальный autoFocus/скролл D-02, живой каскад D-05, живой toast) — среда READ-ONLY, без запуска Tauri-приложения; выводы построены на статике кода + зелёных юнит/persistence-тестах.
+- **Прямой юнит-тест реверта title (D-03)** в репозитории отсутствует (revert-строка `GoalTree.tsx:197` покрыта косвенно через error→toast тест, но не проверяет откат значения) — код однозначен, но точечного assert’а на revert нет.
+- **Живой путь заполнения metric_refs (D-07)** воспроизвести нечем: приложение не имеет средства породить non-empty metric_refs; проверено только статически, что единственный write-path (update_goal) из UI зовётся исключительно с `null`.
+
+# Эпик K — Кросс-каттинг: инвестигейт K-01..K-07
+
+> READ-ONLY инвестигейт по каталогу `docs/qa/ux-first-session-scenarios.md` §2 Эпик K.
+> Модель: opus. Пути прослежены UI-контрол → store → ipc → verb → dispatch → persistence.
+> Ничего в репозитории не менялось. launchd/реальные процессы не трогались.
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть одной строкой |
+|---|---|---|---|
+| K-01 | 🟡 UX-GAP | Important | Toast — очередь-из-ОДНОГО (`showToast` затирает мгновенно), автозакрытие 4с, ручного закрытия НЕТ (`dismissToast` определён+тестируется, но не подключён ни к одному UI-контролу — мёртв). Под пачкой ошибок сообщения провабельно теряются (N+1 в IdeasList, mutation-toast → refresh-error-toast). |
+| K-02 | 🟡 UX-GAP | Important | `onOrchdUp` рефетчит ТОЛЬКО `projects` (+ 6 слайсов открытого проекта, если `activeProjectId!==null`). НЕ рефетчит: MCP servers/tools/artifacts, connectors, skills, invocations, audit, policies, research runs, global-ruleset. F-10 подтверждён и обобщён на всю поверхность «Расширения»+Журнал+глобальные правила. |
+| K-03 | ✅ OK | — | Оба баннера есть («файл утерян»+[Создать заново] / «файл изменён снаружи»+[Принять]); `acknowledge_rule_file` — отдельный `Invariant("file missing")` + `Io` для прочих read-ошибок. (Минор: англ. «file missing» протекает в toast — O-2; concurrent in-app upsert-clobber не детектится — см. K-07.) |
+| K-04 | 🟡 UX-GAP | Minor | Ноль лимитов длины/валидации пустоты/нормализации — ни на клиенте (нет `maxLength`), ни на сервере (`title`/`body` пишутся в SQLite verbatim). Единственная граница — 16 MiB wire-frame (`MAX_FRAME_LEN`). 100КБ-тело принимается (~0.6% капа) и рендерится целиком в plain-map списках/сайдбаре/пуш-payload (связка с K-06). Честно (без молчаливого обрезания), но без guardrails. |
+| K-05 | ✅ OK | Minor | Single-instance на уровне приложения НЕ энфорсится (нет `tauri-plugin-single-instance`). НО мультиклиент поддержан by design: orchd accept-loop даёт каждому коннекту уникальный `conn_id` и регистрирует в общий `Broadcaster`, пуши фанятся всем; boot-kickstart non-force/идемпотентен. Два экземпляра → два клиента к одному демону → LWW+fan-out сводят. Undefined-но-безвредно. |
+| K-06 | 🟡 UX-GAP | Minor | Виртуализирован только FileTree (собственный windowing). IdeasList/TasksList/InsightsList/HomeGoals/GoalTree/ArtifactsTab/InvocationLog — plain `.map()` (нет react-window/Virtuoso в deps). GraphCanvas: `<ReactFlow>` без `onlyRenderVisibleElements` → все узлы в DOM. Реальный N+1: IdeasList на маунте фаерит `refreshResearchRuns` НА КАЖДУЮ идею. |
+| K-07 | 🟡 UX-GAP | Minor | Чистый last-write-wins везде (ноль optimistic-concurrency: нет version/etag/updated_at-guard). Пуши сводят оба окна честно. Read-modify-write clobber: rank/ord (абсолютный midpoint из stale-списка — H-04) и **upsert_ruleset — whole-document** (md+policy заменяются целиком, md_hash обновляется → второе окно НЕ увидит ExternallyModified). Конвергенция честная, но конфликт-детекции ноль. |
+
+**Итог по эпику:** 2×✅ OK (K-03, K-05) · 5×🟡 UX-GAP (K-01/K-02 Important + K-04/K-06/K-07 Minor) · 0×🔴 · 0×📄.
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где подтверждено |
+|---|---|---|
+| P-21 (Toast: один слот, авто-4с, dismissToast мёртв) | 🟡 ПОДТВЕРЖДЁН | K-01 |
+| F-10 (onOrchdUp не рефетчит research runs) | 🟡 ПОДТВЕРЖДЁН и ОБОБЩЁН (весь ext+audit+global-ruleset) | K-02 |
+| H-04 (rank midpoint из stale — clobber) | 🟡 подтверждён (+ goal ord, + ruleset whole-doc) | K-07 |
+| P-19 (двойной сабмит) — смежно N+1 | 🟡 см. K-06 (N+1 усиливает K-01 clobber) | K-06 |
+| K-04 отсутствие валидации длины | 🟡 подтверждён статически | K-04 |
+
+---
+
+## K-01 — Две ошибки подряд: второй toast затирает первый через <4с
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.**
+- **Проверено:** `src/store/store.ts:548-559` (`showToast`), `:561-565` (`dismissToast`), `:379-380` (`TOAST_AUTO_DISMISS_MS = 4000`); `src/components/Toast.tsx:20-48` (рендер); `src/store/store.ts:574-727` (все `refresh*` → `showToast(describeOrchdError(e))`); `src/components/IdeasList.tsx:390-396` (N+1-loop). Использование `dismissToast`: только `store.test.ts`/`Toast.test.tsx` — в проде **ноль** вызовов (`grep -rn dismissToast src/`).
+- **Обработка ошибок:** честная, но queue-of-ONE. `showToast` (549-551): `clearToastTimer()` → `set({ toast: message })` — безусловно ЗАМЕНЯЕТ текущий toast. Токен-гвард (550, 556) защищает только от того, чтобы старый таймер не гасил НОВЫЙ toast — он НЕ сохраняет старое сообщение. `<Toast/>` — чистый ридер `s.toast`, без кнопки закрытия/onClick (Toast.tsx:24-47: `<div role="alert">{toast}</div>`, никакого «×»).
+- **Логи:** UI-слой не логирует (toast — единственный канал). Сообщение = `describeOrchdError` (человекочитаемое, без секретов); `Invariant`→«недопустимая операция: <msg>», `disconnected`→«оркестратор недоступен» (`orchd.test.ts:817-876`).
+- **Что видит пользователь:** ровно ОДНО сообщение за раз, ≤4с, гасится само, вернуть/закрыть вручную нельзя. Провабельные потери (grounded в коде):
+  1. **N+1 в IdeasList при сбое orchd** (`IdeasList.tsx:392-393`): на маунте для каждой из N идей `refreshResearchRuns(idea.id)`; при `orchdDown`/сбое КАЖДЫЙ отказ зовёт `showToast` в тесном цикле → видно только ПОСЛЕДНЕЕ из N, первые N-1 затёрты за микросекунды.
+  2. **mutation-toast → refresh-error-toast**: успешная мутация показала «…создано», следом её `refresh*` (или прилетевший `*-changed`-пуш) падает → error-toast мгновенно накрывает success.
+  3. **Два доменных пуша при флапе orchd**: `onOrchdIdeasChanged`→`refreshIdeas` (fail→toast) и `onOrchdTasksChanged`→`refreshTasks` (fail→toast) — второй затирает первый.
+- **Дельта от ожидания:** каталог ждёт «оба сообщения прочитываемы» — не выполняется. Дизайн осознанно выбрал queue-of-one (`store.ts:125-131` doc: «at most one thing asks for attention»), но (а) `dismissToast` — мёртвый код (нет UI-триггера) и (б) под bursty-сбоями сообщения теряются без истории.
+- **Действие:** BL-кандидат: либо мини-очередь/стек toast-ов + видимая кнопка закрытия (подключить существующий `dismissToast`), либо хотя бы «(+N ещё)»-счётчик и ручное закрытие. Important, т.к. это системный «honest error surface», а под ошибками он молчит про всё, кроме последнего.
+
+## K-02 — orchd восстановился (`orchd://up`): полная регидрация открытых табов
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.**
+- **Проверено:** `src/App.tsx:248-276` (`onOrchdUp`-хендлер, прочитан полностью). Доступные `refresh*` в сторе: `store.ts:574-727` (16 действий). Маунт-фетчи ext-табов: `ServersTab`/`ConnectorsTab.tsx:250-251`/`SkillsTab.tsx:161-162`/`InvocationLog.tsx:160`/`ArtifactsTab.tsx:163-164`/`ToolsBrowser.tsx:138-140` — все на `useEffect` (один раз при маунте), далее полагаются на пуши.
+- **Что `onOrchdUp` РЕФЕТЧИТ:** `s.setOrchdDown(false)`; `s.refreshProjects()` — ВСЕГДА; и ТОЛЬКО если `activeProjectId!==null` (т.е. открыт ProjectPanel): `refreshGoals`, `refreshTasks`, `refreshIdeas`, `refreshInsights`, `refreshRuleset('project:'+id)`, `refreshGraph` (App.tsx:262-274).
+- **Что `onOrchdUp` ПРОПУСКАЕТ** (проверено grep'ом хендлера — ни одного из этих вызовов внутри 248-276):
+  - **research runs** — `refreshResearchRuns` (F-10 — ПОДТВЕРЖДЁН);
+  - **MCP** — `refreshMcpServers`, `refreshMcpTools`, `refreshMcpArtifacts`;
+  - **connectors** — `refreshAccounts`;
+  - **skills** — `refreshSkills`;
+  - **audit/журнал** — `refreshInvocations`, `refreshAuditRows`, `refreshPolicies`;
+  - **global-scope ruleset** — `refreshRuleset('global')` (рефетчится только `project:<id>`, и только при открытом проекте).
+- **Обработка ошибок:** каждый `refresh*` честно тостит `describeOrchdError` при отказе (`store.ts`), но это про сам вызов; проблема — что вызовы НЕ делаются.
+- **Что видит пользователь:** если во время бунса orchd открыт таб «Расширения» (Серверы/Инструменты/Коннекторы/Навыки/Журнал/Артефакты) или ResearchPane — их слайсы НЕ обновляются на реконнекте. Маунт-эффект таба не перезапускается (компонент не ремоунтится), а `onOrchdUp` их не трогает → данные остаются как были ДО бунса. Худший случай (как F-10): на холодном старте маунт-фетч таба проиграл гонку с ~4с bring-up orchd, слайс пуст, тост «оркестратор недоступен» — и `onOrchdUp` его НЕ долечивает (в отличие от `projects`, у которого self-heal есть, App.tsx:249-262). Восстановление только ручное: уйти с таба и вернуться (ремоунт → маунт-фетч) либо дождаться мутирующего пуша.
+- **Дельта от ожидания:** каталог ждёт «полная регидрация открытых табов» — фактически регидрируется только домен проекта. Вся S-EXT-поверхность + research + audit + global-ruleset не покрыты.
+- **Действие:** BL-кандидат: расширить `onOrchdUp` до безусловного рефетча всех whole-store слайсов (`refreshMcpServers`/`refreshMcpArtifacts`/`refreshAccounts`/`refreshSkills`/`refreshInvocations`/`refreshAuditRows`/`refreshPolicies` + `refreshRuleset('global')`), а scoped (`refreshMcpTools`/`refreshResearchRuns`) — по уже закэшированным ключам. Это ровно тот же паттерн self-heal, что уже применён к `projects`.
+
+## K-03 — Rules-файл удалён/изменён извне: баннеры + AcknowledgeRuleFile
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** классификация — `crates/orchd/src/ruleset_files.rs:67-77` (`read_state`: `Ok`/`ExternallyModified`/`Missing`, прочие read-fail → `Missing`); dispatch — `socket_server.rs:581-644` (`build_ruleset_view`), `:1206-1215` (`AcknowledgeRuleFile`); persistence — `persistence.rs:2611-2633` (`acknowledge_rule_file`); UI — `RulesetPanel.tsx:17-18` (копии), `:427-441` (`externallyModified`→баннер+[Принять]), `:442-456` (`missing`→баннер+[Создать заново]).
+- **Обработка ошибок / оба пути:**
+  - `externallyModified` (hash не сошёлся): `read_state` возвращает `(Some(content), ExternallyModified)` → `RulesetPanel.tsx:427` рисует `ruleset-banner-modified` + [Принять] (`AcknowledgeRuleFile` → rehash).
+  - `missing` (файла нет / нечитаем): `(None, Missing)` → `RulesetPanel.tsx:442` рисует `ruleset-banner-missing` + [Создать заново] (`UpsertRuleSet{mdContent:""}`). Прочие read-ошибки (перм, non-UTF8, директория) честно свёрнуты в `Missing` (ruleset_files.rs:76).
+  - `acknowledge_rule_file` — ОТДЕЛЬНЫЙ путь для гонки «баннер сказал modified, но к моменту клика файл удалён»: `persistence.rs:2616-2622` — `NotFound`(io) → `Invariant("file missing")`; прочие io-ошибки → `Io(...)`; неизвестный `id` → `NotFound`; архивный проект → guard до чтения файла (`:2614`). Три различимых исхода, не проглочены.
+- **Логи:** файл-контент НИКОГДА не логируется (ruleset_files.rs:60, spec §5 no-secrets).
+- **Что видит пользователь:** корректные различимые баннеры и действия; после [Принять]/[Создать заново] `RulesetPanel` рефетчит вью (RulesetPanel.tsx:298-303) → баннер исчезает.
+- **Дельта от ожидания:** нет. Два минорных смежных замечания (не дефекты K-03): (1) `Invariant("file missing")` протекает в toast как «недопустимая операция: file missing» — англ. строка в ru-UI (общий O-2). (2) In-app конкурентный `UpsertRuleSet` из второго окна обновляет `md_hash` в БД → первое окно на следующем `GetRuleSet` увидит `Ok`, а НЕ `ExternallyModified`, то есть file-state-механизм ловит внешние правки, но НЕ чужой клиентский upsert (см. K-07).
+- **Действие:** ничего по K-03. Языковую правку «file missing» — в общий тикет O-2.
+
+## K-04 — Лимиты ввода: 10к-символьные строки, эмодзи, RTL
+
+- **Вердикт:** 🟡 UX-GAP (robustness). **Severity: Minor.**
+- **Проверено:** серверная сторона — `persistence.rs:1761-1781` (`create_idea`: `title`/`body` уходят в `INSERT` params verbatim, ноль проверок), `:1787-1818` (`update_idea` — то же), аналогично `create_goal:1477`/`create_insight:1918`/`create_task:2149`/`create_project:1276`. Единственные `Validation`-ветки в персистентности — про `workspace_ids.is_empty()` (1282), политику (2405-2425), `md_path` (2554-2560): **ни одной про длину/пустоту title/body**. Клиент — `grep -rnE "maxLength" src/components/` → **пусто** (ни на одном input/textarea). Wire-cap — `crates/protocol/src/framing.rs:21` `MAX_FRAME_LEN = 16*1024*1024`; orchd переиспользует тот же codec (`orchd-proto/src/lib.rs:1313-1321` через `bpa_protocol::encode_cbor_frame`/`CborFrameDecoder`).
+- **Обработка ошибок:** честная, но нулевые guardrails. Значение любой длины и любого юникода (эмодзи/RTL/комбинирующие) пишется в SQLite как UTF-8 без нормализации — это КОРРЕКТНО (SQLite хранит байты как есть; никакого молчаливого обрезания). Единственный отказ — если ВЕСЬ CBOR-фрейм превысит 16 MiB: `CborFrameDecoder` отвергнет фрейм (framing error → дисконнект запроса), честно, без порчи данных.
+- **Что видит пользователь:** 100КБ-тело (~0.6% капа) принимается и сохраняется. Далее оно рендерится ЦЕЛИКОМ: в plain-`.map()` списках (K-06), в сайдбаре, и в payload доменных пушей (весь объект гоняется по сокету на каждое `*-changed`). Нет усечения в превью, нет «…ещё N символов». RTL/эмодзи отрисуются как обычный текст (без нормализации/санитайза — XSS-риска нет, React экранирует).
+- **Дельта от ожидания:** каталог ждёт «рендер не ломается, сервер не режет молча» — сервер и правда не режет (честно), но и лимитов нет вообще: патологическое тело деградирует рендер/пуши и раздувает БД без единого предупреждения.
+- **Действие:** BL-кандидат (Minor): ввести разумные капы (напр. title ≤512, body ≤64КБ) с клиентским `maxLength` + серверным `Validation` (defense-in-depth), и усечение в списочных превью. Не срочно (нет краха/потери данных), но «production-grade» ожидает guardrails.
+
+## K-05 — Второй экземпляр приложения: single-instance guard
+
+- **Вердикт:** ✅ OK (мультиклиент поддержан). **Severity: Minor** (app-level guard отсутствует, но безвреден). Формулировка «supported/unsupported/undefined»: **мультиклиент — SUPPORTED by design; app single-instance — UNDEFINED/незагвардён, но безвредно.**
+- **Проверено:** single-instance — `grep -rn single_instance src-tauri/ Cargo.*` → **пусто**; плагины в `lib.rs:638-642` — только `store`/`dialog`/`fs`/`shell` (нет `tauri-plugin-single-instance`); `Cargo.toml:16-36` — плагин не в зависимостях. Мультиклиент orchd — `socket_server.rs:151-197` (accept-loop: `next_conn_id: u64=1`, инкремент на каждый коннект :185-186, `conns.spawn(handle_client(conn_id,...))`), `:243` (`broadcaster.register(conn_id, out_tx)`), `broadcast.rs:62-67` (`broadcast` фанит `try_send` ВСЕМ зарегистрированным). Boot-kickstart non-force — доказано тестом `lib.rs:1032-1067` (`ensure_daemon_running_uses_non_force_kickstart_on_boot`: kickstart БЕЗ `-k`).
+- **Что происходит при двух экземплярах:** оба процесса гонят `bring_up_daemon`/`bring_up_orchd` = install_agent+bootstrap(идемпотентно)+kickstart(non-force, НЕ убивает живой демон/сессии). Оба коннектятся к одним сокетам, получают разные `conn_id`, регистрируются каждый в общий `Broadcaster` → оба получают КАЖДЫЙ пуш. БД `orchd.db` открыта только ДЕМОНОМ (единый launchd-managed на пользователя), не приложением → нет lock-contention. Мутации из обоих окон → LWW в демоне; `*-changed`-пуши сводят оба экрана.
+- **Практическая экспозиция:** macOS LaunchServices на обычный двойной клик по .app НЕ поднимает второй экземпляр (активирует существующий). Второй инстанс достижим только через `open -n`/запуск бинаря напрямую. Т.е. редко, и когда случается — архитектура переносит это когерентно.
+- **Дельта от ожидания:** каталог ставит «???». Ответ: два окна на один сокет — поддержано (broker мультисабскрайб), не крашится, сводится. Единственный тонкий край: обе сессии могут аттачнуться к одному PTY (broker attach-map, территория sessiond) — вне скоупа K, отмечено как edge.
+- **Действие:** ничего обязательного. Опц. Minor: добавить `tauri-plugin-single-instance` с фокусировкой существующего окна — косметика, не корректность.
+
+## K-06 — 100+ идей/задач/узлов: виртуализация и деградация списков
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** виртуализация — `grep -rlnE "react-window|FixedSizeList|Virtuoso|useVirtual" src/` → только упоминаний нет, в `package.json` виртуализирующих либ нет (есть `@xyflow/react`). FileTree — собственный windowing: `FileTree.tsx:653-668` (`visibleCount = ceil(viewportHeight/ROW_HEIGHT)+OVERSCAN*2`, `nodes.slice(startIndex,endIndex)`, `visible.map(renderRow)`). Остальные — plain `.map()`: `IdeasList.tsx:493`, `TasksList.tsx:446`, `InsightsList.tsx:360`, `HomeGoals.tsx:149/167`, `GoalTree.tsx:402`, `ArtifactsTab.tsx:179`, `InvocationLog.tsx:291/332`. GraphCanvas — `GraphCanvas.tsx:522-533`: `<ReactFlow nodes={displayNodes} ...>` БЕЗ `onlyRenderVisibleElements` (дефолт xyflow = false → все узлы в DOM).
+- **N+1 refresh (реальный):** `IdeasList.tsx:390-396` — на маунте `for (const idea of rows) if (!(idea.id in researchRunsByIdea)) void refreshResearchRuns(idea.id)`. Каждый вызов = отдельный `research_list_runs(ideaId)` IPC → сокет-round-trip → SQL. 100 идей = до 100 параллельных IPC на первый рендер списка (и до 100 toast-ов при сбое — усиливает K-01). Тест это фиксирует как намеренное: `IdeasList.test.tsx:321` («eagerly fetches research runs ... for every rendered idea, once»). Смежно: `ToolsBrowser.tsx:138-140` — тот же per-server `refreshMcpTools`.
+- **Что видит пользователь:** при 100+ элементах списки идей/задач/инсайтов/целей/артефактов/журнала рендерят все ряды в DOM (нет окна) — растёт время маунта/скролл-джанк; xyflow-граф держит все узлы в DOM (canvas-рендер терпимее, но без culling). Первый вход в «Идеи» с большим числом идей = всплеск IPC/DB.
+- **Дельта от ожидания:** каталог ждёт «приемлемая отзывчивость». Корректность не страдает — это чистая деградация производительности на масштабе.
+- **Действие:** BL-кандидат (Minor): виртуализировать длинные списки (переиспользовать паттерн FileTree или ввести react-window), выставить `onlyRenderVisibleElements` на ReactFlow, и заменить IdeasList N+1 на батч-verb (`research_list_runs` по массиву ideaId одним вызовом).
+
+## K-07 — Правки в двух окнах/гонки: LWW + сведение пушами
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** optimistic-concurrency — `grep -rnE "WHERE.*updated_at|version =|expected_version|if_match|etag" persistence.rs` → **пусто**; все `UPDATE ... WHERE id=?1` безусловны. `set_task_rank:2296-2309` (`UPDATE task SET rank=?2 WHERE id=?1` — клиент шлёт абсолютный `rank: f64`). `move_goal:1617-1671` (`UPDATE goal SET parent_id=?2, ord=?3 WHERE id=?1` — абсолютный `ord`). `upsert_ruleset:2543-2597` — whole-document (md_content пишется атомарно `write_atomic`, `policy`+`md_path`+`md_hash` заменяются целиком; **нет параметра expected-hash/version**). Сведение — каждый мутирующий verb бродкастит `*-changed` (broadcast.rs + App.tsx:198-243 → `refresh*`).
+- **Конвергенция (честная):** ДА. Любая мутация из любого окна → `*-changed`-пуш обоим клиентам → оба рефетчат → оба консистентны с БД (последней записью). Экраны сходятся.
+- **Read-modify-write clobber (по возрастанию остроты):**
+  1. **rank / ord** (`set_task_rank`, `move_goal`): клиент считает midpoint из ОТОБРАЖЁННОГО (возможно stale) списка и шлёт абсолютное значение. Два конкурентных реордера из stale-состояния → пересекающиеся rank/ord (видимая аномалия порядка, не порча; H-04 покрыл).
+  2. **upsert_ruleset — whole-document (острейший)**: два окна открыли Правила с одной базой; A сохраняет (md_hash→hashA); B сохраняет свой stale-контент (md_hash→hashB) → правки A СТИРАЮТСЯ полностью (заменяются и markdown-тело, и policy). Конфликт НЕ поднимается (нет сравнения ожидаемого hash). Хуже: т.к. upsert обновляет `md_hash` в БД под новый контент, следующее `GetRuleSet` у окна A вернёт `state=Ok` (совпадающий hash), а НЕ `ExternallyModified` → НИКАКОГО баннера-предупреждения о том, что его правки затёрты (K-03-механизм ловит только внешние правки файла, не чужой клиентский upsert).
+- **Что видит пользователь:** оба окна в итоге показывают одно и то же (LWW-состояние БД) — сведение честное. Но при одновременном редактировании одной сущности (особенно Правил) проигравший тихо теряет свои правки без конфликт-нотиса.
+- **Дельта от ожидания:** каталог ждёт «last-write-wins + пуши сводят + видимые аномалии». LWW и сведение — есть и честные; аномалии — rank/ord-перекос и молчаливый ruleset-clobber.
+- **Действие:** BL-кандидат (Minor): для `UpsertRuleSet` завести optimistic-concurrency (передавать `expected_md_hash`; при рассинхроне → `Conflict` вместо тихого затирания, роняя пользователя в тот же [Принять]-flow, что и `ExternallyModified`). rank/ord — приемлемо в v1 (LWW осознан). Конвергенция как таковая честна — не 🔴.
+
+## Что НЕ удалось проверить (и почему)
+
+- **Динамический репро под нагрузкой** (реальные 100+ элементов, реальный конкурентный upsert из двух окон, реальный второй .app-инстанс): требует запуска приложения/демонов и мутации живых процессов — задача READ-ONLY, launchd/процессы не трогались. Все вердикты выведены статически из кода/тестов (пути прослежены до строк).
+- **Broker attach-map при двух клиентах на один PTY** (K-05 edge): это территория `bpa-sessiond`/`broker.rs`, вне 7 сценариев K; отмечено как потенциальный edge, но не прослеживалось до конца.
+- **Точный лимит рендера большого тела в браузере** (K-04): «ломается ли» 1МБ/10МБ-строка в конкретном списке — зависит от рантайма webview; статически подтверждено лишь отсутствие усечения/капов и полный проброс в пуши.
