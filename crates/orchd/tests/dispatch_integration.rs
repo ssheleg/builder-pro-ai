@@ -668,7 +668,7 @@ async fn create_project_returns_project_broadcasts_projects_changed_and_writes_r
         .join(format!("project-{}.md", project.id));
     let content = std::fs::read_to_string(&md_path)
         .unwrap_or_else(|e| panic!("ruleset file must exist at {}: {e}", md_path.display()));
-    assert_eq!(content, "# Правила проекта Acme\n");
+    assert_eq!(content, "# Project rules Acme\n");
 
     c1.shutdown(boot).await;
 }
@@ -798,7 +798,7 @@ async fn get_ruleset_ok_then_externally_modified_after_on_disk_edit() {
         .await,
     );
     assert_eq!(view.file_state, RuleFileState::Ok);
-    assert_eq!(view.md_content.as_deref(), Some("# Правила проекта Acme\n"));
+    assert_eq!(view.md_content.as_deref(), Some("# Project rules Acme\n"));
 
     std::fs::write(&view.rule.md_path, "someone edited this by hand\n").unwrap();
 

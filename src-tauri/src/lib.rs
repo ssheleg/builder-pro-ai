@@ -58,7 +58,7 @@
 //! fans out through `broker::map_orchd_conn_state` to `orchd://down|up|incompatible`, superseding
 //! T11's placeholder `tracing::debug!`-only push handler. `bring_up_orchd` itself is `pub(crate)`
 //! (not private) so `commands::orchd_reconnect` can re-run this exact sequence after dropping the
-//! slot (the [Повторить] button's target, spec §9).
+//! slot (the [Retry] button's target, spec §9).
 
 pub mod broker;
 pub mod commands;
@@ -539,7 +539,7 @@ async fn bring_up_daemon(
 ///
 /// `pub(crate)` (not private): [`commands::orchd_reconnect`] calls this directly to re-run the
 /// exact same bring-up sequence after dropping the slot (spec §9's locked `orchd_reconnect`
-/// flow — the [Повторить] button's target).
+/// flow — the [Retry] button's target).
 pub(crate) async fn bring_up_orchd(
     app: tauri::AppHandle,
     agent: Arc<LaunchdAgent<'static>>,

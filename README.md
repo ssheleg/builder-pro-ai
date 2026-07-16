@@ -60,7 +60,7 @@ contract → test matrix.
 - **Live file watch (S2):** debounced FSEvents watch (`notify`/`notify-debouncer-full`) per active
   root, gitignore-filtered, point-refreshing only the affected expanded tree nodes.
 - **Attention-first Home (S2):** on open, sessions waiting for input are pinned first (amber) with
-  a one-click «Пройти →» that jumps to and focuses that terminal, then running, then recently
+  a one-click «Go →» that jumps to and focuses that terminal, then running, then recently
   exited (✓/✗ by exit code) — across every workspace, no polling.
 - **OSC-133 command strip (S2):** per-session recent-command chips (✓/✗ by exit code) sourced from
   `command_events` — the first real UI consumer of that table (persisted since Pv2).
@@ -77,13 +77,13 @@ contract → test matrix.
   goals), Task/Subtask (unified model, kanban is a future view), RuleSet (global + per-project;
   markdown is the source of truth, DB stores `md_path`+`md_hash`) — full CRUD, invariants, and
   cascades, plus per-project/whole-store JSON export/import with field-verbatim round-trips.
-- **Project management UI (S3):** left-rail project groups, a tabbed `ProjectPanel` (Обзор · Цели
-  · Идеи · Задачи · Инсайты · Правила), ⌘K quick-capture for ideas, and a `HomeGoals` panel (below
+- **Project management UI (S3):** left-rail project groups, a tabbed `ProjectPanel` (Overview · Goals
+  · Ideas · Tasks · Insights · Rules), ⌘K quick-capture for ideas, and a `HomeGoals` panel (below
   the S2 attention queue) showing each active project's strategic goal + children.
 - **Knowledge graph (S4):** `orchd.db` schema v2 adds `graph_node`/`graph_edge` — typed nodes
   (concept/fact/artifact/decision/note + `entityRef` soft-refs onto a goal/idea/insight/task, no
-  FK — a deleted domain entity leaves its node behind flagged `isOrphan`, rendered «источник
-  удалён») and typed edges that may link nodes across DIFFERENT projects (a cross-project edge
+  FK — a deleted domain entity leaves its node behind flagged `isOrphan`, rendered «source
+  deleted») and typed edges that may link nodes across DIFFERENT projects (a cross-project edge
   survives BOTH projects' daemon restarts). A strategic-goal `entityRef` node is auto-seeded for
   every project.
 - **Workspace-wide graph retrieval API (S4):** the S6-agent contract — `list_project_graph` (a
@@ -93,7 +93,7 @@ contract → test matrix.
   project-scoped, so an agent working project A can query project B's knowledge. A depth-3
   neighborhood rooted at a project's strategic goal on a synthetic 500-node/1000-edge graph
   measures ~51 ms (DoD: <100 ms).
-- **Graph canvas (S4):** a 7th `ProjectPanel` tab, «Граф», an editable `@xyflow/react` canvas —
+- **Graph canvas (S4):** a 7th `ProjectPanel` tab, «Graph», an editable `@xyflow/react` canvas —
   drag debounced-persists a node's position, connecting two nodes adds an edge, a toolbar
   adds/deletes nodes and searches (a match gets an accent ring), every mutating control disabled
   while `orchd://down`. A cross-project ghost node click navigates to its own project; a local
@@ -120,9 +120,9 @@ contract → test matrix.
   `env_overrides`.
 - **Skills (S-EXT):** a SKILL.md-format registry (portable — matches the Claude Code convention)
   with files-as-truth (Present/Modified/Missing). **Plumbing only** — there is no runtime
-  consumer yet (that's the S6b agent org); the «Навыки» tab says so honestly.
-- **«Расширения» management UI (S-EXT):** Серверы / Инструменты / Коннекторы / Журнал /
-  Артефакты / Навыки tabs, consent dialogs, untrusted-result banners; every mutating control
+  consumer yet (that's the S6b agent org); the «Skills» tab says so honestly.
+- **«Extensions» management UI (S-EXT):** Servers / Tools / Connectors / Log /
+  Artifacts / Skills tabs, consent dialogs, untrusted-result banners; every mutating control
   disabled while `orchd://down`.
 - **Research pipeline (S-IDEA):** `orchd.db` schema v4 adds one net-new table, `research_run` —
   the ResearchArtifact the roadmap named is the REUSED S-EXT `mcp_artifact` a run's tool call
@@ -136,12 +136,12 @@ contract → test matrix.
   not built, so `fit_verdict`/`fit_reasoning` are set by the owner beside a fit-context panel
   (goals+metrics + a graph-neighborhood read); LLM-computed scoring is filed to backlog for S6a,
   never silently claimed as done.
-- **Idea research flow UI (S-IDEA):** per idea, «Исследовать» → `ResearchRunDialog` (pick a
+- **Idea research flow UI (S-IDEA):** per idea, «Research» → `ResearchRunDialog` (pick a
   connected MCP server + tool + args, a spend-approval preflight) → `ResearchPane` (run status;
-  a done run reuses the S-EXT artifact viewer + «непроверенные данные» banner — NOT
+  a done run reuses the S-EXT artifact viewer + «unverified data» banner — NOT
   token-streaming, an honest scope line since MCP `tools/call` is request/response) →
   `FormInsightDialog` (fit-context beside owner-set fit-verdict, accept graph-ingests the insight)
-  → «В backlog» forms a task. `SpawnProjectFromIdea` closes BL-56 (spawn-project-from-idea UI, an
+  → «To backlog» forms a task. `SpawnProjectFromIdea` closes BL-56 (spawn-project-from-idea UI, an
   S3-deferred flow) — pure frontend orchestration over existing verbs, no new orchd verb. Every
   mutating control disabled while `orchdDown`.
 
@@ -272,7 +272,7 @@ bash scripts/build-universal.sh
 | Suite | Command | What it covers |
 |---|---|---|
 | Rust workspace | `cargo test --workspace` | three daemons/daemon-adjacent crates (`bpa-sessiond`, `bpa-orchd`, `bpa-daemon-core`), the MCP client + Keychain wrapper (`bpa-mcp`, `bpa-secrets`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **1023 tests** as of the last full run (S-IDEA, `[0.7.0]`), 0 failed. A handful of `bpa-orchd`/`bpa-secrets` tests touch the real macOS Keychain (connector/MCP-bearer round-trips) and can hit a one-time ACL-prompt stall on a fully headless runner with no prior Keychain interaction in that session — a pre-existing S-EXT-era environment quirk, not a code defect; CI's keychain-unlock step (S-EXT T19) covers it, and this run completed clean end-to-end with no stall |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`/`researchRunsByIdea`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`/the `ext/` «Расширения» components/the `idea/` research-flow components) — **772 tests, 47 files** (S-IDEA, `[0.7.0]`), 0 failed |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`/`researchRunsByIdea`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`/the `ext/` «Extensions» components/the `idea/` research-flow components) — **772 tests, 47 files** (S-IDEA, `[0.7.0]`), 0 failed |
 | End-to-end (sessiond) | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
 | End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof); phase 5 creates two projects + a cross-project graph edge, restarts the daemon, and asserts the edge survives on both projects' sides (S4 spec §8 DoD proof); phase 6 registers a local stub MCP server, connects, calls a tool, restarts, and asserts the artifact survived (S-EXT spec §9 Phase-1 DoD); phase 7 does the connector-invoke analogue against a local stub, gracefully skipping on a Keychain-unavailable runner (S-EXT spec §9 Phase-2 DoD); phase 8 (S-IDEA) drives the whole idea→research→insight→task loop against a local stub research server, restarts the daemon, and asserts every row survives (S-IDEA spec §8, the roadmap DoD proof); phase 9 (S-IDEA) starts a run against a BLOCKING stub, shuts the daemon down mid-run, and asserts boot-reconcile flips it to `failed{interrupted}` on restart (S-IDEA spec D11) |
 | Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — real, enforcing ≥80% line-coverage gates on BOTH daemon crates (requires `cargo install cargo-llvm-cov`) |

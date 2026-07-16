@@ -312,7 +312,7 @@ async fn fresh_boot_creates_schema_v4_and_global_ruleset() {
     // `rules/global.md` on disk with the locked template content.
     let md_path = bpa_orchd::app_support_dir_for_test().join("rules/global.md");
     let content = std::fs::read_to_string(&md_path).expect("rules/global.md must exist");
-    assert_eq!(content, "# Глобальные правила\n");
+    assert_eq!(content, "# Global rules\n");
 }
 
 #[tokio::test]

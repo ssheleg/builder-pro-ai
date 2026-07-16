@@ -82,7 +82,7 @@ impl SkillRow {
 /// [`SkillRow`] plus its files-as-truth read-time status (spec §8 brief: "`SkillView` = the row
 /// PLUS a files-as-truth status"). Mirrors `bpa_orchd_proto::RuleSetView`'s "DB row + fresh file
 /// read" shape, minus the file CONTENT itself — the skills UI only needs a badge
-/// («изменён»/«файл отсутствует»), never the raw markdown, so [`SkillFileState`] alone (no
+/// («modified»/«file missing»), never the raw markdown, so [`SkillFileState`] alone (no
 /// `Option<String>` content field) is the honest, minimal shape here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillView {

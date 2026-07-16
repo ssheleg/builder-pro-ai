@@ -84,14 +84,14 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
   `ResearchGetRun` are the ONLY net-new wire this slice adds. Tauri core gains matching
   `research_start_run`/`research_list_runs`/`research_get_run` commands and a
   `orchd://research-runs-changed` broker event.
-- **Idea research flow (frontend):** per idea, «Исследовать» opens `ResearchRunDialog` (pick a
+- **Idea research flow (frontend):** per idea, «Research» opens `ResearchRunDialog` (pick a
   connected MCP server → `McpListTools` → pick a tool → owner-supplied args JSON → a
   spend-approval preflight reusing `TrustListPolicies`, with an honest "cost usually unknown until
   after the call" note — the trust layer's existing hard caps are unchanged, a breach surfaces as
   `failed{policy_cap_exceeded}`); `ResearchPane` lists runs by status and, on `done`, reuses the
-  S-EXT artifact viewer + «непроверенные данные» untrusted banner (NOT token-streaming — MCP
+  S-EXT artifact viewer + «unverified data» untrusted banner (NOT token-streaming — MCP
   `tools/call` is request/response in the connect-per-call model, an honest scope line, not a
-  partial build); a failed run offers «сформировать insight без ресёрча» (Q8 honest degradation,
+  partial build); a failed run offers «form insight without research» (Q8 honest degradation,
   the owner path never dead-ends). `FormInsightDialog` prefills title/body from the artifact,
   shows a fit-context panel (the project's goals+`metric_refs` + a `GraphNeighborhood` read)
   beside owner-set `fit_verdict`/`fit_reasoning` (reusing `CreateInsight`/`SetInsightFitVerdict`);
@@ -187,13 +187,13 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
   inheritance leak from either source.
 - **Skills — a SKILL.md-format registry (plumbing only):** CRUD + files-as-truth
   (`Present`/`Modified`/`Missing`, mirrors `ruleset_files.rs`'s pattern). There is no runtime
-  consumer yet (that's the S6b agent org); the «Навыки» tab states this honestly rather than
+  consumer yet (that's the S6b agent org); the «Skills» tab states this honestly rather than
   presenting the registry as executable.
-- **Frontend — «Расширения», a new top-level view** (alongside Home/Workspace/Project): Серверы
-  (MCP server registry + connect/consent), Инструменты (tool browser + per-tool allowlist +
-  invoke, an untrusted-result banner on every response), Коннекторы (OAuth/api-key accounts +
-  the generic-rest ops runner), Журнал (invocation log + audit log + a spend/rate policy
-  editor), Артефакты (durable results + an untrusted banner per item), Навыки (the skills
+- **Frontend — «Extensions», a new top-level view** (alongside Home/Workspace/Project): Servers
+  (MCP server registry + connect/consent), Tools (tool browser + per-tool allowlist +
+  invoke, an untrusted-result banner on every response), Connectors (OAuth/api-key accounts +
+  the generic-rest ops runner), Log (invocation log + audit log + a spend/rate policy
+  editor), Artifacts (durable results + an untrusted banner per item), Skills (the skills
   registry). Every mutating control is `disabled` while `orchd://down`.
 - **E2E (`npm run e2e:orchd`, extended with two phases):** phase 6 registers a local stub HTTP
   MCP server → grants connect consent → connects (tools cached) → lists tools → calls the
@@ -241,7 +241,7 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
   row it names. Deleting the referenced goal/idea/insight/task never deletes or corrupts the
   graph node — the node persists, and a read-time resolver looks up the live domain row's title
   on every read; when the row is gone the node keeps its last-known stored label and the UI
-  renders `isOrphan: true` («источник удалён»). Exactly one `entityRef` node exists per
+  renders `isOrphan: true` («source deleted»). Exactly one `entityRef` node exists per
   `(entity_type, entity_id)` (partial unique index; a second attempt is a typed `Conflict`). A
   strategic-goal `entityRef` node is auto-seeded inside `CreateProject`'s own transaction (D6) —
   a project's graph is never empty — and the schema-v2 migration backfills one for every project
@@ -279,7 +279,7 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
 - **Core:** 9 `orchd_graph_*` Tauri commands (thin wrappers over the new `OrchdClient` verbs, one
   per wire verb) and the `orchd://graph-changed` event, wired through `broker.rs`'s
   `map_orchd_push` exactly like every other `orchd://*-changed` push.
-- **Frontend — graph canvas, a 7th `ProjectPanel` tab «Граф»:** an editable `@xyflow/react` (v12)
+- **Frontend — graph canvas, a 7th `ProjectPanel` tab «Graph»:** an editable `@xyflow/react` (v12)
   canvas (`src/components/graph/GraphCanvas.tsx`), controlled via two pure, fully-unit-tested
   mapping helpers (`src/components/graph/graphMapping.ts`: `toFlowNodes`/`toFlowEdges`/
   `flowPositionChangeToMove`/`dedupeMovesById`, zero `@xyflow/react`/React imports — trivially
@@ -365,13 +365,13 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
   `exportedAt`). A 16 MiB frame-cap guard answers a typed `Io` error instead of attempting a
   doomed oversized send (chunked export tracked as a backlog row).
 - **Frontend — project management UI:** left-rail project groups (project header + nested
-  workspace rows, «Без проекта» group, create-project dialog); a tabbed `ProjectPanel` (Обзор ·
-  Цели `GoalTree` · Идеи `IdeasList` · Задачи `TasksList` · Инсайты `InsightsList` · Правила
+  workspace rows, «No project» group, create-project dialog); a tabbed `ProjectPanel` (Overview ·
+  Goals `GoalTree` · Ideas `IdeasList` · Tasks `TasksList` · Insights `InsightsList` · Rules
   `RulesetPanel`); ⌘K quick-capture (`QuickCapture`) — global overlay, title/body/project select,
   `CreateIdea` on Enter, disabled with an honest inline note while orchd is down; `HomeGoals`
-  mounted below the S2 attention sections (the amber «Нужен ты» block keeps its pinned-top spot)
+  mounted below the S2 attention sections (the amber «Needs you» block keeps its pinned-top spot)
   showing each active project's strategic goal + direct children with status chips.
-- **Honest degradation for the second daemon:** `orchd://down` → shared banner + [Повторить]
+- **Honest degradation for the second daemon:** `orchd://down` → shared banner + [Retry]
   (`orchd_reconnect`) on every domain surface, mutating controls disabled; `orchd://incompatible`
   → the existing `UpgradeDialog` generalized to read both daemons' flag pairs, rendering one
   dialog at a time (sessiond first if both are incompatible — no combined choreography); orchd's
@@ -419,7 +419,7 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
   (`["*"]` sentinel on overflow) or honest `fs://watch-error{root,reason}` — GUI-lifetime only
   (starts on activation, stops on switch/unmount).
 - **Attention-first Home:** on open, sessions waiting for input are pinned first (amber) with a
-  one-click «Пройти →» that navigates, activates, and focuses that terminal; then running; then
+  one-click «Go →» that navigates, activates, and focuses that terminal; then running; then
   recently exited (✓/✗ by exit code) — across every workspace, computed from the existing store,
   never polled.
 - **OSC-133 command strip:** per-session recent-command chips (✓/✗ by exit code, running-dot for

@@ -297,7 +297,7 @@ pub struct GraphNode {
     /// `true` when this is an `entityRef` node whose referenced domain entity has been deleted
     /// (D3 soft-ref orphan). Set by the read-time label resolver (`resolve_node_label` in
     /// `crates/orchd/src/graph.rs`), never by the client — the UI renders an orphaned node with
-    /// «источник удалён». Always `false` for non-`entityRef` nodes and for a still-live
+    /// «source deleted». Always `false` for non-`entityRef` nodes and for a still-live
     /// `entityRef` node.
     pub is_orphan: bool,
 }
@@ -639,7 +639,7 @@ pub enum SkillFileState {
 
 // ---- S-EXT Trust entities (spec §4/§5/§6, BL-22, task T18, appended — order FROZEN
 // append-only): the `policy` spend/rate-cap table + the `audit_log` rows surfaced to the
-// Журнал/audit UI. Distinct from the pre-existing `PolicyRules` above (a per-ruleset
+// Log/audit UI. Distinct from the pre-existing `PolicyRules` above (a per-ruleset
 // owner-consent policy, S1, with its OWN unrelated spend-cap field): `Policy` here is the trust
 // CHOKE-POINT's spend/rate cap row (`crate::trust::authorize`, spec §6), keyed by scope + a
 // reference id, not a ruleset. ----
@@ -679,7 +679,7 @@ pub enum PolicyScope {
 }
 
 /// `audit_log` row (spec §4/§6, BL-22, task T18): every trust-choke-point decision, allow or
-/// deny, surfaced to the Журнал/audit UI. `reason`/every other field NEVER carries secrets or
+/// deny, surfaced to the Log/audit UI. `reason`/every other field NEVER carries secrets or
 /// tool-call arguments (spec §6) — only the fixed action/decision/reason vocabulary
 /// `crate::trust::authorize` writes (request content lives in the matching invocation's own
 /// request-hash field, a sha256, never here).

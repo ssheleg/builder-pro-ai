@@ -6,7 +6,7 @@ export type AccountAuthKind = "oauth" | "apikey";
 
 /**
  * `audit_log` row (spec §4/§6, BL-22, task T18): every trust-choke-point decision, allow or
- * deny, surfaced to the Журнал/audit UI. `reason`/every other field NEVER carries secrets or
+ * deny, surfaced to the Log/audit UI. `reason`/every other field NEVER carries secrets or
  * tool-call arguments (spec §6) — only the fixed action/decision/reason vocabulary
  * `crate::trust::authorize` writes (request content lives in the matching invocation's own
  * request-hash field, a sha256, never here).
@@ -62,7 +62,7 @@ export type GraphNode = { id: string, projectId: string, kind: GraphNodeKind, en
  * `true` when this is an `entityRef` node whose referenced domain entity has been deleted
  * (D3 soft-ref orphan). Set by the read-time label resolver (`resolve_node_label` in
  * `crates/orchd/src/graph.rs`), never by the client — the UI renders an orphaned node with
- * «источник удалён». Always `false` for non-`entityRef` nodes and for a still-live
+ * «source deleted». Always `false` for non-`entityRef` nodes and for a still-live
  * `entityRef` node.
  */
 isOrphan: boolean, };

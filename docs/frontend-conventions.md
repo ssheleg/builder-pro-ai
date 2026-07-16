@@ -56,8 +56,8 @@ attach guards in component refs (a pane instance is reused across tab switches �
   button — nav buttons live inline there, no separate `LeftRail` component), `App.tsx` (the
   `view === "ext"` branch in the `if`/`else` render chain).
 - **`ExtPanel` mirrors `ProjectPanel`'s tab pattern:** one panel component owns tab-selection
-  state and renders exactly one child per tab (Серверы/Инструменты/Коннекторы/Журнал/Артефакты/
-  Навыки — `src/components/ext/*.tsx`), same shape as `ProjectPanel`'s Обзор/Цели/Идеи/…
+  state and renders exactly one child per tab (Servers/Tools/Connectors/Log/Artifacts/
+  Skills — `src/components/ext/*.tsx`), same shape as `ProjectPanel`'s Overview/Goals/Ideas/…
   tabs — no new tab-panel pattern invented for this view.
 - **Honest degradation, unchanged discipline:** every mutating control across every `ext/*` tab
   (add/enable/disable/connect/set-bearer/invoke/OAuth-begin/api-key-add/delete/set-policy/
@@ -68,31 +68,31 @@ attach guards in component refs (a pane instance is reused across tab switches �
 - **`ConnectDialog`:** every connect attempt from `ServersTab` routes through this one dialog
   (no "already consented" signal exists on the wire `McpServer` entity to gate a
   dialog-vs-direct-connect choice on, and `trustGrantConsent` is idempotent, so always
-  confirming is simpler and honest) — `Подключиться` grants `TrustGrantConsent(id, "connect")`
+  confirming is simpler and honest) — `Connect` grants `TrustGrantConsent(id, "connect")`
   THEN calls `mcpConnect`, in that order, since `mcpConnect` is trust-gated and rejects with
   `Error{Consent}` until the grant exists. A failure (network/consent/policy) is shown IN-dialog
   (`role="alert"`) via `describeOrchdError`, not just a toast. **`ServersTab`'s transport picker
-  is fixed at `"http"` for now** — a `"stdio"` option is present but disabled ("скоро"): the
+  is fixed at `"http"` for now** — a `"stdio"` option is present but disabled ("soon"): the
   backend's distinct `stdio_exec` consent kind (a different fingerprint scheme, binary-hash not
   URL) is fully built (`crates/orchd/src/trust.rs`), but no UI flow can create a stdio server
   yet, so there is no separate stdio-exec consent dialog to document — don't assume `ConnectDialog`
   covers it until a future task wires up the stdio transport picker.
 - **Untrusted-result banner:** any surface that renders an MCP tool result or a connector-invoke
   result (`ToolsBrowser`'s invoke-result panel, `ArtifactsTab`'s per-row viewer) shows a fixed
-  «непроверенные данные» banner — unconditional for any result at all (every `mcp_artifact` is
+  «unverified data» banner — unconditional for any result at all (every `mcp_artifact` is
   `is_untrusted=1` by construction, S-EXT spec D9), never computed from response content. Treat
   this the same way as the graph canvas's orphan/ghost styling: a static, tested badge driven by
   a boolean flag from the wire, not inferred client-side.
 - **Skills tab's plumbing-only banner:** `SkillsTab` renders a fixed, unconditional
-  `role="status"` banner («Навыки — это реестр; они исполняются, когда появится агент-оркестр
+  `role="status"` banner («Skills are a registry; they run once an orchestrator agent exists
   (S6b).») ABOVE the list — every skills-adjacent UI must keep stating this honestly until S6b
   actually ships a runtime consumer; don't let a future edit quietly drop the banner while the
   registry is still non-executable.
 
 ## Idea research flow — `components/idea/*`, untrusted-banner reuse (S-IDEA)
 
-- **No new top-level view:** the research flow hangs entirely off the shipped «Идеи» surface
-  (`IdeasList` in the `ProjectPanel` «Идеи» tab AND the project-less idea inbox) — unlike S-EXT's
+- **No new top-level view:** the research flow hangs entirely off the shipped «Ideas» surface
+  (`IdeasList` in the `ProjectPanel` «Ideas» tab AND the project-less idea inbox) — unlike S-EXT's
   `"ext"` view, S-IDEA does not widen the `view` union. Four new components live under
   `src/components/idea/`: `ResearchRunDialog`, `ResearchPane`, `FormInsightDialog`,
   `SpawnProjectFromIdea` — each a focused modal/panel `IdeasList` opens per idea, not a
@@ -100,13 +100,13 @@ attach guards in component refs (a pane instance is reused across tab switches �
 - **`ResearchRunDialog`:** picks a connected+enabled MCP server (`McpListTools` populates the tool
   picker once a server is chosen) → an owner-supplied args JSON field → a spend-approval preflight
   panel (`TrustListPolicies` for the effective scope + a fixed "cost usually unknown until after
-  the call" note) → «Запустить» fires `researchStartRun`. The trust layer's hard caps are
+  the call" note) → «Run» fires `researchStartRun`. The trust layer's hard caps are
   unchanged — a cap breach at invoke time surfaces as the run reaching `failed{policy_cap_exceeded}`
   in `ResearchPane`, not a dialog-time rejection (the preflight is advisory, not enforcing).
 - **`ResearchPane` reuses the S-EXT untrusted-artifact banner verbatim, does NOT reinvent it:** a
   `done` run's artifact view calls the exact same artifact-rendering path `ArtifactsTab`/
-  `ToolsBrowser` use (fetch via `mcpGetArtifact`, render content + the fixed «непроверенные
-  данные» banner unconditionally — every `mcp_artifact` is `is_untrusted=1` by construction, same
+  `ToolsBrowser` use (fetch via `mcpGetArtifact`, render content + the fixed «unverified
+  data» banner unconditionally — every `mcp_artifact` is `is_untrusted=1` by construction, same
   contract as the Extensions-view convention above). **Never build a second untrusted-banner
   component** — if a research-specific artifact treatment is ever needed, extend the shared one,
   don't fork it.
@@ -114,8 +114,8 @@ attach guards in component refs (a pane instance is reused across tab switches �
   renders `pending|running|done|failed` badges per run (driven by the `ResearchRunsChanged` push,
   never polling) — there is no token-by-token rendering, because `mcp::invoke::call_tool` is
   request/response in the shipped connect-per-call model (BL-70 tracks the persistent-session
-  architecture a real streaming pane would need). A `failed` run's card always offers «сформировать
-  insight без ресёрча» so the owner path never dead-ends on a research failure (Q8 honest
+  architecture a real streaming pane would need). A `failed` run's card always offers «form
+  insight without research» so the owner path never dead-ends on a research failure (Q8 honest
   degradation, same discipline as every other orchd-down/failure surface).
 - **`FormInsightDialog`'s fit-context panel is read-only display, not a new editor:** it renders
   the project's goals (with `metric_refs` as owner-declared strings, no real metric timeseries —

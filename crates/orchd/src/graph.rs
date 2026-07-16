@@ -284,7 +284,7 @@ fn entity_table(t: &GraphEntityType) -> &'static str {
 /// Looks up an `entityRef`'s live `title` from its source domain row (S4 spec §5: "resolving an
 /// entityRef's live label happens at read time"). `Ok(None)` means the source row is gone
 /// (deleted) — the caller keeps the node's STORED `label` in that case (D3 soft-ref: the node
-/// persists, the UI flags «источник удалён»); this helper itself does not know or care which
+/// persists, the UI flags «source deleted»); this helper itself does not know or care which
 /// node it's resolving for, it just answers "does entity_id still exist in this domain table,
 /// and if so what's its title".
 fn resolve_entity_label(
@@ -304,7 +304,7 @@ fn resolve_entity_label(
 /// unchanged (`is_orphan` stays `false`, its `into_node` default). An orphaned `entityRef`
 /// (source row deleted) keeps its STORED `label` unchanged AND has `is_orphan` set `true` —
 /// `resolve_entity_label` returning `None` is exactly that "orphan" signal (D3: the UI flags
-/// «источник удалён» off this wire field).
+/// «source deleted» off this wire field).
 fn resolve_node_label(
     conn: &Connection,
     mut node: GraphNode,
@@ -636,7 +636,7 @@ impl Db {
     /// in the project (the cross-project "ghosts"), deduped. `entityRef` node labels (in both
     /// `nodes` and `external_nodes`) are re-resolved from their live domain row at read time
     /// (D3, [`resolve_node_label`]) — an orphan (source deleted) keeps its stored label AND has
-    /// `is_orphan` set `true` on the wire, the signal the UI renders as «источник удалён». Unknown
+    /// `is_orphan` set `true` on the wire, the signal the UI renders as «source deleted». Unknown
     /// project ⇒ `NotFound` (mirrors [`Db::list_goals`]'s existence check).
     pub(crate) fn list_project_graph(
         &self,
@@ -1851,7 +1851,7 @@ mod tests {
         );
         assert!(
             orphan.is_orphan,
-            "an entityRef whose source row was deleted must be flagged is_orphan (D3, UI renders «источник удалён»)"
+            "an entityRef whose source row was deleted must be flagged is_orphan (D3, UI renders «source deleted»)"
         );
 
         let plain_node = view

@@ -623,7 +623,7 @@ fn respond_ruleset(
 /// Post-commit ruleset FILE write for a freshly created project (spec §7/§10, task-10 brief):
 /// `Db::create_project` already committed the `ruleset` DB ROW (default `md_path`, `md_hash: ""`)
 /// inside its OWN transaction before this is ever called. This writes the FILE at that path with
-/// the locked template (`"# Правила проекта <name>\n"`) and stores its hash by delegating to
+/// the locked template (`"# Project rules <name>\n"`) and stores its hash by delegating to
 /// `Db::upsert_ruleset` — which, given `md_content: Some(_)`, already does exactly "atomic write +
 /// rehash the row" (T8); calling it here is not a second hashing/writing implementation, just
 /// this task's post-commit trigger for the one T8 already built.
@@ -634,7 +634,7 @@ fn respond_ruleset(
 /// `GetRuleSet` (via [`build_ruleset_view`]) honestly reports `RuleFileState::Missing` until the
 /// owner retries through `UpsertRuleSet`/`AcknowledgeRuleFile`.
 async fn write_initial_ruleset_file(deps: &Arc<ServerDeps>, project: &Project) {
-    let template = format!("# Правила проекта {}\n", project.name);
+    let template = format!("# Project rules {}\n", project.name);
     let db = deps.db.lock().await;
     if let Err(e) = db.upsert_ruleset(
         RuleScope::Project,

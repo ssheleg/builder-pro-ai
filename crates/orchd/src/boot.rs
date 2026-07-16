@@ -22,8 +22,8 @@ use crate::socket_server::{serve, ServerDeps};
 /// On-disk file name of the daemon's SQLite database, under `{app-support}/`.
 const DB_FILE_NAME: &str = "orchd.db";
 
-/// Template content written to a fresh `rules/global.md` (spec §5.2: `# Глобальные правила\n`).
-const GLOBAL_RULESET_TEMPLATE: &str = "# Глобальные правила\n";
+/// Template content written to a fresh `rules/global.md` (spec §5.2: `# Global rules\n`).
+const GLOBAL_RULESET_TEMPLATE: &str = "# Global rules\n";
 
 /// Resolve `~/Library/Application Support/ai.builderpro.desktop` (spec §5: durable state — DB,
 /// settings, logs — lives here, never next to the short socket path). Thin wrapper over
@@ -338,7 +338,7 @@ mod tests {
 
         // Operator hand-edits the file (e.g. directly in an editor, or via a repo-tracked copy).
         let md_path = dir.path().join("rules/global.md");
-        let hand_edited = "# Мои собственные правила\n\nникогда не перезаписывай меня\n";
+        let hand_edited = "# My own rules\n\nnever overwrite me\n";
         std::fs::write(&md_path, hand_edited).unwrap();
 
         // A later boot (app relaunch, daemon restart) must NOT overwrite the hand-edit.

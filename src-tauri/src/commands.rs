@@ -1153,7 +1153,7 @@ pub async fn pick_skill_file(app: AppHandle) -> Result<Option<String>, CommandEr
     app.dialog()
         .file()
         .add_filter("SKILL.md", &["md"])
-        .set_title("Выбрать SKILL.md")
+        .set_title("Select SKILL.md")
         .pick_file(move |maybe_path| {
             let _ = tx.send(maybe_path);
         });
@@ -1925,7 +1925,7 @@ pub async fn orchd_import_from_file(
 }
 
 /// Drops the current orchd client slot, then re-runs `lib.rs`'s `bring_up_orchd` connect sequence
-/// from scratch (spec §9's locked flow — the [Повторить] button's target, T19). Spawned via
+/// from scratch (spec §9's locked flow — the [Retry] button's target, T19). Spawned via
 /// `tauri::async_runtime::spawn` rather than awaited inline: `bring_up_orchd`'s bounded retry can
 /// take up to ~4s (`BOOT_CONNECT_ATTEMPTS` x 500ms), and the frontend observes the outcome via the
 /// `orchd://down|up|incompatible` events / `AppState.orchd_status` rather than this command's
@@ -2625,7 +2625,7 @@ pub async fn trust_list_policies(state: State<'_, AppState>) -> Result<Vec<Polic
 }
 
 /// Newest-first, optionally capped at `limit` (spec §4 `audit_log`) — every trust-choke-point
-/// decision, allow or deny, for the Журнал/audit UI.
+/// decision, allow or deny, for the Log/audit UI.
 #[tauri::command]
 pub async fn trust_list_audit(
     state: State<'_, AppState>,

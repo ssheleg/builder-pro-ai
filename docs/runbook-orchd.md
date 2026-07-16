@@ -47,7 +47,7 @@ pgrep -fl bpa-orchd
 launchctl kickstart -k gui/$(id -u)/ai.builderpro.desktop.orchd
 ```
 
-The GUI's `orchd_reconnect` command (`src-tauri/src/commands.rs`, the [Повторить] button on the
+The GUI's `orchd_reconnect` command (`src-tauri/src/commands.rs`, the [Retry] button on the
 `orchd://down` banner) drops the client slot and re-spawns `lib.rs::bring_up_orchd`'s same
 bounded-retry connect sequence used at boot — no app restart needed for a plain reconnect.
 
@@ -62,7 +62,7 @@ bounded-retry connect sequence used at boot — no app restart needed for a plai
   `upgrade_daemon` verbatim — best-effort `OrchdShutdown{drain:true}` (WAL checkpoint) →
   `kickstart_force()` (`launchctl kickstart -k`) on the orchd agent → `app.restart()` (a full app
   relaunch, same choreography as the sessiond upgrade dialog). Copy is honest that no live session
-  is at risk: *«Обновить фоновый сервис оркестратора — записи (проекты, цели, задачи) сохранены»*
+  is at risk: *«Update the orchestrator background service — your records (projects, goals, tasks) are preserved»*
   (no N-live-sessions warning — orchd has no PTYs to lose).
 - **Both daemons incompatible after one app update:** the GUI shows ONE dialog at a time,
   **sessiond first** (its `kickstart -k` + `app.restart()` relaunches the app; orchd's
@@ -222,8 +222,8 @@ print the secret value in a shared terminal/log.
 **What can reach the network:** ONLY an MCP server the owner explicitly registered + granted
 connect (or `stdio_exec`) consent to, and ONLY a connector account/adapter the owner explicitly
 added — there is no background polling, no telemetry call, no unsolicited egress. Every attempt
-(allow or deny) writes an `audit_log` row (`TrustListAudit`, surfaced in the «Расширения» →
-Журнал tab) — `reason` never contains a secret or a tool argument, only a short code like
+(allow or deny) writes an `audit_log` row (`TrustListAudit`, surfaced in the «Extensions» →
+Log tab) — `reason` never contains a secret or a tool argument, only a short code like
 `consent_required`/`spend_cap_exceeded`.
 
 **stdio MCP servers spawn a real child process:** `pgrep -fl` under `bpa-orchd`'s pid will show
@@ -236,13 +236,13 @@ publicly without checking it first if any stdio server has been connected.
 
 **Human step — connecting a real provider (e.g. prowl.chat):** the autonomous/CI path proves the
 whole MCP + connector mechanism against a LOCAL STUB server (`tests/e2e/orchd-survive.mjs` phases
-6/7) — no agent creates or enters a real credential. To connect a REAL server: open «Расширения» →
-Серверы → add a server (name + URL) → «Подключиться» (grants connect consent) → if it needs a
-bearer, «задать токен» (masked, never echoed back) and paste it yourself. For a real OAuth
-connector: «Расширения» → Коннекторы → «подключить OAuth» — this needs an owner-registered OAuth
+6/7) — no agent creates or enters a real credential. To connect a REAL server: open «Extensions» →
+Servers → add a server (name + URL) → «Connect» (grants connect consent) → if it needs a
+bearer, «set token» (masked, never echoed back) and paste it yourself. For a real OAuth
+connector: «Extensions» → Connectors → «connect OAuth» — this needs an owner-registered OAuth
 client (the v1 provider registry ships EMPTY; `register_oauth_provider` must be called with a
 real IdP's client id/secret/endpoints before `ConnectorBeginOAuth` can succeed for that provider —
-there is no config-file-backed registry yet, D14 Phase 3 follow-up) — or «добавить API-ключ» for a
+there is no config-file-backed registry yet, D14 Phase 3 follow-up) — or «add API key» for a
 simpler static key. None of this is on the automated test path; it's a one-time, owner-performed
 setup step.
 
@@ -273,7 +273,7 @@ other row in `orchd.db`, which is always in a fully-committed, terminal state be
 `kickstart -k` (the Restart section above) or any daemon stop while a run is `running` interrupts
 it; **the boot-reconcile step handles this automatically, no manual intervention needed**: right
 after `open_db` on every boot, `Db::reconcile_interrupted_research_runs` flips any row still
-`pending`/`running` to `failed{interrupted}` (D11) — the owner just re-runs it from «Исследовать».
+`pending`/`running` to `failed{interrupted}` (D11) — the owner just re-runs it from «Research».
 You can confirm this happened by tailing the boot log around a restart:
 
 ```bash
@@ -285,7 +285,7 @@ There is no owner action required here — this is the daemon healing itself, do
 restart during an in-progress research run.
 
 **Connecting a real research server** is the SAME "Human step" as above — `ResearchRunDialog`'s
-server picker only lists servers already registered in «Расширения» → Серверы, so connecting
+server picker only lists servers already registered in «Extensions» → Servers, so connecting
 prowl.chat (or any other MCP research tool) as a real server is a one-time prerequisite before
 `ResearchStartRun` can target it; the autonomous/e2e path (phases 8/9, `tests/e2e/orchd-survive.mjs`)
 proves the identical mechanism against a local stub, never a real credential.

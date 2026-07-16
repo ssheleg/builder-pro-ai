@@ -625,7 +625,7 @@ pub(crate) fn migrate_v4(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
 /// Title of the strategic goal auto-created with every project (spec §5.2; the owner edits it
 /// afterwards, it is never auto-changed again and never deletable). `pub(crate)`: `crate::graph`'s
 /// tests reuse this literal rather than duplicating it (drift-proof).
-pub(crate) const STRATEGIC_GOAL_TITLE: &str = "Стратегическая цель";
+pub(crate) const STRATEGIC_GOAL_TITLE: &str = "Strategic goal";
 
 /// Domain persistence error (spec §5.2, §6 wire mapping: `NotFound→NotFound`,
 /// `Invariant→Invariant`, `Conflict→Conflict`, `Validation→Validation`, `Sql→Io`,
@@ -1289,7 +1289,7 @@ fn task_ancestor_chain_contains(
 impl Db {
     /// `CreateProject` (spec §5.2): ONE transaction inserts the `project` row, its
     /// `project_workspace` links (`ord` 0..), the auto-created strategic `goal`
-    /// (`title: "Стратегическая цель"`, empty body — owner edits it, never deletable), its
+    /// (`title: "Strategic goal"`, empty body — owner edits it, never deletable), its
     /// `entity_ref` graph node (S4 spec §5 D6: `crate::graph::seed_strategic_entity_ref`, same
     /// tx — a project's graph is never empty) AND the project's `ruleset` DB row
     /// (`scope='project'`, default `md_path`, `md_hash=''`, `policy='{}'`; the FILE itself is
@@ -2623,7 +2623,7 @@ impl Db {
 
     /// `AcknowledgeRuleFile` (spec §7): re-reads the file at the row's CURRENT `md_path` and
     /// stores its fresh sha256 as `md_hash` — the owner's "yes, I've seen the external edit, this
-    /// is now the accepted content" action (spec §11: "`ExternallyModified` → banner + [Принять]
+    /// is now the accepted content" action (spec §11: "`ExternallyModified` → banner + [Accept]
     /// (rehash)"). Unknown `id` ⇒ `NotFound`. The file being missing is `Invariant("file
     /// missing")` (spec, task-8 brief) — the ROW is found, it's the FILE that's gone, and
     /// "acknowledge" a file that isn't there is a contradiction in terms, not silently ignored.
@@ -3101,7 +3101,7 @@ mod domain_tests {
         let goals = db.list_goals(&project.id).unwrap();
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].kind, GoalKind::Strategic);
-        assert_eq!(goals[0].title, "Стратегическая цель");
+        assert_eq!(goals[0].title, "Strategic goal");
         assert_eq!(goals[0].body, "");
         assert!(goals[0].parent_id.is_none());
         assert!(
@@ -5354,7 +5354,7 @@ mod ruleset_tests {
         assert_ne!(acknowledged.md_hash, rs.md_hash);
         assert!(acknowledged.updated_at >= rs.updated_at);
 
-        // The whole point of Acknowledge (spec §7/§11: "[Принять] → AcknowledgeRuleFile"):
+        // The whole point of Acknowledge (spec §7/§11: "[Accept] → AcknowledgeRuleFile"):
         // read_state against the acknowledged hash must now report Ok, not ExternallyModified.
         let (content, state) = crate::ruleset_files::read_state(
             Path::new(&acknowledged.md_path),

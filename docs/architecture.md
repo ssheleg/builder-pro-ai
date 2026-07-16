@@ -149,7 +149,7 @@ src/                              # React frontend
 │                    S2 adds link-provider.ts (pure regex file-link resolver, spec §6.5/D9)
 └─ components/     # TerminalPane, TerminalTabs, WorkspaceSidebar, StatusDot, DaemonBanner;
                      S2 adds HomeView, FileTree, FilePreview, FilesRail, CommandStrip, Toast;
-                     S3 adds ProjectPanel (Обзор/Цели/Идеи/Задачи/Инсайты/Правила tabs),
+                     S3 adds ProjectPanel (Overview/Goals/Ideas/Tasks/Insights/Rules tabs),
                      GoalTree, IdeasList, TasksList, InsightsList, RulesetPanel,
                      CreateProjectDialog, QuickCapture (⌘K), HomeGoals, OrchdDownBanner;
                      WorkspaceSidebar restructured into project-group rows (S3 spec §10)
@@ -310,8 +310,8 @@ webview grew from a two-pane (sidebar + terminal) layout to three rails:
 ```
 ┌ DaemonBanner ───────────────────────────────────────────────────────────┐
 ├──────────┬─────────────────────────────────────────────┬────────────────┤
-│ ⌂ Home   │ Home: attention queue («нужен ты» → работают │ FILES (right,  │
-│ • ws-... │  → завершились, «Пройти →» jumps+focuses)    │ collapsible):  │
+│ ⌂ Home   │ Home: attention queue («needs you» → running │ FILES (right,  │
+│ • ws-... │  → exited, «Go →» jumps+focuses)             │ collapsible):  │
 │ (nav     │  | Workspace: stat chips + TerminalTabs +    │ FileTree       │
 │  only)   │  per-session OSC-133 command strip           │ + FilePreview  │
 └──────────┴─────────────────────────────────────────────┴────────────────┘
@@ -412,7 +412,7 @@ both owned entirely by `crates/orchd/src/graph.rs` (new module, no new crate). N
   referenced goal/idea/insight/task does not delete or corrupt the graph node — the node
   persists and a read-time resolver looks up the live domain row's title on every
   `list_project_graph`/`neighborhood` call; if the row is gone, the node keeps its last-known
-  stored `label` and the UI renders it with `isOrphan: true` («источник удалён»). Exactly one
+  stored `label` and the UI renders it with `isOrphan: true` («source deleted»). Exactly one
   `entityRef` node exists per `(entity_type, entity_id)` (partial unique index). A strategic-goal
   `entityRef` node is auto-seeded in the same transaction as `CreateProject` (D6), so a project's
   graph is never empty; the schema-v2 migration backfills one for every pre-S4 project on upgrade.
@@ -437,7 +437,7 @@ both owned entirely by `crates/orchd/src/graph.rs` (new module, no new crate). N
   **every project the change actually touches** — a cross-project edge mutation pushes to BOTH
   endpoint projects, not just the mutated row's own project, so a stale `external_nodes` ghost
   elsewhere is never left un-invalidated.
-- **UI:** a 7th `ProjectPanel` tab, «Граф», renders an editable `@xyflow/react` canvas
+- **UI:** a 7th `ProjectPanel` tab, «Graph», renders an editable `@xyflow/react` canvas
   (`src/components/graph/GraphCanvas.tsx`) — drag moves a node (debounced `GraphMoveNode`),
   connecting two nodes adds an edge, a toolbar adds/deletes nodes and searches (match ⇒ accent
   ring), and every mutating control is `disabled` while `orchd://down`. Clicking a cross-project
@@ -527,14 +527,14 @@ routes through the identical trust-choke-point + invocation/artifact persistence
 **Skills:** a `SKILL.md`-format registry (portable, matches the Claude Code convention) — CRUD +
 files-as-truth (`Present`/`Modified`/`Missing`, mirrors `ruleset_files.rs`'s pattern) + a
 management tab. **Plumbing only** — there is no runtime consumer yet (the agent org that would
-load and execute a skill is S6b); the UI states this honestly («Навыки исполняются, когда
-появится агент-оркестр (S6b) — сейчас это реестр»), never presenting the registry as executable.
+load and execute a skill is S6b); the UI states this honestly («Skills run once an orchestrator
+agent exists (S6b) — for now it's a registry»), never presenting the registry as executable.
 
-**UI — «Расширения»,** a new top-level view (alongside Home/Workspace/Project) with tabs:
-Серверы (MCP server registry + connect/consent), Инструменты (tool browser + per-tool allowlist +
-invoke), Коннекторы (OAuth/api-key accounts + the generic-rest ops runner), Журнал (invocation
-log + audit log + a spend/rate policy editor), Артефакты (durable results + an untrusted banner
-per item), Навыки (the skills registry). Every mutating control is `disabled` while `orchd://down`
+**UI — «Extensions»,** a new top-level view (alongside Home/Workspace/Project) with tabs:
+Servers (MCP server registry + connect/consent), Tools (tool browser + per-tool allowlist +
+invoke), Connectors (OAuth/api-key accounts + the generic-rest ops runner), Log (invocation
+log + audit log + a spend/rate policy editor), Artifacts (durable results + an untrusted banner
+per item), Skills (the skills registry). Every mutating control is `disabled` while `orchd://down`
 (the established honest-degradation contract).
 
 **e2e (`npm run e2e:orchd`):** phase 6 registers a local stub HTTP MCP server → grants connect
@@ -559,7 +559,7 @@ future *unattended* orchd run) is re-targeted to S6b/SW2 — this slice's flows 
 interactive/screen-unlocked and unaffected. Connecting the *real* prowl.chat server needs the
 owner's own account/API key — the autonomous path (above) proves the identical mechanism against
 a local stub; wiring a real provider is a documented, non-blocking Human step (owner adds the
-server / pastes a key in the «Расширения» UI).
+server / pastes a key in the «Extensions» UI).
 
 ## Research pipeline — SHIPPED in S-IDEA (`[0.7.0]`)
 
@@ -647,12 +647,12 @@ for S6a (`docs/backlog.md`), never silently claimed as shipped.
 spend-approval preflight reusing `TrustListPolicies`, with an honest "cost usually unknown until
 after the call" note — the trust layer's existing hard caps are UNCHANGED, a breach at invoke time
 surfaces as `failed{policy_cap_exceeded}`, Q8 honest degradation) → `ResearchPane` (per-idea run
-list by status; a `done` run reuses the S-EXT artifact viewer + «непроверенные данные» untrusted
+list by status; a `done` run reuses the S-EXT artifact viewer + «unverified data» untrusted
 banner; **not token-streaming** — MCP `tools/call` is request/response in the shipped
 connect-per-call model, so v1 shows run status, not streamed tokens, an honest scope line stated in
-the pane itself, not a partial build; a `failed` run offers «сформировать insight без ресёрча» so
+the pane itself, not a partial build; a `failed` run offers «form insight without research» so
 the owner path never dead-ends) → `FormInsightDialog` (title/body prefilled from the artifact, the
-fit-context panel above, owner sets fit-verdict, creates the insight) → «Принять»/«В backlog» forms
+fit-context panel above, owner sets fit-verdict, creates the insight) → «Accept»/«To backlog» forms
 the task and flips the idea `researching→specced`. `SpawnProjectFromIdea` closes BL-56 (the
 spawn-project-from-idea UI flow S3 shipped only the data enabler for, `Idea.project_id`) — pure
 frontend orchestration over the three existing verbs above, no new orchd verb. Every mutating

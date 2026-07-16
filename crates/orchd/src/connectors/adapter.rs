@@ -92,7 +92,7 @@ pub trait ConnectorAdapter {
 /// `accounts::ssrf_guarded_http_client` (the OAuth token-exchange client, which disables
 /// redirects because the target URL is the IdP's own metadata-resolved endpoint — the OWNER never
 /// typed it), a `generic-rest` call's target URL IS exactly what the owner typed into the
-/// «вызвать» op form (spec §8 UI) for an account THEY explicitly added. Reaching an
+/// «invoke» op form (spec §8 UI) for an account THEY explicitly added. Reaching an
 /// owner-specified arbitrary URL is the entire point of a generic REST connector, not a bug to
 /// guard against — so this client keeps reqwest's default (bounded, following) redirect policy,
 /// same as any other user-driven outbound call in this app. The bearer is still only ever sent to

@@ -1,7 +1,7 @@
 # Builder Pro AI — Design System
 
-Written 2026-07-06 (vision v4 §4: «супер минималистичный, лёгкий, современный, приятный шрифт,
-компактный»). **Binds every feature designed after this date.** Extends
+Written 2026-07-06 (vision v4 §4: «super minimalist, light, modern, pleasant font,
+compact»). **Binds every feature designed after this date.** Extends
 [`frontend-conventions.md`](frontend-conventions.md) (store/events/testing architecture); this doc
 owns the VISUAL and UX language. Tokens live in `src/theme.ts` — this doc is their contract.
 
@@ -91,21 +91,21 @@ defect. New tokens are added to `theme.ts` first, doc second, usage third.
 | **File tree** | lazy per-level fetch (`listDir` on expand, cached in the store until invalidated — re-expanding never re-fetches; a cache entry vanishing out from under a still-expanded dir auto-refetches with no click needed) + plain scroll-offset windowing over the flattened visible-node list (fixed row height, no virtualization dependency — stays smooth at 10k+ entries, DoD: <500 DOM rows rendered at any time); dirs-first sort then name; ignored entries hidden by default, dimmed (`textDim`) and shown only behind the "show ignored" toggle; per-row `⋯`/right-click context menu (new file/new folder → inline name input, rename, delete → Trash with `confirm`, reveal in Finder, open external); root nodes get New File/Folder only — no rename/delete on a workspace root (§9 "workspace deletion verb" out of scope) |
 | **Preview pane** | read-only mono text under the tree, no editing, no syntax highlighting (YAGNI v1, spec §9); `binary`/`tooLarge`/error each render an explicit placeholder card with a humanized size — never a truncated read presented as the whole file (spec §7); an error placeholder ALSO fires a toast, never console-only |
 | **Command strip** | horizontal row of Chip atoms under the active terminal, one per recent shell command (OSC-133 `command_events`, spec §6.3): a finished command renders ✓ (`statusRunning` green, `exitCode===0`) or ✗ + the code (`statusExited` red); a command still in flight (a `started` with no matching `finished` yet) renders a Status-dot atom + "running" instead of an outcome glyph; no events yet (or a session that predates the `command_events` table) is NOT an error — a calm dim one-liner, never a blank gap or a toast; a fetch failure fires a toast (spec §7 error-surfacing contract) and renders nothing |
-| **Lifecycle chip** | mono 11px `<select>` styled as a pill (999px radius, 1px `border`), cycling a LOCKED enum in its declared order only (`IdeaLifecycle`'s six values, `FitVerdict`'s three, `InsightStatus`'s three — spec §4.2); one accent on hover/focus, no amber (amber stays reserved for "нужен ты"); an archiving transition that has a server-side precondition (Insight `status → archived` requires non-empty `resolutionReasoning`) is never fired straight from the select — it opens an inline reasoning field + confirm button below the row instead, blocking with a `statusExited` inline message on an empty reasoning rather than round-tripping a doomed request (`IdeasList.tsx`/`InsightsList.tsx`, S3 §10) |
+| **Lifecycle chip** | mono 11px `<select>` styled as a pill (999px radius, 1px `border`), cycling a LOCKED enum in its declared order only (`IdeaLifecycle`'s six values, `FitVerdict`'s three, `InsightStatus`'s three — spec §4.2); one accent on hover/focus, no amber (amber stays reserved for "needs you"); an archiving transition that has a server-side precondition (Insight `status → archived` requires non-empty `resolutionReasoning`) is never fired straight from the select — it opens an inline reasoning field + confirm button below the row instead, blocking with a `statusExited` inline message on an empty reasoning rather than round-tripping a doomed request (`IdeasList.tsx`/`InsightsList.tsx`, S3 §10) |
 | **Policy form** | numeric cap (empty=∞), chip inputs for classes/allowlist; client mirrors server validation |
-| **File-state banner** | info banner (не amber): ExternallyModified → [Принять]; Missing → [Создать заново] |
-| **Project group row** | bold project header + nested workspace rows; «Без проекта» group last |
+| **File-state banner** | info banner (not amber): ExternallyModified → [Accept]; Missing → [Recreate] |
+| **Project group row** | bold project header + nested workspace rows; «No project» group last |
 | **Quick-capture overlay** | ⌘K portal; title+body+project select; Enter submits; Esc closes |
-| **Graph node card** | `bgElevated` + 1px `border`, radius 6, mono-uppercase kind label above a 12px body-face title; an `entityRef` node reads «ref · {entityType}» instead of its own kind and shows «источник удалён» in place of the label when orphaned (D3); an `isExternal` (cross-project ghost) node is dimmed (60% opacity) with a dashed border — read-only, click navigates to its own project (`openProject`), never mutated from the panel it's dimmed into; orphaned nodes get a `statusExited` border instead of the default; a search-matched node gets a 2px `accent` outer ring, never a fill change |
-| **Graph toolbar** | one row above the canvas: kind `<select>` (every `GraphNodeKind` except `entityRef` — never hand-created) + [Добавить] primary button; [Удалить выбранное] secondary button acting on the canvas's own multi-select; a right-aligned search `<input>`, debounced, highlighting matches via the match-ring above — never a separate results list; every mutating control (kind select, [Добавить], [Удалить выбранное]) is `disabled` while `orchdDown`, mirroring `RulesetPanel`'s degradation contract exactly — the search input stays live (it's a read) |
+| **Graph node card** | `bgElevated` + 1px `border`, radius 6, mono-uppercase kind label above a 12px body-face title; an `entityRef` node reads «ref · {entityType}» instead of its own kind and shows «source deleted» in place of the label when orphaned (D3); an `isExternal` (cross-project ghost) node is dimmed (60% opacity) with a dashed border — read-only, click navigates to its own project (`openProject`), never mutated from the panel it's dimmed into; orphaned nodes get a `statusExited` border instead of the default; a search-matched node gets a 2px `accent` outer ring, never a fill change |
+| **Graph toolbar** | one row above the canvas: kind `<select>` (every `GraphNodeKind` except `entityRef` — never hand-created) + [Add] primary button; [Delete selected] secondary button acting on the canvas's own multi-select; a right-aligned search `<input>`, debounced, highlighting matches via the match-ring above — never a separate results list; every mutating control (kind select, [Add], [Delete selected]) is `disabled` while `orchdDown`, mirroring `RulesetPanel`'s degradation contract exactly — the search input stays live (it's a read) |
 
 Buttons: primary = accent fill (one per view maximum), secondary = 1px border ghost; destructive
 = red border ghost with confirm. Toggles, not checkboxes, for enable/disable.
 
 ## 6. UX laws
 
-1. **Delta-first:** every returning view leads with what changed («+4 задачи done · фикс
-   задеплоен ночью»), then current state.
+1. **Delta-first:** every returning view leads with what changed («+4 tasks done · fix
+   deployed overnight»), then current state.
 2. **One inbox:** all human-needed decisions (escalations, gates, approvals) land in THE inbox —
    never scattered as per-view dialogs. Badge count = actionable items only.
 3. **Drill-down, never pogo:** grid → project → artifact in place (panels/sheets), preserving
@@ -124,12 +124,12 @@ Buttons: primary = accent fill (one per view maximum), secondary = 1px border gh
 
 ## 7. Writing rules (copy is design)
 
-- Name things by what the owner recognizes: «Горячие вопросы», not «escalation queue»; «В бэклог»,
-  not «accept insight». UI copy language: Russian for the owner-facing app (owner's language),
-  English for code/logs/ids.
-- A control says what happens («Задеплоить», toast «Задеплоено»). Errors say what broke and what
+- Name things by what the owner recognizes: «Hot questions», not «escalation queue»; «To backlog»,
+  not «accept insight». UI copy language: English everywhere — the owner-facing app, code, logs,
+  and ids are all English (O-2).
+- A control says what happens («Deploy», toast «Deployed»). Errors say what broke and what
   to do next — no apologies, no vagueness.
-- Numbers carry units and context («$1.87 · 42 мин», «214 юзеров задето»).
+- Numbers carry units and context («$1.87 · 42 min», «214 users affected»).
 
 ## 8. Process rule
 
