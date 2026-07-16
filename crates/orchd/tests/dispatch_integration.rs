@@ -13,10 +13,10 @@ use bpa_orchd::protocol::{
     encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, Goal, GoalKind, GraphEdge,
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
     McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
-    OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Policy,
-    PolicyScope, Project, ProjectStatus, ResearchRun, ResearchStatus, RuleFileState, RuleScope,
-    RuleSetView, Skill, SkillFileState, SkillScope, ORCHD_CLIENT_MAX_VERSION,
-    ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
+    OAuthChallenge, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest,
+    OrchdResponse, Policy, PolicyScope, Project, ProjectStatus, ResearchRun, ResearchStatus,
+    RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
+    ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -382,6 +382,20 @@ fn expect_connector_ops(res: OrchdResponse) -> Vec<ConnectorOp> {
     match res {
         OrchdResponse::ConnectorOps(v) => v,
         other => panic!("expected ConnectorOps, got {other:?}"),
+    }
+}
+
+fn expect_connector_providers(res: OrchdResponse) -> Vec<String> {
+    match res {
+        OrchdResponse::ConnectorProviders(v) => v,
+        other => panic!("expected ConnectorProviders, got {other:?}"),
+    }
+}
+
+fn expect_oauth_challenge(res: OrchdResponse) -> OAuthChallenge {
+    match res {
+        OrchdResponse::OAuthChallenge(c) => c,
+        other => panic!("expected OAuthChallenge, got {other:?}"),
     }
 }
 
@@ -2489,6 +2503,99 @@ async fn connector_begin_oauth_unregistered_provider_is_error_no_pending_challen
         "ConnectorError has no dedicated wire code yet (mirrors map_secret_err's Sql->Io \
          precedent) — still a genuine Error response, never a fabricated OAuthChallenge"
     );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn connector_list_providers_returns_empty_when_no_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    // No oauth_providers.json written — the honest v1 default (spec D7): an empty registry, and a
+    // read that returns an empty list rather than an error.
+    let boot = boot_daemon(&socket).await;
+    let mut c1 = Client::connect(&socket).await;
+
+    let providers =
+        expect_connector_providers(c1.request(OrchdRequest::ConnectorListProviders).await);
+    assert!(
+        providers.is_empty(),
+        "with no oauth_providers.json the registry must be empty, got {providers:?}"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn connector_list_providers_returns_names_from_config_file_no_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    // Plant an oauth_providers.json (spec D7 shape) in the app-support dir BEFORE boot — the loader
+    // runs in `boot::run`. One provider carries a confidential `client_secret` to prove it never
+    // rides back on the names-only `ConnectorListProviders` response.
+    let app_support = home_dir
+        .path()
+        .join("Library/Application Support/ai.builderpro.desktop");
+    std::fs::create_dir_all(&app_support).unwrap();
+    std::fs::write(
+        app_support.join("oauth_providers.json"),
+        r#"{
+          "prowl": {
+            "client_id": "prowl-client-id",
+            "auth_url": "https://prowl.chat/oauth/authorize",
+            "token_url": "https://prowl.chat/oauth/token",
+            "default_scopes": ["read"],
+            "client_secret": "prowl-CLIENT-SECRET-must-not-ride-the-wire"
+          },
+          "github": {
+            "client_id": "gh-client-id",
+            "auth_url": "https://github.com/login/oauth/authorize",
+            "token_url": "https://github.com/login/oauth/access_token"
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let boot = boot_daemon(&socket).await;
+    let mut c1 = Client::connect(&socket).await;
+
+    let providers =
+        expect_connector_providers(c1.request(OrchdRequest::ConnectorListProviders).await);
+    assert_eq!(
+        providers,
+        vec!["github".to_string(), "prowl".to_string()],
+        "ConnectorListProviders must return the configured provider names, sorted"
+    );
+
+    // Names ONLY on the wire (spec D7): no client_id, no client_secret, no endpoint URLs.
+    let joined = providers.join(",");
+    assert!(
+        !joined.contains("SECRET")
+            && !joined.contains("client_id")
+            && !joined.contains("prowl.chat"),
+        "no client id/secret/URL may cross the wire, got {providers:?}"
+    );
+
+    // A provider from the config is now genuinely reachable: begin_oauth against it succeeds
+    // (proving the full config — not just the name — was registered).
+    let challenge = expect_oauth_challenge(
+        c1.request(OrchdRequest::ConnectorBeginOAuth {
+            provider: "github".to_string(),
+            label: "My GitHub".to_string(),
+            scopes: None,
+            server_id: None,
+        })
+        .await,
+    );
+    assert!(challenge
+        .authorize_url
+        .contains("github.com/login/oauth/authorize"));
 
     c1.shutdown(boot).await;
 }

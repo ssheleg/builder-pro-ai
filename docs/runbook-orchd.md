@@ -257,12 +257,62 @@ whole MCP + connector mechanism against a LOCAL STUB server (`tests/e2e/orchd-su
 6/7) — no agent creates or enters a real credential. To connect a REAL server: open «Extensions» →
 Servers → add a server (name + URL) → «Connect» (grants connect consent) → if it needs a
 bearer, «set token» (masked, never echoed back) and paste it yourself. For a real OAuth
-connector: «Extensions» → Connectors → «connect OAuth» — this needs an owner-registered OAuth
-client (the v1 provider registry ships EMPTY; `register_oauth_provider` must be called with a
-real IdP's client id/secret/endpoints before `ConnectorBeginOAuth` can succeed for that provider —
-there is no config-file-backed registry yet, D14 Phase 3 follow-up) — or «add API key» for a
-simpler static key. None of this is on the automated test path; it's a one-time, owner-performed
-setup step.
+connector: «Extensions» → Connectors → pick the provider from the «OAuth provider» dropdown →
+«start OAuth». The dropdown is fed by the config-backed provider registry below — until you
+configure at least one provider it shows the honest empty-state «No OAuth providers configured»
+and the begin button stays disabled. «add API key» is the simpler static-key alternative and needs
+no provider registry at all. None of this is on the automated test path; it's a one-time,
+owner-performed setup step.
+
+### OAuth provider registry — `oauth_providers.json` (S-POLISH, O-5, spec D7)
+
+The OAuth provider dropdown («Extensions» → Connectors) is populated at daemon boot from an
+optional JSON file next to the daemon's other durable state:
+
+```
+~/Library/Application Support/ai.builderpro.desktop/oauth_providers.json
+```
+
+Shape — a top-level object keyed by provider name; each entry gives the IdP's registered OAuth
+client and endpoints:
+
+```json
+{
+  "prowl": {
+    "client_id": "your-prowl-oauth-client-id",
+    "auth_url": "https://prowl.chat/oauth/authorize",
+    "token_url": "https://prowl.chat/oauth/token",
+    "default_scopes": ["read", "write"],
+    "client_secret": "your-prowl-client-secret"
+  },
+  "github": {
+    "client_id": "your-github-oauth-client-id",
+    "auth_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token"
+  }
+}
+```
+
+- `client_id`, `auth_url`, `token_url` are **required**; a missing one (or an unknown/typo'd key)
+  makes the whole file *malformed* — see the degradation rules below.
+- `default_scopes` (optional) are the scopes `ConnectorBeginOAuth` uses when the UI's scopes field
+  is left blank; an explicit scope entry in the form always wins and is never widened.
+- `client_secret` (optional) is for confidential clients only; PKCE-only public clients omit it.
+  It is stored **only in memory** in the provider registry, **never** in `orchd.db`, and **never**
+  logged (the boot line logs only the provider *count* and *names*). Provider **names only** cross
+  the wire to the UI — no client id/secret/URL is ever sent to the frontend.
+
+**Degradation (never boot-blocking):**
+
+| File state | Behavior |
+|---|---|
+| Missing | Empty registry; boot logs an info line; the UI shows the empty-state. Normal default. |
+| Malformed (bad JSON, missing required field, unknown key) | Empty registry; boot logs an **error** line; **daemon still boots fully**. Fix the JSON and restart (see «Restart» above) to load it. |
+| Valid | Every provider registered; boot logs `loaded OAuth provider registry … count=N providers=[…]`. |
+
+After editing the file, restart the daemon (`launchctl kickstart -k gui/$(id -u)/ai.builderpro.desktop.orchd`,
+or relaunch the app) so boot re-reads it — the registry is loaded once at boot, not watched. Confirm
+with `grep 'OAuth provider registry' <log>` (see «Locations» for the log path).
 
 ## Research runs (S-IDEA, `[0.7.0]`)
 

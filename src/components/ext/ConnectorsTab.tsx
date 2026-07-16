@@ -8,6 +8,7 @@ import {
   connectorDeleteAccount,
   connectorInvoke,
   connectorListOps,
+  connectorListProviders,
   describeOrchdError,
   isConsentError,
 } from "../../ipc/orchd";
@@ -261,6 +262,15 @@ export function ConnectorsTab(): JSX.Element {
   const [oauthChallenge, setOauthChallenge] = useState<OAuthChallenge | null>(null);
   const [oauthCode, setOauthCode] = useState("");
 
+  // ---- config-backed OAuth provider registry (spec D7, O-5) ----
+  // The provider free-text input is a dropdown fed by `connectorListProviders()`. `providersLoaded`
+  // distinguishes "still loading" from a genuinely empty registry, so the honest empty-state
+  // ("No OAuth providers configured …") shows only once we KNOW the registry is empty (mirrors the
+  // ops runner's `loading`/`ready`-vs-empty distinction). Providers are boot-static config with no
+  // push, so this fetches on mount and again whenever orchd reconnects (`orchdDown` → false).
+  const [oauthProviders, setOauthProviders] = useState<string[]>([]);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
+
   // ---- per-account ops runner (generic-rest only) ----
   const [opsByAccount, setOpsByAccount] = useState<Record<string, ConnectorOp[]>>({});
   const [opsStatus, setOpsStatus] = useState<Record<string, OpsLoadStatus>>({});
@@ -273,6 +283,29 @@ export function ConnectorsTab(): JSX.Element {
     void refreshAccounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Fetch the config-backed OAuth provider registry on mount and on every orchd reconnect. While
+  // orchd is down there is nothing to fetch (the request would fail); once it's back up we (re)load.
+  // A failure marks `providersLoaded` anyway so the UI settles on the honest empty-state rather than
+  // an indefinite "loading" the user can't tell apart from "no providers".
+  useEffect(() => {
+    if (orchdDown) return;
+    let cancelled = false;
+    connectorListProviders()
+      .then((names) => {
+        if (cancelled) return;
+        setOauthProviders(names);
+        setProvidersLoaded(true);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setProvidersLoaded(true);
+        showToast(describeOrchdError(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [orchdDown, showToast]);
 
   const genericRestAccountIds = accounts
     .filter((a) => a.provider === GENERIC_REST_PROVIDER)
@@ -329,7 +362,10 @@ export function ConnectorsTab(): JSX.Element {
     }
   }
 
-  const oauthBeginBlocked = oauthProvider.trim() === "" || oauthLabel.trim() === "";
+  // An empty registry hard-blocks begin (spec D7: the begin button is disabled in the empty-state)
+  // in addition to the usual "a provider + a label must be chosen".
+  const oauthBeginBlocked =
+    oauthProviders.length === 0 || oauthProvider.trim() === "" || oauthLabel.trim() === "";
 
   async function handleBeginOAuth(): Promise<void> {
     if (oauthBeginBlocked) return;
@@ -609,15 +645,30 @@ export function ConnectorsTab(): JSX.Element {
 
       <div style={sectionStyle}>
         <div style={sectionTitleStyle}>{strings.ext.connectors.connectOAuthTitle}</div>
+        {providersLoaded && oauthProviders.length === 0 ? (
+          <div
+            data-testid="oauth-no-providers"
+            style={{ color: theme.colors.textDim, fontSize: 12, marginBottom: 8 }}
+          >
+            {strings.ext.connectors.noProviders}
+          </div>
+        ) : null}
         <div style={createFormStyle}>
-          <input
+          <select
             data-testid="oauth-provider"
-            aria-label={strings.ext.connectors.providerAria}
-            placeholder={strings.ext.connectors.providerPlaceholder}
+            aria-label={strings.ext.connectors.oauthProviderAria}
             value={oauthProvider}
+            disabled={orchdDown || oauthProviders.length === 0}
             onChange={(e) => setOauthProvider(e.target.value)}
-            style={createInputStyle}
-          />
+            style={selectStyle}
+          >
+            <option value="">{strings.ext.connectors.oauthProviderOption}</option>
+            {oauthProviders.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
           <input
             data-testid="oauth-label"
             aria-label={strings.ext.connectors.labelAria}

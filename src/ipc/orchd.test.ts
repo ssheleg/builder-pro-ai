@@ -82,6 +82,7 @@ import {
   connectorListAccounts,
   connectorDeleteAccount,
   connectorListOps,
+  connectorListProviders,
   connectorInvoke,
   skillAdd,
   skillList,
@@ -745,6 +746,11 @@ describe("ipc/orchd", () => {
   it("connectorListOps sends accountId", async () => {
     await connectorListOps({ accountId: "a1" });
     expect(invokeMock).toHaveBeenCalledWith("connector_list_ops", { accountId: "a1" });
+  });
+
+  it("connectorListProviders sends no args", async () => {
+    await connectorListProviders();
+    expect(invokeMock).toHaveBeenCalledWith("connector_list_providers");
   });
 
   it("connectorInvoke sends accountId/op/argsJson/projectId, defaulting projectId to null", async () => {

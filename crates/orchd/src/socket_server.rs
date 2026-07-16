@@ -1852,6 +1852,14 @@ async fn dispatch_inner(
                 Err(e) => map_err(e),
             }
         }
+        // Config-backed OAuth provider registry (spec D7, O-5): the NAMES of the providers loaded
+        // from `<app-support>/oauth_providers.json` at boot. A pure in-memory read of
+        // `deps.connectors` — no DB, no network, never fails (an empty registry ⇒ an empty list,
+        // the honest v1 default). Read verb: broadcasts nothing. Names ONLY — no client
+        // id/secret/URLs cross the wire (spec D7).
+        OrchdRequest::ConnectorListProviders => {
+            OrchdResponse::ConnectorProviders(deps.connectors.provider_names())
+        }
         // Reuses the MCP call/artifact/invocation path (spec §6: "connector_invoke passes through
         // trust::authorize IDENTICALLY to McpCallTool"). `connectors::adapter::invoke` locks
         // `deps.db` itself in short phases around its own network round-trips (bearer resolution

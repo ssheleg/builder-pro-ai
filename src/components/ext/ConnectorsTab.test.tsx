@@ -8,6 +8,7 @@ const connectorCompleteOAuthMock = vi.fn();
 const connectorAddApiKeyMock = vi.fn();
 const connectorDeleteAccountMock = vi.fn();
 const connectorListOpsMock = vi.fn();
+const connectorListProvidersMock = vi.fn();
 const connectorInvokeMock = vi.fn();
 // `refreshAccounts` (store.ts) calls `connectorListAccounts` straight through — mocked here too
 // (same module) so ConnectorsTab's mount-time fetch resolves deterministically, mirroring
@@ -21,6 +22,7 @@ vi.mock("../../ipc/orchd", () => ({
   connectorListAccounts: (...a: unknown[]) => connectorListAccountsMock(...a),
   connectorDeleteAccount: (...a: unknown[]) => connectorDeleteAccountMock(...a),
   connectorListOps: (...a: unknown[]) => connectorListOpsMock(...a),
+  connectorListProviders: (...a: unknown[]) => connectorListProvidersMock(...a),
   connectorInvoke: (...a: unknown[]) => connectorInvokeMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
   // Faithful reimplementation of the real `isConsentError` (daemon error, Debug `code` "Consent").
@@ -61,6 +63,9 @@ beforeEach(() => {
   connectorListAccountsMock.mockReset().mockResolvedValue([]);
   connectorDeleteAccountMock.mockReset().mockResolvedValue(undefined);
   connectorListOpsMock.mockReset().mockResolvedValue([]);
+  // Default: one configured OAuth provider so the general OAuth-flow tests can select it. Tests
+  // asserting the empty-state override this with `mockResolvedValue([])`.
+  connectorListProvidersMock.mockReset().mockResolvedValue(["github"]);
   connectorInvokeMock.mockReset();
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   openUrlMock.mockReset().mockResolvedValue(undefined);
@@ -194,6 +199,10 @@ describe("ConnectorsTab", () => {
     connectorCompleteOAuthMock.mockResolvedValue(makeAccount({ id: "a2", authKind: "oauth" }));
     render(<ConnectorsTab />);
 
+    // The provider dropdown is fed by connectorListProviders(); wait for it to populate + enable.
+    await waitFor(() => {
+      expect((screen.getByTestId("oauth-provider") as HTMLSelectElement).disabled).toBe(false);
+    });
     fireEvent.change(screen.getByTestId("oauth-provider"), { target: { value: "github" } });
     fireEvent.change(screen.getByTestId("oauth-label"), { target: { value: "My GitHub" } });
     fireEvent.click(screen.getByTestId("oauth-begin-submit"));
@@ -225,8 +234,12 @@ describe("ConnectorsTab", () => {
     });
   });
 
-  it("begin-OAuth submit stays disabled while provider or label is empty", () => {
+  it("begin-OAuth submit stays disabled while provider or label is empty", async () => {
     render(<ConnectorsTab />);
+    // Wait for the provider dropdown to populate + enable.
+    await waitFor(() => {
+      expect((screen.getByTestId("oauth-provider") as HTMLSelectElement).disabled).toBe(false);
+    });
     expect(screen.getByTestId("oauth-begin-submit")).toHaveProperty("disabled", true);
     fireEvent.change(screen.getByTestId("oauth-provider"), { target: { value: "github" } });
     expect(screen.getByTestId("oauth-begin-submit")).toHaveProperty("disabled", true);
@@ -238,6 +251,54 @@ describe("ConnectorsTab", () => {
     render(<ConnectorsTab />);
     expect(screen.queryByTestId("oauth-code-input")).toBeNull();
     expect(screen.queryByTestId("oauth-authorize-link")).toBeNull();
+  });
+
+  // ---- config-backed OAuth provider dropdown + empty-state (spec D7, O-5) ----
+
+  it("the provider dropdown lists the providers from connectorListProviders", async () => {
+    connectorListProvidersMock.mockResolvedValue(["github", "prowl"]);
+    render(<ConnectorsTab />);
+
+    await waitFor(() => {
+      expect(connectorListProvidersMock).toHaveBeenCalledWith();
+    });
+
+    const select = screen.getByTestId("oauth-provider") as HTMLSelectElement;
+    await waitFor(() => {
+      // placeholder option + the two configured providers
+      expect(select.querySelectorAll("option").length).toBe(3);
+    });
+    const optionValues = Array.from(select.querySelectorAll("option")).map((o) => o.value);
+    expect(optionValues).toContain("github");
+    expect(optionValues).toContain("prowl");
+    // No empty-state when providers exist.
+    expect(screen.queryByTestId("oauth-no-providers")).toBeNull();
+  });
+
+  it("an empty provider registry shows the honest empty-state and disables begin", async () => {
+    connectorListProvidersMock.mockResolvedValue([]);
+    render(<ConnectorsTab />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("oauth-no-providers")).toBeTruthy();
+    });
+    expect(screen.getByTestId("oauth-no-providers").textContent).toBe(
+      strings.ext.connectors.noProviders,
+    );
+    // The dropdown offers no real options, and begin is disabled in the empty-state.
+    expect((screen.getByTestId("oauth-provider") as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.getByTestId("oauth-begin-submit")).toHaveProperty("disabled", true);
+  });
+
+  it("orchdDown disables the provider dropdown and the begin button", async () => {
+    useAppStore.setState({ orchdDown: true }, false);
+    connectorListProvidersMock.mockResolvedValue(["github"]);
+    render(<ConnectorsTab />);
+
+    // While orchd is down the dropdown is disabled regardless of any cached providers, and begin
+    // stays disabled (mutating control guard).
+    expect((screen.getByTestId("oauth-provider") as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.getByTestId("oauth-begin-submit")).toHaveProperty("disabled", true);
   });
 
   // ---- generic-rest ops runner ----
@@ -410,6 +471,10 @@ describe("ConnectorsTab", () => {
     fireEvent.change(screen.getByTestId("apikey-label"), { target: { value: "x" } });
     fireEvent.change(screen.getByTestId("apikey-key"), { target: { value: "k" } });
 
+    // Wait for the provider dropdown (fed by connectorListProviders) to populate + enable.
+    await waitFor(() => {
+      expect((screen.getByTestId("oauth-provider") as HTMLSelectElement).disabled).toBe(false);
+    });
     fireEvent.change(screen.getByTestId("oauth-provider"), { target: { value: "github" } });
     fireEvent.change(screen.getByTestId("oauth-label"), { target: { value: "y" } });
     fireEvent.click(screen.getByTestId("oauth-begin-submit"));

@@ -692,6 +692,7 @@ fn all_requests() -> Vec<OrchdRequest> {
             id: "edge-1".into(),
             kind: GraphEdgeKind::Supports,
         },
+        OrchdRequest::ConnectorListProviders,
     ]
 }
 
@@ -776,6 +777,8 @@ fn all_responses() -> Vec<OrchdResponse> {
             storage_mode: StorageMode::Persistent,
             quarantined_path: None,
         }),
+        OrchdResponse::ConnectorProviders(vec!["prowl".into(), "github".into()]),
+        OrchdResponse::ConnectorProviders(vec![]),
     ]
 }
 

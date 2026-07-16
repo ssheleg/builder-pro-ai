@@ -70,6 +70,13 @@ pub struct OAuthProviderConfig {
     pub client_secret: Option<String>,
     pub auth_url: String,
     pub token_url: String,
+    /// Provider-level default OAuth scopes (spec D7's `oauth_providers.json` `default_scopes?`
+    /// field). Applied by [`ConnectorsState::begin_oauth`] ONLY when the caller passes an empty
+    /// `scopes` slice (the UI's optional scopes field left blank) — an explicit caller-supplied
+    /// scope list always wins, and this fallback never widens a scope set the caller narrowed.
+    /// Empty when the config file omits `default_scopes`. Public OAuth-registration values, not a
+    /// secret.
+    pub default_scopes: Vec<String>,
 }
 
 // Hand-written `Debug` redacts `client_secret` (D4, no-secret-in-logs): the derived impl would
@@ -85,6 +92,7 @@ impl std::fmt::Debug for OAuthProviderConfig {
             )
             .field("auth_url", &self.auth_url)
             .field("token_url", &self.token_url)
+            .field("default_scopes", &self.default_scopes)
             .finish()
     }
 }
@@ -198,6 +206,23 @@ impl ConnectorsState {
             .insert(provider.to_string(), config);
     }
 
+    /// The NAMES of every registered OAuth provider, sorted for a stable/deterministic order
+    /// (`ConnectorListProviders`, spec D7, O-5). Names ONLY — a provider's
+    /// `client_id`/`client_secret`/endpoint URLs never leave [`OAuthProviderConfig`] through this
+    /// accessor (the wire response is names-only, spec D7). An empty registry ⇒ an empty `Vec`,
+    /// never an error — the honest v1 default before any `oauth_providers.json` exists.
+    pub fn provider_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .providers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Test-support introspection: whether a pending `begin_oauth` entry is stored under `state`.
     /// `#[doc(hidden)]`, not part of the stable API — mirrors `persistence::Db::conn()`'s own
     /// "test-support seam" precedent (this crate's tests have no other way to assert in-flight
@@ -226,11 +251,22 @@ impl ConnectorsState {
         let config = self.provider_config(provider)?;
         let client = build_client(&config, Some(redirect))?;
 
+        // Provider `default_scopes` fill in ONLY for an empty caller list (spec D7): an explicit
+        // caller-supplied scope set always wins and is never widened by the fallback. The
+        // effective set is what's both requested on `/authorize` AND recorded on the resulting
+        // `account` row (via the pending entry), so the account honestly reflects the scopes it
+        // was actually granted under.
+        let effective_scopes: &[String] = if scopes.is_empty() {
+            &config.default_scopes
+        } else {
+            scopes
+        };
+
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let mut request = client
             .authorize_url(CsrfToken::new_random)
             .set_pkce_challenge(pkce_challenge);
-        for scope in scopes {
+        for scope in effective_scopes {
             request = request.add_scope(Scope::new(scope.clone()));
         }
         let (authorize_url, csrf_token) = request.url();
@@ -244,7 +280,7 @@ impl ConnectorsState {
                 PendingOAuth {
                     provider: provider.to_string(),
                     label: label.to_string(),
-                    scopes: scopes.to_vec(),
+                    scopes: effective_scopes.to_vec(),
                     redirect: redirect.to_string(),
                     pkce_verifier,
                 },
@@ -813,6 +849,7 @@ mod tests {
             client_secret: Some("s3cr3t-client-secret-must-not-leak-c41d".to_string()),
             auth_url: "https://idp.example/authorize".to_string(),
             token_url: "https://idp.example/token".to_string(),
+            default_scopes: vec!["read".to_string()],
         };
         let rendered = format!("{cfg:?}");
         assert!(
@@ -907,6 +944,7 @@ mod tests {
             client_secret: Some("test-client-secret".to_string()),
             auth_url: "https://idp.example.com/authorize".to_string(),
             token_url: token_url.to_string(),
+            default_scopes: Vec::new(),
         }
     }
 
@@ -1100,6 +1138,90 @@ mod tests {
         assert!(
             state.has_pending(&challenge.state),
             "begin_oauth must stash a pending entry keyed by the returned state"
+        );
+    }
+
+    #[test]
+    fn provider_names_is_empty_by_default_and_lists_sorted_registered_names() {
+        let state = ConnectorsState::new();
+        assert!(
+            state.provider_names().is_empty(),
+            "a fresh registry has no providers"
+        );
+
+        // Register out of alphabetical order — provider_names must return them sorted.
+        state.register_oauth_provider("prowl", test_provider_config("https://idp.example/token"));
+        state.register_oauth_provider("github", test_provider_config("https://idp.example/token"));
+        state.register_oauth_provider("azure", test_provider_config("https://idp.example/token"));
+
+        assert_eq!(
+            state.provider_names(),
+            vec![
+                "azure".to_string(),
+                "github".to_string(),
+                "prowl".to_string()
+            ]
+        );
+
+        // Re-registering an existing provider overwrites, never duplicates the name.
+        state.register_oauth_provider("github", test_provider_config("https://idp.example/token"));
+        assert_eq!(state.provider_names().len(), 3);
+    }
+
+    #[test]
+    fn begin_oauth_falls_back_to_default_scopes_when_caller_passes_none() {
+        let state = ConnectorsState::new();
+        let mut cfg = test_provider_config("https://idp.example.com/token");
+        cfg.default_scopes = vec!["read".to_string(), "write".to_string()];
+        state.register_oauth_provider("test-provider", cfg);
+
+        let challenge = state
+            .begin_oauth(
+                "test-provider",
+                "My Account",
+                &[],
+                "http://127.0.0.1:9999/callback",
+            )
+            .unwrap();
+
+        let url = oauth2::url::Url::parse(&challenge.authorize_url).unwrap();
+        let scope = url
+            .query_pairs()
+            .find(|(k, _)| k == "scope")
+            .map(|(_, v)| v.into_owned())
+            .expect("authorize_url must carry the provider's default scopes");
+        assert!(
+            scope.contains("read") && scope.contains("write"),
+            "got scope={scope}"
+        );
+    }
+
+    #[test]
+    fn begin_oauth_explicit_scopes_win_over_default_scopes() {
+        let state = ConnectorsState::new();
+        let mut cfg = test_provider_config("https://idp.example.com/token");
+        cfg.default_scopes = vec!["read".to_string(), "write".to_string()];
+        state.register_oauth_provider("test-provider", cfg);
+
+        let challenge = state
+            .begin_oauth(
+                "test-provider",
+                "My Account",
+                &["admin".to_string()],
+                "http://127.0.0.1:9999/callback",
+            )
+            .unwrap();
+
+        let url = oauth2::url::Url::parse(&challenge.authorize_url).unwrap();
+        let scope = url
+            .query_pairs()
+            .find(|(k, _)| k == "scope")
+            .map(|(_, v)| v.into_owned())
+            .expect("authorize_url must carry the explicit scope");
+        // Explicit "admin" wins; the provider defaults are NOT widened in.
+        assert_eq!(
+            scope, "admin",
+            "explicit caller scopes must not be widened by default_scopes"
         );
     }
 

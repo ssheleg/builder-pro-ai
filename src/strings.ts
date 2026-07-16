@@ -505,6 +505,12 @@ export const strings = {
       codeAria: "Authorization code",
       codePlaceholder: "paste the code from the redirect",
       finish: "finish",
+      /** OAuth provider dropdown (spec D7, O-5): fed by connectorListProviders(). */
+      oauthProviderAria: "OAuth provider",
+      oauthProviderOption: "— provider —",
+      /** Honest empty-state when the config-backed provider registry is empty. */
+      noProviders:
+        "No OAuth providers configured — add one in oauth_providers.json (see runbook).",
     },
     servers: {
       authKind: { none: "no authorization", bearer: "bearer token", oauth: "OAuth (soon)" },

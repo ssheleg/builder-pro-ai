@@ -25,6 +25,7 @@
 
 pub mod accounts;
 pub mod adapter;
+pub mod registry_config;
 
 /// `account.auth_kind` (spec §4: `'oauth' | 'apikey'`). A separate type from
 /// `bpa_orchd_proto::AccountAuthKind` (T10's wire enum) for the same reason `mcp::McpAuthKind`

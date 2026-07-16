@@ -220,13 +220,15 @@ pub async fn run(
 
     // S-EXT connector OAuth-account layer (spec §5/§7, task T13a): lives for the daemon's whole
     // lifetime alongside `db` (its in-flight `begin_oauth` pending-PKCE map must survive across
-    // requests). v1 boots with an EMPTY OAuth provider registry — no real IdP credentials ship
-    // with this app (spec §10: wiring prowl.chat/X/etc is an owner step in the UI, never
-    // fabricated here); `ConnectorBeginOAuth` for an unregistered `provider` honestly fails with a
-    // typed error until an owner (or a later config-file-backed registry, spec D14 Phase 3) calls
-    // `ConnectorsState::register_oauth_provider`. The api-key and generic-rest connector paths
-    // need no provider registry at all and work from a fresh boot.
+    // requests). The OAuth provider registry is populated from `<app-support>/oauth_providers.json`
+    // (spec D7, O-5, S-POLISH P4d — the config-file-backed registry the connector layer reserved a
+    // seam for). A MISSING file is the honest v1 default (empty registry, info-logged); a MALFORMED
+    // file is error-logged and also leaves the registry empty — the daemon boots fully either way
+    // (`load_oauth_providers` never errors/panics). Until a provider is configured,
+    // `ConnectorBeginOAuth` for an unregistered `provider` still fails with a typed error, and the
+    // api-key/generic-rest connector paths need no provider registry at all.
     let connectors = Arc::new(ConnectorsState::new());
+    crate::connectors::registry_config::load_oauth_providers(&connectors, &app_support);
 
     let deps = Arc::new(ServerDeps::new(
         db.clone(),

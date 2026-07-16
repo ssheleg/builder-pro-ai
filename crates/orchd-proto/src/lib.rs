@@ -1220,6 +1220,13 @@ pub enum OrchdRequest {
         id: String,
         kind: GraphEdgeKind,
     },
+    /// → `OrchdResponse::ConnectorProviders` (spec D7, O-5). Lists the NAMES of the OAuth
+    /// providers registered in `ConnectorsState`'s config-backed registry (loaded at boot from
+    /// `<app-support>/oauth_providers.json`). Read-only, broadcasts nothing. Names ONLY — a
+    /// provider's `client_id`/`client_secret`/endpoint URLs NEVER cross the wire (spec D7:
+    /// "names only — no secrets on the wire"). An empty registry ⇒ an empty `Vec`, never an
+    /// error. Appended at the enum TAIL (append-only wire rule).
+    ConnectorListProviders,
 }
 
 impl OrchdRequest {
@@ -1318,6 +1325,7 @@ impl OrchdRequest {
             Self::GetStorageStatus => "GetStorageStatus",
             Self::UnarchiveProject { .. } => "UnarchiveProject",
             Self::GraphUpdateEdge { .. } => "GraphUpdateEdge",
+            Self::ConnectorListProviders => "ConnectorListProviders",
         }
     }
 }
@@ -1384,6 +1392,10 @@ pub enum OrchdResponse {
     ResearchRuns(Vec<ResearchRun>),
     // Storage-degradation mode (spec D3, BL-94, appended — order FROZEN append-only)
     StorageStatus(StorageStatus),
+    // Config-backed OAuth provider registry (spec D7, O-5, appended — order FROZEN append-only).
+    // Provider NAMES only — no `client_id`/`client_secret`/endpoint URLs (spec D7: "names only —
+    // no secrets on the wire"). A plain `Vec<String>` needs no new exported DTO type.
+    ConnectorProviders(Vec<String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

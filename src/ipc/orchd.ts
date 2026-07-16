@@ -690,6 +690,13 @@ export function connectorListOps(args: { accountId: string }): Promise<Connector
   return invoke<ConnectorOp[]>("connector_list_ops", { accountId: args.accountId });
 }
 
+/** Lists the NAMES of the OAuth providers configured in `<app-support>/oauth_providers.json`
+ * (spec D7, O-5) — feeds the OAuth-provider dropdown in `ConnectorsTab`. Names only; no client
+ * id/secret/URLs cross the wire. An empty array is the honest "no providers configured" state. */
+export function connectorListProviders(): Promise<string[]> {
+  return invoke<string[]>("connector_list_providers");
+}
+
 /** Trust-gated IDENTICALLY to `mcpCallTool` (spec §6/§7): a spend/rate-cap denial rejects with
  * `CommandError{kind:"daemon",code:"Policy"}` BEFORE dispatch, and the result persists as a
  * durable `is_untrusted:true` artifact on success (spec D9) — same "never a silent no-op"

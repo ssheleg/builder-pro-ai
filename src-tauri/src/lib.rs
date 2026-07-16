@@ -736,6 +736,7 @@ pub fn run() {
             commands::connector_list_accounts,
             commands::connector_delete_account,
             commands::connector_list_ops,
+            commands::connector_list_providers,
             commands::connector_invoke,
             commands::skill_add,
             commands::skill_list,

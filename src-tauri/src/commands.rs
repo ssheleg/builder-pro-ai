@@ -831,6 +831,13 @@ fn expect_connector_ops(res: OrchdResponse) -> Result<Vec<ConnectorOp>, CommandE
     }
 }
 
+fn expect_connector_providers(res: OrchdResponse) -> Result<Vec<String>, CommandError> {
+    match res {
+        OrchdResponse::ConnectorProviders(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
 // ── S-EXT Skills orchd response unwrappers (spec §5, D11, Q14, appended, task T17) — mirrors the
 // MCP/Connector blocks above exactly, one unwrapper per `OrchdResponse::Skill*` variant ─────────
 
@@ -2527,6 +2534,22 @@ pub async fn connector_list_ops(
         state
             .orchd()?
             .request(OrchdRequest::ConnectorListOps { account_id })
+            .await?,
+    )
+}
+
+/// Lists the NAMES of the OAuth providers configured in `<app-support>/oauth_providers.json`
+/// (spec D7, O-5). Feeds the OAuth-provider dropdown in `ConnectorsTab`; an empty list is the
+/// honest "no providers configured" state (never an error). Names only — no client
+/// id/secret/URLs cross this boundary.
+#[tauri::command]
+pub async fn connector_list_providers(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, CommandError> {
+    expect_connector_providers(
+        state
+            .orchd()?
+            .request(OrchdRequest::ConnectorListProviders)
             .await?,
     )
 }
@@ -5099,6 +5122,24 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn connector_list_providers_round_trips_names_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::ConnectorListProviders => {
+                OrchdResponse::ConnectorProviders(vec!["github".into(), "prowl".into()])
+            }
+            other => panic!("expected ConnectorListProviders, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::ConnectorListProviders)
+            .await
+            .unwrap();
+        let providers = expect_connector_providers(res).unwrap();
+        assert_eq!(providers, vec!["github".to_string(), "prowl".to_string()]);
     }
 
     // ── S-EXT Skills orchd `skill_*` commands (spec §5/§8, D11, Q14, task T17) ─────────────────
