@@ -55,12 +55,39 @@
 //   tools/call (unknown tool) -> `{content:[{type:"text", text:"unknown tool: <name>"}],
 //                               isError:true}` — never hit by this harness's own flow (defensive).
 //   any other request         -> JSON-RPC `-32601 method not found` (defensive; unused today).
+//   tools/call (research)    -> canned findings (`RESEARCH_FINDINGS_MARKER`, see below) — added
+//                               for S-IDEA task 7's e2e phases (idea→research→insight→task
+//                               survival + D11 boot-reconcile). The `research` tool is advertised
+//                               in `tools/list` in BOTH server variants below.
+//
+// ---- design: blocking option (S-IDEA task 7, D11 boot-reconcile) ----
+//
+// `startStubMcpServer({ blockResearchTool: true })` makes ONLY the `research` tool's `tools/call`
+// hold the HTTP response open forever — the handler registers `res` in a tracked set and never
+// calls `res.end()`/`sendJson`, so the real `rmcp` HTTP client (`bpa-orchd`'s `mcp::invoke::
+// call_tool`) sits awaiting a reply that never comes. This simulates a research MCP peer that
+// never returns, so the daemon's async run driver (`research::run_research`) leaves
+// `research_run.status='running'` indefinitely — exactly the in-flight-at-restart race spec D11's
+// boot-reconcile (`Db::reconcile_interrupted_research_runs`) exists to backstop. `echo` and the
+// NON-blocking `research` response are completely unaffected by this option — only the blocking
+// variant's `research` tool-call branch behaves differently, at the HTTP-handler level (not inside
+// `handleRpcMessage`, which stays a pure, always-synchronous function). The returned `close()`
+// force-ends any still-tracked blocked response (`res.destroy()`) before closing the server, so a
+// harness that never got a natural client-disconnect (e.g. cleanup running before the killed
+// daemon's TCP connection has fully unwound) still closes promptly rather than hanging on
+// `http.Server#close()`'s "wait for every connection to end" contract.
 
 import http from "node:http";
 
 const PROTOCOL_VERSION = "2025-11-25";
 const JSON_MIME = "application/json";
 const MCP_PATH = "/mcp";
+
+// S-IDEA research tool (task 7 e2e phases) — canned findings the harness asserts against by exact
+// string match. Exported so `orchd-survive.mjs` never re-types this literal (single source of
+// truth for what the stub actually returns).
+export const RESEARCH_TOOL_NAME = "research";
+export const RESEARCH_FINDINGS_MARKER = "research-findings-restart-survivor";
 
 function sendJson(res, status, body) {
   const buf = Buffer.from(JSON.stringify(body), "utf8");
@@ -126,6 +153,14 @@ function handleRpcMessage(message) {
                   properties: { msg: { type: "string" } },
                 },
               },
+              {
+                name: RESEARCH_TOOL_NAME,
+                description: "Research a topic and return findings",
+                inputSchema: {
+                  type: "object",
+                  properties: { query: { type: "string" } },
+                },
+              },
             ],
           },
         },
@@ -133,28 +168,57 @@ function handleRpcMessage(message) {
     case "tools/call": {
       const toolName = params && params.name;
       const args = (params && params.arguments) || {};
-      if (toolName !== "echo") {
+      if (toolName === "echo") {
+        const msg = typeof args.msg === "string" ? args.msg : "";
         return {
           status: 200,
           body: {
             jsonrpc: "2.0",
             id,
             result: {
-              content: [{ type: "text", text: `unknown tool: ${toolName}` }],
-              isError: true,
+              content: [{ type: "text", text: msg }],
+              isError: false,
             },
           },
         };
       }
-      const msg = typeof args.msg === "string" ? args.msg : "";
+      if (toolName === RESEARCH_TOOL_NAME) {
+        // Canned findings (non-blocking variant only — the blocking variant intercepts this exact
+        // request shape at the HTTP-handler level, in `startStubMcpServer`, before it ever reaches
+        // this pure dispatcher). The marker + query are packed into a single JSON text block,
+        // mirroring how `mcp::invoke`'s `map_call_result` serializes `content` straight through
+        // into `mcp_artifact.content_json`/`content_text` on the orchd side (see `echo`'s own doc
+        // comment above for the verified shape).
+        const query = typeof args.query === "string" ? args.query : "";
+        return {
+          status: 200,
+          body: {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    marker: RESEARCH_FINDINGS_MARKER,
+                    query,
+                    findings: ["Canned finding A (e2e stub)", "Canned finding B (e2e stub)"],
+                  }),
+                },
+              ],
+              isError: false,
+            },
+          },
+        };
+      }
       return {
         status: 200,
         body: {
           jsonrpc: "2.0",
           id,
           result: {
-            content: [{ type: "text", text: msg }],
-            isError: false,
+            content: [{ type: "text", text: `unknown tool: ${toolName}` }],
+            isError: true,
           },
         },
       };
@@ -181,8 +245,23 @@ function handleRpcMessage(message) {
  * Start the stub MCP server on `127.0.0.1:0` (OS-assigned loopback port). Resolves once bound,
  * with `{ port, url, close() }` — `url` is the server's single MCP endpoint
  * (`http://127.0.0.1:<port>/mcp`), exactly the shape `McpAddServer.url` expects (spec §5).
+ *
+ * `options.blockResearchTool` (default `false`, S-IDEA task 7 / D11 boot-reconcile): when `true`,
+ * a `tools/call` for `RESEARCH_TOOL_NAME` never gets a reply — see the module doc comment's
+ * "design: blocking option" section for the full rationale. Every OTHER request (`initialize`,
+ * `tools/list`, `echo`'s `tools/call`, notifications, `ping`) is answered completely normally in
+ * BOTH variants — only that one exact request shape blocks.
  */
-export function startStubMcpServer() {
+export function startStubMcpServer(options = {}) {
+  const { blockResearchTool = false } = options;
+  // Tracks HTTP responses currently held open by the blocking `research` tool-call branch below,
+  // so `close()` can force-end them (`res.destroy()`) rather than let `http.Server#close()` hang
+  // waiting for a connection this stub deliberately never completes. Entries remove themselves on
+  // `res`'s own `close` event (fired once the underlying connection actually ends, whichever side
+  // — the client or this `destroy()` call — ends it first), so this set never grows unbounded
+  // across a long-lived stub even if `blockResearchTool` sees multiple calls.
+  const pendingBlocked = new Set();
+
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       const urlPath = req.url ? req.url.split("?")[0] : "/";
@@ -224,6 +303,23 @@ export function startStubMcpServer() {
           });
           return;
         }
+
+        // Blocking short-circuit (S-IDEA task 7 / D11): intercept BEFORE `handleRpcMessage` — that
+        // function stays a pure, always-synchronous dispatcher; the "never reply" behavior lives
+        // entirely at this HTTP-handler level. Only a `tools/call` naming `RESEARCH_TOOL_NAME`
+        // blocks; `initialize`/`tools/list`/`echo` all still dispatch normally below.
+        const isBlockingResearchCall =
+          blockResearchTool &&
+          message &&
+          message.method === "tools/call" &&
+          message.params &&
+          message.params.name === RESEARCH_TOOL_NAME;
+        if (isBlockingResearchCall) {
+          pendingBlocked.add(res);
+          res.on("close", () => pendingBlocked.delete(res));
+          return; // deliberately no `res.end()` — the client sits awaiting a reply forever.
+        }
+
         const { status, body } = handleRpcMessage(message);
         if (body === null) {
           sendEmpty(res, status);
@@ -247,7 +343,24 @@ export function startStubMcpServer() {
       resolve({
         port,
         url: `http://127.0.0.1:${port}${MCP_PATH}`,
-        close: () => new Promise((res2) => server.close(() => res2())),
+        close: () =>
+          new Promise((res2) => {
+            // Force-end any still-blocked response first (see this function's own doc comment —
+            // `http.Server#close()`'s callback would otherwise wait for the client to end this
+            // connection, which this stub itself will never trigger).
+            for (const blockedRes of pendingBlocked) {
+              try {
+                blockedRes.destroy();
+              } catch {
+                /* already gone */
+              }
+            }
+            pendingBlocked.clear();
+            server.close(() => res2());
+            // Belt-and-suspenders (Node >=18.2): also force-close any OTHER lingering keep-alive
+            // connection, so `close()` never hangs on an idle socket either.
+            server.closeAllConnections?.();
+          }),
       });
     });
   });

@@ -49,7 +49,11 @@ import {
   pidAlive,
   killProcessGroup,
 } from "./lib/daemon-harness.mjs";
-import { startStubMcpServer } from "./lib/stub-mcp-server.mjs";
+import {
+  startStubMcpServer,
+  RESEARCH_TOOL_NAME,
+  RESEARCH_FINDINGS_MARKER,
+} from "./lib/stub-mcp-server.mjs";
 import { startStubRestServer } from "./lib/stub-rest-server.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..", "..");
@@ -137,6 +141,38 @@ function encodeOrchdRequest(req) {
           body: req.body,
         },
       };
+    case "SetIdeaLifecycle":
+      return { SetIdeaLifecycle: { id: req.id, lifecycle: req.lifecycle } }; // already the wire string
+    case "ListIdeas":
+      return { ListIdeas: { project_id: req.projectId ?? null } };
+    // Insight (spec §4.2) — only the verbs the S-IDEA e2e phases (phase8) drive.
+    case "CreateInsight":
+      return {
+        CreateInsight: {
+          project_id: req.projectId ?? null,
+          source: req.source,
+          title: req.title,
+          body: req.body,
+        },
+      };
+    case "SetInsightFitVerdict":
+      return {
+        SetInsightFitVerdict: {
+          id: req.id,
+          fit_verdict: req.fitVerdict ?? null, // already the wire string ("fit"|"noFit"|"unknown") or null
+          fit_reasoning: req.fitReasoning,
+        },
+      };
+    case "SetInsightStatus":
+      return {
+        SetInsightStatus: {
+          id: req.id,
+          status: req.status, // already the wire string ("new"|"accepted"|"archived")
+          resolution_reasoning: req.resolutionReasoning ?? null,
+        },
+      };
+    case "ListInsights":
+      return { ListInsights: { project_id: req.projectId ?? null } };
     case "CreateTask":
       return {
         CreateTask: {
@@ -150,6 +186,8 @@ function encodeOrchdRequest(req) {
           tags: req.tags ?? [],
         },
       };
+    case "ListTasks":
+      return { ListTasks: { project_id: req.projectId ?? null } };
     case "OrchdShutdown":
       return { OrchdShutdown: { drain: !!req.drain } };
     case "ImportBundle":
@@ -251,6 +289,21 @@ function encodeOrchdRequest(req) {
       };
     case "ConnectorDeleteAccount":
       return { ConnectorDeleteAccount: { id: req.id } };
+    // S-IDEA research (spec §5, task T3, appended — order FROZEN append-only) — only the 3 verbs
+    // phase8/phase9 drive.
+    case "ResearchStartRun":
+      return {
+        ResearchStartRun: {
+          idea_id: req.ideaId,
+          server_id: req.serverId,
+          tool_name: req.toolName,
+          args_json: req.argsJson,
+        },
+      };
+    case "ResearchListRuns":
+      return { ResearchListRuns: { idea_id: req.ideaId } };
+    case "ResearchGetRun":
+      return { ResearchGetRun: { id: req.id } };
     default:
       throw new Error(`encodeOrchdRequest: unsupported request type ${req.t}`);
   }
@@ -350,6 +403,14 @@ function decodeOrchdResponse(value) {
     // §6), already decoded above — no separate case needed for it.
     case "Account":
     case "Accounts":
+    // S-IDEA research (spec §5, task T3, appended — order FROZEN append-only): `ResearchRun` is a
+    // newtype variant over a camelCase-serde entity struct (same convention as `McpArtifact`/
+    // `Account` above — verified against `crates/orchd-proto/src/lib.rs`'s `ResearchRun` field
+    // set: `{id, ideaId, serverId, toolName, argsJson, status, invocationId, artifactId,
+    // errorKind, createdAt, updatedAt}`); `ResearchRuns` is the `Vec<ResearchRun>` newtype
+    // sibling, decoded identically.
+    case "ResearchRun":
+    case "ResearchRuns":
       return { t: variant, value: inner };
     case "ImportReport":
       return {
@@ -416,6 +477,11 @@ function decodeOrchdPush(value) {
       return { t: "McpArtifactsChanged", projectId: inner.project_id ?? null };
     case "McpInvocationLogged":
       return { t: "McpInvocationLogged", serverId: inner.server_id };
+    // S-IDEA research (spec §5, task T3, appended — order FROZEN append-only): fired after a
+    // research run's status changes (start/running/done/failed). `idea_id: Option<String>` — same
+    // optional-scope shape as `McpServersChanged`/`McpArtifactsChanged` above.
+    case "ResearchRunsChanged":
+      return { t: "ResearchRunsChanged", ideaId: inner.idea_id ?? null };
     default:
       throw new Error(`decodeOrchdPush: unknown OrchdPush variant ${variant}`);
   }
@@ -1101,7 +1167,36 @@ async function main() {
   // keychain is writable (every local dev run, and any CI runner with an unlocked keychain). ----
   conn = await connectorInvokePhase(conn);
 
+  // ---- phase 8: idea -> research -> insight -> task survives restart (S-IDEA DoD, spec §8) ----
+  conn = await researchInsightTaskSurvivalPhase(conn);
+
+  // ---- phase 9: interrupted research run boot-reconcile (S-IDEA spec D11) ----
+  conn = await researchBootReconcilePhase(conn);
+
   log("ALL PHASES PASSED");
+}
+
+/**
+ * Poll `ResearchGetRun{id}` until `predicate(run)` is true, or throw after `tries` attempts
+ * (`delayMs` apart) — bounded, no wall-clock-fragile assumption about exactly how fast the async
+ * run driver transitions (S4 lesson, spec §8: "no env-fragile timing asserts — the run test uses a
+ * fake seam, not wall-clock"; this e2e drives the REAL async driver over a real loopback HTTP stub,
+ * so a bounded poll — not a fixed sleep — is this harness's own equivalent). `what` is a short
+ * human label used only in the failure message.
+ */
+async function pollResearchRunUntil(conn, runId, predicate, what, tries = 100, delayMs = 100) {
+  let lastRun = null;
+  for (let i = 0; i < tries; i++) {
+    const resp = await orchdRequest(conn, { t: "ResearchGetRun", id: runId });
+    assert.equal(resp.t, "ResearchRun", `ResearchGetRun -> ${JSON.stringify(resp)}`);
+    lastRun = resp.value;
+    if (predicate(lastRun)) return lastRun;
+    await sleep(delayMs);
+  }
+  assert.fail(
+    `research run ${runId} never reached the expected state (${what}) within ${tries * delayMs}ms; ` +
+      `last observed: ${JSON.stringify(lastRun)}`,
+  );
 }
 
 /**
@@ -1381,6 +1476,412 @@ async function connectorInvokePhase(conn) {
   );
 
   log("phase7 OK: connector invoke artifact survived restart");
+  return conn;
+}
+
+/**
+ * Phase 8: idea -> research -> insight -> task survives restart — the S-IDEA slice's own DoD
+ * (spec §8's "the DoD" e2e bullet). Mirrors the REAL owner-driven flow byte-for-byte, verified
+ * against `src/components/idea/FormInsightDialog.tsx`'s `handleCreate`/`handleAccept`/
+ * `handleBacklog` (S-IDEA task T6): `CreateInsight` with `source: "research-run:<runId>"` (THAT
+ * exact convention — `FormInsightDialog.handleCreate`), then `SetInsightFitVerdict`, then (once
+ * accepted) `CreateTask{source:"insight", sourceId:<insightId>}` followed by the dialog's own
+ * explicit `SetIdeaLifecycle{specced}` call (`handleBacklog`) — lifecycle `specced` is NOT an
+ * automatic side effect of any other verb here, it is its own request.
+ *
+ * Sequence: CreateProject + CreateIdea -> register+connect a stub MCP server exposing a
+ * `research` tool (canned findings, see `stub-mcp-server.mjs`) -> `ResearchStartRun` -> poll
+ * `ResearchGetRun` until `done` -> assert the run's `artifactId` (the durable `mcp_artifact`, spec
+ * D2's provenance link) -> close the stub (mirrors phase6/phase7: artifact durability must not
+ * depend on the MCP server still being reachable) -> `CreateInsight` + `SetInsightFitVerdict{fit}`
+ * -> `SetInsightStatus{accepted}` -> `CreateTask{source:insight}` -> `SetIdeaLifecycle{specced}`
+ * -> `OrchdShutdown{drain:true}` -> relaunch -> re-fetch EVERY entity by id and assert it
+ * survived: the idea's `specced` lifecycle, the run's `done` status + its artifact (content
+ * intact, re-verified via `McpListArtifacts`), the insight's fit-verdict + `accepted` status, and
+ * the task's `source`/`sourceId` link back to the insight.
+ *
+ * Returns the (possibly relaunched) connection.
+ */
+async function researchInsightTaskSurvivalPhase(conn) {
+  log("phase8: CreateProject + CreateIdea + register/connect stub MCP research server");
+
+  const projectResp = await orchdRequest(conn, {
+    t: "CreateProject",
+    name: "E2E Research Project",
+    description: "created by orchd-survive.mjs (phase8, idea->research->insight->task survival)",
+    workspaceIds: ["ws-e2e-orchd-research-1"],
+  });
+  assert.equal(projectResp.t, "Project", `CreateProject -> ${JSON.stringify(projectResp)}`);
+  const researchProjectId = projectResp.value.id;
+
+  const ideaResp = await orchdRequest(conn, {
+    t: "CreateIdea",
+    projectId: researchProjectId,
+    title: "Idea 8 (e2e research survival)",
+    body: "an idea driven through the full research->insight->task pipeline",
+  });
+  assert.equal(ideaResp.t, "Idea", `CreateIdea -> ${JSON.stringify(ideaResp)}`);
+  const ideaId = ideaResp.value.id;
+  assert.equal(ideaResp.value.lifecycle, "captured", "a freshly created idea must start captured");
+
+  const stubMcpServer = await startStubMcpServer();
+  cleanup.stubMcpServer = stubMcpServer;
+  log(`phase8: stub MCP research server listening at ${stubMcpServer.url}`);
+
+  const addServerResp = await orchdRequest(conn, {
+    t: "McpAddServer",
+    name: "E2E Research Stub MCP",
+    transport: "http",
+    url: stubMcpServer.url,
+    command: null,
+    args: null,
+    env: null,
+    scope: "global",
+    projectId: null,
+    authKind: "none",
+    timeoutMs: null,
+    maxRetries: null,
+  });
+  assert.equal(addServerResp.t, "McpServer", `McpAddServer -> ${JSON.stringify(addServerResp)}`);
+  const researchServerId = addServerResp.value.id;
+
+  const consentResp = await orchdRequest(conn, {
+    t: "TrustGrantConsent",
+    serverId: researchServerId,
+    kind: "connect",
+  });
+  assert.equal(consentResp.t, "Ack", `TrustGrantConsent -> ${JSON.stringify(consentResp)}`);
+
+  const connectResp = await orchdRequest(conn, { t: "McpConnect", id: researchServerId });
+  assert.equal(connectResp.t, "McpConnectReport", `McpConnect -> ${JSON.stringify(connectResp)}`);
+  assert.ok(
+    connectResp.value.toolCount >= 1,
+    `expected >=1 tool advertised by the stub, got ${JSON.stringify(connectResp.value)}`,
+  );
+
+  const listToolsResp = await orchdRequest(conn, { t: "McpListTools", serverId: researchServerId });
+  assert.equal(listToolsResp.t, "McpTools", `McpListTools -> ${JSON.stringify(listToolsResp)}`);
+  const researchTool = listToolsResp.value.find((tool) => tool.name === RESEARCH_TOOL_NAME);
+  assert.ok(
+    researchTool,
+    `expected a "${RESEARCH_TOOL_NAME}" tool in ${JSON.stringify(listToolsResp.value)}`,
+  );
+
+  log("phase8: ResearchStartRun -> poll ResearchGetRun until done");
+
+  const startRunResp = await orchdRequest(conn, {
+    t: "ResearchStartRun",
+    ideaId,
+    serverId: researchServerId,
+    toolName: RESEARCH_TOOL_NAME,
+    argsJson: JSON.stringify({ query: "e2e research query" }),
+  });
+  assert.equal(startRunResp.t, "ResearchRun", `ResearchStartRun -> ${JSON.stringify(startRunResp)}`);
+  const runId = startRunResp.value.id;
+  assert.equal(startRunResp.value.ideaId, ideaId, "run must reference the idea it was started for");
+  assert.equal(
+    startRunResp.value.status,
+    "pending",
+    `a freshly started run must be pending, got ${JSON.stringify(startRunResp.value)}`,
+  );
+
+  const doneRun = await pollResearchRunUntil(conn, runId, (run) => run.status === "done", "status=done");
+  assert.ok(doneRun.artifactId, `a done run must carry an artifactId: ${JSON.stringify(doneRun)}`);
+  assert.ok(doneRun.invocationId, `a done run must carry an invocationId: ${JSON.stringify(doneRun)}`);
+  const runArtifactId = doneRun.artifactId;
+
+  const artifactsResp = await orchdRequest(conn, {
+    t: "McpListArtifacts",
+    projectId: null,
+    serverId: researchServerId,
+    limit: null,
+  });
+  assert.equal(artifactsResp.t, "McpArtifacts", `McpListArtifacts -> ${JSON.stringify(artifactsResp)}`);
+  const runArtifact = artifactsResp.value.find((a) => a.id === runArtifactId);
+  assert.ok(
+    runArtifact,
+    `expected the run's artifact ${runArtifactId} in ${JSON.stringify(artifactsResp.value.map((a) => a.id))}`,
+  );
+  assert.ok(
+    runArtifact.contentJson.includes(RESEARCH_FINDINGS_MARKER),
+    `expected the canned findings marker in the artifact content: ${runArtifact.contentJson}`,
+  );
+
+  log(`phase8: research run ${runId} done, artifact ${runArtifactId}`);
+
+  // Close the stub NOW, before insight/task creation and the restart — mirrors phase6/phase7:
+  // artifact durability must not depend on the MCP server still being reachable.
+  await stubMcpServer.close();
+  cleanup.stubMcpServer = null;
+  log("phase8: stub MCP research server closed (artifact durability must not depend on it)");
+
+  log("phase8: CreateInsight + SetInsightFitVerdict{fit} + SetInsightStatus{accepted}");
+
+  const createInsightResp = await orchdRequest(conn, {
+    t: "CreateInsight",
+    projectId: researchProjectId,
+    source: `research-run:${runId}`,
+    title: "Insight 8 (e2e)",
+    body: "an insight formed from the research findings",
+  });
+  assert.equal(createInsightResp.t, "Insight", `CreateInsight -> ${JSON.stringify(createInsightResp)}`);
+  const insightId = createInsightResp.value.id;
+  assert.equal(createInsightResp.value.source, `research-run:${runId}`, "insight must carry the research-run source");
+  assert.equal(createInsightResp.value.status, "new", "a freshly created insight must start new");
+
+  const fitVerdictResp = await orchdRequest(conn, {
+    t: "SetInsightFitVerdict",
+    id: insightId,
+    fitVerdict: "fit",
+    fitReasoning: "aligns with the project's strategic goal (e2e)",
+  });
+  assert.equal(fitVerdictResp.t, "Insight", `SetInsightFitVerdict -> ${JSON.stringify(fitVerdictResp)}`);
+  assert.equal(fitVerdictResp.value.fitVerdict, "fit", "SetInsightFitVerdict must persist the fit verdict");
+
+  const acceptResp = await orchdRequest(conn, {
+    t: "SetInsightStatus",
+    id: insightId,
+    status: "accepted",
+    resolutionReasoning: null,
+  });
+  assert.equal(acceptResp.t, "Insight", `SetInsightStatus -> ${JSON.stringify(acceptResp)}`);
+  assert.equal(acceptResp.value.status, "accepted", "SetInsightStatus must persist accepted");
+
+  log("phase8: CreateTask{source:insight} + SetIdeaLifecycle{specced}");
+
+  const createTaskResp = await orchdRequest(conn, {
+    t: "CreateTask",
+    projectId: researchProjectId,
+    parentId: null,
+    title: acceptResp.value.title,
+    body: acceptResp.value.body,
+    status: null,
+    source: "insight",
+    sourceId: insightId,
+    tags: [],
+  });
+  assert.equal(createTaskResp.t, "Task", `CreateTask -> ${JSON.stringify(createTaskResp)}`);
+  const taskId = createTaskResp.value.id;
+  assert.equal(createTaskResp.value.source, "insight", "task must carry source=insight");
+  assert.equal(createTaskResp.value.sourceId, insightId, "task must link sourceId back to the insight");
+
+  const lifecycleResp = await orchdRequest(conn, {
+    t: "SetIdeaLifecycle",
+    id: ideaId,
+    lifecycle: "specced",
+  });
+  assert.equal(lifecycleResp.t, "Idea", `SetIdeaLifecycle -> ${JSON.stringify(lifecycleResp)}`);
+  assert.equal(lifecycleResp.value.lifecycle, "specced", "SetIdeaLifecycle must persist specced");
+
+  log(
+    `phase8: idea ${ideaId} -> run ${runId} -> insight ${insightId} -> task ${taskId} all ` +
+      "created — restarting to prove survival",
+  );
+
+  await shutdownAndWaitExit(conn);
+  log(`phase8 OK: orchd (pid ${cleanup.daemonPid}) process exited (pre-research-restart)`);
+
+  conn = await bootAndConnect();
+  assert.equal(
+    conn.chosenVersion,
+    1,
+    `post-research-restart preamble handshake negotiated unexpected version: ${JSON.stringify(conn)}`,
+  );
+
+  const ideasAfterRestart = await orchdRequest(conn, { t: "ListIdeas", projectId: researchProjectId });
+  assert.equal(ideasAfterRestart.t, "Ideas", `ListIdeas -> ${JSON.stringify(ideasAfterRestart)}`);
+  const rehydratedIdea = ideasAfterRestart.value.find((i) => i.id === ideaId);
+  assert.ok(
+    rehydratedIdea,
+    `idea ${ideaId} lost across orchd restart (ideas: ${JSON.stringify(ideasAfterRestart.value.map((i) => i.id))})`,
+  );
+  assert.equal(rehydratedIdea.lifecycle, "specced", "rehydrated idea lost its specced lifecycle");
+
+  const runAfterRestart = await orchdRequest(conn, { t: "ResearchGetRun", id: runId });
+  assert.equal(
+    runAfterRestart.t,
+    "ResearchRun",
+    `ResearchGetRun (post-restart) -> ${JSON.stringify(runAfterRestart)}`,
+  );
+  assert.equal(runAfterRestart.value.status, "done", "rehydrated research run lost its done status");
+  assert.equal(
+    runAfterRestart.value.artifactId,
+    runArtifactId,
+    "rehydrated research run lost its artifactId",
+  );
+
+  const artifactsAfterRestart = await orchdRequest(conn, {
+    t: "McpListArtifacts",
+    projectId: null,
+    serverId: researchServerId,
+    limit: null,
+  });
+  assert.equal(
+    artifactsAfterRestart.t,
+    "McpArtifacts",
+    `McpListArtifacts (post-restart) -> ${JSON.stringify(artifactsAfterRestart)}`,
+  );
+  const rehydratedRunArtifact = artifactsAfterRestart.value.find((a) => a.id === runArtifactId);
+  assert.ok(rehydratedRunArtifact, `run artifact ${runArtifactId} lost across orchd restart`);
+  assert.ok(
+    rehydratedRunArtifact.contentJson.includes(RESEARCH_FINDINGS_MARKER),
+    `rehydrated run artifact lost its content across orchd restart: ${rehydratedRunArtifact.contentJson}`,
+  );
+
+  const insightsAfterRestart = await orchdRequest(conn, {
+    t: "ListInsights",
+    projectId: researchProjectId,
+  });
+  assert.equal(insightsAfterRestart.t, "Insights", `ListInsights -> ${JSON.stringify(insightsAfterRestart)}`);
+  const rehydratedInsight = insightsAfterRestart.value.find((i) => i.id === insightId);
+  assert.ok(rehydratedInsight, `insight ${insightId} lost across orchd restart`);
+  assert.equal(rehydratedInsight.fitVerdict, "fit", "rehydrated insight lost its fit verdict");
+  assert.equal(rehydratedInsight.status, "accepted", "rehydrated insight lost its accepted status");
+
+  const tasksAfterRestart = await orchdRequest(conn, { t: "ListTasks", projectId: researchProjectId });
+  assert.equal(tasksAfterRestart.t, "Tasks", `ListTasks -> ${JSON.stringify(tasksAfterRestart)}`);
+  const rehydratedTask = tasksAfterRestart.value.find((t) => t.id === taskId);
+  assert.ok(rehydratedTask, `task ${taskId} lost across orchd restart`);
+  assert.equal(rehydratedTask.source, "insight", "rehydrated task lost its insight source");
+  assert.equal(
+    rehydratedTask.sourceId,
+    insightId,
+    "rehydrated task lost its sourceId link to the insight",
+  );
+
+  log("phase8 OK: idea→research→insight→task survives restart");
+  return conn;
+}
+
+/**
+ * Phase 9: an interrupted research run is reconciled to `failed{interrupted}` on the NEXT boot
+ * (S-IDEA spec D11 — the boot-reconcile safety net for the async run driver's detached,
+ * drain-untracked `tokio::spawn` task, `research::run_research`). This phase deliberately
+ * exercises the in-flight-at-restart race phase8 avoids (phase8's run always reaches `done`
+ * BEFORE its restart): register+connect a stub MCP server whose `research` tool's `tools/call`
+ * NEVER responds (`startStubMcpServer({ blockResearchTool: true })`, see that module's own doc
+ * comment) -> `ResearchStartRun` -> poll `ResearchGetRun` until `running` (NOT `done` — the tool
+ * call never completes, so the run can never reach `done` on its own) ->
+ * `OrchdShutdown{drain:true}` (spec D11: the drain does NOT track this orphaned task — the ack
+ * comes back promptly regardless of the still-blocked network call) -> relaunch -> boot's
+ * `reconcile_interrupted_research_runs` (called unconditionally, before any client connects —
+ * mirrors `ensure_global_ruleset`'s "ensured at every boot" placement) must have flipped the
+ * still-`running` row to `failed{interrupted}` — asserted below, not a lingering `running`.
+ *
+ * Returns the (possibly relaunched) connection.
+ */
+async function researchBootReconcilePhase(conn) {
+  log("phase9: CreateProject + CreateIdea + register/connect BLOCKING stub MCP research server");
+
+  const projectResp = await orchdRequest(conn, {
+    t: "CreateProject",
+    name: "E2E Boot-Reconcile Project",
+    description: "created by orchd-survive.mjs (phase9, S-IDEA D11 boot-reconcile)",
+    workspaceIds: ["ws-e2e-orchd-reconcile-1"],
+  });
+  assert.equal(projectResp.t, "Project", `CreateProject -> ${JSON.stringify(projectResp)}`);
+  const reconcileProjectId = projectResp.value.id;
+
+  const ideaResp = await orchdRequest(conn, {
+    t: "CreateIdea",
+    projectId: reconcileProjectId,
+    title: "Idea 9 (e2e boot-reconcile)",
+    body: "an idea whose research run gets interrupted mid-flight",
+  });
+  assert.equal(ideaResp.t, "Idea", `CreateIdea -> ${JSON.stringify(ideaResp)}`);
+  const ideaId = ideaResp.value.id;
+
+  const blockingStub = await startStubMcpServer({ blockResearchTool: true });
+  cleanup.stubMcpServer = blockingStub;
+  log(`phase9: BLOCKING stub MCP research server listening at ${blockingStub.url}`);
+
+  const addServerResp = await orchdRequest(conn, {
+    t: "McpAddServer",
+    name: "E2E Boot-Reconcile Stub MCP",
+    transport: "http",
+    url: blockingStub.url,
+    command: null,
+    args: null,
+    env: null,
+    scope: "global",
+    projectId: null,
+    authKind: "none",
+    timeoutMs: null,
+    maxRetries: null,
+  });
+  assert.equal(addServerResp.t, "McpServer", `McpAddServer -> ${JSON.stringify(addServerResp)}`);
+  const blockingServerId = addServerResp.value.id;
+
+  const consentResp = await orchdRequest(conn, {
+    t: "TrustGrantConsent",
+    serverId: blockingServerId,
+    kind: "connect",
+  });
+  assert.equal(consentResp.t, "Ack", `TrustGrantConsent -> ${JSON.stringify(consentResp)}`);
+
+  const connectResp = await orchdRequest(conn, { t: "McpConnect", id: blockingServerId });
+  assert.equal(connectResp.t, "McpConnectReport", `McpConnect -> ${JSON.stringify(connectResp)}`);
+
+  log("phase9: ResearchStartRun -> poll ResearchGetRun until running (the tool call blocks)");
+
+  const startRunResp = await orchdRequest(conn, {
+    t: "ResearchStartRun",
+    ideaId,
+    serverId: blockingServerId,
+    toolName: RESEARCH_TOOL_NAME,
+    argsJson: JSON.stringify({ query: "e2e boot-reconcile query" }),
+  });
+  assert.equal(startRunResp.t, "ResearchRun", `ResearchStartRun -> ${JSON.stringify(startRunResp)}`);
+  const runId = startRunResp.value.id;
+
+  const runningRun = await pollResearchRunUntil(
+    conn,
+    runId,
+    (run) => run.status === "running",
+    "status=running",
+  );
+  assert.equal(
+    runningRun.status,
+    "running",
+    `expected the run to be blocked in running, got ${JSON.stringify(runningRun)}`,
+  );
+  assert.equal(runningRun.artifactId, null, "a running run must not yet carry an artifactId");
+
+  log(`phase9: research run ${runId} is running (blocked on the stub) — shutting down mid-flight`);
+
+  await shutdownAndWaitExit(conn);
+  log(`phase9 OK: orchd (pid ${cleanup.daemonPid}) process exited (pre-reconcile-restart)`);
+
+  conn = await bootAndConnect();
+  assert.equal(
+    conn.chosenVersion,
+    1,
+    `post-reconcile-restart preamble handshake negotiated unexpected version: ${JSON.stringify(conn)}`,
+  );
+
+  const runAfterRestart = await orchdRequest(conn, { t: "ResearchGetRun", id: runId });
+  assert.equal(
+    runAfterRestart.t,
+    "ResearchRun",
+    `ResearchGetRun (post-restart) -> ${JSON.stringify(runAfterRestart)}`,
+  );
+  assert.equal(
+    runAfterRestart.value.status,
+    "failed",
+    `boot-reconcile must flip an interrupted run to failed, got ${JSON.stringify(runAfterRestart.value)}`,
+  );
+  assert.equal(
+    runAfterRestart.value.errorKind,
+    "interrupted",
+    `boot-reconcile must set errorKind=interrupted, got ${JSON.stringify(runAfterRestart.value)}`,
+  );
+  assert.equal(runAfterRestart.value.artifactId, null, "a failed run must not carry an artifactId");
+
+  await blockingStub.close();
+  cleanup.stubMcpServer = null;
+  log("phase9: BLOCKING stub MCP research server closed");
+
+  log("phase9 OK: interrupted research run reconciled on restart");
   return conn;
 }
 
