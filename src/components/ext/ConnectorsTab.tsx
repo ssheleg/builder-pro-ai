@@ -12,12 +12,13 @@ import {
 } from "../../ipc/orchd";
 import type { Account, AccountAuthKind, ConnectorOp, OAuthChallenge } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const AUTH_LABEL: Record<AccountAuthKind, string> = {
   oauth: "OAuth",
-  apikey: "API-ключ",
+  apikey: strings.ext.connectors.apiKeyLabel,
 };
 
 const sectionStyle: CSSProperties = {
@@ -193,8 +194,8 @@ function formatScopes(scopes: string[]): string {
 }
 
 /**
- * «Коннекторы» tab (S-EXT §8, T13b): the connector-account registry — accounts list + an
- * «добавить API-ключ» form (masked, never echoed back) + a «подключить OAuth» form + (per
+ * Connectors tab (S-EXT §8, T13b): the connector-account registry — accounts list + an
+ * "Add API key" form (masked, never echoed back) + a "Connect OAuth" form + (per
  * `generic-rest` account) an ops runner. Mirrors `ServersTab`/`ToolsBrowser`'s conventions
  * exactly: on mount `refreshAccounts()`, every mutating control `disabled={orchdDown}`, every
  * async failure -> `showToast(describeOrchdError(e))` rather than a silent no-op.
@@ -207,8 +208,8 @@ function formatScopes(scopes: string[]): string {
  * again if a pop-up blocker or similar swallowed the auto-open. There is no OS-level redirect
  * capture in this Phase (that is a §10 human/browser-integration step, out of scope here): once
  * the provider redirects the owner's browser back with a `code` query param, the owner copies it
- * and pastes it into «Вставить код», which calls `connectorCompleteOAuth({state, code})` to
- * finish the PKCE exchange. This paste-the-code step is the deliberately honest v1 UX, not a
+ * and pastes it into the "paste code" field, which calls `connectorCompleteOAuth({state, code})`
+ * to finish the PKCE exchange. This paste-the-code step is the deliberately honest v1 UX, not a
  * placeholder — it works today against any standard OAuth 2.1 authorization-code provider without
  * a custom URL-scheme/loopback-listener registration.
  *
@@ -217,8 +218,8 @@ function formatScopes(scopes: string[]): string {
  * auto-fetch-on-mount) into local `opsByAccount` state — there is no store slice for ops (an
  * account's op catalog is small/static per provider, unlike the tool-cache-with-list_changed
  * MCP case), so this component owns that cache itself. Selecting an op + a JSON args textarea +
- * «вызвать» calls `connectorInvoke`, trust-gated identically to `mcpCallTool` (spec §6/§7); the
- * result is rendered with an unconditional «непроверенные данные» banner — EVERY artifact this
+ * "invoke" calls `connectorInvoke`, trust-gated identically to `mcpCallTool` (spec §6/§7); the
+ * result is rendered with an unconditional "unverified data" banner — EVERY artifact this
  * slice creates is `is_untrusted:true` by construction (spec D9), mirrors `ToolsBrowser`'s own
  * banner exactly.
  */
@@ -324,7 +325,7 @@ export function ConnectorsTab(): JSX.Element {
       setOauthChallenge(null);
       setOauthCode("");
       await refreshAccounts();
-      showToast("Аккаунт подключён");
+      showToast(strings.ext.connectors.accountConnected);
     } catch (e) {
       // Keep the challenge/code fields as-is so the owner can retry the paste (spec §8 v1 flow).
       showToast(describeOrchdError(e));
@@ -332,7 +333,7 @@ export function ConnectorsTab(): JSX.Element {
   }
 
   async function handleDeleteAccount(account: Account): Promise<void> {
-    if (!window.confirm(`удалить аккаунт «${account.label}»?`)) return;
+    if (!window.confirm(strings.ext.connectors.deleteConfirm(account.label))) return;
     try {
       await connectorDeleteAccount({ id: account.id });
       await refreshAccounts();
@@ -349,7 +350,7 @@ export function ConnectorsTab(): JSX.Element {
     try {
       JSON.parse(argsJson);
     } catch {
-      setOpsCallError((prev) => ({ ...prev, [accountId]: "аргументы должны быть валидным JSON" }));
+      setOpsCallError((prev) => ({ ...prev, [accountId]: strings.common.argsInvalidJson }));
       return;
     }
     setOpsCallError((prev) => ({ ...prev, [accountId]: null }));
@@ -369,10 +370,10 @@ export function ConnectorsTab(): JSX.Element {
   return (
     <div data-testid="connectors-tab">
       <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>Аккаунты</div>
+        <div style={sectionTitleStyle}>{strings.ext.connectors.accountsTitle}</div>
         {accounts.length === 0 ? (
           <div data-testid="accounts-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-            нет аккаунтов
+            {strings.ext.connectors.noAccounts}
           </div>
         ) : (
           <div role="list">
@@ -400,10 +401,10 @@ export function ConnectorsTab(): JSX.Element {
                       {AUTH_LABEL[account.authKind]}
                     </span>
                     <span data-testid={`account-scopes-${account.id}`} style={metaStyle}>
-                      области: {formatScopes(account.scopes)}
+                      {strings.ext.connectors.scopesLabel} {formatScopes(account.scopes)}
                     </span>
                     <span data-testid={`account-expiry-${account.id}`} style={metaStyle}>
-                      истекает: {formatExpiry(account.expiresAt)}
+                      {strings.ext.connectors.expiresLabel} {formatExpiry(account.expiresAt)}
                     </span>
                     <button
                       type="button"
@@ -412,7 +413,7 @@ export function ConnectorsTab(): JSX.Element {
                       onClick={() => void handleDeleteAccount(account)}
                       style={deleteButtonStyle}
                     >
-                      удалить
+                      {strings.ext.delete}
                     </button>
                   </div>
 
@@ -421,7 +422,7 @@ export function ConnectorsTab(): JSX.Element {
                       <div style={invokeRowStyle}>
                         <select
                           data-testid={`ops-select-${account.id}`}
-                          aria-label={`Операция для ${account.label}`}
+                          aria-label={strings.ext.connectors.operationFor(account.label)}
                           value={selected}
                           disabled={orchdDown}
                           onChange={(e) =>
@@ -429,7 +430,7 @@ export function ConnectorsTab(): JSX.Element {
                           }
                           style={selectStyle}
                         >
-                          <option value="">— операция —</option>
+                          <option value="">{strings.ext.connectors.operationOption}</option>
                           {ops.map((op) => (
                             <option key={op.name} value={op.name}>
                               {op.name}
@@ -438,7 +439,7 @@ export function ConnectorsTab(): JSX.Element {
                         </select>
                         <textarea
                           data-testid={`ops-args-${account.id}`}
-                          aria-label={`Аргументы для ${account.label}`}
+                          aria-label={strings.ext.connectors.argsFor(account.label)}
                           placeholder="{}"
                           disabled={invokeDisabled}
                           value={opsArgsDraft[account.id] ?? ""}
@@ -455,7 +456,7 @@ export function ConnectorsTab(): JSX.Element {
                           onClick={() => void handleInvoke(account.id)}
                           style={textButtonStyle}
                         >
-                          вызвать
+                          {strings.ext.invoke}
                         </button>
                       </div>
 
@@ -478,11 +479,11 @@ export function ConnectorsTab(): JSX.Element {
                             data-testid={`ops-result-untrusted-${account.id}`}
                             style={untrustedBannerStyle}
                           >
-                            ⚠ непроверенные данные
+                            {strings.ext.unverified}
                           </span>
                           {result.isError && (
                             <span style={{ fontSize: 12, color: theme.colors.statusExited }}>
-                              операция вернула ошибку
+                              {strings.ext.connectors.operationError}
                             </span>
                           )}
                           <pre style={preStyle}>{result.contentJson}</pre>
@@ -498,20 +499,20 @@ export function ConnectorsTab(): JSX.Element {
       </div>
 
       <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>Добавить API-ключ</div>
+        <div style={sectionTitleStyle}>{strings.ext.connectors.addApiKeyTitle}</div>
         <div style={createFormStyle}>
           <input
             data-testid="apikey-provider"
-            aria-label="Провайдер"
-            placeholder="провайдер"
+            aria-label={strings.ext.connectors.providerAria}
+            placeholder={strings.ext.connectors.providerPlaceholder}
             value={apiKeyProvider}
             onChange={(e) => setApiKeyProvider(e.target.value)}
             style={createInputStyle}
           />
           <input
             data-testid="apikey-label"
-            aria-label="Метка"
-            placeholder="метка"
+            aria-label={strings.ext.connectors.labelAria}
+            placeholder={strings.ext.connectors.labelPlaceholder}
             value={apiKeyLabel}
             onChange={(e) => setApiKeyLabel(e.target.value)}
             style={createInputStyle}
@@ -519,8 +520,8 @@ export function ConnectorsTab(): JSX.Element {
           <input
             type="password"
             data-testid="apikey-key"
-            aria-label="API-ключ"
-            placeholder="API-ключ"
+            aria-label={strings.ext.connectors.apiKeyAria}
+            placeholder={strings.ext.connectors.apiKeyPlaceholder}
             value={apiKeyValue}
             onChange={(e) => setApiKeyValue(e.target.value)}
             style={createInputStyle}
@@ -532,34 +533,34 @@ export function ConnectorsTab(): JSX.Element {
             onClick={() => void handleAddApiKey()}
             style={{ ...primaryButtonStyle, opacity: apiKeyBlocked ? 0.5 : 1 }}
           >
-            + API-ключ
+            {strings.ext.connectors.addApiKey}
           </button>
         </div>
       </div>
 
       <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>Подключить OAuth</div>
+        <div style={sectionTitleStyle}>{strings.ext.connectors.connectOAuthTitle}</div>
         <div style={createFormStyle}>
           <input
             data-testid="oauth-provider"
-            aria-label="Провайдер"
-            placeholder="провайдер"
+            aria-label={strings.ext.connectors.providerAria}
+            placeholder={strings.ext.connectors.providerPlaceholder}
             value={oauthProvider}
             onChange={(e) => setOauthProvider(e.target.value)}
             style={createInputStyle}
           />
           <input
             data-testid="oauth-label"
-            aria-label="Метка"
-            placeholder="метка"
+            aria-label={strings.ext.connectors.labelAria}
+            placeholder={strings.ext.connectors.labelPlaceholder}
             value={oauthLabel}
             onChange={(e) => setOauthLabel(e.target.value)}
             style={createInputStyle}
           />
           <input
             data-testid="oauth-scopes"
-            aria-label="Области доступа"
-            placeholder="области, через запятую (необязательно)"
+            aria-label={strings.ext.connectors.scopesAria}
+            placeholder={strings.ext.connectors.scopesPlaceholder}
             value={oauthScopes}
             onChange={(e) => setOauthScopes(e.target.value)}
             style={createInputStyle}
@@ -571,7 +572,7 @@ export function ConnectorsTab(): JSX.Element {
             onClick={() => void handleBeginOAuth()}
             style={{ ...primaryButtonStyle, opacity: oauthBeginBlocked ? 0.5 : 1 }}
           >
-            начать OAuth
+            {strings.ext.connectors.startOAuth}
           </button>
 
           {oauthChallenge && (
@@ -583,13 +584,13 @@ export function ConnectorsTab(): JSX.Element {
                 rel="noreferrer"
                 style={linkStyle}
               >
-                открыть страницу авторизации
+                {strings.ext.connectors.openAuthPage}
               </a>
               <div style={{ display: "flex", gap: 6 }}>
                 <input
                   data-testid="oauth-code-input"
-                  aria-label="Код авторизации"
-                  placeholder="вставьте код из редиректа"
+                  aria-label={strings.ext.connectors.codeAria}
+                  placeholder={strings.ext.connectors.codePlaceholder}
                   value={oauthCode}
                   onChange={(e) => setOauthCode(e.target.value)}
                   style={createInputStyle}
@@ -601,7 +602,7 @@ export function ConnectorsTab(): JSX.Element {
                   onClick={() => void handleCompleteOAuth()}
                   style={{ ...primaryButtonStyle, opacity: oauthCompleteBlocked ? 0.5 : 1 }}
                 >
-                  завершить
+                  {strings.ext.connectors.finish}
                 </button>
               </div>
             </div>

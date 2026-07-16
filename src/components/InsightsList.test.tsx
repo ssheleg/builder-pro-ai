@@ -5,7 +5,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 const orchdSetInsightFitVerdictMock = vi.fn();
 const orchdSetInsightStatusMock = vi.fn();
 const orchdListInsightsMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../ipc/orchd", () => ({
   orchdSetInsightFitVerdict: (...a: unknown[]) => orchdSetInsightFitVerdictMock(...a),
@@ -24,8 +24,8 @@ function makeInsight(over: Partial<Insight> & { id: string }): Insight {
   return {
     projectId,
     source: "issledovanie",
-    title: "инсайт",
-    body: "тело инсайта",
+    title: "insight",
+    body: "insight body",
     fitVerdict: null,
     fitReasoning: "",
     status: "new",
@@ -42,7 +42,7 @@ beforeEach(() => {
   orchdSetInsightFitVerdictMock.mockReset().mockResolvedValue(makeInsight({ id: "in1" }));
   orchdSetInsightStatusMock.mockReset().mockResolvedValue(makeInsight({ id: "in1" }));
   orchdListInsightsMock.mockReset().mockResolvedValue([]);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState({ insights: [], toast: null, orchdDown: false }, false);
 });
 
@@ -60,8 +60,8 @@ describe("InsightsList", () => {
     );
     expect(rows).toEqual(["insight-row-new", "insight-row-old"]);
 
-    // localized: fitVerdict "fit" → «подходит» (badge reuses FIT_VERDICT_LABEL); null → «—»
-    expect(screen.getByTestId("insight-fit-badge-old").textContent).toBe("подходит");
+    // localized: fitVerdict "fit" → "fit" (badge reuses FIT_VERDICT_LABEL); null → "—"
+    expect(screen.getByTestId("insight-fit-badge-old").textContent).toBe("fit");
     expect(screen.getByTestId("insight-fit-badge-new").textContent).toBe("—");
     expect(screen.getByTestId("insight-source-new").textContent).toContain("issledovanie");
   });
@@ -76,7 +76,7 @@ describe("InsightsList", () => {
       target: { value: "fit" },
     });
     fireEvent.change(screen.getByTestId("insight-verdict-reasoning-in1"), {
-      target: { value: "соответствует стратегии" },
+      target: { value: "matches strategy" },
     });
     fireEvent.click(screen.getByTestId("insight-verdict-apply-in1"));
 
@@ -84,7 +84,7 @@ describe("InsightsList", () => {
       expect(orchdSetInsightFitVerdictMock).toHaveBeenCalledWith(
         "in1",
         "fit",
-        "соответствует стратегии",
+        "matches strategy",
       ),
     );
   });
@@ -116,7 +116,7 @@ describe("InsightsList", () => {
     fireEvent.click(screen.getByTestId("insight-archive-confirm-in1"));
 
     expect(screen.getByTestId("insight-archive-error-in1").textContent).toBe(
-      "нужна причина архивации",
+      "an archive reason is required",
     );
     expect(orchdSetInsightStatusMock).not.toHaveBeenCalled();
   });
@@ -131,12 +131,12 @@ describe("InsightsList", () => {
       target: { value: "archived" },
     });
     fireEvent.change(screen.getByTestId("insight-archive-reasoning-in1"), {
-      target: { value: "устарело" },
+      target: { value: "outdated" },
     });
     fireEvent.click(screen.getByTestId("insight-archive-confirm-in1"));
 
     await waitFor(() =>
-      expect(orchdSetInsightStatusMock).toHaveBeenCalledWith("in1", "archived", "устарело"),
+      expect(orchdSetInsightStatusMock).toHaveBeenCalledWith("in1", "archived", "outdated"),
     );
     expect(screen.queryByTestId("insight-archive-error-in1")).toBeNull();
   });
@@ -144,7 +144,7 @@ describe("InsightsList", () => {
   it("an error from a mutating call surfaces via showToast", async () => {
     const insight = makeInsight({ id: "in1" });
     useAppStore.setState({ insights: [insight] }, false);
-    const commandError = { kind: "daemon", code: "Validation", message: "плохие данные" };
+    const commandError = { kind: "daemon", code: "Validation", message: "bad data" };
     orchdSetInsightStatusMock.mockRejectedValueOnce(commandError);
 
     render(<InsightsList projectId={projectId} />);
@@ -153,7 +153,7 @@ describe("InsightsList", () => {
     });
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalledWith(commandError));
-    await waitFor(() => expect(useAppStore.getState().toast).toBe("оркестратор: ошибка"));
+    await waitFor(() => expect(useAppStore.getState().toast).toBe("orchestrator: error"));
   });
 
   it("renders an empty state when there are no matching insights", () => {

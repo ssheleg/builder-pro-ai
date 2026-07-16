@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 
 const mcpSetToolEnabledMock = vi.fn();
 const mcpCallToolMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../../ipc/orchd", () => ({
   mcpSetToolEnabled: (...a: unknown[]) => mcpSetToolEnabledMock(...a),
   mcpCallTool: (...a: unknown[]) => mcpCallToolMock(...a),
@@ -15,6 +15,7 @@ vi.mock("../../ipc/orchd", () => ({
 import { ToolsBrowser } from "./ToolsBrowser";
 import { useAppStore } from "../../store/store";
 import type { McpServer, McpTool } from "../../ipc/orchd-types";
+import { strings } from "../../strings";
 
 function makeServer(over: Partial<McpServer> = {}): McpServer {
   return {
@@ -63,7 +64,7 @@ beforeEach(() => {
     contentJson: '{"ok":true}',
     isError: false,
   });
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState(
     {
       mcpServers: [makeServer()],
@@ -97,7 +98,7 @@ describe("ToolsBrowser", () => {
     });
   });
 
-  it("«вызвать» calls mcpCallTool with the entered JSON args and renders the result with the untrusted banner", async () => {
+  it("\"invoke\" calls mcpCallTool with the entered JSON args and renders the result with the untrusted banner", async () => {
     render(<ToolsBrowser />);
     fireEvent.change(screen.getByTestId("tool-args-t1"), {
       target: { value: '{"q":"hello"}' },
@@ -110,7 +111,7 @@ describe("ToolsBrowser", () => {
 
     expect(screen.getByTestId("tool-result-t1")).toBeTruthy();
     expect(screen.getByTestId("tool-result-untrusted-t1").textContent).toContain(
-      "непроверенные данные",
+      strings.ext.unverified,
     );
     expect(screen.getByText('{"ok":true}')).toBeTruthy();
   });

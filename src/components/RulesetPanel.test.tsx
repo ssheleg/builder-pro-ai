@@ -6,7 +6,7 @@ const orchdGetRulesetMock = vi.fn();
 const orchdUpsertRulesetMock = vi.fn();
 const orchdAcknowledgeRuleFileMock = vi.fn();
 const orchdRevealRulesFileMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../ipc/orchd", () => ({
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
@@ -18,6 +18,7 @@ vi.mock("../ipc/orchd", () => ({
 
 import { RulesetPanel } from "./RulesetPanel";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { RuleFileState, RuleSetView } from "../ipc/orchd-types";
 
 function makeView(over: {
@@ -43,7 +44,7 @@ function makeView(over: {
       createdAt: 1,
       updatedAt: 1,
     },
-    mdContent: over.mdContent !== undefined ? over.mdContent : fileState === "missing" ? null : "# правила\n",
+    mdContent: over.mdContent !== undefined ? over.mdContent : fileState === "missing" ? null : "# rules\n",
     fileState,
   };
 }
@@ -55,7 +56,7 @@ beforeEach(() => {
   orchdUpsertRulesetMock.mockReset().mockResolvedValue(makeView());
   orchdAcknowledgeRuleFileMock.mockReset().mockResolvedValue(makeView());
   orchdRevealRulesFileMock.mockReset().mockResolvedValue(undefined);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState({ rulesets: {}, toast: null, orchdDown: false }, false);
 });
 
@@ -72,7 +73,7 @@ describe("RulesetPanel", () => {
     expect(screen.queryByTestId("ruleset-banner-missing")).toBeNull();
   });
 
-  it('fileState "externallyModified": renders an info banner + [Принять] button', () => {
+  it('fileState "externallyModified": renders an info banner + [Accept] button', () => {
     useAppStore.setState(
       { rulesets: { global: makeView({ fileState: "externallyModified", mdContent: "# changed on disk\n" }) } },
       false,
@@ -81,22 +82,22 @@ describe("RulesetPanel", () => {
     render(<RulesetPanel scope="global" projectId={null} />);
 
     const banner = screen.getByTestId("ruleset-banner-modified");
-    expect(within(banner).getByRole("button", { name: "Принять" })).toBeTruthy();
+    expect(within(banner).getByRole("button", { name: strings.common.accept })).toBeTruthy();
     expect(screen.queryByTestId("ruleset-banner-missing")).toBeNull();
   });
 
-  it('fileState "missing": renders a banner «файл утерян» + [Создать заново] button, no textarea', () => {
+  it('fileState "missing": renders a banner "file lost" + [Recreate] button, no textarea', () => {
     useAppStore.setState({ rulesets: { global: makeView({ fileState: "missing", mdContent: null }) } }, false);
 
     render(<RulesetPanel scope="global" projectId={null} />);
 
     const banner = screen.getByTestId("ruleset-banner-missing");
-    expect(within(banner).getByText("файл утерян")).toBeTruthy();
-    expect(within(banner).getByRole("button", { name: "Создать заново" })).toBeTruthy();
+    expect(within(banner).getByText(strings.rules.missingBanner)).toBeTruthy();
+    expect(within(banner).getByRole("button", { name: strings.rules.recreate })).toBeTruthy();
     expect(screen.queryByTestId("ruleset-content")).toBeNull();
   });
 
-  it("[Принять] calls orchdAcknowledgeRuleFile(rule.id) and refreshes the view", async () => {
+  it("[Accept] calls orchdAcknowledgeRuleFile(rule.id) and refreshes the view", async () => {
     const view = makeView({ fileState: "externallyModified", mdContent: "# changed\n" });
     const acknowledged = makeView({ fileState: "ok", mdContent: "# changed\n" });
     useAppStore.setState({ rulesets: { global: view } }, false);
@@ -107,7 +108,7 @@ describe("RulesetPanel", () => {
     orchdAcknowledgeRuleFileMock.mockResolvedValue(acknowledged);
 
     render(<RulesetPanel scope="global" projectId={null} />);
-    fireEvent.click(screen.getByRole("button", { name: "Принять" }));
+    fireEvent.click(screen.getByRole("button", { name: strings.common.accept }));
 
     await waitFor(() => expect(orchdAcknowledgeRuleFileMock).toHaveBeenCalledWith("rule-global"));
     await waitFor(() => expect(useAppStore.getState().rulesets["global"]?.fileState).toBe("ok"));
@@ -128,24 +129,24 @@ describe("RulesetPanel", () => {
     );
   });
 
-  it('"Создать заново" on a missing file calls orchdUpsertRuleset with mdContent: ""', async () => {
+  it('"Recreate" on a missing file calls orchdUpsertRuleset with mdContent: ""', async () => {
     const view = makeView({ fileState: "missing", mdContent: null });
     useAppStore.setState({ rulesets: { global: view } }, false);
     orchdGetRulesetMock.mockResolvedValue(view);
 
     render(<RulesetPanel scope="global" projectId={null} />);
-    fireEvent.click(screen.getByRole("button", { name: "Создать заново" }));
+    fireEvent.click(screen.getByRole("button", { name: strings.rules.recreate }));
 
     await waitFor(() => expect(orchdUpsertRulesetMock).toHaveBeenCalledWith("global", null, "", null, null));
   });
 
-  it('«показать файл» calls orchdRevealRulesFile with scope+projectId only, never a path arg', async () => {
+  it('"reveal file" calls orchdRevealRulesFile with scope+projectId only, never a path arg', async () => {
     const view = makeView({ fileState: "ok" });
     useAppStore.setState({ rulesets: { "project:p1": view } }, false);
     orchdGetRulesetMock.mockResolvedValue(view);
 
     render(<RulesetPanel scope="project" projectId="p1" />);
-    fireEvent.click(screen.getByRole("button", { name: "показать файл" }));
+    fireEvent.click(screen.getByRole("button", { name: strings.rules.revealFile }));
 
     await waitFor(() => expect(orchdRevealRulesFileMock).toHaveBeenCalledWith("project", "p1"));
     expect(orchdRevealRulesFileMock).toHaveBeenCalledWith(
@@ -223,14 +224,14 @@ describe("RulesetPanel", () => {
     const view = makeView({ fileState: "ok" });
     useAppStore.setState({ rulesets: { global: view } }, false);
     orchdGetRulesetMock.mockResolvedValue(view);
-    const commandError = { kind: "daemon", code: "Validation", message: "неверная политика" };
+    const commandError = { kind: "daemon", code: "Validation", message: "invalid policy" };
     orchdUpsertRulesetMock.mockRejectedValueOnce(commandError);
 
     render(<RulesetPanel scope="global" projectId={null} />);
     fireEvent.click(screen.getByTestId("ruleset-save-policy"));
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalledWith(commandError));
-    await waitFor(() => expect(useAppStore.getState().toast).toBe("оркестратор: ошибка"));
+    await waitFor(() => expect(useAppStore.getState().toast).toBe("orchestrator: error"));
   });
 
   it("mounts and refreshes: calls orchdGetRuleset(scope, projectId) on mount", async () => {
@@ -243,7 +244,7 @@ describe("RulesetPanel", () => {
     await waitFor(() => expect(orchdGetRulesetMock).toHaveBeenCalledWith("global", null));
   });
 
-  it("while orchdDown: every mutating (Save/Принять/Создать заново) button is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
+  it("while orchdDown: every mutating (Save/Accept/Recreate) button is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
     const modified = makeView({ fileState: "externallyModified", mdContent: "# changed\n" });
     useAppStore.setState({ rulesets: { global: modified }, orchdDown: true }, false);
 
@@ -265,7 +266,7 @@ describe("RulesetPanel", () => {
     expect(orchdAcknowledgeRuleFileMock).not.toHaveBeenCalled();
   });
 
-  it("while orchdDown: the «Создать заново» button (missing file state) is disabled", () => {
+  it('while orchdDown: the "Recreate" button (missing file state) is disabled', () => {
     const missing = makeView({ fileState: "missing", mdContent: null });
     useAppStore.setState({ rulesets: { global: missing }, orchdDown: true }, false);
 

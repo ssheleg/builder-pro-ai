@@ -9,6 +9,7 @@ vi.mock("../ipc/fs", () => ({
 
 import { FilePreview } from "./FilePreview";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -19,7 +20,7 @@ beforeEach(() => {
 describe("FilePreview", () => {
   it("renders an empty-state placeholder when nothing is selected", () => {
     render(<FilePreview />);
-    expect(screen.getByText(/выберите файл/i)).toBeTruthy();
+    expect(screen.getByText(strings.files.selectFile)).toBeTruthy();
     expect(readFilePreviewMock).not.toHaveBeenCalled();
   });
 
@@ -58,15 +59,19 @@ describe("FilePreview", () => {
     });
     useAppStore.setState({ selectedFile: { root: "/proj", rel: "a.txt" } }, false);
     render(<FilePreview />);
-    await screen.findByText((content) => content.includes("partial"));
-    expect(screen.getByText(/неполн/i)).toBeTruthy();
+    // Match the <pre> content specifically — the banner text (strings.files.contentMayHaveChanged)
+    // also contains the word "partial", so a tag-agnostic substring query would be ambiguous.
+    await screen.findByText(
+      (content, element) => element?.tagName.toLowerCase() === "pre" && content.includes("partial"),
+    );
+    expect(screen.getByText(strings.files.contentMayHaveChanged)).toBeTruthy();
   });
 
   it("renders a binary placeholder with a humanized size", async () => {
     readFilePreviewMock.mockResolvedValue({ kind: "binary", size: 2048 });
     useAppStore.setState({ selectedFile: { root: "/proj", rel: "bin.dat" } }, false);
     render(<FilePreview />);
-    expect(await screen.findByText(/Бинарный файл/)).toBeTruthy();
+    expect(await screen.findByText(new RegExp(strings.files.binaryFile("").trim()))).toBeTruthy();
     expect(screen.getByText(/2(\.0)? KB/)).toBeTruthy();
   });
 
@@ -74,7 +79,7 @@ describe("FilePreview", () => {
     readFilePreviewMock.mockResolvedValue({ kind: "tooLarge", size: 5 * 1024 * 1024 });
     useAppStore.setState({ selectedFile: { root: "/proj", rel: "big.bin" } }, false);
     render(<FilePreview />);
-    expect(await screen.findByText(/слишком большой/)).toBeTruthy();
+    expect(await screen.findByText(new RegExp(strings.files.tooLargePreview("").trim()))).toBeTruthy();
     expect(screen.getByText(/5(\.0)? MB/)).toBeTruthy();
   });
 
@@ -86,8 +91,9 @@ describe("FilePreview", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.getByText(/не удалось открыть файл/i)).toBeTruthy();
-    expect(useAppStore.getState().toast).toMatch(/не удалось открыть файл/i);
+    const openFailedPrefix = new RegExp(strings.files.openFileFailed("").trim(), "i");
+    expect(screen.getByText(openFailedPrefix)).toBeTruthy();
+    expect(useAppStore.getState().toast).toMatch(openFailedPrefix);
   });
 
   it("re-fetches when selectedFile changes to a different file", async () => {
@@ -114,7 +120,7 @@ describe("FilePreview", () => {
     await act(async () => {
       useAppStore.setState({ selectedFile: null }, false);
     });
-    expect(screen.getByText(/выберите файл/i)).toBeTruthy();
+    expect(screen.getByText(strings.files.selectFile)).toBeTruthy();
   });
 
   it("a late-resolving stale request never clobbers a newer selection's preview", async () => {

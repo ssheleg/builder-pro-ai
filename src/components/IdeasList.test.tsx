@@ -111,7 +111,7 @@ beforeEach(() => {
   orchdSetIdeaLifecycleMock.mockReset().mockResolvedValue(makeIdea({ id: "i1" }));
   orchdDeleteIdeaMock.mockReset().mockResolvedValue(undefined);
   orchdListIdeasMock.mockReset().mockResolvedValue([]);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   researchStartRunMock.mockReset();
   researchListRunsMock.mockReset().mockResolvedValue([]);
   mcpListToolsMock.mockReset().mockResolvedValue([]);
@@ -165,17 +165,17 @@ describe("IdeasList", () => {
   });
 
   it("inline title edit commits via orchdUpdateIdea with the trimmed title and null body", async () => {
-    const idea = makeIdea({ id: "i1", title: "старое название" });
+    const idea = makeIdea({ id: "i1", title: "old title" });
     useAppStore.setState({ ideas: [idea] }, false);
 
     render(<IdeasList projectId={projectId} />);
 
     const input = screen.getByTestId("idea-title-input-i1") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "новое название" } });
+    fireEvent.change(input, { target: { value: "new title" } });
     fireEvent.blur(input);
 
     await waitFor(() =>
-      expect(orchdUpdateIdeaMock).toHaveBeenCalledWith("i1", "новое название", null),
+      expect(orchdUpdateIdeaMock).toHaveBeenCalledWith("i1", "new title", null),
     );
   });
 
@@ -198,9 +198,9 @@ describe("IdeasList", () => {
     confirmSpy.mockRestore();
   });
 
-  it('an orphan row (projectId null) shows a "привязать к проекту" affordance that fires orchdSetIdeaProject with the chosen project id', async () => {
+  it('an orphan row (projectId null) shows a "link to project" affordance that fires orchdSetIdeaProject with the chosen project id', async () => {
     const orphan = makeIdea({ id: "orphan1", projectId: null });
-    const project = makeProject({ id: "proj-9", name: "Проект 9" });
+    const project = makeProject({ id: "proj-9", name: "Project 9" });
     useAppStore.setState({ ideas: [orphan], projects: [project] }, false);
 
     render(<IdeasList projectId={null} />);
@@ -228,15 +228,15 @@ describe("IdeasList", () => {
     render(<IdeasList projectId={projectId} />);
 
     fireEvent.change(screen.getByTestId("idea-create-title"), {
-      target: { value: "Новая идея" },
+      target: { value: "New idea" },
     });
     fireEvent.change(screen.getByTestId("idea-create-body"), {
-      target: { value: "Описание" },
+      target: { value: "Description" },
     });
     fireEvent.click(screen.getByTestId("idea-create-submit"));
 
     await waitFor(() =>
-      expect(orchdCreateIdeaMock).toHaveBeenCalledWith(projectId, "Новая идея", "Описание"),
+      expect(orchdCreateIdeaMock).toHaveBeenCalledWith(projectId, "New idea", "Description"),
     );
     await waitFor(() => expect(orchdListIdeasMock).toHaveBeenCalledWith(null));
   });
@@ -252,7 +252,7 @@ describe("IdeasList", () => {
   it("an error from a mutating call surfaces via showToast", async () => {
     const idea = makeIdea({ id: "i1" });
     useAppStore.setState({ ideas: [idea] }, false);
-    const commandError = { kind: "daemon", code: "Invariant", message: "нельзя" };
+    const commandError = { kind: "daemon", code: "Invariant", message: "not allowed" };
     orchdSetIdeaLifecycleMock.mockRejectedValueOnce(commandError);
 
     render(<IdeasList projectId={projectId} />);
@@ -261,7 +261,7 @@ describe("IdeasList", () => {
     });
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalledWith(commandError));
-    await waitFor(() => expect(useAppStore.getState().toast).toBe("оркестратор: ошибка"));
+    await waitFor(() => expect(useAppStore.getState().toast).toBe("orchestrator: error"));
   });
 
   it("renders an empty state when there are no matching ideas", () => {
@@ -299,7 +299,7 @@ describe("IdeasList", () => {
     expect(orchdCreateIdeaMock).not.toHaveBeenCalled();
   });
 
-  it("while orchdDown: an orphan row's «привязать к проекту» button is disabled", () => {
+  it('while orchdDown: an orphan row\'s "link to project" button is disabled', () => {
     const idea = makeIdea({ id: "i1", projectId: null });
     useAppStore.setState(
       { ideas: [idea], projects: [{ id: "p1", name: "Proj", description: "", status: "active", workspaceIds: [], createdAt: 1, updatedAt: 1 }], orchdDown: true },
@@ -329,7 +329,7 @@ describe("IdeasList", () => {
     await waitFor(() => expect(researchListRunsMock).toHaveBeenCalledWith("i2"));
   });
 
-  it("«Исследовать» opens ResearchRunDialog for that idea", () => {
+  it('the "Research" button opens ResearchRunDialog for that idea', () => {
     const idea = makeIdea({ id: "i1" });
     useAppStore.setState({ ideas: [idea] }, false);
 
@@ -356,7 +356,7 @@ describe("IdeasList", () => {
     );
 
     render(<IdeasList projectId={projectId} />);
-    expect(screen.getByTestId("idea-research-badge-i1").textContent).toMatch(/готово/i);
+    expect(screen.getByTestId("idea-research-badge-i1").textContent).toMatch(/done/i);
   });
 
   it("no research-run badge is rendered when the idea has no runs yet", () => {
@@ -367,7 +367,7 @@ describe("IdeasList", () => {
     expect(screen.queryByTestId("idea-research-badge-i1")).toBeNull();
   });
 
-  it('the "исследования" toggle shows/hides the ResearchPane for that idea', () => {
+  it('the "research" toggle shows/hides the ResearchPane for that idea', () => {
     const idea = makeIdea({ id: "i1" });
     useAppStore.setState(
       { ideas: [idea], researchRunsByIdea: { i1: [makeResearchRun({ id: "r1", ideaId: "i1" })] } },
@@ -397,7 +397,7 @@ describe("IdeasList", () => {
     expect(screen.queryByTestId("spawn-project-i1")).toBeNull();
   });
 
-  it("while orchdDown: «Исследовать» is disabled and clicking it never opens the dialog", () => {
+  it('while orchdDown: the "Research" button is disabled and clicking it never opens the dialog', () => {
     const idea = makeIdea({ id: "i1" });
     useAppStore.setState({ ideas: [idea], orchdDown: true }, false);
 
@@ -409,7 +409,7 @@ describe("IdeasList", () => {
     expect(screen.queryByTestId("research-run-dialog")).toBeNull();
   });
 
-  it("while orchdDown: an orphan row's «Создать проект» button is disabled", () => {
+  it('while orchdDown: an orphan row\'s "Create project" button is disabled', () => {
     const orphan = makeIdea({ id: "orphan1", projectId: null });
     useAppStore.setState({ ideas: [orphan], orchdDown: true }, false);
 

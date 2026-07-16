@@ -6,6 +6,7 @@ import { HomeView } from "./HomeView";
 import { useAppStore } from "../store/store";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { TerminalManager } from "../terminal/terminal-manager";
+import { strings } from "../strings";
 
 const wsA: Workspace = { id: "w1", name: "alpha", rootPath: "/p/alpha", roots: ["/p/alpha"] };
 const wsB: Workspace = { id: "w2", name: "beta", rootPath: "/p/beta", roots: ["/p/beta"] };
@@ -67,7 +68,7 @@ describe("HomeView", () => {
     expect(rows.indexOf("home-row-s-wait")).toBeLessThan(rows.indexOf("home-row-s-run"));
   });
 
-  it('"Пройти" navigates: setActiveWorkspaceId + setView("workspace") + setActiveSession + manager.focus', () => {
+  it('"Go" navigates: setActiveWorkspaceId + setView("workspace") + setActiveSession + manager.focus', () => {
     const setActiveWorkspaceId = vi.fn();
     useAppStore.setState({
       workspaces: { w1: wsA },
@@ -77,7 +78,7 @@ describe("HomeView", () => {
     });
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={setActiveWorkspaceId} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /пройти/i }));
+    fireEvent.click(screen.getByRole("button", { name: strings.home.go }));
 
     expect(setActiveWorkspaceId).toHaveBeenCalledWith("w1");
     expect(useAppStore.getState().view).toBe("workspace");
@@ -85,7 +86,7 @@ describe("HomeView", () => {
     expect(focusMock).toHaveBeenCalledWith("s1");
   });
 
-  it("clicking a running row does the same navigation as Пройти", () => {
+  it("clicking a running row does the same navigation as Go", () => {
     const setActiveWorkspaceId = vi.fn();
     useAppStore.setState({
       workspaces: { w1: wsA },
@@ -209,7 +210,7 @@ describe("HomeView", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("F1: an exited session that still carries a stale waitingForInput:true renders EXACTLY ONCE, in «Завершились недавно» (exited wins), never duplicated into «Нужен ты», and is excluded from the waiting/live stats", () => {
+  it("F1: an exited session that still carries a stale waitingForInput:true renders EXACTLY ONCE, in «Recently finished» (exited wins), never duplicated into «Needs you», and is excluded from the waiting/live stats", () => {
     useAppStore.setState({
       workspaces: { w1: wsA },
       sessions: {
@@ -227,11 +228,11 @@ describe("HomeView", () => {
     // exactly one row for this session, anywhere in the DOM
     expect(screen.getAllByTestId("home-row-s1")).toHaveLength(1);
 
-    // it lives in "Завершились недавно", not "Нужен ты"
-    expect(screen.queryByText("Нужен ты")).toBeNull();
+    // it lives in "Recently finished", not "Needs you"
+    expect(screen.queryByText(strings.home.needsYou)).toBeNull();
     const row = screen.getByTestId("home-row-s1");
     expect(row.textContent).toContain("✗");
-    expect(row.textContent).not.toContain("ждёт ввода");
+    expect(row.textContent).not.toContain(strings.home.waitingForInput);
 
     // the whole-store stats strip must not count a dead session as waiting or live
     expect(screen.getByTestId("home-stats").textContent).toBe("1 workspaces · 0 live · 0 waiting");
@@ -260,8 +261,8 @@ describe("HomeView", () => {
     });
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
 
-    expect(screen.getByRole("button", { name: /успешно/i })).toBe(screen.getByTestId("home-row-ok"));
-    expect(screen.getByRole("button", { name: /с ошибкой/i })).toBe(screen.getByTestId("home-row-bad"));
+    expect(screen.getByRole("button", { name: new RegExp(strings.home.ok, "i") })).toBe(screen.getByTestId("home-row-ok"));
+    expect(screen.getByRole("button", { name: new RegExp(strings.home.withError, "i") })).toBe(screen.getByTestId("home-row-bad"));
   });
 
   it("a section is omitted entirely when it has no sessions", () => {
@@ -272,11 +273,11 @@ describe("HomeView", () => {
       },
     });
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
-    expect(screen.queryByRole("region", { name: "Нужен ты" })).toBeNull();
-    expect(screen.queryByText("Нужен ты")).toBeNull();
+    expect(screen.queryByRole("region", { name: strings.home.needsYou })).toBeNull();
+    expect(screen.queryByText(strings.home.needsYou)).toBeNull();
   });
 
-  it("task-19: HomeGoals renders BELOW all three attention sections — the amber «Нужен ты» block keeps its pinned-top position", () => {
+  it("task-19: HomeGoals renders BELOW all three attention sections — the amber «Needs you» block keeps its pinned-top position", () => {
     useAppStore.setState({
       workspaces: { w1: wsA },
       sessions: {
@@ -322,9 +323,9 @@ describe("HomeView", () => {
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
 
     const goalsSection = screen.getByTestId("home-goals");
-    const waitingHeading = screen.getByText("Нужен ты");
-    const runningHeading = screen.getByText("Работают");
-    const exitedHeading = screen.getByText("Завершились недавно");
+    const waitingHeading = screen.getByText(strings.home.needsYou);
+    const runningHeading = screen.getByText(strings.home.runningSection);
+    const exitedHeading = screen.getByText(strings.home.recentlyFinished);
 
     // DOCUMENT_POSITION_FOLLOWING on the LEFT-hand node means the left node comes BEFORE the
     // right node in document order — every attention section must precede the goals panel.

@@ -17,8 +17,8 @@ describe("Toast (S2 T9, design-system.md Toast atom, spec §7 honest error surfa
 
   it("renders the current toast message with role=alert when showToast is called", () => {
     render(<Toast />);
-    act(() => useAppStore.getState().showToast("Не удалось подключиться к демону"));
-    expect(screen.getByRole("alert").textContent).toBe("Не удалось подключиться к демону");
+    act(() => useAppStore.getState().showToast("Failed to connect to the daemon"));
+    expect(screen.getByRole("alert").textContent).toBe("Failed to connect to the daemon");
   });
 
   it("clears when dismissToast is called", () => {

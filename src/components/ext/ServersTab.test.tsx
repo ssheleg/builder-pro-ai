@@ -10,7 +10,7 @@ const mcpSetServerBearerMock = vi.fn();
 const mcpConnectMock = vi.fn();
 const mcpDisconnectMock = vi.fn();
 const trustGrantConsentMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../../ipc/orchd", () => ({
   mcpAddServer: (...a: unknown[]) => mcpAddServerMock(...a),
   mcpSetServerEnabled: (...a: unknown[]) => mcpSetServerEnabledMock(...a),
@@ -59,7 +59,7 @@ beforeEach(() => {
   mcpConnectMock.mockReset().mockResolvedValue({ protocolVersion: "2025-11-25", toolCount: 3 });
   mcpDisconnectMock.mockReset().mockResolvedValue(undefined);
   trustGrantConsentMock.mockReset().mockResolvedValue(undefined);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   vi.spyOn(window, "confirm").mockReturnValue(true);
   useAppStore.setState(
     {
@@ -122,7 +122,7 @@ describe("ServersTab", () => {
     expect(screen.getByTestId("server-create-submit")).toHaveProperty("disabled", false);
   });
 
-  it("clicking «включить/выключить» calls mcpSetServerEnabled with the flipped flag", async () => {
+  it("clicking enable/disable calls mcpSetServerEnabled with the flipped flag", async () => {
     useAppStore.setState({ mcpServers: [makeServer({ enabled: true })] }, false);
     render(<ServersTab />);
     fireEvent.click(screen.getByTestId("server-toggle-enabled-s1"));
@@ -131,7 +131,7 @@ describe("ServersTab", () => {
     });
   });
 
-  it("clicking «удалить» confirms then calls mcpDeleteServer", async () => {
+  it("clicking delete confirms then calls mcpDeleteServer", async () => {
     useAppStore.setState({ mcpServers: [makeServer()] }, false);
     render(<ServersTab />);
     fireEvent.click(screen.getByTestId("server-delete-s1"));
@@ -148,7 +148,7 @@ describe("ServersTab", () => {
     expect(mcpDeleteServerMock).not.toHaveBeenCalled();
   });
 
-  it("clicking «отключить» calls mcpDisconnect directly (no consent gate on disconnect)", async () => {
+  it("clicking disconnect calls mcpDisconnect directly (no consent gate on disconnect)", async () => {
     useAppStore.setState({ mcpServers: [makeServer()] }, false);
     render(<ServersTab />);
     fireEvent.click(screen.getByTestId("server-disconnect-s1"));
@@ -199,7 +199,7 @@ describe("ServersTab", () => {
     });
   });
 
-  it("Отмена in ConnectDialog closes it without calling trustGrantConsent/mcpConnect", () => {
+  it("Cancel in ConnectDialog closes it without calling trustGrantConsent/mcpConnect", () => {
     useAppStore.setState({ mcpServers: [makeServer()] }, false);
     render(<ServersTab />);
     fireEvent.click(screen.getByTestId("server-connect-s1"));
@@ -211,14 +211,14 @@ describe("ServersTab", () => {
 
   it("a consent/connect failure shows an in-dialog error and keeps the dialog open", async () => {
     trustGrantConsentMock.mockRejectedValueOnce({ kind: "daemon", code: "Consent", message: "denied" });
-    describeOrchdErrorMock.mockReturnValue("требуется согласие: denied");
+    describeOrchdErrorMock.mockReturnValue("consent required: denied");
     useAppStore.setState({ mcpServers: [makeServer()] }, false);
     render(<ServersTab />);
     fireEvent.click(screen.getByTestId("server-connect-s1"));
     fireEvent.click(screen.getByTestId("connect-dialog-confirm"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("connect-dialog-error").textContent).toBe("требуется согласие: denied");
+      expect(screen.getByTestId("connect-dialog-error").textContent).toBe("consent required: denied");
     });
     expect(screen.getByTestId("connect-dialog")).toBeTruthy();
     expect(mcpConnectMock).not.toHaveBeenCalled();

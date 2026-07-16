@@ -10,6 +10,7 @@ vi.mock("../../ipc/orchd", () => ({
 import { ArtifactsTab } from "./ArtifactsTab";
 import { useAppStore } from "../../store/store";
 import type { McpArtifact, McpServer } from "../../ipc/orchd-types";
+import { strings } from "../../strings";
 
 function makeArtifact(over: Partial<McpArtifact> = {}): McpArtifact {
   return {
@@ -78,7 +79,7 @@ describe("ArtifactsTab", () => {
     expect(screen.getByTestId("artifact-source-art-1").textContent).toBe("Prowl");
     expect(row.textContent).not.toContain("undefined");
     expect(screen.getByTestId("artifact-untrusted-art-1").textContent).toContain(
-      "непроверенные данные",
+      strings.ext.unverified,
     );
   });
 
@@ -99,7 +100,7 @@ describe("ArtifactsTab", () => {
     expect(screen.getByTestId("artifact-source-art-1").textContent).toBe("acct-1");
   });
 
-  it("content is hidden until «показать содержимое» is clicked, then shows content_text", () => {
+  it("content is hidden until \"show content\" is clicked, then shows content_text", () => {
     useAppStore.setState({ mcpArtifacts: [makeArtifact()] }, false);
     render(<ArtifactsTab />);
     expect(screen.queryByTestId("artifact-content-art-1")).toBeNull();

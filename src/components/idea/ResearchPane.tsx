@@ -5,14 +5,15 @@ import type { Idea, McpArtifact, ResearchRun, ResearchStatus } from "../../ipc/o
 import { ArtifactViewer } from "../ext/ArtifactsTab";
 import { FormInsightDialog } from "./FormInsightDialog";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const RESEARCH_STATUS_LABEL: Record<ResearchStatus, string> = {
-  pending: "ожидание",
-  running: "выполняется",
-  done: "готово",
-  failed: "ошибка",
+  pending: strings.research.runStatus.pending,
+  running: strings.research.runStatus.running,
+  done: strings.research.runStatus.done,
+  failed: strings.research.runStatus.failed,
 };
 
 const paneStyle: CSSProperties = {
@@ -77,19 +78,19 @@ interface OpenInsightTarget {
  * comment) — this component never fetches the run LIST itself, only individual artifact CONTENT
  * on demand.
  *
- * Per run: a status badge. A `done` run additionally offers «показать артефакт», which fetches
+ * Per run: a status badge. A `done` run additionally offers "show artifact", which fetches
  * `mcpGetArtifact(artifactId)` on first click and renders it via the REUSED `ArtifactViewer`
  * (`../ext/ArtifactsTab.tsx`, S-EXT's untrusted-banner viewer — not a re-implementation) plus
- * «Сформировать insight» (fetches the artifact too, if not already cached, then opens
+ * "Form insight" (fetches the artifact too, if not already cached, then opens
  * `FormInsightDialog` prefilled from it). A `failed` run shows its `errorKind` plus a
- * «сформировать insight без ресёрча» affordance (Q8: the degraded path) that opens
+ * "form insight without research" affordance (Q8: the degraded path) that opens
  * `FormInsightDialog` with a `null` artifact — never fetches (there is nothing to fetch, a failed
  * run has no `artifactId`).
  *
  * Honest degradation (spec §10, T8 discipline): the two insight-forming affordances — the ones
  * that lead into a MUTATING flow (`FormInsightDialog`) — are `disabled={disabled}` (the caller
  * passes `orchdDown`), mirroring `IdeasList`'s own choice to disable even its dialog-opening
- * triggers while the daemon is down. «показать артефакт» is a plain read and stays enabled — a
+ * triggers while the daemon is down. "show artifact" is a plain read and stays enabled — a
  * failed attempt while down surfaces the same honest toast every other read failure does.
  */
 export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Element {
@@ -143,7 +144,7 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
   if (runs.length === 0) {
     return (
       <div data-testid="research-pane-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-        исследований по этой идее пока нет
+        {strings.research.emptyRuns}
       </div>
     );
   }
@@ -170,7 +171,7 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
                     onClick={() => void handleShowArtifact(run)}
                     style={textButtonStyle}
                   >
-                    показать артефакт
+                    {strings.research.showArtifact}
                   </button>
                   <button
                     type="button"
@@ -179,7 +180,7 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
                     onClick={() => void handleFormInsightFromDone(run)}
                     style={textButtonStyle}
                   >
-                    Сформировать insight
+                    {strings.research.formInsight}
                   </button>
                 </>
               )}
@@ -192,14 +193,14 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
                   onClick={() => handleFormInsightWithoutResearch(run)}
                   style={textButtonStyle}
                 >
-                  сформировать insight без ресёрча
+                  {strings.research.formInsightNoResearch}
                 </button>
               )}
             </div>
 
             {run.status === "failed" && (
               <span data-testid={`research-run-error-kind-${run.id}`} style={errorKindStyle}>
-                {run.errorKind ?? "неизвестная ошибка"}
+                {run.errorKind ?? strings.research.unknownError}
               </span>
             )}
 

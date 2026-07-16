@@ -3,6 +3,7 @@ import { useAppStore } from "../store/store";
 import { readFilePreview } from "../ipc/fs";
 import type { FilePreview as FilePreviewData, FsError } from "../ipc/fs";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -13,15 +14,15 @@ function describeFsError(err: unknown): string {
   const e = err as Partial<FsError> | undefined;
   switch (e?.kind) {
     case "notFound":
-      return "файл не найден";
+      return strings.errors.fs.notFound;
     case "permissionDenied":
-      return "нет доступа";
+      return strings.errors.fs.noAccess;
     case "outsideRoot":
-      return "путь вне корня воркспейса";
+      return strings.errors.fs.outsideRoot;
     case "tooLarge":
-      return "файл слишком большой";
+      return strings.errors.fs.tooLarge;
     case "io":
-      return e.message ?? "ошибка ввода-вывода";
+      return e.message ?? strings.errors.fs.io;
     default:
       return err instanceof Error ? err.message : String(err);
   }
@@ -92,7 +93,7 @@ export function FilePreview(): JSX.Element {
         if (requestRef.current !== token) return;
         const msg = describeFsError(err);
         setError(msg);
-        showToast(`Не удалось открыть файл: ${msg}`);
+        showToast(strings.files.openFileFailed(msg));
       })
       .finally(() => {
         if (requestRef.current === token) setLoading(false);
@@ -100,17 +101,17 @@ export function FilePreview(): JSX.Element {
   }, [selectedFile, showToast]);
 
   if (!selectedFile) {
-    return <div style={containerStyle}>Выберите файл для просмотра</div>;
+    return <div style={containerStyle}>{strings.files.selectFile}</div>;
   }
 
   if (loading) {
-    return <div style={containerStyle}>Загрузка…</div>;
+    return <div style={containerStyle}>{strings.files.loading}</div>;
   }
 
   if (error !== null) {
     return (
       <div style={{ ...containerStyle, color: theme.colors.statusExited }}>
-        {`Не удалось открыть файл: ${error}`}
+        {strings.files.openFileFailed(error)}
       </div>
     );
   }
@@ -120,13 +121,13 @@ export function FilePreview(): JSX.Element {
   }
 
   if (preview.kind === "binary") {
-    return <div style={containerStyle}>{`Бинарный файл · ${formatBytes(preview.size)}`}</div>;
+    return <div style={containerStyle}>{strings.files.binaryFile(formatBytes(preview.size))}</div>;
   }
 
   if (preview.kind === "tooLarge") {
     return (
       <div style={containerStyle}>
-        {`Файл слишком большой для предпросмотра · ${formatBytes(preview.size)}`}
+        {strings.files.tooLargePreview(formatBytes(preview.size))}
       </div>
     );
   }
@@ -135,7 +136,7 @@ export function FilePreview(): JSX.Element {
     <div style={{ height: "100%", minHeight: 0, overflow: "auto" }}>
       {preview.truncated && (
         <div style={{ padding: "4px 8px", fontSize: 11, color: theme.colors.statusWaiting }}>
-          Содержимое могло измениться во время чтения — показан неполный результат.
+          {strings.files.contentMayHaveChanged}
         </div>
       )}
       <pre

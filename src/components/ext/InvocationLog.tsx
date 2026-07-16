@@ -3,6 +3,7 @@ import { useAppStore } from "../../store/store";
 import { trustSetPolicy, describeOrchdError } from "../../ipc/orchd";
 import type { McpInvocation, Policy, PolicyScope } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -112,9 +113,9 @@ const emptyStyle: CSSProperties = {
 };
 
 const SCOPE_LABEL: Record<PolicyScope, string> = {
-  global: "глобально",
-  project: "проект",
-  server: "сервер",
+  global: strings.common.scope.global,
+  project: strings.common.scope.project,
+  server: strings.common.scope.server,
 };
 
 function formatTimestamp(ms: number): string {
@@ -128,7 +129,7 @@ function sourceLabel(inv: McpInvocation, serverNames: Record<string, string>): s
 }
 
 /**
- * «Журнал» tab (S-EXT §8, T18): the invocation log (`mcpListInvocations`, spec §5) + the
+ * Log tab (S-EXT §8, T18): the invocation log (`mcpListInvocations`, spec §5) + the
  * append-only audit log (`trustListAudit`, spec §4/§6, BL-22) + a spend/rate policy-cap editor
  * (`trustListPolicies`/`trustSetPolicy`).
  *
@@ -175,7 +176,7 @@ export function InvocationLog(): JSX.Element {
     const spend = spendCapUsd.trim() === "" ? null : Number(spendCapUsd);
     const rate = ratePerMin.trim() === "" ? null : Number(ratePerMin);
     if ((spend !== null && Number.isNaN(spend)) || (rate !== null && Number.isNaN(rate))) {
-      showToast("предел должен быть числом");
+      showToast(strings.ext.log.limitMustBeNumber);
       return;
     }
     try {
@@ -192,23 +193,23 @@ export function InvocationLog(): JSX.Element {
   return (
     <div data-testid="invocation-log">
       <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>Лимиты (spend/rate)</div>
+        <div style={sectionTitleStyle}>{strings.ext.log.limitsTitle}</div>
         <div style={createFormStyle}>
           <select
             data-testid="policy-scope"
-            aria-label="Область"
+            aria-label={strings.ext.log.scopeAria}
             value={scope}
             onChange={(e) => setScope(e.target.value as PolicyScope)}
             style={selectStyle}
           >
-            <option value="global">глобально</option>
-            <option value="project">проект</option>
-            <option value="server">сервер</option>
+            <option value="global">{strings.common.scope.global}</option>
+            <option value="project">{strings.common.scope.project}</option>
+            <option value="server">{strings.common.scope.server}</option>
           </select>
           <input
             data-testid="policy-ref-id"
-            aria-label="ID проекта или сервера"
-            placeholder={scope === "global" ? "не требуется" : "id проекта/сервера"}
+            aria-label={strings.ext.log.refIdAria}
+            placeholder={scope === "global" ? strings.ext.log.refIdNotRequired : strings.ext.log.refIdPlaceholder}
             value={refId}
             disabled={scope === "global"}
             onChange={(e) => setRefId(e.target.value)}
@@ -216,16 +217,16 @@ export function InvocationLog(): JSX.Element {
           />
           <input
             data-testid="policy-spend-cap"
-            aria-label="Лимит расходов, USD"
-            placeholder="лимит $ (пусто = без лимита)"
+            aria-label={strings.ext.log.spendCapAria}
+            placeholder={strings.ext.log.spendCapPlaceholder}
             value={spendCapUsd}
             onChange={(e) => setSpendCapUsd(e.target.value)}
             style={createInputStyle}
           />
           <input
             data-testid="policy-rate-per-min"
-            aria-label="Лимит вызовов в минуту"
-            placeholder="вызовов/мин (пусто = без лимита)"
+            aria-label={strings.ext.log.ratePerMinAria}
+            placeholder={strings.ext.log.ratePerMinPlaceholder}
             value={ratePerMin}
             onChange={(e) => setRatePerMin(e.target.value)}
             style={createInputStyle}
@@ -237,22 +238,22 @@ export function InvocationLog(): JSX.Element {
             onClick={() => void handleSetPolicy()}
             style={{ ...primaryButtonStyle, opacity: orchdDown || setBlocked ? 0.5 : 1 }}
           >
-            задать лимит
+            {strings.ext.log.setLimit}
           </button>
         </div>
 
         {policies.length === 0 ? (
           <div data-testid="policies-empty" style={emptyStyle}>
-            лимиты не заданы
+            {strings.ext.log.noLimits}
           </div>
         ) : (
           <table style={tableStyle}>
             <thead>
               <tr>
-                <th style={thStyle}>область</th>
+                <th style={thStyle}>{strings.ext.log.thScope}</th>
                 <th style={thStyle}>id</th>
-                <th style={thStyle}>лимит $</th>
-                <th style={thStyle}>вызовов/мин</th>
+                <th style={thStyle}>{strings.ext.log.thCap}</th>
+                <th style={thStyle}>{strings.ext.log.thRate}</th>
               </tr>
             </thead>
             <tbody>
@@ -270,21 +271,21 @@ export function InvocationLog(): JSX.Element {
       </div>
 
       <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>Вызовы</div>
+        <div style={sectionTitleStyle}>{strings.ext.log.callsTitle}</div>
         {invocations.length === 0 ? (
           <div data-testid="invocations-empty" style={emptyStyle}>
-            нет вызовов
+            {strings.ext.log.noCalls}
           </div>
         ) : (
           <table style={tableStyle}>
             <thead>
               <tr>
-                <th style={thStyle}>источник</th>
-                <th style={thStyle}>инструмент</th>
-                <th style={thStyle}>статус</th>
-                <th style={thStyle}>задержка, мс</th>
-                <th style={thStyle}>стоимость, $</th>
-                <th style={thStyle}>время</th>
+                <th style={thStyle}>{strings.ext.log.thSource}</th>
+                <th style={thStyle}>{strings.ext.log.thTool}</th>
+                <th style={thStyle}>{strings.ext.log.thStatus}</th>
+                <th style={thStyle}>{strings.ext.log.thLatency}</th>
+                <th style={thStyle}>{strings.ext.log.thCost}</th>
+                <th style={thStyle}>{strings.ext.log.thTime}</th>
               </tr>
             </thead>
             <tbody>
@@ -313,19 +314,19 @@ export function InvocationLog(): JSX.Element {
       </div>
 
       <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>Аудит</div>
+        <div style={sectionTitleStyle}>{strings.ext.log.auditTitle}</div>
         {auditRows.length === 0 ? (
           <div data-testid="audit-rows-empty" style={emptyStyle}>
-            нет записей аудита
+            {strings.ext.log.noAudit}
           </div>
         ) : (
           <table style={tableStyle}>
             <thead>
               <tr>
-                <th style={thStyle}>действие</th>
-                <th style={thStyle}>решение</th>
-                <th style={thStyle}>причина</th>
-                <th style={thStyle}>время</th>
+                <th style={thStyle}>{strings.ext.log.thAction}</th>
+                <th style={thStyle}>{strings.ext.log.thDecision}</th>
+                <th style={thStyle}>{strings.ext.log.thReason}</th>
+                <th style={thStyle}>{strings.ext.log.thTime}</th>
               </tr>
             </thead>
             <tbody>

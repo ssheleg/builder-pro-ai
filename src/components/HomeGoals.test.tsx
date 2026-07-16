@@ -5,6 +5,7 @@ import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { HomeGoals } from "./HomeGoals";
 import { useAppStore } from "../store/store";
 import type { Goal, Project } from "../ipc/orchd-types";
+import { strings } from "../strings";
 
 function makeProject(over: Partial<Project> = {}): Project {
   return {
@@ -126,9 +127,9 @@ describe("HomeGoals", () => {
     const block = screen.getByTestId("home-goals-project-p1");
     expect(block.textContent).toContain("Ship v1");
     expect(screen.getByTestId("home-goals-chip-child1").textContent).toContain("Onboarding");
-    expect(screen.getByTestId("home-goals-chip-child1").textContent).toContain("активна");
+    expect(screen.getByTestId("home-goals-chip-child1").textContent).toContain(strings.goals.status.active);
     expect(screen.getByTestId("home-goals-chip-child2").textContent).toContain("Billing");
-    expect(screen.getByTestId("home-goals-chip-child2").textContent).toContain("достигнута");
+    expect(screen.getByTestId("home-goals-chip-child2").textContent).toContain(strings.goals.status.achieved);
     expect(screen.queryByTestId("home-goals-chip-grandchild")).toBeNull();
     expect(block.textContent).not.toContain("Grandchild");
   });

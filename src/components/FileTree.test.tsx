@@ -30,6 +30,7 @@ import { FileTree } from "./FileTree";
 import { useAppStore } from "../store/store";
 import type { Workspace } from "../ipc/types";
 import type { FsEntry } from "../ipc/fs";
+import { strings } from "../strings";
 
 const ws: Workspace = { id: "w1", name: "proj", rootPath: "/proj", roots: ["/proj"] };
 
@@ -256,10 +257,10 @@ describe("FileTree", () => {
 
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: a.txt/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("a.txt") }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /Удалить/i }));
+      fireEvent.click(screen.getByRole("menuitem", { name: strings.common.delete }));
     });
 
     expect(confirmSpy).toHaveBeenCalled();
@@ -281,10 +282,10 @@ describe("FileTree", () => {
 
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: a.txt/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("a.txt") }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /Удалить/i }));
+      fireEvent.click(screen.getByRole("menuitem", { name: strings.common.delete }));
     });
 
     expect(deleteEntryMock).not.toHaveBeenCalled();
@@ -309,10 +310,10 @@ describe("FileTree", () => {
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: sub/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("sub") }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /Новый файл/i }));
+      fireEvent.click(screen.getByRole("menuitem", { name: strings.files.newFile }));
     });
     const input = screen.getByRole("textbox");
     fireEvent.change(input, { target: { value: "new.txt" } });
@@ -338,10 +339,10 @@ describe("FileTree", () => {
       fireEvent.click(screen.getByText("proj"));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: a.txt/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("a.txt") }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /Переименовать/i }));
+      fireEvent.click(screen.getByRole("menuitem", { name: strings.files.rename }));
     });
     const input = screen.getByRole("textbox") as HTMLInputElement;
     expect(input.value).toBe("a.txt");
@@ -361,12 +362,12 @@ describe("FileTree", () => {
       fireEvent.click(screen.getByText("proj"));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: proj/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("proj") }));
     });
-    expect(screen.getByRole("menuitem", { name: /Новый файл/i })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /Новая папка/i })).toBeTruthy();
-    expect(screen.queryByRole("menuitem", { name: /Переименовать/i })).toBeNull();
-    expect(screen.queryByRole("menuitem", { name: /Удалить/i })).toBeNull();
+    expect(screen.getByRole("menuitem", { name: strings.files.newFile })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: strings.files.newFolder })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: strings.files.rename })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: strings.common.delete })).toBeNull();
   });
 
   it("Reveal in Finder and Open External call their IPC wrappers", async () => {
@@ -379,18 +380,18 @@ describe("FileTree", () => {
       fireEvent.click(screen.getByText("proj"));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: a.txt/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("a.txt") }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /Показать в Finder/i }));
+      fireEvent.click(screen.getByRole("menuitem", { name: strings.files.reveal }));
     });
     expect(revealInFinderMock).toHaveBeenCalledWith("/proj", "a.txt");
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: a.txt/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("a.txt") }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /внешн/i }));
+      fireEvent.click(screen.getByRole("menuitem", { name: strings.files.openExternal }));
     });
     expect(openExternalMock).toHaveBeenCalledWith("/proj", "a.txt");
   });
@@ -436,7 +437,7 @@ describe("FileTree", () => {
       fireEvent.click(screen.getByText("proj"));
     });
     expect(useAppStore.getState().toast).toBeTruthy();
-    expect(useAppStore.getState().toast).toMatch(/доступ/i);
+    expect(useAppStore.getState().toast).toContain(strings.errors.fs.noAccess);
   });
 
   it("(h) an FsError from deleteEntry fires a toast (never a silent failure)", async () => {
@@ -451,10 +452,10 @@ describe("FileTree", () => {
     });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Действия: a.txt/i }));
+      fireEvent.click(screen.getByRole("button", { name: strings.files.actionsAria("a.txt") }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /Удалить/i }));
+      fireEvent.click(screen.getByRole("menuitem", { name: strings.common.delete }));
     });
     expect(useAppStore.getState().toast).toMatch(/disk full/);
     confirmSpy.mockRestore();

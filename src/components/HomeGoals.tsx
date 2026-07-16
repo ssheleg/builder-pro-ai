@@ -2,17 +2,18 @@ import { useEffect, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../store/store";
 import type { Goal, GoalStatus, Project } from "../ipc/orchd-types";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
-  active: "активна",
-  achieved: "достигнута",
-  dropped: "брошена",
+  active: strings.goals.status.active,
+  achieved: strings.goals.status.achieved,
+  dropped: strings.goals.status.dropped,
 };
 
 /** Status-chip accent (design-system.md "Lifecycle chip" atom, read-only variant here — no amber,
- * amber stays reserved for "нужен ты"): `active` is the neutral default, `achieved` gets the
+ * amber stays reserved for "needs you"): `active` is the neutral default, `achieved` gets the
  * green success color, `dropped` gets the red exited color — a glance tells state without reading
  * the label. */
 const STATUS_COLOR: Record<GoalStatus, string> = {
@@ -109,7 +110,7 @@ function directChildrenOf(goals: Goal[], strategicId: string): Goal[] {
 /**
  * Home goals panel (spec §10, task-19): per ACTIVE project, the strategic goal's title + its
  * direct `additional` children as status chips. Mounts BELOW the three S2 attention sections in
- * `HomeView.tsx` — the amber "Нужен ты" block keeps its pinned-top position (S2 §6.2 rule wins
+ * `HomeView.tsx` — the amber "Needs you" block keeps its pinned-top position (S2 §6.2 rule wins
  * over goals prominence, spec §10 verbatim).
  *
  * Reads `goalsByProject` from the store; a project whose goals haven't been fetched yet
@@ -144,8 +145,8 @@ export function HomeGoals(): JSX.Element | null {
   if (activeProjects.length === 0) return null;
 
   return (
-    <section aria-label="Цели" data-testid="home-goals">
-      <h2 style={sectionHeadingStyle}>Цели</h2>
+    <section aria-label={strings.home.goals} data-testid="home-goals">
+      <h2 style={sectionHeadingStyle}>{strings.home.goals}</h2>
       {activeProjects.map((p) => {
         const goals = goalsByProject[p.id];
         if (!goals) return null; // not fetched yet — the effect above is already chasing it
@@ -180,7 +181,7 @@ export function HomeGoals(): JSX.Element | null {
       })}
       {activeProjects.every((p) => !goalsByProject[p.id]) && (
         <div data-testid="home-goals-empty" style={emptyNoteStyle}>
-          Цели загружаются…
+          {strings.home.goalsLoading}
         </div>
       )}
     </section>

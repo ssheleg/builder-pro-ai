@@ -16,7 +16,7 @@ describe("strings", () => {
   });
 
   it("carries no Cyrillic in any leaf value", () => {
-    const cyrillic = /[А-Яа-яЁё]/;
+    const cyrillic = /[\u0400-\u04FF]/;
     const walk = (node: unknown): void => {
       if (typeof node === "string") {
         expect(cyrillic.test(node)).toBe(false);

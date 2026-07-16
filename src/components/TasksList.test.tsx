@@ -8,7 +8,7 @@ const orchdSetTaskStatusMock = vi.fn();
 const orchdSetTaskRankMock = vi.fn();
 const orchdDeleteTaskMock = vi.fn();
 const orchdListTasksMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../ipc/orchd", () => ({
   orchdCreateTask: (...a: unknown[]) => orchdCreateTaskMock(...a),
@@ -30,7 +30,7 @@ function makeTask(over: Partial<DomainTask> & { id: string }): DomainTask {
   return {
     projectId,
     parentId: null,
-    title: "задача",
+    title: "task",
     body: "",
     status: "backlog",
     source: "idea",
@@ -54,7 +54,7 @@ beforeEach(() => {
   orchdSetTaskRankMock.mockReset().mockResolvedValue(makeTask({ id: "rank-changed" }));
   orchdDeleteTaskMock.mockReset().mockResolvedValue(undefined);
   orchdListTasksMock.mockReset().mockResolvedValue([]);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState({ tasksByProject: {}, toast: null, orchdDown: false }, false);
 });
 
@@ -153,7 +153,7 @@ describe("TasksList", () => {
     expect(childPad).toBeGreaterThan(parentPad);
   });
 
-  it("delete on a task with children shows the «удалит N подзадач» warning and only calls orchdDeleteTask after confirm", async () => {
+  it('delete on a task with children shows the "will delete N subtasks" warning and only calls orchdDeleteTask after confirm', async () => {
     const parent = makeTask({ id: "parent", status: "backlog", rank: 0 });
     const child1 = makeTask({ id: "child1", status: "backlog", rank: 10, parentId: "parent" });
     const child2 = makeTask({ id: "child2", status: "todo", rank: 0, parentId: "parent" });
@@ -169,7 +169,7 @@ describe("TasksList", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     fireEvent.click(deleteButton);
     expect(confirmSpy).toHaveBeenCalledWith(
-      expect.stringContaining("удалит 2 подзадач"),
+      expect.stringContaining("will delete 2 subtasks"),
     );
     expect(orchdDeleteTaskMock).not.toHaveBeenCalled();
 
@@ -189,22 +189,22 @@ describe("TasksList", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     fireEvent.click(screen.getByTestId("task-delete-solo"));
 
-    expect(confirmSpy).toHaveBeenCalledWith(expect.not.stringContaining("подзадач"));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.not.stringContaining("subtasks"));
     confirmSpy.mockRestore();
   });
 
   it("the create dialog passes source, parent, and comma-split tags correctly to orchdCreateTask", async () => {
-    const existing = makeTask({ id: "existing", status: "backlog", rank: 0, title: "существующая" });
+    const existing = makeTask({ id: "existing", status: "backlog", rank: 0, title: "existing task" });
     useAppStore.setState({ tasksByProject: { [projectId]: [existing] } }, false);
     orchdListTasksMock.mockResolvedValue([existing]);
 
     render(<TasksList projectId={projectId} />);
 
     fireEvent.change(screen.getByTestId("task-create-title"), {
-      target: { value: "новая задача" },
+      target: { value: "new task" },
     });
     fireEvent.change(screen.getByTestId("task-create-body"), {
-      target: { value: "описание" },
+      target: { value: "description" },
     });
     fireEvent.change(screen.getByTestId("task-create-source"), {
       target: { value: "bug" },
@@ -222,8 +222,8 @@ describe("TasksList", () => {
       expect(orchdCreateTaskMock).toHaveBeenCalledWith(
         projectId,
         "existing",
-        "новая задача",
-        "описание",
+        "new task",
+        "description",
         null,
         "bug",
         null,
@@ -242,7 +242,7 @@ describe("TasksList", () => {
   it("a rejecting status-change mutation surfaces via showToast", async () => {
     const a = makeTask({ id: "a", status: "backlog", rank: 0 });
     useAppStore.setState({ tasksByProject: { [projectId]: [a] } }, false);
-    const commandError = { kind: "daemon", code: "Invariant", message: "нельзя" };
+    const commandError = { kind: "daemon", code: "Invariant", message: "not allowed" };
     orchdSetTaskStatusMock.mockRejectedValueOnce(commandError);
 
     render(<TasksList projectId={projectId} />);
@@ -252,7 +252,7 @@ describe("TasksList", () => {
     fireEvent.change(select, { target: { value: "todo" } });
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalledWith(commandError));
-    await waitFor(() => expect(useAppStore.getState().toast).toBe("оркестратор: ошибка"));
+    await waitFor(() => expect(useAppStore.getState().toast).toBe("orchestrator: error"));
   });
 
   it("mounts empty: fetches the task list via refreshTasks when nothing is cached for this project yet", async () => {

@@ -3,6 +3,7 @@ import { useAppStore } from "../../store/store";
 import { researchStartRun, describeOrchdError } from "../../ipc/orchd";
 import type { Idea, Policy } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -146,10 +147,10 @@ function effectivePolicy(policies: Policy[], serverId: string, projectId: string
 }
 
 /**
- * «Исследовать» dialog (S-IDEA spec §7): pick a connected+enabled MCP server → fetch its tools →
+ * "Research" dialog (S-IDEA spec §7): pick a connected+enabled MCP server → fetch its tools →
  * pick a tool → an owner-editable args JSON field (seeded from the idea's title/body) → a
  * spend-approval preflight (the effective `trustListPolicies` row for the picked server's scope +
- * an honest "cost unknown before the call" note, spec §7) → «Запустить» fires `researchStartRun`.
+ * an honest "cost unknown before the call" note, spec §7) → "Run" fires `researchStartRun`.
  *
  * "Connected" is approximated the same way `ServersTab` does (`server.protocolVersion !== null` —
  * set on first successful `McpConnect`, `null` until then): a server that has never connected has
@@ -160,9 +161,9 @@ function effectivePolicy(policies: Policy[], serverId: string, projectId: string
  * that survives a concurrent toast clobbering the global queue-of-one, and the dialog stays open
  * on failure so the owner can retry.
  *
- * Honest degradation (spec §10, T8 discipline): «Запустить» is `disabled={orchdDown}`
+ * Honest degradation (spec §10, T8 discipline): "Run" is `disabled={orchdDown}`
  * independently of whatever gates the button that opened this dialog (`IdeasList`'s own
- * `disabled={orchdDown}` on its «Исследовать» trigger) — this component must never fire
+ * `disabled={orchdDown}` on its "Research" trigger) — this component must never fire
  * `researchStartRun` while the daemon is down even if reached some other way.
  */
 export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): JSX.Element {
@@ -215,7 +216,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
     try {
       JSON.parse(raw);
     } catch {
-      setArgsError("аргументы должны быть валидным JSON");
+      setArgsError(strings.common.argsInvalidJson);
       return;
     }
     setArgsError(null);
@@ -223,7 +224,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
     try {
       await researchStartRun(idea.id, serverId, toolName, raw);
       await refreshResearchRuns(idea.id);
-      showToast("Запуск исследования начат");
+      showToast(strings.research.runStarted);
       onClose();
     } catch (e) {
       const message = describeOrchdError(e);
@@ -245,20 +246,20 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
         style={cardStyle}
       >
         <div id="research-run-title" style={titleStyle}>
-          Исследовать «{idea.title}»
+          {strings.research.dialogTitle(idea.title)}
         </div>
 
         <label style={fieldLabelStyle}>
-          Сервер
+          {strings.research.serverLabel}
           <select
             ref={nameRef}
             data-testid="research-run-server-select"
-            aria-label="MCP-сервер"
+            aria-label={strings.research.serverAria}
             value={serverId}
             onChange={(e) => handleServerChange(e.target.value)}
             style={selectStyle}
           >
-            <option value="">выбрать сервер…</option>
+            <option value="">{strings.research.selectServer}</option>
             {connectedServers.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
@@ -268,16 +269,16 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
         </label>
 
         <label style={fieldLabelStyle}>
-          Инструмент
+          {strings.research.toolLabel}
           <select
             data-testid="research-run-tool-select"
-            aria-label="Инструмент"
+            aria-label={strings.research.toolAria}
             value={toolName}
             disabled={serverId === ""}
             onChange={(e) => setToolName(e.target.value)}
             style={selectStyle}
           >
-            <option value="">выбрать инструмент…</option>
+            <option value="">{strings.research.selectTool}</option>
             {tools.map((t) => (
               <option key={t.id} value={t.name}>
                 {t.title ?? t.name}
@@ -287,10 +288,10 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
         </label>
 
         <label style={fieldLabelStyle}>
-          Аргументы (JSON)
+          {strings.research.argsLabel}
           <textarea
             data-testid="research-run-args"
-            aria-label="Аргументы вызова"
+            aria-label={strings.research.argsAria}
             value={argsDraft}
             onChange={(e) => {
               setArgsDraft(e.target.value);
@@ -308,17 +309,16 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
         {serverId !== "" && (
           <div style={preflightStyle}>
             <div data-testid="research-run-policy-scope">
-              область лимита: {policy === null ? "не задана" : SCOPE_LABEL[policy.scope]}
+              {strings.research.limitScope} {policy === null ? strings.research.notSet : SCOPE_LABEL[policy.scope]}
             </div>
             <div data-testid="research-run-policy-spend-cap">
-              лимит расходов: {policy?.spendCapUsd != null ? `$${policy.spendCapUsd}` : "не задан"}
+              {strings.research.spendCap} {policy?.spendCapUsd != null ? `$${policy.spendCapUsd}` : strings.research.notSet}
             </div>
             <div data-testid="research-run-policy-rate">
-              лимит вызовов/мин: {policy?.ratePerMin ?? "не задан"}
+              {strings.research.callsPerMin} {policy?.ratePerMin ?? strings.research.notSet}
             </div>
             <div data-testid="research-run-policy-note" style={noteStyle}>
-              стоимость внешнего вызова обычно неизвестна заранее — оркестратор остановит вызов,
-              только если он превысит текущий лимит.
+              {strings.research.costNote}
             </div>
           </div>
         )}
@@ -336,7 +336,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
             onClick={onClose}
             style={secondaryButtonStyle}
           >
-            Отмена
+            {strings.common.cancel}
           </button>
           <button
             type="button"
@@ -345,7 +345,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
             onClick={() => void handleSubmit()}
             style={{ ...primaryButtonStyle, opacity: submitBlocked ? 0.5 : 1 }}
           >
-            Запустить
+            {strings.research.run}
           </button>
         </div>
       </div>
@@ -354,7 +354,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
 }
 
 const SCOPE_LABEL: Record<Policy["scope"], string> = {
-  global: "глобально",
-  project: "проект",
-  server: "сервер",
+  global: strings.common.scope.global,
+  project: strings.common.scope.project,
+  server: strings.common.scope.server,
 };

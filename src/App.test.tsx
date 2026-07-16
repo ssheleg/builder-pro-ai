@@ -252,6 +252,7 @@ const fakeManager = {
 import { App, changedPathsToParentDirs } from "./App";
 import { useAppStore } from "./store/store";
 import type { SessionMeta } from "./ipc/types";
+import { strings } from "./strings";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: "s1",
@@ -783,7 +784,7 @@ describe("T11: attention-first Home, view switch, watch + fs/workspace event wir
     expect(screen.queryByRole("tablist")).toBeNull();
   });
 
-  it("end-to-end: Пройти from Home switches to the workspace view with that session active and focuses its terminal", async () => {
+  it("end-to-end: Go from Home switches to the workspace view with that session active and focuses its terminal", async () => {
     listWorkspacesMock.mockResolvedValue([{ id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] }]);
     await act(async () => {
       render(<App manager={fakeManager} />);
@@ -799,7 +800,7 @@ describe("T11: attention-first Home, view switch, watch + fs/workspace event wir
     expect(screen.getByTestId("home-stats")).toBeTruthy();
 
     await act(async () => {
-      screen.getByRole("button", { name: /пройти/i }).click();
+      screen.getByRole("button", { name: strings.home.go }).click();
     });
 
     expect(useAppStore.getState().view).toBe("workspace");
@@ -982,10 +983,10 @@ describe("T11: attention-first Home, view switch, watch + fs/workspace event wir
       render(<App manager={fakeManager} />);
     });
     await act(async () => {
-      useAppStore.getState().showToast("что-то пошло не так");
+      useAppStore.getState().showToast("something went wrong");
     });
     const alerts = screen.getAllByRole("alert");
-    expect(alerts.some((el) => el.textContent?.includes("что-то пошло не так"))).toBe(true);
+    expect(alerts.some((el) => el.textContent?.includes("something went wrong"))).toBe(true);
   });
 });
 
@@ -1305,7 +1306,7 @@ describe("S3 T13: orchd domain event wiring", () => {
     expect(orchdListIdeasMock).toHaveBeenCalledWith(null);
     expect(orchdListInsightsMock).toHaveBeenCalledWith(null);
     expect(orchdGetRulesetMock).toHaveBeenCalledWith("project", "p1");
-    // T6 review must-not-drop item (b): the Граф tab must not stay stale after a reconnect any
+    // T6 review must-not-drop item (b): the Graph tab must not stay stale after a reconnect any
     // more than the sibling domain surfaces above do.
     expect(orchdGraphListProjectMock).toHaveBeenCalledWith("p1");
   });
@@ -1373,8 +1374,8 @@ describe("T18: view='project' renders ProjectPanel", () => {
   });
 });
 
-describe("S-EXT §8 T8: «Расширения» view + MCP event wiring", () => {
-  it("clicking the «Расширения» sidebar button sets view to \"ext\" and renders ExtPanel", async () => {
+describe("S-EXT §8 T8: «Extensions» view + MCP event wiring", () => {
+  it("clicking the «Extensions» sidebar button sets view to \"ext\" and renders ExtPanel", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });

@@ -9,17 +9,18 @@ import {
 } from "../ipc/orchd";
 import type { Goal, GoalStatus } from "../ipc/orchd-types";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Confirm copy for the delete-subtree action (S3 spec §10, task-14 brief verbatim). Deleting a
  * goal deletes its whole subtree server-side — this text says so up front, never a silent
  * cascading delete. */
-const DELETE_CONFIRM_TEXT = "удалить ветку целиком?";
+const DELETE_CONFIRM_TEXT = strings.goals.deleteConfirm;
 
-/** «новая цель» is the seed title for a freshly created subgoal (task-14 brief verbatim) — the
+/** "new goal" is the seed title for a freshly created subgoal (task-14 brief verbatim) — the
  * owner renames it inline immediately after, same UX as FileTree's inline-rename-after-create. */
-const NEW_SUBGOAL_TITLE = "новая цель";
+const NEW_SUBGOAL_TITLE = strings.goals.newSubgoal;
 
 interface TreeRow {
   goal: Goal;
@@ -132,9 +133,9 @@ const deleteButtonStyle: CSSProperties = {
 };
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
-  active: "активна",
-  achieved: "достигнута",
-  dropped: "брошена",
+  active: strings.goals.status.active,
+  achieved: strings.goals.status.achieved,
+  dropped: strings.goals.status.dropped,
 };
 
 interface GoalRowProps {
@@ -201,7 +202,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
     <div data-testid={`goal-row-${goal.id}`} role="treeitem" style={rowStyle(depth)}>
       <input
         data-testid={`goal-title-input-${goal.id}`}
-        aria-label="Название цели"
+        aria-label={strings.goals.titleAria}
         value={title}
         disabled={disabled}
         onChange={(e) => setTitle(e.target.value)}
@@ -216,7 +217,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
       />
       <select
         data-testid={`goal-status-${goal.id}`}
-        aria-label="Статус цели"
+        aria-label={strings.goals.statusAria}
         value={goal.status}
         disabled={disabled}
         onChange={(e) => onStatusChange(goal.id, e.target.value as GoalStatus)}
@@ -232,7 +233,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
         <button
           type="button"
           data-testid={`goal-move-up-${goal.id}`}
-          aria-label="Переместить вверх"
+          aria-label={strings.common.moveUp}
           disabled={disabled || !canMoveUp}
           onClick={() => onMoveUp(goal)}
           style={{ ...iconButtonStyle, opacity: canMoveUp ? 1 : 0.35 }}
@@ -244,7 +245,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
         <button
           type="button"
           data-testid={`goal-move-down-${goal.id}`}
-          aria-label="Переместить вниз"
+          aria-label={strings.common.moveDown}
           disabled={disabled || !canMoveDown}
           onClick={() => onMoveDown(goal)}
           style={{ ...iconButtonStyle, opacity: canMoveDown ? 1 : 0.35 }}
@@ -258,7 +259,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
         onClick={() => onAddSubgoal(goal.id)}
         style={textButtonStyle}
       >
-        + подцель
+        {strings.goals.addSubgoal}
       </button>
       {!isStrategic && (
         <button
@@ -268,7 +269,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
           onClick={() => onDelete(goal.id)}
           style={deleteButtonStyle}
         >
-          Удалить
+          {strings.common.delete}
         </button>
       )}
     </div>
@@ -279,7 +280,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
  * Goal-hierarchy editor (S3 spec §10, D5). Renders `goalsByProject[projectId]` as an indent tree
  * — the strategic goal is the pinned root (`parentId: null`, never deletable/movable per the
  * server-side invariant); every `additional` goal always has a parent, so there is no "add
- * top-level goal" affordance, only per-row "+ подцель" targeting that row as the new parent.
+ * top-level goal" affordance, only per-row "+ subgoal" targeting that row as the new parent.
  *
  * Structural mutations (create/delete/move) explicitly `refreshGoals(projectId)` after a
  * successful round-trip so the tree's SHAPE updates immediately rather than waiting on the
@@ -290,7 +291,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
  * honest error surface).
  *
  * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every mutating control
- * on every row (title input, status select, move ▲/▼, "+ подцель", Удалить) is disabled — reads
+ * on every row (title input, status select, move ▲/▼, "+ subgoal", Delete) is disabled — reads
  * (the tree itself) stay live. `ProjectPanel` owns the shared banner; this component only owns
  * disabling its own controls, composed with the pre-existing per-row disable logic (e.g. ▲ on the
  * first sibling) via `disabled || <existing condition>`, never replacing it.
@@ -392,13 +393,13 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
   if (rows.length === 0) {
     return (
       <div data-testid="goal-tree-empty" style={{ color: theme.colors.textDim, fontSize: 13 }}>
-        Дерево целей пусто.
+        {strings.goals.empty}
       </div>
     );
   }
 
   return (
-    <div data-testid="goal-tree" role="tree" aria-label="Дерево целей">
+    <div data-testid="goal-tree" role="tree" aria-label={strings.goals.treeAria}>
       {rows.map(({ goal, depth }) => {
         const isStrategic = goal.kind === "strategic";
         const siblings = siblingsOf(goals, goal);

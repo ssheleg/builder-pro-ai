@@ -8,14 +8,15 @@ import {
 } from "../ipc/orchd";
 import type { PolicyRules, RuleScope } from "../ipc/orchd-types";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
-/** Locked banner copy for the `missing` file state (task-17 brief verbatim: «файл утерян»). No
+/** Locked banner copy for the `missing` file state (task-17 brief verbatim: "file lost"). No
  * copy is locked for `externallyModified` — this one is written to the same terse honesty
  * register. */
-const MISSING_BANNER_TEXT = "файл утерян";
-const MODIFIED_BANNER_TEXT = "файл изменён снаружи";
+const MISSING_BANNER_TEXT = strings.rules.missingBanner;
+const MODIFIED_BANNER_TEXT = strings.rules.modifiedBanner;
 
 /**
  * Store-key format shared with `store.ts`'s `rulesets`/`parseRulesetKey` (spec §10): the global
@@ -44,15 +45,15 @@ function validatePolicy(
   if (trimmedCap !== "") {
     const parsed = Number(trimmedCap);
     if (!Number.isFinite(parsed)) {
-      return { error: "лимит расходов должен быть числом" };
+      return { error: strings.rules.spendCapNotNumber };
     }
     if (parsed < 0) {
-      return { error: "лимит расходов не может быть отрицательным" };
+      return { error: strings.rules.spendCapNegative };
     }
     spendCapUsd = parsed;
   }
   if (approvalClasses.some((c) => c.trim() === "") || pathAllowlist.some((p) => p.trim() === "")) {
-    return { error: "пустые записи недопустимы" };
+    return { error: strings.rules.emptyEntry };
   }
   return { policy: { spendCapUsd, approvalClasses, pathAllowlist } };
 }
@@ -79,7 +80,7 @@ const pathTextStyle: CSSProperties = {
 
 /** Info banner (design-system.md "File-state banner" atom, task-17): the SAME inbox-item shape as
  * `DaemonBanner`'s incompatible case (left-edge accent + text + inline action) but with `accent`
- * (the one neutral/info color) instead of `statusWaiting` — amber is reserved for "нужен ты"
+ * (the one neutral/info color) instead of `statusWaiting` — amber is reserved for "needs you"
  * (design-system.md §2), and a stale/missing rules file is informational, not a human-attention
  * gate. */
 const bannerStyle: CSSProperties = {
@@ -235,7 +236,7 @@ function ChipList(props: ChipListProps): JSX.Element {
           <button
             type="button"
             data-testid={`${testIdPrefix}-remove-${v}`}
-            aria-label={`Удалить ${v}`}
+            aria-label={strings.rules.deleteEntry(v)}
             onClick={() => onRemove(v)}
             style={chipRemoveStyle}
           >
@@ -263,7 +264,7 @@ function ChipList(props: ChipListProps): JSX.Element {
         onClick={commitAdd}
         style={textButtonStyle}
       >
-        + добавить
+        {strings.rules.addEntry}
       </button>
     </div>
   );
@@ -274,9 +275,9 @@ function ChipList(props: ChipListProps): JSX.Element {
  * here is only ever a DRAFT of the on-disk file, never authoritative until a Save round-trips.
  * `fileState` drives which affordances render: `ok` ⇒ a plain editable textarea, no banner;
  * `externallyModified` ⇒ the on-disk content (spec §7: "content returned") PLUS an info banner
- * offering [Принять] to accept the new hash without discarding the owner's ability to instead
+ * offering [Accept] to accept the new hash without discarding the owner's ability to instead
  * just overwrite it with Save; `missing` ⇒ no textarea (there is no content to bind — `mdContent`
- * is `null`), only a banner offering [Создать заново] (`UpsertRuleSet{mdContent: ""}`, spec §7's
+ * is `null`), only a banner offering [Recreate] (`UpsertRuleSet{mdContent: ""}`, spec §7's
  * documented recreate path).
  *
  * The policy form is INDEPENDENT of file state — `RuleSet.policy` is a DB column, not file
@@ -295,13 +296,13 @@ function ChipList(props: ChipListProps): JSX.Element {
  * this component only owns the on-mount re-Get, unconditionally — unlike `GoalTree`'s "only if
  * empty" cache check, spec §7 explicitly wants a fresh read every time the panel opens since the
  * file can change on disk with no push to invalidate it) and after every successful mutation
- * (Save/Принять/Создать заново/policy Save) so the UI reflects the new hash/state immediately
+ * (Save/Accept/Recreate/policy Save) so the UI reflects the new hash/state immediately
  * rather than waiting on a `RuleSetChanged` push that may not even fire for every one of these
  * (e.g. Acknowledge is a pure client action from the daemon's perspective in some races).
  *
  * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every mutating button
- * (Сохранить, Принять, Создать заново, Сохранить политику) is disabled — reads (the content
- * textarea, the policy draft fields, показать файл — a local Finder reveal, not an orchd
+ * (Save, Accept, Recreate, Save policy) is disabled — reads (the content
+ * textarea, the policy draft fields, reveal file — a local Finder reveal, not an orchd
  * mutation) stay live. `ProjectPanel` owns the shared banner; this component only owns disabling
  * its own controls.
  */
@@ -351,7 +352,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
   if (!view) {
     return (
       <div data-testid="ruleset-panel-loading" style={{ color: theme.colors.textDim, fontSize: 13 }}>
-        Загрузка правил…
+        {strings.rules.loading}
       </div>
     );
   }
@@ -420,7 +421,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           onClick={() => void handleReveal()}
           style={textButtonStyle}
         >
-          показать файл
+          {strings.rules.revealFile}
         </button>
       </div>
 
@@ -434,7 +435,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
             onClick={() => void handleAcknowledge()}
             style={textButtonStyle}
           >
-            Принять
+            {strings.common.accept}
           </button>
         </div>
       )}
@@ -449,7 +450,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
             onClick={() => void handleRecreate()}
             style={textButtonStyle}
           >
-            Создать заново
+            {strings.rules.recreate}
           </button>
         </div>
       )}
@@ -458,7 +459,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
         <>
           <textarea
             data-testid="ruleset-content"
-            aria-label="Содержимое правил"
+            aria-label={strings.rules.contentAria}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             rows={12}
@@ -471,18 +472,18 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
             onClick={() => void handleSaveContent()}
             style={primaryButtonStyle}
           >
-            Сохранить
+            {strings.common.save}
           </button>
         </>
       )}
 
       <div data-testid="ruleset-policy-form" style={policyFormStyle}>
-        <span style={labelStyle}>Лимит расходов, $</span>
+        <span style={labelStyle}>{strings.rules.spendCapLabel}</span>
         <input
           data-testid="ruleset-spend-cap"
-          aria-label="Лимит расходов в долларах, пусто — без лимита"
+          aria-label={strings.rules.spendCapAria}
           type="number"
-          placeholder="без лимита"
+          placeholder={strings.rules.spendCapPlaceholder}
           value={spendCapText}
           onChange={(e) => {
             setSpendCapText(e.target.value);
@@ -491,11 +492,11 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           style={numberInputStyle}
         />
 
-        <span style={labelStyle}>Классы, требующие подтверждения</span>
+        <span style={labelStyle}>{strings.rules.confirmClassesLabel}</span>
         <ChipList
           testIdPrefix="ruleset-approval-class"
-          ariaLabel="Новый класс подтверждения"
-          placeholder="класс"
+          ariaLabel={strings.rules.confirmClassAria}
+          placeholder={strings.rules.confirmClassPlaceholder}
           values={approvalClasses}
           onAdd={(v) => {
             setApprovalClasses((prev) => [...prev, v]);
@@ -504,11 +505,11 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           onRemove={(v) => setApprovalClasses((prev) => prev.filter((c) => c !== v))}
         />
 
-        <span style={labelStyle}>Разрешённые пути</span>
+        <span style={labelStyle}>{strings.rules.allowedPathsLabel}</span>
         <ChipList
           testIdPrefix="ruleset-allowlist"
-          ariaLabel="Новый разрешённый путь"
-          placeholder="путь"
+          ariaLabel={strings.rules.allowedPathAria}
+          placeholder={strings.rules.allowedPathPlaceholder}
           values={pathAllowlist}
           onAdd={(v) => {
             setPathAllowlist((prev) => [...prev, v]);
@@ -530,7 +531,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           onClick={() => void handleSavePolicy()}
           style={primaryButtonStyle}
         >
-          Сохранить политику
+          {strings.rules.savePolicy}
         </button>
       </div>
     </div>

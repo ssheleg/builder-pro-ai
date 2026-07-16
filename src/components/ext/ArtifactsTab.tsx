@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../../store/store";
 import type { McpArtifact } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -113,12 +114,12 @@ export function ArtifactViewer(props: {
           {source}
         </span>
         {artifact.projectId !== null && (
-          <span style={metaStyle}>проект: {artifact.projectId}</span>
+          <span style={metaStyle}>{strings.ext.artifacts.projectLabel} {artifact.projectId}</span>
         )}
         <span style={metaStyle}>{formatTimestamp(artifact.createdAt)}</span>
         {artifact.isUntrusted && (
           <span data-testid={`artifact-untrusted-${artifact.id}`} style={untrustedBannerStyle}>
-            ⚠ непроверенные данные
+            {strings.ext.unverified}
           </span>
         )}
         <button
@@ -127,7 +128,7 @@ export function ArtifactViewer(props: {
           onClick={() => setIsOpen((v) => !v)}
           style={textButtonStyle}
         >
-          {isOpen ? "скрыть" : "показать содержимое"}
+          {isOpen ? strings.ext.artifacts.toggleHide : strings.ext.artifacts.toggleShow}
         </button>
       </div>
       {isOpen && (
@@ -140,9 +141,9 @@ export function ArtifactViewer(props: {
 }
 
 /**
- * «Артефакты» tab (S-EXT §8, T18): the durable `mcp_artifact` list (spec §4/§5) — every result
+ * Artifacts tab (S-EXT §8, T18): the durable `mcp_artifact` list (spec §4/§5) — every result
  * from `McpCallTool`/`ConnectorInvoke` persists here, `isUntrusted:true` by construction (spec
- * D9), so the «непроверенные данные» banner is unconditional per row, mirroring
+ * D9), so the "unverified data" banner is unconditional per row, mirroring
  * `ToolsBrowser`/`ConnectorsTab`'s own result-banner discipline exactly.
  *
  * Reuses the `mcpArtifacts` store slice + `refreshMcpArtifacts` action T8 already shipped (no
@@ -152,7 +153,7 @@ export function ArtifactViewer(props: {
  * "honest state, always": the list must not silently stay stale just because the tab wasn't
  * mounted when the last push fired).
  *
- * Each row expands («показать содержимое») into a read-only viewer showing `contentText` when
+ * Each row expands ("show content") into a read-only viewer showing `contentText` when
  * present (the flattened preview), else the full `contentJson`.
  */
 export function ArtifactsTab(): JSX.Element {
@@ -172,7 +173,7 @@ export function ArtifactsTab(): JSX.Element {
     <div data-testid="artifacts-tab">
       {artifacts.length === 0 ? (
         <div data-testid="artifacts-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          нет артефактов
+          {strings.ext.artifacts.empty}
         </div>
       ) : (
         <div role="list">

@@ -3,6 +3,7 @@ import { useAppStore } from "../../store/store";
 import { trustGrantConsent, mcpConnect, describeOrchdError } from "../../ipc/orchd";
 import type { McpServer } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const overlayStyle: CSSProperties = {
   position: "fixed",
@@ -69,7 +70,7 @@ const inlineErrorStyle: CSSProperties = {
  *
  * Shows the server's endpoint (its `url` for an http server; `command` for a future stdio one —
  * Phase 1 ships http only, spec D6) so the owner can see exactly what they are about to let the
- * app talk to. «Подключиться» runs `trustGrantConsent(serverId, "connect")` THEN `mcpConnect(id)`
+ * app talk to. "Connect" runs `trustGrantConsent(serverId, "connect")` THEN `mcpConnect(id)`
  * — in that order, since `mcpConnect` is trust-gated and rejects with `Error{Consent}` until a
  * grant exists (spec D10). `trustGrantConsent` is idempotent (`Db::grant_consent` upserts on
  * `(server_id, kind)`), so this dialog is safe to show again for a server the owner already
@@ -132,7 +133,7 @@ export function ConnectDialog(props: { server: McpServer; onClose: () => void })
         style={cardStyle}
       >
         <div id="connect-dialog-title" style={titleStyle}>
-          Подключиться к серверу «{server.name}»
+          {strings.ext.connectDialog.title(server.name)}
         </div>
 
         <div data-testid="connect-dialog-url" style={{ fontSize: 13, color: theme.colors.textDim }}>
@@ -140,7 +141,7 @@ export function ConnectDialog(props: { server: McpServer; onClose: () => void })
         </div>
 
         <div style={{ fontSize: 12, color: theme.colors.textDim }}>
-          Приложение подключится к этому MCP-серверу и получит доступ к его инструментам.
+          {strings.ext.connectDialog.body}
         </div>
 
         {error !== null && (
@@ -156,7 +157,7 @@ export function ConnectDialog(props: { server: McpServer; onClose: () => void })
             onClick={onClose}
             style={secondaryButtonStyle}
           >
-            Отмена
+            {strings.common.cancel}
           </button>
           <button
             ref={confirmRef}
@@ -166,7 +167,7 @@ export function ConnectDialog(props: { server: McpServer; onClose: () => void })
             onClick={() => void handleConfirm()}
             style={{ ...primaryButtonStyle, opacity: busy ? 0.6 : 1 }}
           >
-            Подключиться
+            {strings.ext.connectDialog.connect}
           </button>
         </div>
       </div>

@@ -146,14 +146,14 @@ const primaryButtonStyle: CSSProperties = {
  * store (sessions + workspaces + lifecycle) — no new backend, no polling. Three sections in a
  * FIXED order (attention beats chronology, design-system.md §1 "glanceability beats
  * completeness"):
- *   ① «Нужен ты»    — `waitingForInput` sessions, amber Inbox-item rows, pinned top.
- *   ② «Работают»    — active, non-waiting sessions; the whole row is the navigation target.
- *   ③ «Завершились» — exited sessions, ✓/✗ by exit code.
+ *   ① «Needs you»          — `waitingForInput` sessions, amber Inbox-item rows, pinned top.
+ *   ② «Running»            — active, non-waiting sessions; the whole row is the navigation target.
+ *   ③ «Recently finished»  — exited sessions, ✓/✗ by exit code.
  * Every section groups its rows by workspace (a clickable group header jumps to that workspace
  * with no session selected). A thin stats strip counts across ALL workspaces/sessions, not just
  * what's rendered below it.
  *
- * Navigation (`goTo`, spec §6.2 "Пройти"): `setActiveWorkspaceId` (App-owned UI selection, not
+ * Navigation (`goTo`, spec §6.2 "Go"): `setActiveWorkspaceId` (App-owned UI selection, not
  * store data) -> `setView("workspace")` ->, for a specific session, `setActiveSession` ->
  * `manager.focus`. `manager.focus` is best-effort (TerminalManager.focus is a no-op on a pane
  * that has never been opened) — BL-14's reset-before-replay (T9) is what actually guarantees a
@@ -183,7 +183,7 @@ export function HomeView(props: {
   // Exited always wins (mirrors StatusDot.dotStateOf, spec §5/§10.4): belt-and-suspenders against
   // a stale `waitingForInput:true` on a session whose process has already finished — `markExited`
   // is the root fix (clears the flag), this guard is defense-in-depth so no other path can ever
-  // surface a dead session in the amber "Нужен ты" section (review finding F1).
+  // surface a dead session in the amber "Needs you" section (review finding F1).
   const waiting = all.filter((m) => m.waitingForInput && m.lifecycle.kind !== "exited");
   const running = all.filter((m) => m.isActive && !m.waitingForInput);
   const exited = all.filter((m) => !m.isActive && m.lifecycle.kind === "exited");
@@ -234,7 +234,7 @@ export function HomeView(props: {
           style={{ display: "flex", flexDirection: "column", gap: 8 }}
         >
           <div style={{ color: theme.colors.textDim, fontSize: 13 }}>
-            Нет активных сессий.
+            {strings.home.noActiveSessions}
           </div>
           {firstWorkspace && (
             <button
@@ -242,16 +242,16 @@ export function HomeView(props: {
               style={primaryButtonStyle}
               onClick={() => goTo(firstWorkspace.id)}
             >
-              Открыть {firstWorkspace.name}
+              {strings.home.openWorkspace(firstWorkspace.name)}
             </button>
           )}
         </div>
       ) : (
         <>
           {waitingGroups.length > 0 && (
-            <section aria-label="Нужен ты">
+            <section aria-label={strings.home.needsYou}>
               <h2 style={{ ...sectionHeadingStyle, color: theme.colors.statusWaiting }}>
-                Нужен ты
+                {strings.home.needsYou}
               </h2>
               {waitingGroups.map((group) => (
                 <div key={group.workspaceId}>
@@ -272,13 +272,13 @@ export function HomeView(props: {
                       <span style={monoNameStyle}>
                         {group.workspaceName}/{meta.title}
                       </span>
-                      <span style={dimTextStyle}>ждёт ввода</span>
+                      <span style={dimTextStyle}>{strings.home.waitingForInput}</span>
                       <button
                         type="button"
                         style={proceedButtonStyle}
                         onClick={() => goTo(meta.workspaceId, meta.id)}
                       >
-                        Пройти →
+                        {strings.home.go}
                       </button>
                     </div>
                   ))}
@@ -288,8 +288,8 @@ export function HomeView(props: {
           )}
 
           {runningGroups.length > 0 && (
-            <section aria-label="Работают">
-              <h2 style={sectionHeadingStyle}>Работают</h2>
+            <section aria-label={strings.home.runningSection}>
+              <h2 style={sectionHeadingStyle}>{strings.home.runningSection}</h2>
               {runningGroups.map((group) => (
                 <div key={group.workspaceId}>
                   <button
@@ -320,8 +320,8 @@ export function HomeView(props: {
           )}
 
           {exitedGroups.length > 0 && (
-            <section aria-label="Завершились недавно">
-              <h2 style={sectionHeadingStyle}>Завершились недавно</h2>
+            <section aria-label={strings.home.recentlyFinished}>
+              <h2 style={sectionHeadingStyle}>{strings.home.recentlyFinished}</h2>
               {exitedGroups.map((group) => (
                 <div key={group.workspaceId}>
                   <button
@@ -343,7 +343,7 @@ export function HomeView(props: {
                         onClick={() => goTo(meta.workspaceId, meta.id)}
                       >
                         <span
-                          aria-label={ok ? "успешно" : "с ошибкой"}
+                          aria-label={ok ? strings.home.ok : strings.home.withError}
                           style={{
                             fontFamily: MONO_FONT,
                             fontSize: 13,
@@ -369,7 +369,7 @@ export function HomeView(props: {
       )}
 
       {/* Home goals panel (spec §10, task-19): mounts BELOW the three attention sections above —
-          the amber "Нужен ты" block keeps its pinned-top position (S2 §6.2 rule wins over goals
+          the amber "Needs you" block keeps its pinned-top position (S2 §6.2 rule wins over goals
           prominence, spec §10 verbatim). Renders unconditionally here (outside the `all.length`
           empty-state branch above) — an empty terminal store has nothing to say about whether the
           owner has active projects with goals, so goals visibility is independent of session

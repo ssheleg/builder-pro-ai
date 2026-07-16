@@ -103,7 +103,7 @@ describe("UpgradeDialog", () => {
       );
       render(<UpgradeDialog />);
       expect(screen.getByText(UNCOUNTED_COPY)).toBeTruthy();
-      expect(screen.queryByText(/live sessions will end\./)).toBeNull();
+      expect(screen.queryByText(/\d+ live sessions will end\./)).toBeNull();
       expect(screen.queryByText(new RegExp(`^Update the background service — \\d`))).toBeNull();
     });
 

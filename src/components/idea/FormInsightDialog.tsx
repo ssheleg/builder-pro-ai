@@ -11,13 +11,14 @@ import {
 } from "../../ipc/orchd";
 import type { FitVerdict, GraphNeighborhood, Idea, Insight, McpArtifact } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const FIT_VERDICT_VALUES: FitVerdict[] = ["fit", "noFit", "unknown"];
 
 const FIT_VERDICT_LABEL: Record<FitVerdict, string> = {
-  fit: "подходит",
-  noFit: "не подходит",
-  unknown: "неясно",
+  fit: strings.insights.fitVerdict.fit,
+  noFit: strings.insights.fitVerdict.noFit,
+  unknown: strings.insights.fitVerdict.unknown,
 };
 
 const overlayStyle: CSSProperties = {
@@ -160,8 +161,8 @@ const statusLineStyle: CSSProperties = {
 };
 
 /**
- * «Сформировать insight» dialog (S-IDEA spec §7). Reached either from a `done` research run's
- * «Сформировать insight» (`artifact` set — title stays the idea's own, body prefills from the
+ * "Form insight" dialog (S-IDEA spec §7). Reached either from a `done` research run's
+ * "Form insight" (`artifact` set — title stays the idea's own, body prefills from the
  * artifact's flattened content, owner-editable) or the `failed`-run degraded path (Q8,
  * `artifact: null` — the owner types the body by hand). `source` is ALWAYS `research-run:<runId>`
  * regardless of which path reached this dialog — a failed run still has an id, it just has no
@@ -170,21 +171,21 @@ const statusLineStyle: CSSProperties = {
  * Fit-context side panel (owner-facing, informational only — never auto-applies anything): the
  * project's goals (with `metricRefs`) plus the idea's `GraphNeighborhood`, when the idea already
  * has a graph node (`entityType:"idea", entityId:idea.id` — most ideas won't, since graph-ingest
- * only happens on insight-ACCEPT, spec D9; an honest "нет данных графа" is shown otherwise). An
+ * only happens on insight-ACCEPT, spec D9; an honest "no graph data" is shown otherwise). An
  * orphan idea (`projectId: null`) has no project to pull goals from and nowhere to look for a
  * graph node, so the whole panel degrades to a single honest note instead of guessing.
  *
  * Flow (owner-driven throughout — `fitVerdict`/`fitReasoning` are the OWNER's judgment call, never
- * inferred): «Создать» -> `orchdCreateInsight` then `orchdSetInsightFitVerdict` (spec §7 bullet
- * 3); once created, «Принять» -> `orchdSetInsightStatus(accepted)`; once accepted, «В backlog» ->
+ * inferred): "Create" -> `orchdCreateInsight` then `orchdSetInsightFitVerdict` (spec §7 bullet
+ * 3); once created, "Accept" -> `orchdSetInsightStatus(accepted)`; once accepted, "To backlog" ->
  * `orchdCreateTask{source:"insight"}` then `orchdSetIdeaLifecycle(idea.id, "specced")` and closes
- * (spec §7 bullet 5/6). «В backlog» is additionally blocked for an orphan idea — `orchdCreateTask`
+ * (spec §7 bullet 5/6). "To backlog" is additionally blocked for an orphan idea — `orchdCreateTask`
  * requires a concrete `projectId`, so there is nowhere to file the task.
  *
  * Dialog-atom parity with `CreateProjectDialog`/`ResearchRunDialog`: overlay + centered card,
  * `role="dialog"`, an in-dialog `role="alert"` failure line, stays open on failure.
  *
- * Honest degradation (spec §10, T8 discipline): every mutating button (Создать/Принять/В backlog)
+ * Honest degradation (spec §10, T8 discipline): every mutating button (Create/Accept/To backlog)
  * is independently `disabled={orchdDown}`.
  */
 export function FormInsightDialog(props: {
@@ -264,7 +265,7 @@ export function FormInsightDialog(props: {
       const updated = await orchdSetInsightFitVerdict(created.id, verdict, fitReasoning);
       setInsight(updated);
       await refreshInsights();
-      showToast("Инсайт создан");
+      showToast(strings.insights.form.created);
     } catch (e) {
       const message = describeOrchdError(e);
       setErrorMessage(message);
@@ -303,7 +304,7 @@ export function FormInsightDialog(props: {
       await orchdSetIdeaLifecycle(idea.id, "specced");
       await refreshTasks(idea.projectId);
       await refreshIdeas();
-      showToast("Задача добавлена в backlog");
+      showToast(strings.insights.form.addedToBacklog);
       onClose();
     } catch (e) {
       const message = describeOrchdError(e);
@@ -327,17 +328,17 @@ export function FormInsightDialog(props: {
         style={cardStyle}
       >
         <div id="form-insight-title-heading" style={titleStyle}>
-          Сформировать insight
+          {strings.insights.form.title}
         </div>
 
         <div style={bodyLayoutStyle}>
           <div style={formColumnStyle}>
             <label style={fieldLabelStyle}>
-              Название
+              {strings.insights.form.nameLabel}
               <input
                 ref={titleRef}
                 data-testid="form-insight-title"
-                aria-label="Название инсайта"
+                aria-label={strings.insights.form.nameAria}
                 value={title}
                 disabled={insight !== null}
                 onChange={(e) => setTitle(e.target.value)}
@@ -346,10 +347,10 @@ export function FormInsightDialog(props: {
             </label>
 
             <label style={fieldLabelStyle}>
-              Описание
+              {strings.insights.form.descriptionLabel}
               <textarea
                 data-testid="form-insight-body"
-                aria-label="Описание инсайта"
+                aria-label={strings.insights.form.descriptionAria}
                 value={body}
                 disabled={insight !== null}
                 onChange={(e) => setBody(e.target.value)}
@@ -358,16 +359,16 @@ export function FormInsightDialog(props: {
             </label>
 
             <label style={fieldLabelStyle}>
-              Вердикт владельца
+              {strings.insights.form.ownerVerdictLabel}
               <select
                 data-testid="form-insight-verdict"
-                aria-label="Вердикт владельца"
+                aria-label={strings.insights.form.ownerVerdictAria}
                 value={fitVerdict}
                 disabled={insight !== null}
                 onChange={(e) => setFitVerdict(e.target.value as FitVerdict | "")}
                 style={selectStyle}
               >
-                <option value="">— без вердикта —</option>
+                <option value="">{strings.common.noVerdict}</option>
                 {FIT_VERDICT_VALUES.map((v) => (
                   <option key={v} value={v}>
                     {FIT_VERDICT_LABEL[v]}
@@ -377,10 +378,10 @@ export function FormInsightDialog(props: {
             </label>
 
             <label style={fieldLabelStyle}>
-              Обоснование
+              {strings.insights.form.reasoningLabel}
               <input
                 data-testid="form-insight-reasoning"
-                aria-label="Обоснование вердикта"
+                aria-label={strings.insights.form.reasoningAria}
                 value={fitReasoning}
                 disabled={insight !== null}
                 onChange={(e) => setFitReasoning(e.target.value)}
@@ -390,40 +391,40 @@ export function FormInsightDialog(props: {
 
             {insight !== null && (
               <div data-testid="form-insight-status" style={statusLineStyle}>
-                статус инсайта: {insight.status}
+                {strings.insights.form.status(insight.status)}
               </div>
             )}
           </div>
 
           <div style={fitContextColumnStyle}>
-            <div style={fitContextTitleStyle}>Контекст для оценки</div>
+            <div style={fitContextTitleStyle}>{strings.insights.form.contextTitle}</div>
             {idea.projectId === null ? (
               <div data-testid="form-insight-no-project">
-                идея не привязана к проекту — контекст недоступен
+                {strings.insights.form.ideaNotLinked}
               </div>
             ) : (
               <>
                 <div>
-                  <div style={fitContextTitleStyle}>Цели проекта</div>
+                  <div style={fitContextTitleStyle}>{strings.insights.form.projectGoals}</div>
                   {goals.length === 0 ? (
-                    <div>целей пока нет</div>
+                    <div>{strings.insights.form.noGoals}</div>
                   ) : (
                     goals.map((g) => (
                       <div key={g.id} data-testid={`form-insight-goal-${g.id}`} style={goalRowStyle}>
                         {g.title}
-                        {g.metricRefs.length > 0 && ` — метрики: ${g.metricRefs.join(", ")}`}
+                        {g.metricRefs.length > 0 && strings.insights.form.metrics(g.metricRefs.join(", "))}
                       </div>
                     ))
                   )}
                 </div>
                 <div>
-                  <div style={fitContextTitleStyle}>Связанный граф</div>
+                  <div style={fitContextTitleStyle}>{strings.insights.form.relatedGraph}</div>
                   {ideaNode === null ? (
                     <div data-testid="form-insight-neighborhood-empty">
-                      нет узла графа для этой идеи ещё
+                      {strings.insights.form.noGraphNode}
                     </div>
                   ) : neighborhood === null || neighborhood.nodes.length === 0 ? (
-                    <div data-testid="form-insight-neighborhood-empty">нет связанных узлов</div>
+                    <div data-testid="form-insight-neighborhood-empty">{strings.insights.form.noRelatedNodes}</div>
                   ) : (
                     neighborhood.nodes
                       .filter((n) => n.id !== ideaNode.id)
@@ -452,7 +453,7 @@ export function FormInsightDialog(props: {
             onClick={onClose}
             style={secondaryButtonStyle}
           >
-            Отмена
+            {strings.common.cancel}
           </button>
           <button
             type="button"
@@ -461,7 +462,7 @@ export function FormInsightDialog(props: {
             onClick={() => void handleCreate()}
             style={{ ...primaryButtonStyle, opacity: createBlocked ? 0.5 : 1 }}
           >
-            Создать
+            {strings.common.create}
           </button>
           {insight !== null && (
             <button
@@ -471,7 +472,7 @@ export function FormInsightDialog(props: {
               onClick={() => void handleAccept()}
               style={{ ...primaryButtonStyle, opacity: acceptBlocked ? 0.5 : 1 }}
             >
-              Принять
+              {strings.common.accept}
             </button>
           )}
           {insight !== null && insight.status === "accepted" && (
@@ -482,7 +483,7 @@ export function FormInsightDialog(props: {
               onClick={() => void handleBacklog()}
               style={{ ...primaryButtonStyle, opacity: backlogBlocked ? 0.5 : 1 }}
             >
-              В backlog
+              {strings.insights.form.toBacklog}
             </button>
           )}
         </div>

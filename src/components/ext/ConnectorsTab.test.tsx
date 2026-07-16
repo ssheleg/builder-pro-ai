@@ -13,7 +13,7 @@ const connectorInvokeMock = vi.fn();
 // (same module) so ConnectorsTab's mount-time fetch resolves deterministically, mirroring
 // ServersTab.test.tsx's relationship with `mcpListServers`/`refreshMcpServers`.
 const connectorListAccountsMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../../ipc/orchd", () => ({
   connectorBeginOAuth: (...a: unknown[]) => connectorBeginOAuthMock(...a),
   connectorCompleteOAuth: (...a: unknown[]) => connectorCompleteOAuthMock(...a),
@@ -57,7 +57,7 @@ beforeEach(() => {
   connectorDeleteAccountMock.mockReset().mockResolvedValue(undefined);
   connectorListOpsMock.mockReset().mockResolvedValue([]);
   connectorInvokeMock.mockReset();
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   openUrlMock.mockReset().mockResolvedValue(undefined);
   vi.spyOn(window, "confirm").mockReturnValue(true);
   useAppStore.setState({ accounts: [], orchdDown: false }, false);
@@ -140,7 +140,7 @@ describe("ConnectorsTab", () => {
 
   // ---- delete ----
 
-  it("clicking «удалить» confirms then calls connectorDeleteAccount", async () => {
+  it("clicking delete confirms then calls connectorDeleteAccount", async () => {
     connectorListAccountsMock.mockResolvedValue([makeAccount()]);
     useAppStore.setState({ accounts: [makeAccount()] }, false);
     render(<ConnectorsTab />);
@@ -161,7 +161,7 @@ describe("ConnectorsTab", () => {
 
   // ---- OAuth begin -> paste-code -> complete ----
 
-  it("«подключить OAuth»: begin opens the authorize URL and shows a paste-code field; completing calls connectorCompleteOAuth", async () => {
+  it("\"Connect OAuth\": begin opens the authorize URL and shows a paste-code field; completing calls connectorCompleteOAuth", async () => {
     connectorBeginOAuthMock.mockResolvedValue({
       authorizeUrl: "https://example.com/authorize?x=1",
       state: "st-1",

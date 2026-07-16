@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
 
 const orchdCreateIdeaMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../ipc/orchd", () => ({
   orchdCreateIdea: (...a: unknown[]) => orchdCreateIdeaMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
@@ -11,6 +11,7 @@ vi.mock("../ipc/orchd", () => ({
 
 import { QuickCapture } from "./QuickCapture";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { Project } from "../ipc/orchd-types";
 
 function makeProject(over: Partial<Project> = {}): Project {
@@ -42,7 +43,7 @@ beforeEach(() => {
     createdAt: 1,
     updatedAt: 1,
   });
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState(
     {
       projects: [],
@@ -135,7 +136,7 @@ describe("QuickCapture", () => {
     expect(screen.queryByTestId("quick-capture-overlay")).toBeNull();
   });
 
-  it("submit calls orchdCreateIdea with null projectId for «без проекта», shows the saved toast, and closes", async () => {
+  it('submit calls orchdCreateIdea with null projectId for "no project", shows the saved toast, and closes', async () => {
     useAppStore.setState({ projects: [makeProject({ id: "p1", name: "Proj" })] }, false);
     render(<QuickCapture />);
     pressCmdK();
@@ -146,7 +147,7 @@ describe("QuickCapture", () => {
     fireEvent.change(screen.getByTestId("quick-capture-body-input"), {
       target: { value: "body text" },
     });
-    // leave the project select at its default "без проекта" (empty string) value
+    // leave the project select at its default "no project" (empty string) value
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("quick-capture-submit"));
@@ -155,7 +156,7 @@ describe("QuickCapture", () => {
     });
 
     expect(orchdCreateIdeaMock).toHaveBeenCalledWith(null, "My idea", "body text");
-    expect(useAppStore.getState().toast).toBe("идея сохранена");
+    expect(useAppStore.getState().toast).toBe(strings.capture.ideaSaved);
     expect(screen.queryByTestId("quick-capture-overlay")).toBeNull();
   });
 
@@ -220,7 +221,7 @@ describe("QuickCapture", () => {
     });
 
     expect(screen.getByTestId("quick-capture-orchd-down")).toBeTruthy();
-    expect(screen.getByText("оркестратор недоступен")).toBeTruthy();
+    expect(screen.getByText(strings.errors.unavailable)).toBeTruthy();
     expect(screen.getByTestId("quick-capture-submit")).toHaveProperty("disabled", true);
 
     fireEvent.click(screen.getByTestId("quick-capture-submit"));
@@ -242,7 +243,7 @@ describe("QuickCapture", () => {
     });
 
     expect(describeOrchdErrorMock).toHaveBeenCalled();
-    expect(useAppStore.getState().toast).toBe("оркестратор: ошибка");
+    expect(useAppStore.getState().toast).toBe("orchestrator: error");
     expect(screen.getByTestId("quick-capture-overlay")).toBeTruthy();
   });
 

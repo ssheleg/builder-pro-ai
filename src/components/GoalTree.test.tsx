@@ -7,7 +7,7 @@ const orchdUpdateGoalMock = vi.fn();
 const orchdMoveGoalMock = vi.fn();
 const orchdDeleteGoalMock = vi.fn();
 const orchdListGoalsMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../ipc/orchd", () => ({
   orchdCreateGoal: (...a: unknown[]) => orchdCreateGoalMock(...a),
@@ -20,6 +20,7 @@ vi.mock("../ipc/orchd", () => ({
 
 import { GoalTree } from "./GoalTree";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { Goal } from "../ipc/orchd-types";
 
 const projectId = "proj-1";
@@ -29,7 +30,7 @@ function makeGoal(over: Partial<Goal> & { id: string }): Goal {
     projectId,
     parentId: null,
     kind: "additional",
-    title: "цель",
+    title: "goal",
     body: "",
     ord: 0,
     status: "active",
@@ -44,7 +45,7 @@ const root: Goal = makeGoal({
   id: "root",
   kind: "strategic",
   parentId: null,
-  title: "Стратегическая цель",
+  title: "Strategic goal",
   ord: 0,
 });
 
@@ -56,14 +57,14 @@ beforeEach(() => {
   orchdMoveGoalMock.mockReset().mockResolvedValue(root);
   orchdDeleteGoalMock.mockReset().mockResolvedValue(undefined);
   orchdListGoalsMock.mockReset().mockResolvedValue([]);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState({ goalsByProject: {}, toast: null, orchdDown: false }, false);
 });
 
 describe("GoalTree", () => {
   it("renders a 3-level tree with correct indent and parent-before-children order, regardless of store array order", () => {
-    const child = makeGoal({ id: "child", parentId: "root", title: "Подцель", ord: 0 });
-    const grandchild = makeGoal({ id: "grandchild", parentId: "child", title: "Подподцель", ord: 0 });
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
+    const grandchild = makeGoal({ id: "grandchild", parentId: "child", title: "Sub-subgoal", ord: 0 });
     // Deliberately scrambled relative to tree order — the component must sort defensively.
     useAppStore.setState({ goalsByProject: { [projectId]: [grandchild, root, child] } }, false);
 
@@ -80,7 +81,7 @@ describe("GoalTree", () => {
   });
 
   it("the strategic root row has no delete and no move controls; a non-root row has both", () => {
-    const child = makeGoal({ id: "child", parentId: "root", title: "Подцель", ord: 0 });
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
     useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
 
     render(<GoalTree projectId={projectId} />);
@@ -94,22 +95,22 @@ describe("GoalTree", () => {
     expect(screen.getByTestId("goal-move-down-child")).toBeTruthy();
   });
 
-  it('"+ подцель" calls orchdCreateGoal with this row\'s id as parentId and kind "additional", then refreshes the tree', async () => {
-    const child = makeGoal({ id: "child", parentId: "root", title: "Подцель", ord: 0 });
+  it('"+ subgoal" calls orchdCreateGoal with this row\'s id as parentId and kind "additional", then refreshes the tree', async () => {
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
     useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
     orchdListGoalsMock.mockResolvedValue([root, child]);
 
     render(<GoalTree projectId={projectId} />);
 
     const childRow = screen.getByTestId("goal-row-child");
-    fireEvent.click(within(childRow).getByRole("button", { name: "+ подцель" }));
+    fireEvent.click(within(childRow).getByRole("button", { name: strings.goals.addSubgoal }));
 
     await waitFor(() =>
       expect(orchdCreateGoalMock).toHaveBeenCalledWith(
         projectId,
         "child",
         "additional",
-        "новая цель",
+        strings.goals.newSubgoal,
         "",
       ),
     );
@@ -117,7 +118,7 @@ describe("GoalTree", () => {
   });
 
   it("delete asks for confirmation and only calls orchdDeleteGoal after it is accepted", async () => {
-    const child = makeGoal({ id: "child", parentId: "root", title: "Подцель", ord: 0 });
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
     useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
 
     render(<GoalTree projectId={projectId} />);
@@ -125,7 +126,7 @@ describe("GoalTree", () => {
 
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     fireEvent.click(deleteButton);
-    expect(confirmSpy).toHaveBeenCalledWith("удалить ветку целиком?");
+    expect(confirmSpy).toHaveBeenCalledWith(strings.goals.deleteConfirm);
     expect(orchdDeleteGoalMock).not.toHaveBeenCalled();
 
     confirmSpy.mockReturnValue(true);
@@ -138,8 +139,8 @@ describe("GoalTree", () => {
   });
 
   it("a sibling ▲ TRUE-SWAPS ords with the previous sibling via TWO orchdMoveGoal calls, then refreshes once", async () => {
-    const child1 = makeGoal({ id: "child1", parentId: "root", title: "Первая", ord: 0 });
-    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Вторая", ord: 1 });
+    const child1 = makeGoal({ id: "child1", parentId: "root", title: "First", ord: 0 });
+    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Second", ord: 1 });
     useAppStore.setState({ goalsByProject: { [projectId]: [root, child1, child2] } }, false);
     orchdListGoalsMock.mockResolvedValue([root, child1, child2]);
 
@@ -159,8 +160,8 @@ describe("GoalTree", () => {
   });
 
   it("a sibling ▼ TRUE-SWAPS with the NEXT sibling (first row takes next's ord, next takes first's)", async () => {
-    const child1 = makeGoal({ id: "child1", parentId: "root", title: "Первая", ord: 0 });
-    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Вторая", ord: 1 });
+    const child1 = makeGoal({ id: "child1", parentId: "root", title: "First", ord: 0 });
+    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Second", ord: 1 });
     useAppStore.setState({ goalsByProject: { [projectId]: [root, child1, child2] } }, false);
     orchdListGoalsMock.mockResolvedValue([root, child1, child2]);
 
@@ -173,8 +174,8 @@ describe("GoalTree", () => {
   });
 
   it("edge: ▲ on the FIRST sibling and ▼ on the LAST sibling are disabled and never call orchdMoveGoal", async () => {
-    const child1 = makeGoal({ id: "child1", parentId: "root", title: "Первая", ord: 0 });
-    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Вторая", ord: 1 });
+    const child1 = makeGoal({ id: "child1", parentId: "root", title: "First", ord: 0 });
+    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Second", ord: 1 });
     useAppStore.setState({ goalsByProject: { [projectId]: [root, child1, child2] } }, false);
 
     render(<GoalTree projectId={projectId} />);
@@ -190,18 +191,18 @@ describe("GoalTree", () => {
   });
 
   it("an Invariant error from a mutating call surfaces via showToast", async () => {
-    const child = makeGoal({ id: "child", parentId: "root", title: "Подцель", ord: 0 });
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
     useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
-    const commandError = { kind: "daemon", code: "Invariant", message: "нельзя переименовать" };
+    const commandError = { kind: "daemon", code: "Invariant", message: "cannot rename" };
     orchdUpdateGoalMock.mockRejectedValueOnce(commandError);
 
     render(<GoalTree projectId={projectId} />);
     const input = screen.getByTestId("goal-title-input-child") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "Новое имя" } });
+    fireEvent.change(input, { target: { value: "New name" } });
     fireEvent.blur(input);
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalledWith(commandError));
-    await waitFor(() => expect(useAppStore.getState().toast).toBe("оркестратор: ошибка"));
+    await waitFor(() => expect(useAppStore.getState().toast).toBe("orchestrator: error"));
   });
 
   it("mounts empty: fetches the tree via refreshGoals when nothing is cached for this project yet", async () => {
@@ -212,8 +213,8 @@ describe("GoalTree", () => {
   });
 
   it("while orchdDown: every mutating control is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {
-    const child1 = makeGoal({ id: "child1", parentId: "root", title: "Первая", ord: 0 });
-    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Вторая", ord: 1 });
+    const child1 = makeGoal({ id: "child1", parentId: "root", title: "First", ord: 0 });
+    const child2 = makeGoal({ id: "child2", parentId: "root", title: "Second", ord: 1 });
     useAppStore.setState(
       { goalsByProject: { [projectId]: [root, child1, child2] }, orchdDown: true },
       false,
@@ -227,7 +228,7 @@ describe("GoalTree", () => {
     const moveUpButton = screen.getByTestId("goal-move-up-child2") as HTMLButtonElement; // otherwise movable
     const moveDownButton = screen.getByTestId("goal-move-down-child1") as HTMLButtonElement; // otherwise movable
     const addSubgoalButton = within(screen.getByTestId("goal-row-child1")).getByRole("button", {
-      name: "+ подцель",
+      name: strings.goals.addSubgoal,
     }) as HTMLButtonElement;
 
     expect(titleInput.disabled).toBe(true);

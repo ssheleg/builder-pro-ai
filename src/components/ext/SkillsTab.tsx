@@ -4,6 +4,7 @@ import { pickSkillFile } from "../../ipc/commands";
 import { skillAdd, skillDelete, describeOrchdError } from "../../ipc/orchd";
 import type { Skill, SkillFileState } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -117,21 +118,21 @@ const badgeStyle: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-/** Files-as-truth badge copy (task-17 brief: «изменён»/«файл отсутствует» for Modified/Missing).
+/** Files-as-truth badge copy (task-17 brief: "modified"/"file missing" for Modified/Missing).
  * `present` renders no badge at all — nothing wrong to flag, mirrors `ConnectorsTab`'s "only show
  * a banner when there's something to say" discipline. */
 const FILE_STATE_LABEL: Partial<Record<SkillFileState, string>> = {
-  modified: "изменён",
-  missing: "файл отсутствует",
+  modified: strings.ext.skills.badge.modified,
+  missing: strings.ext.skills.badge.missing,
 };
 
 const SCOPE_LABEL: Record<Skill["scope"], string> = {
-  global: "глобально",
-  project: "проект",
+  global: strings.common.scope.global,
+  project: strings.common.scope.project,
 };
 
 /**
- * «Навыки» tab (S-EXT §8, D11, Q14, task T17): the SKILL.md skills registry — list + add
+ * Skills tab (S-EXT §8, D11, Q14, task T17): the SKILL.md skills registry — list + add
  * (pick-a-SKILL.md-file) + remove. PLUMBING ONLY (D11): there is no runtime consumer of this
  * registry yet — the banner below says so honestly, never presenting the list as something that
  * currently executes anything.
@@ -139,7 +140,7 @@ const SCOPE_LABEL: Record<Skill["scope"], string> = {
  * Mirrors `ServersTab`/`ConnectorsTab`'s conventions exactly: on mount `refreshSkills()`, every
  * mutating control `disabled={orchdDown}`, every async failure -> `showToast(describeOrchdError(e))`
  * rather than a silent no-op. The add form's `scope` picker is fixed at `"global"` (a `"project"`
- * option is present but disabled, "скоро") — this top-level «Расширения» view carries no
+ * option is present but disabled, "soon") — this top-level Extensions view carries no
  * per-project context to scope a `"project"` skill to, same rationale `ServersTab`'s own scope
  * picker documents for MCP servers.
  *
@@ -195,7 +196,7 @@ export function SkillsTab(): JSX.Element {
   }
 
   async function handleDelete(skill: Skill): Promise<void> {
-    if (!window.confirm(`удалить навык «${skill.name}»?`)) return;
+    if (!window.confirm(strings.ext.skills.deleteConfirm(skill.name))) return;
     try {
       await skillDelete(skill.id);
       await refreshSkills();
@@ -207,36 +208,36 @@ export function SkillsTab(): JSX.Element {
   return (
     <div data-testid="skills-tab">
       <div data-testid="skills-banner" role="status" style={bannerStyle}>
-        Навыки — это реестр; они исполняются, когда появится агент-оркестр (S6b).
+        {strings.ext.skills.registryBanner}
       </div>
 
       <div style={createFormStyle}>
         <input
           data-testid="skill-create-name"
-          aria-label="Имя навыка"
-          placeholder="имя (необязательно — иначе из SKILL.md)"
+          aria-label={strings.ext.skills.nameAria}
+          placeholder={strings.ext.skills.namePlaceholder}
           value={name}
           onChange={(e) => setName(e.target.value)}
           style={createInputStyle}
         />
         <input
           data-testid="skill-create-description"
-          aria-label="Описание навыка"
-          placeholder="описание (необязательно)"
+          aria-label={strings.ext.skills.descriptionAria}
+          placeholder={strings.common.descriptionOptional}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           style={createInputStyle}
         />
         <select
           data-testid="skill-create-scope"
-          aria-label="Область"
+          aria-label={strings.ext.skills.scopeAria}
           value="global"
           disabled
           style={selectStyle}
         >
-          <option value="global">глобально</option>
+          <option value="global">{strings.common.scope.global}</option>
           <option value="project" disabled>
-            проект (скоро)
+            {strings.ext.projectSoon}
           </option>
         </select>
         <button
@@ -245,7 +246,7 @@ export function SkillsTab(): JSX.Element {
           onClick={() => void handlePickFile()}
           style={textButtonStyle}
         >
-          выбрать SKILL.md
+          {strings.ext.skills.chooseSkillMd}
         </button>
         {mdPath !== null && (
           <span data-testid="skill-picked-path" style={pathTextStyle} title={mdPath}>
@@ -259,13 +260,13 @@ export function SkillsTab(): JSX.Element {
           onClick={() => void handleAdd()}
           style={{ ...primaryButtonStyle, opacity: addBlocked ? 0.5 : 1 }}
         >
-          + навык
+          {strings.ext.skills.addSkill}
         </button>
       </div>
 
       {skills.length === 0 ? (
         <div data-testid="skills-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          нет навыков
+          {strings.ext.skills.empty}
         </div>
       ) : (
         <div role="list">
@@ -306,7 +307,7 @@ export function SkillsTab(): JSX.Element {
                   onClick={() => void handleDelete(skill)}
                   style={deleteButtonStyle}
                 >
-                  удалить
+                  {strings.ext.delete}
                 </button>
               </div>
             );

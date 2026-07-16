@@ -7,28 +7,24 @@ import {
 } from "../ipc/orchd";
 import type { FitVerdict, Insight, InsightStatus } from "../ipc/orchd-types";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
-
-/** Inline block message shown when the owner tries to archive an insight without a reasoning
- * (spec §10/§5.2 — the server enforces this too; the UI refuses it up front rather than round-
- * tripping a doomed request). */
-const ARCHIVE_REASONING_REQUIRED_TEXT = "нужна причина архивации";
 
 const FIT_VERDICT_VALUES: FitVerdict[] = ["fit", "noFit", "unknown"];
 
 const FIT_VERDICT_LABEL: Record<FitVerdict, string> = {
-  fit: "подходит",
-  noFit: "не подходит",
-  unknown: "неясно",
+  fit: strings.insights.fitVerdict.fit,
+  noFit: strings.insights.fitVerdict.noFit,
+  unknown: strings.insights.fitVerdict.unknown,
 };
 
 const STATUS_VALUES: InsightStatus[] = ["new", "accepted", "archived"];
 
 const STATUS_LABEL: Record<InsightStatus, string> = {
-  new: "новый",
-  accepted: "принят",
-  archived: "архив",
+  new: strings.insights.status.new,
+  accepted: strings.insights.status.accepted,
+  archived: strings.insights.status.archived,
 };
 
 const listStyle: CSSProperties = {
@@ -203,7 +199,7 @@ function InsightRow(props: InsightRowProps): JSX.Element {
         </span>
         <select
           data-testid={`insight-status-${insight.id}`}
-          aria-label="Статус инсайта"
+          aria-label={strings.insights.statusAria}
           value={pendingStatus}
           disabled={disabled}
           onChange={(e) => handleStatusChange(e.target.value as InsightStatus)}
@@ -218,7 +214,7 @@ function InsightRow(props: InsightRowProps): JSX.Element {
       </div>
 
       <span data-testid={`insight-source-${insight.id}`} style={captionStyle}>
-        источник: {insight.source || "—"}
+        {strings.insights.sourceLabel} {insight.source || "—"}
       </span>
       {insight.body !== "" && <p style={bodyStyle}>{insight.body}</p>}
 
@@ -226,8 +222,8 @@ function InsightRow(props: InsightRowProps): JSX.Element {
         <div style={rowGroupStyle}>
           <input
             data-testid={`insight-archive-reasoning-${insight.id}`}
-            aria-label="Причина архивации"
-            placeholder="причина архивации"
+            aria-label={strings.insights.archiveReasonAria}
+            placeholder={strings.insights.archiveReasonPlaceholder}
             value={archiveReasoning}
             onChange={(e) => {
               setArchiveReasoning(e.target.value);
@@ -242,11 +238,11 @@ function InsightRow(props: InsightRowProps): JSX.Element {
             onClick={handleArchiveConfirm}
             style={textButtonStyle}
           >
-            подтвердить архивацию
+            {strings.insights.confirmArchival}
           </button>
           {archiveError && (
             <span data-testid={`insight-archive-error-${insight.id}`} style={errorTextStyle}>
-              {ARCHIVE_REASONING_REQUIRED_TEXT}
+              {strings.insights.archiveReasonRequired}
             </span>
           )}
         </div>
@@ -255,12 +251,12 @@ function InsightRow(props: InsightRowProps): JSX.Element {
       <div style={rowGroupStyle}>
         <select
           data-testid={`insight-verdict-select-${insight.id}`}
-          aria-label="Вердикт владельца"
+          aria-label={strings.insights.ownerVerdictAria}
           value={verdict}
           onChange={(e) => setVerdict(e.target.value as FitVerdict | "")}
           style={selectStyle}
         >
-          <option value="">— без вердикта —</option>
+          <option value="">{strings.common.noVerdict}</option>
           {FIT_VERDICT_VALUES.map((v) => (
             <option key={v} value={v}>
               {FIT_VERDICT_LABEL[v]}
@@ -269,8 +265,8 @@ function InsightRow(props: InsightRowProps): JSX.Element {
         </select>
         <input
           data-testid={`insight-verdict-reasoning-${insight.id}`}
-          aria-label="Обоснование вердикта"
-          placeholder="обоснование"
+          aria-label={strings.insights.verdictReasoningAria}
+          placeholder={strings.insights.verdictReasoningPlaceholder}
           value={verdictReasoning}
           onChange={(e) => setVerdictReasoning(e.target.value)}
           style={inputStyle}
@@ -284,7 +280,7 @@ function InsightRow(props: InsightRowProps): JSX.Element {
           }
           style={textButtonStyle}
         >
-          применить вердикт
+          {strings.insights.applyVerdict}
         </button>
       </div>
     </div>
@@ -306,7 +302,7 @@ function InsightRow(props: InsightRowProps): JSX.Element {
  * `showToast(describeOrchdError(e))` (spec §7 honest error surface).
  *
  * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every mutating control
- * (status select, «подтвердить архивацию», «применить вердикт») is disabled — reads (the rows
+ * (status select, "confirm archival", "apply verdict") is disabled — reads (the rows
  * themselves) stay live. `ProjectPanel` owns the shared banner; this component only owns
  * disabling its own controls.
  */
@@ -354,7 +350,7 @@ export function InsightsList(props: { projectId: string | null }): JSX.Element {
           data-testid="insights-list-empty"
           style={{ color: theme.colors.textDim, fontSize: 13 }}
         >
-          {isOrphanView ? "Нет инсайтов без проекта." : "В этом проекте пока нет инсайтов."}
+          {isOrphanView ? strings.insights.emptyOrphan : strings.insights.emptyProject}
         </div>
       ) : (
         rows.map((insight) => (

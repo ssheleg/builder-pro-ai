@@ -3,6 +3,7 @@ import { useAppStore } from "../../store/store";
 import { mcpSetToolEnabled, mcpCallTool, describeOrchdError } from "../../ipc/orchd";
 import type { McpTool } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -103,14 +104,14 @@ interface ToolCallResult {
 }
 
 /**
- * «Инструменты» tab (S-EXT §8, T8): tools across every registered server's cached tool list
+ * Tools tab (S-EXT §8, T8): tools across every registered server's cached tool list
  * (`mcpToolsByServer`, fetched via `refreshMcpTools` — this component eagerly fetches any server's
  * list it hasn't cached yet, on mount and whenever the server set changes). Per tool:
  * name/description/input-schema (collapsed behind a `<details>` — the schema is often long JSON,
  * design-system §1 "detail is one drill-down away"), an enable/disable toggle
- * (`mcpSetToolEnabled` — the per-tool allowlist, spec §6), and a "вызвать" form (a JSON args
+ * (`mcpSetToolEnabled` — the per-tool allowlist, spec §6), and an "invoke" form (a JSON args
  * textarea, disabled for a disabled tool per spec §8) that calls `mcpCallTool` and renders the
- * result with an «непроверенные данные» banner — EVERY `mcp_artifact` this slice creates is
+ * result with an "unverified data" banner — EVERY `mcp_artifact` this slice creates is
  * `is_untrusted:true` by construction (spec D9), so the banner is unconditional, not derived from
  * anything the server itself claims.
  *
@@ -118,7 +119,7 @@ interface ToolCallResult {
  * empty textarea defaults to `"{}"`) — an invalid-JSON draft shows an inline error and never
  * reaches the wire, rather than sending a malformed `argsJson` the daemon would reject anyway.
  *
- * Honest degradation (spec §8/§10): the enable toggle and "вызвать" are `disabled` while the
+ * Honest degradation (spec §8/§10): the enable toggle and "invoke" are `disabled` while the
  * store's `orchdDown` is `true` (mirrors `TasksList`'s per-row `disabled` composition) — `ExtPanel`
  * owns the shared `<OrchdDownBanner/>`.
  */
@@ -157,7 +158,7 @@ export function ToolsBrowser(): JSX.Element {
     try {
       JSON.parse(argsJson);
     } catch {
-      setCallError((prev) => ({ ...prev, [tool.id]: "аргументы должны быть валидным JSON" }));
+      setCallError((prev) => ({ ...prev, [tool.id]: strings.common.argsInvalidJson }));
       return;
     }
     setCallError((prev) => ({ ...prev, [tool.id]: null }));
@@ -182,7 +183,7 @@ export function ToolsBrowser(): JSX.Element {
     <div data-testid="tools-browser">
       {rows.length === 0 ? (
         <div data-testid="tools-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          нет инструментов
+          {strings.ext.tools.empty}
         </div>
       ) : (
         rows.map(({ server, tool }) => {
@@ -204,18 +205,18 @@ export function ToolsBrowser(): JSX.Element {
                   <input
                     type="checkbox"
                     data-testid={`tool-enabled-${tool.id}`}
-                    aria-label={`Включить ${tool.name}`}
+                    aria-label={strings.ext.tools.enableTool(tool.name)}
                     checked={tool.enabled}
                     disabled={orchdDown}
                     onChange={() => void handleToggle(tool)}
                   />
-                  включён
+                  {strings.ext.tools.enabled}
                 </label>
               </div>
 
               <details>
                 <summary style={{ fontSize: 11, color: theme.colors.textDim, cursor: "pointer" }}>
-                  схема
+                  {strings.ext.tools.schema}
                 </summary>
                 <pre data-testid={`tool-schema-${tool.id}`} style={schemaStyle}>
                   {tool.inputSchemaJson}
@@ -225,7 +226,7 @@ export function ToolsBrowser(): JSX.Element {
               <div style={invokeRowStyle}>
                 <textarea
                   data-testid={`tool-args-${tool.id}`}
-                  aria-label={`Аргументы для ${tool.name}`}
+                  aria-label={strings.ext.tools.argsFor(tool.name)}
                   placeholder="{}"
                   disabled={callDisabled}
                   value={argsDraft[tool.id] ?? ""}
@@ -240,7 +241,7 @@ export function ToolsBrowser(): JSX.Element {
                   onClick={() => void handleCall(tool)}
                   style={textButtonStyle}
                 >
-                  вызвать
+                  {strings.ext.invoke}
                 </button>
               </div>
 
@@ -253,11 +254,11 @@ export function ToolsBrowser(): JSX.Element {
               {toolResult && (
                 <div data-testid={`tool-result-${tool.id}`} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span data-testid={`tool-result-untrusted-${tool.id}`} style={untrustedBannerStyle}>
-                    ⚠ непроверенные данные
+                    {strings.ext.unverified}
                   </span>
                   {toolResult.isError && (
                     <span style={{ fontSize: 12, color: theme.colors.statusExited }}>
-                      инструмент вернул ошибку
+                      {strings.ext.tools.toolError}
                     </span>
                   )}
                   <pre style={schemaStyle}>{toolResult.contentJson}</pre>

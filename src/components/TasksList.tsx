@@ -9,6 +9,7 @@ import {
 } from "../ipc/orchd";
 import type { DomainTask, TaskSource, TaskStatus } from "../ipc/orchd-types";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -17,22 +18,22 @@ const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 const STATUS_VALUES: TaskStatus[] = ["backlog", "todo", "waiting", "progress", "testing", "done"];
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
-  backlog: "бэклог",
-  todo: "к выполнению",
-  waiting: "ожидание",
-  progress: "в работе",
-  testing: "тестирование",
-  done: "готово",
+  backlog: strings.tasks.status.backlog,
+  todo: strings.tasks.status.todo,
+  waiting: strings.tasks.status.waiting,
+  progress: strings.tasks.status.progress,
+  testing: strings.tasks.status.testing,
+  done: strings.tasks.status.done,
 };
 
 /** Locked enum order (spec §4.2 `TaskSource`) — the create dialog's source select. */
 const SOURCE_VALUES: TaskSource[] = ["idea", "insight", "bug", "plan"];
 
 const SOURCE_LABEL: Record<TaskSource, string> = {
-  idea: "идея",
-  insight: "инсайт",
-  bug: "баг",
-  plan: "план",
+  idea: strings.tasks.source.idea,
+  insight: strings.tasks.source.insight,
+  bug: strings.tasks.source.bug,
+  plan: strings.tasks.source.plan,
 };
 
 /**
@@ -48,10 +49,10 @@ const RANK_GAP = 1024;
 
 /** Confirm copy for task delete (mirrors `GoalTree`/`IdeasList`'s honesty pattern). When the task
  * has descendants the message names the exact cascade count up front — never a silent cascading
- * delete (task-16 brief "«удалит N подзадач»" verbatim). */
+ * delete (task-16 brief "will delete N subtasks" verbatim). */
 function deleteConfirmText(descendantCount: number): string {
-  if (descendantCount === 0) return "удалить задачу?";
-  return `удалить задачу? удалит ${descendantCount} подзадач`;
+  if (descendantCount === 0) return strings.tasks.deleteConfirm;
+  return strings.tasks.deleteConfirmWithChildren(descendantCount);
 }
 
 /** Every descendant (children, grandchildren, …) of `id` within `tasks` — the count the delete
@@ -235,7 +236,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       </span>
       <select
         data-testid={`task-status-select-${task.id}`}
-        aria-label="Статус задачи"
+        aria-label={strings.tasks.statusAria}
         value={task.status}
         disabled={disabled}
         onChange={(e) => onStatusChange(task.id, e.target.value as TaskStatus)}
@@ -250,7 +251,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       <button
         type="button"
         data-testid={`task-move-up-${task.id}`}
-        aria-label="Переместить вверх"
+        aria-label={strings.common.moveUp}
         disabled={disabled || !canMoveUp}
         onClick={() => onMoveUp(task)}
         style={{ ...iconButtonStyle, opacity: canMoveUp ? 1 : 0.35 }}
@@ -260,7 +261,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       <button
         type="button"
         data-testid={`task-move-down-${task.id}`}
-        aria-label="Переместить вниз"
+        aria-label={strings.common.moveDown}
         disabled={disabled || !canMoveDown}
         onClick={() => onMoveDown(task)}
         style={{ ...iconButtonStyle, opacity: canMoveDown ? 1 : 0.35 }}
@@ -274,7 +275,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
         onClick={() => onDelete(task)}
         style={deleteButtonStyle}
       >
-        Удалить
+        {strings.common.delete}
       </button>
     </div>
   );
@@ -295,7 +296,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
  * in try/catch → `showToast(describeOrchdError(e))` (spec §7 honest error surface).
  *
  * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every per-row mutating
- * control (status select, move ▲/▼, Удалить) and the create form's submit button are disabled —
+ * control (status select, move ▲/▼, Delete) and the create form's submit button are disabled —
  * reads (the groups/rows themselves) stay live. `ProjectPanel` owns the shared banner; this
  * component only owns disabling its own controls, composed with the pre-existing per-row disable
  * logic (e.g. ▲ on the first row of a group) via `disabled || <existing condition>`.
@@ -407,16 +408,16 @@ export function TasksList(props: { projectId: string }): JSX.Element {
       <div style={createFormStyle}>
         <input
           data-testid="task-create-title"
-          aria-label="Название новой задачи"
-          placeholder="название задачи"
+          aria-label={strings.tasks.newTitleAria}
+          placeholder={strings.tasks.newTitlePlaceholder}
           value={createTitle}
           onChange={(e) => setCreateTitle(e.target.value)}
           style={createInputStyle}
         />
         <textarea
           data-testid="task-create-body"
-          aria-label="Описание новой задачи"
-          placeholder="описание (необязательно)"
+          aria-label={strings.tasks.newDescriptionAria}
+          placeholder={strings.common.descriptionOptional}
           value={createBody}
           onChange={(e) => setCreateBody(e.target.value)}
           rows={2}
@@ -424,7 +425,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         />
         <select
           data-testid="task-create-source"
-          aria-label="Источник новой задачи"
+          aria-label={strings.tasks.newSourceAria}
           value={createSource}
           onChange={(e) => setCreateSource(e.target.value as TaskSource)}
           style={selectStyle}
@@ -437,12 +438,12 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         </select>
         <select
           data-testid="task-create-parent"
-          aria-label="Родительская задача"
+          aria-label={strings.tasks.parentAria}
           value={createParentId}
           onChange={(e) => setCreateParentId(e.target.value)}
           style={selectStyle}
         >
-          <option value="">без родителя</option>
+          <option value="">{strings.tasks.noParent}</option>
           {tasks.map((t) => (
             <option key={t.id} value={t.id}>
               {t.title}
@@ -451,8 +452,8 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         </select>
         <input
           data-testid="task-create-tags"
-          aria-label="Теги новой задачи (через запятую)"
-          placeholder="теги через запятую"
+          aria-label={strings.tasks.newTagsAria}
+          placeholder={strings.tasks.tagsPlaceholder}
           value={createTags}
           onChange={(e) => setCreateTags(e.target.value)}
           style={createInputStyle}
@@ -464,7 +465,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
           onClick={() => void handleCreate()}
           style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
         >
-          + задача
+          {strings.tasks.addTask}
         </button>
       </div>
 
@@ -480,7 +481,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
                 data-testid={`task-empty-group-${status}`}
                 style={{ color: theme.colors.textDim, fontSize: 12, padding: "0 8px" }}
               >
-                нет задач
+                {strings.tasks.empty}
               </div>
             ) : (
               group.map((task, idx) => (

@@ -4,6 +4,7 @@ import { orchdCreateProject, orchdSetIdeaProject, describeOrchdError } from "../
 import { pickFolder, createWorkspace } from "../../ipc/commands";
 import type { Idea } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 /** Mirrors `WorkspaceSidebar.tsx`'s / `CreateProjectDialog.tsx`'s identical helper (same tiny,
  * self-contained pattern — not worth a shared module for four lines). */
@@ -30,13 +31,13 @@ const errorTextStyle: CSSProperties = {
 };
 
 /**
- * «Создать проект из идеи» (S-IDEA spec §7): the spawn flow for a project-less idea —
+ * "Create project from idea" (S-IDEA spec §7): the spawn flow for a project-less idea —
  * `pickFolder` -> `createWorkspace` (sessiond) -> `orchdCreateProject{name:idea.title,
  * workspaceIds:[newWorkspaceId]}` -> `orchdSetIdeaProject(idea.id, project.id)`, run as ONE
  * sequential chain from a single click (unlike `CreateProjectDialog`, there is no owner-typed
  * form here — every input is either derived from the idea or the OS folder picker).
  *
- * Mirrors `CreateProjectDialog`'s inline «+ создать workspace» affordance: the new workspace is
+ * Mirrors `CreateProjectDialog`'s inline "+ create workspace" affordance: the new workspace is
  * upserted into the store immediately (`upsertWorkspace`) rather than waiting on the
  * `workspace://created` push (which never fires in a unit test, and would otherwise leave the
  * store momentarily stale even in production between this call and that push's arrival).
@@ -70,7 +71,7 @@ export function SpawnProjectFromIdea(props: { idea: Idea }): JSX.Element {
     try {
       dir = await pickFolder();
     } catch (e) {
-      const message = e instanceof Error ? e.message : "не удалось открыть диалог выбора папки";
+      const message = e instanceof Error ? e.message : strings.ideas.spawn.folderPickerFailed;
       setError(message);
       showToast(message);
       return;
@@ -83,7 +84,7 @@ export function SpawnProjectFromIdea(props: { idea: Idea }): JSX.Element {
       upsertWorkspace(ws);
       workspaceId = ws.id;
     } catch (e) {
-      const message = e instanceof Error ? e.message : "не удалось создать workspace";
+      const message = e instanceof Error ? e.message : strings.project.createWorkspaceFailed;
       setError(message);
       showToast(message);
       return;
@@ -94,7 +95,7 @@ export function SpawnProjectFromIdea(props: { idea: Idea }): JSX.Element {
       await orchdSetIdeaProject(idea.id, project.id);
       await refreshProjects();
       await refreshIdeas();
-      showToast("Проект создан из идеи");
+      showToast(strings.ideas.spawn.createdFromIdea);
     } catch (e) {
       const message = describeOrchdError(e);
       setError(message);
@@ -111,7 +112,7 @@ export function SpawnProjectFromIdea(props: { idea: Idea }): JSX.Element {
         onClick={() => void handleSpawn()}
         style={textButtonStyle}
       >
-        Создать проект
+        {strings.ideas.spawn.createProject}
       </button>
       {error !== null && (
         <span data-testid={`spawn-project-error-${idea.id}`} style={errorTextStyle}>

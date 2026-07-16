@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 
 const orchdCreateProjectMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../ipc/orchd", () => ({
   orchdCreateProject: (...a: unknown[]) => orchdCreateProjectMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
@@ -18,6 +18,7 @@ vi.mock("../ipc/commands", () => ({
 
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { Workspace } from "../ipc/types";
 import type { Project } from "../ipc/orchd-types";
 
@@ -41,7 +42,7 @@ afterEach(cleanup);
 
 beforeEach(() => {
   orchdCreateProjectMock.mockReset();
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
   useAppStore.setState({ projects: [], workspaces: { w2: wsB }, toast: null }, false);
@@ -87,7 +88,7 @@ describe("CreateProjectDialog", () => {
     });
   });
 
-  it('inline "создать workspace": pickFolder -> createWorkspace -> adds the new workspace to the selection', async () => {
+  it('inline "create workspace": pickFolder -> createWorkspace -> adds the new workspace to the selection', async () => {
     pickFolderMock.mockResolvedValue("/Users/me/projects/gamma");
     createWorkspaceMock.mockResolvedValue({ id: "w3", name: "gamma", rootPath: "/p/gamma", roots: ["/p/gamma"] });
     render(<CreateProjectDialog onClose={() => {}} />);
@@ -133,12 +134,12 @@ describe("CreateProjectDialog", () => {
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
-    expect(useAppStore.getState().toast).toBe("оркестратор: ошибка");
+    expect(useAppStore.getState().toast).toBe("orchestrator: error");
   });
 
   it("a failed create renders an in-dialog role=alert with the mapped message AND stays open", async () => {
     orchdCreateProjectMock.mockRejectedValue({ kind: "daemon", code: "Validation", message: "bad" });
-    describeOrchdErrorMock.mockReturnValue("неверные данные: bad");
+    describeOrchdErrorMock.mockReturnValue("invalid data: bad");
     const onClose = vi.fn();
     render(<CreateProjectDialog onClose={onClose} />);
 
@@ -150,7 +151,7 @@ describe("CreateProjectDialog", () => {
     // concurrent toast clobbering the global queue-of-one never hides the failure.
     const alert = await screen.findByTestId("create-project-error");
     expect(alert.getAttribute("role")).toBe("alert");
-    expect(alert.textContent).toContain("неверные данные: bad");
+    expect(alert.textContent).toContain("invalid data: bad");
     // The dialog itself must still be on screen (not close-and-toast-into-the-void).
     expect(screen.getByTestId("create-project-dialog")).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
@@ -172,6 +173,6 @@ describe("CreateProjectDialog", () => {
   it("renders as a labelled dialog", () => {
     render(<CreateProjectDialog onClose={() => {}} />);
     const dialog = within(screen.getByTestId("create-project-dialog"));
-    expect(dialog.getByText("Новый проект")).toBeTruthy();
+    expect(dialog.getByText(strings.project.newProject)).toBeTruthy();
   });
 });

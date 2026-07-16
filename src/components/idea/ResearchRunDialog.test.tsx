@@ -5,7 +5,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 const researchStartRunMock = vi.fn();
 const mcpListToolsMock = vi.fn();
 const trustListPoliciesMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../../ipc/orchd", () => ({
   researchStartRun: (...a: unknown[]) => researchStartRunMock(...a),
@@ -21,8 +21,8 @@ import type { Idea, McpServer, McpTool, Policy } from "../../ipc/orchd-types";
 const idea: Idea = {
   id: "idea-1",
   projectId: "p1",
-  title: "Проверить спрос",
-  body: "нужно понять размер рынка",
+  title: "Validate demand",
+  body: "need to understand market size",
   lifecycle: "captured",
   createdAt: 1,
   updatedAt: 1,
@@ -97,7 +97,7 @@ beforeEach(() => {
   });
   mcpListToolsMock.mockReset().mockResolvedValue([makeTool()]);
   trustListPoliciesMock.mockReset().mockResolvedValue([makePolicy()]);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState(
     {
       mcpServers: [makeServer()],
@@ -167,11 +167,11 @@ describe("ResearchRunDialog", () => {
       expect(screen.getByTestId("research-run-policy-spend-cap").textContent).toContain("2");
     });
     expect(screen.getByTestId("research-run-policy-note").textContent).toMatch(
-      /стоимость.*неизвестна/i,
+      /cost.*unknown/i,
     );
   });
 
-  it('shows an honest "лимит не задан" note when no policy applies to the scope', async () => {
+  it('shows an honest "not set" note when no policy applies to the scope', async () => {
     trustListPoliciesMock.mockResolvedValue([]);
     render(<ResearchRunDialog idea={idea} onClose={() => {}} />);
     fireEvent.change(screen.getByTestId("research-run-server-select"), {
@@ -179,12 +179,12 @@ describe("ResearchRunDialog", () => {
     });
     await waitFor(() => {
       expect(screen.getByTestId("research-run-policy-spend-cap").textContent).toContain(
-        "не задан",
+        "not set",
       );
     });
   });
 
-  it("«Запустить» fires researchStartRun with the picked server/tool/args and refreshes runs", async () => {
+  it('"Run" fires researchStartRun with the picked server/tool/args and refreshes runs', async () => {
     const onClose = vi.fn();
     render(<ResearchRunDialog idea={idea} onClose={onClose} />);
 

@@ -16,14 +16,14 @@ function basename(path: string): string {
 
 /** Every workspace id linked to at least one project (spec §10) — the dialog's multi-select
  * offers only the complement (unlinked workspaces), matching `ProjectPanel`'s add-workspace
- * select and `WorkspaceSidebar`'s «Без проекта» group. */
+ * select and `WorkspaceSidebar`'s "No project" group. */
 function linkedWorkspaceIds(projects: Project[]): Set<string> {
   return new Set(projects.flatMap((p) => p.workspaceIds));
 }
 
 /** Locked inline-block copy (task-18 brief verbatim): shown whenever fewer than one workspace is
  * selected, and doubles as the reason the primary button stays disabled. */
-const BLOCKED_TEXT = "нужен хотя бы один workspace";
+const BLOCKED_TEXT = strings.project.workspaceRequired;
 
 const overlayStyle: CSSProperties = {
   position: "fixed",
@@ -149,14 +149,14 @@ const inlineErrorStyle: CSSProperties = {
 };
 
 /**
- * «+ проект» dialog (S3 spec §10, task-18 brief). Design-system "Dialog / modal overlay" atom:
+ * "+ project" dialog (S3 spec §10, task-18 brief). Design-system "Dialog / modal overlay" atom:
  * fixed dim backdrop + centered `bgElevated` card, `role="dialog"` + `aria-modal` + labelled
  * title.
  *
  * Name (required) + description + a multi-select of the workspaces linked to NO project yet
  * (`linkedWorkspaceIds` complement — the same computation `ProjectPanel`'s add-workspace select
- * and `WorkspaceSidebar`'s «Без проекта» group use, so the three surfaces never disagree about
- * what "unlinked" means). The inline «+ создать workspace» affordance reuses the EXACT
+ * and `WorkspaceSidebar`'s "No project" group use, so the three surfaces never disagree about
+ * what "unlinked" means). The inline "+ create workspace" affordance reuses the EXACT
  * `pickFolder` -> `createWorkspace` flow `WorkspaceSidebar`'s own "+ Add workspace" button uses —
  * the new workspace is immediately upserted into the store (so it renders in the list without
  * waiting on the `workspace://created` push, which never fires in a unit test) and pre-selected.
@@ -222,7 +222,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
       upsertWorkspace(ws);
       setSelectedIds((prev) => (prev.includes(ws.id) ? prev : [...prev, ws.id]));
     } catch (e) {
-      const message = e instanceof Error ? e.message : "не удалось создать workspace";
+      const message = e instanceof Error ? e.message : strings.project.createWorkspaceFailed;
       setCreateError(message);
       showToast(message);
     }
@@ -233,7 +233,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
     setCreateError(null); // clear any stale failure before a fresh attempt (UpgradeDialog parity)
     try {
       await orchdCreateProject(name.trim(), description, selectedIds);
-      showToast("Проект создан");
+      showToast(strings.project.projectCreated);
       onClose();
     } catch (e) {
       const message = describeOrchdError(e);
@@ -252,15 +252,15 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
         style={cardStyle}
       >
         <div id="create-project-title" style={titleStyle}>
-          Новый проект
+          {strings.project.newProject}
         </div>
 
         <label style={fieldLabelStyle}>
-          Название
+          {strings.project.nameLabel}
           <input
             ref={nameRef}
             data-testid="create-project-name"
-            aria-label="Название проекта"
+            aria-label={strings.project.nameAria}
             required
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -269,10 +269,10 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
         </label>
 
         <label style={fieldLabelStyle}>
-          Описание
+          {strings.project.descriptionLabel}
           <textarea
             data-testid="create-project-description"
-            aria-label="Описание проекта"
+            aria-label={strings.project.descriptionAria}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
@@ -284,7 +284,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
           <div style={fieldLabelStyle}>Workspaces</div>
           <div data-testid="create-project-workspaces" style={workspaceListStyle}>
             {unlinked.length === 0 ? (
-              <span style={{ fontSize: 12, color: theme.colors.textDim }}>нет свободных workspace</span>
+              <span style={{ fontSize: 12, color: theme.colors.textDim }}>{strings.project.noFreeWorkspaces}</span>
             ) : (
               unlinked.map((w) => (
                 <label key={w.id} style={checkboxRowStyle}>
@@ -305,7 +305,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
             onClick={() => void handleCreateWorkspace()}
             style={{ ...textButtonStyle, marginTop: 6 }}
           >
-            + создать workspace
+            {strings.project.createWorkspace}
           </button>
         </div>
 
@@ -328,7 +328,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button type="button" data-testid="create-project-cancel" onClick={onClose} style={secondaryButtonStyle}>
-            Отмена
+            {strings.common.cancel}
           </button>
           <button
             type="button"
@@ -337,7 +337,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
             onClick={() => void handleSubmit()}
             style={{ ...primaryButtonStyle, opacity: blocked || name.trim() === "" ? 0.5 : 1 }}
           >
-            Создать
+            {strings.common.create}
           </button>
         </div>
       </div>

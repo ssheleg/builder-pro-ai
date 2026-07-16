@@ -7,7 +7,7 @@ const mcpListInvocationsMock = vi.fn();
 const trustListAuditMock = vi.fn();
 const trustListPoliciesMock = vi.fn();
 const trustSetPolicyMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../../ipc/orchd", () => ({
   mcpListInvocations: (...a: unknown[]) => mcpListInvocationsMock(...a),
   trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
@@ -19,6 +19,7 @@ vi.mock("../../ipc/orchd", () => ({
 import { InvocationLog } from "./InvocationLog";
 import { useAppStore } from "../../store/store";
 import type { AuditRow, McpInvocation, McpServer, Policy } from "../../ipc/orchd-types";
+import { strings } from "../../strings";
 
 function makeInvocation(over: Partial<McpInvocation> = {}): McpInvocation {
   return {
@@ -97,7 +98,7 @@ beforeEach(() => {
   trustListAuditMock.mockReset().mockResolvedValue([]);
   trustListPoliciesMock.mockReset().mockResolvedValue([]);
   trustSetPolicyMock.mockReset().mockResolvedValue(makePolicy());
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState(
     {
       invocations: [],
@@ -188,7 +189,7 @@ describe("InvocationLog", () => {
     useAppStore.setState({ policies: [makePolicy()] }, false);
     render(<InvocationLog />);
     const row = screen.getByTestId("policy-row-policy-1");
-    expect(row.textContent).toContain("глобально");
+    expect(row.textContent).toContain(strings.common.scope.global);
     expect(row.textContent).toContain("10");
     expect(row.textContent).toContain("30");
   });

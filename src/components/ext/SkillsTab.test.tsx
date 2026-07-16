@@ -9,7 +9,7 @@ const skillDeleteMock = vi.fn();
 // so SkillsTab's mount-time fetch resolves deterministically, mirroring
 // ConnectorsTab.test.tsx's relationship with `connectorListAccounts`/`refreshAccounts`.
 const skillListMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../../ipc/orchd", () => ({
   skillAdd: (...a: unknown[]) => skillAddMock(...a),
   skillDelete: (...a: unknown[]) => skillDeleteMock(...a),
@@ -25,6 +25,7 @@ vi.mock("../../ipc/commands", () => ({
 import { SkillsTab } from "./SkillsTab";
 import { useAppStore } from "../../store/store";
 import type { Skill } from "../../ipc/orchd-types";
+import { strings } from "../../strings";
 
 function makeSkill(over: Partial<Skill> = {}): Skill {
   return {
@@ -47,7 +48,7 @@ beforeEach(() => {
   skillAddMock.mockReset().mockResolvedValue(makeSkill());
   skillDeleteMock.mockReset().mockResolvedValue(undefined);
   skillListMock.mockReset().mockResolvedValue([]);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   pickSkillFileMock.mockReset().mockResolvedValue("/Users/demo/skills/my-skill/SKILL.md");
   vi.spyOn(window, "confirm").mockReturnValue(true);
   useAppStore.setState({ skills: [], orchdDown: false }, false);
@@ -64,7 +65,7 @@ describe("SkillsTab", () => {
   it("renders the plumbing-only banner (D11: no runtime consumer until S6b)", () => {
     render(<SkillsTab />);
     const banner = screen.getByTestId("skills-banner");
-    expect(banner.textContent).toContain("реестр");
+    expect(banner.textContent).toContain("registry");
     expect(banner.textContent).toContain("S6b");
   });
 
@@ -90,7 +91,7 @@ describe("SkillsTab", () => {
     expect(screen.getByTestId("skill-path-s1").textContent).toBe(
       "/Users/demo/skills/research/SKILL.md",
     );
-    expect(screen.getByTestId("skill-scope-s1").textContent).toBe("глобально");
+    expect(screen.getByTestId("skill-scope-s1").textContent).toBe(strings.common.scope.global);
     expect(screen.queryByTestId("skills-empty")).toBeNull();
   });
 
@@ -107,21 +108,25 @@ describe("SkillsTab", () => {
     expect(screen.queryByTestId("skill-filestate-s1")).toBeNull();
   });
 
-  it("a modified-state skill renders the «изменён» badge", () => {
+  it("a modified-state skill renders the \"modified\" badge", () => {
     useAppStore.setState({ skills: [makeSkill({ fileState: "modified" })] }, false);
     render(<SkillsTab />);
-    expect(screen.getByTestId("skill-filestate-s1").textContent).toBe("изменён");
+    expect(screen.getByTestId("skill-filestate-s1").textContent).toBe(
+      strings.ext.skills.badge.modified,
+    );
   });
 
-  it("a missing-state skill renders the «файл отсутствует» badge", () => {
+  it("a missing-state skill renders the \"file missing\" badge", () => {
     useAppStore.setState({ skills: [makeSkill({ fileState: "missing" })] }, false);
     render(<SkillsTab />);
-    expect(screen.getByTestId("skill-filestate-s1").textContent).toBe("файл отсутствует");
+    expect(screen.getByTestId("skill-filestate-s1").textContent).toBe(
+      strings.ext.skills.badge.missing,
+    );
   });
 
   // ---- add (pick SKILL.md -> skillAdd) ----
 
-  it("«выбрать SKILL.md» calls pickSkillFile and shows the picked path", async () => {
+  it("\"choose SKILL.md\" calls pickSkillFile and shows the picked path", async () => {
     render(<SkillsTab />);
     fireEvent.click(screen.getByTestId("skill-pick-path"));
     await waitFor(() => {
@@ -214,7 +219,7 @@ describe("SkillsTab", () => {
 
   // ---- delete ----
 
-  it("clicking «удалить» confirms then calls skillDelete", async () => {
+  it("clicking delete confirms then calls skillDelete", async () => {
     skillListMock.mockResolvedValue([makeSkill()]);
     useAppStore.setState({ skills: [makeSkill()] }, false);
     render(<SkillsTab />);

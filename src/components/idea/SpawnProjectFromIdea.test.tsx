@@ -4,7 +4,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 
 const orchdCreateProjectMock = vi.fn();
 const orchdSetIdeaProjectMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../../ipc/orchd", () => ({
   orchdCreateProject: (...a: unknown[]) => orchdCreateProjectMock(...a),
   orchdSetIdeaProject: (...a: unknown[]) => orchdSetIdeaProjectMock(...a),
@@ -25,7 +25,7 @@ import type { Idea } from "../../ipc/orchd-types";
 const idea: Idea = {
   id: "idea-1",
   projectId: null,
-  title: "Проверить спрос",
+  title: "Validate demand",
   body: "",
   lifecycle: "captured",
   createdAt: 1,
@@ -37,7 +37,7 @@ afterEach(cleanup);
 beforeEach(() => {
   orchdCreateProjectMock.mockReset();
   orchdSetIdeaProjectMock.mockReset();
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
   useAppStore.setState({ workspaces: {}, projects: [], ideas: [], toast: null, orchdDown: false }, false);
@@ -117,7 +117,7 @@ describe("SpawnProjectFromIdea", () => {
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalled());
     expect(orchdSetIdeaProjectMock).not.toHaveBeenCalled();
-    expect(useAppStore.getState().toast).toBe("оркестратор: ошибка");
+    expect(useAppStore.getState().toast).toBe("orchestrator: error");
   });
 
   it("while orchdDown: the button is disabled and clicking it never calls any wrapper", () => {

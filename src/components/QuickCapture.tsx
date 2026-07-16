@@ -2,16 +2,17 @@ import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react
 import { useAppStore } from "../store/store";
 import { orchdCreateIdea, describeOrchdError } from "../ipc/orchd";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Locked toast copy (task-19 brief verbatim) shown after a successful capture. */
-const SAVED_TOAST = "идея сохранена";
+const SAVED_TOAST = strings.capture.ideaSaved;
 
 /** Inline note shown instead of attempting a doomed round-trip while orchd is down (spec §10/§11
  * honest-degradation contract — mirrors every other domain surface's "never a silent no-op, never
  * a doomed send" rule). */
-const ORCHD_DOWN_NOTE = "оркестратор недоступен";
+const ORCHD_DOWN_NOTE = strings.errors.unavailable;
 
 /**
  * `true` when the given element is a place the owner is already typing — a plain text input/
@@ -86,7 +87,7 @@ const selectStyle: CSSProperties = {
 };
 
 /** Non-amber note (design-system.md "File-state banner" atom's `accent` convention — amber stays
- * reserved for "нужен ты"): honest, not urgent — the owner just can't save right now. */
+ * reserved for "needs you"): honest, not urgent — the owner just can't save right now. */
 const noteStyle: CSSProperties = {
   fontSize: 13,
   lineHeight: 1.5,
@@ -129,8 +130,8 @@ const primaryButtonStyle: CSSProperties = {
  * A second, `open`-scoped effect owns focus-on-open + `Escape`-to-close, mirroring
  * `CreateProjectDialog`'s identical pattern.
  *
- * Submit (`Enter` in the title field, or the Сохранить button) posts `orchdCreateIdea` with the
- * selected project id, or `null` for «без проекта» (the `<select>`'s empty-string sentinel maps to
+ * Submit (`Enter` in the title field, or the Save button) posts `orchdCreateIdea` with the
+ * selected project id, or `null` for "no project" (the `<select>`'s empty-string sentinel maps to
  * `null` right at the call site — never sent as `""`). While `orchdDown`, the primary button is
  * disabled and an inline honest note replaces the round-trip entirely (spec §11: never a doomed
  * send). Any other rejection is surfaced via the shared toast (`describeOrchdError`), same as every
@@ -216,14 +217,14 @@ export function QuickCapture(): JSX.Element | null {
         style={cardStyle}
       >
         <div id="quick-capture-title" style={titleHeadingStyle}>
-          Новая идея
+          {strings.capture.newIdea}
         </div>
 
         <input
           ref={titleRef}
           data-testid="quick-capture-title-input"
-          aria-label="Название идеи"
-          placeholder="название"
+          aria-label={strings.capture.titleAria}
+          placeholder={strings.capture.titlePlaceholder}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => {
@@ -240,8 +241,8 @@ export function QuickCapture(): JSX.Element | null {
 
         <textarea
           data-testid="quick-capture-body-input"
-          aria-label="Описание идеи"
-          placeholder="описание (необязательно)"
+          aria-label={strings.capture.descriptionAria}
+          placeholder={strings.common.descriptionOptional}
           value={body}
           onChange={(e) => setBody(e.target.value)}
           rows={3}
@@ -250,12 +251,12 @@ export function QuickCapture(): JSX.Element | null {
 
         <select
           data-testid="quick-capture-project-select"
-          aria-label="Проект"
+          aria-label={strings.capture.projectAria}
           value={projectId}
           onChange={(e) => setProjectId(e.target.value)}
           style={selectStyle}
         >
-          <option value="">без проекта</option>
+          <option value="">{strings.capture.noProject}</option>
           {projects.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
@@ -276,7 +277,7 @@ export function QuickCapture(): JSX.Element | null {
             onClick={close}
             style={secondaryButtonStyle}
           >
-            Отмена
+            {strings.common.cancel}
           </button>
           <button
             type="button"
@@ -285,7 +286,7 @@ export function QuickCapture(): JSX.Element | null {
             onClick={() => void handleSubmit()}
             style={{ ...primaryButtonStyle, opacity: blocked ? 0.5 : 1 }}
           >
-            Сохранить
+            {strings.common.save}
           </button>
         </div>
       </div>

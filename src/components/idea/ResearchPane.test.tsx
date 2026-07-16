@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 
 const mcpGetArtifactMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../../ipc/orchd", () => ({
   mcpGetArtifact: (...a: unknown[]) => mcpGetArtifactMock(...a),
@@ -27,7 +27,7 @@ import type { Idea, McpArtifact, McpServer, ResearchRun } from "../../ipc/orchd-
 const idea: Idea = {
   id: "idea-1",
   projectId: "p1",
-  title: "Проверить спрос",
+  title: "Validate demand",
   body: "",
   lifecycle: "researching",
   createdAt: 1,
@@ -94,7 +94,7 @@ afterEach(cleanup);
 
 beforeEach(() => {
   mcpGetArtifactMock.mockReset().mockResolvedValue(makeArtifact());
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   formInsightDialogPropsLog.length = 0;
   useAppStore.setState(
     { researchRunsByIdea: {}, mcpServers: [makeServer()], toast: null, orchdDown: false },
@@ -121,11 +121,11 @@ describe("ResearchPane", () => {
       false,
     );
     render(<ResearchPane idea={idea} disabled={false} />);
-    expect(screen.getByTestId("research-run-status-r1").textContent).toMatch(/ожидан/i);
-    expect(screen.getByTestId("research-run-status-r2").textContent).toMatch(/выполня/i);
+    expect(screen.getByTestId("research-run-status-r1").textContent).toMatch(/pending/i);
+    expect(screen.getByTestId("research-run-status-r2").textContent).toMatch(/running/i);
   });
 
-  it("a done run: clicking «показать артефакт» fetches via mcpGetArtifact and shows the untrusted banner", async () => {
+  it('a done run: clicking "show artifact" fetches via mcpGetArtifact and shows the untrusted banner', async () => {
     useAppStore.setState(
       {
         researchRunsByIdea: {
@@ -142,12 +142,12 @@ describe("ResearchPane", () => {
     await waitFor(() => expect(mcpGetArtifactMock).toHaveBeenCalledWith("art-1"));
     await waitFor(() => {
       expect(screen.getByTestId("artifact-untrusted-art-1").textContent).toContain(
-        "непроверенные данные",
+        "unverified data",
       );
     });
   });
 
-  it("a done run: «Сформировать insight» opens FormInsightDialog with the fetched artifact", async () => {
+  it('a done run: "Form insight" opens FormInsightDialog with the fetched artifact', async () => {
     useAppStore.setState(
       {
         researchRunsByIdea: {
@@ -172,7 +172,7 @@ describe("ResearchPane", () => {
     expect(lastProps.idea).toEqual(idea);
   });
 
-  it("a failed run: shows error_kind and a «сформировать insight без ресёрча» affordance that opens FormInsightDialog with a null artifact (Q8)", () => {
+  it('a failed run: shows error_kind and a "form insight without research" affordance that opens FormInsightDialog with a null artifact (Q8)', () => {
     useAppStore.setState(
       {
         researchRunsByIdea: {
@@ -224,7 +224,7 @@ describe("ResearchPane", () => {
     fireEvent.click(screen.getByTestId("research-run-show-artifact-r1"));
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalled());
-    expect(useAppStore.getState().toast).toBe("оркестратор: ошибка");
+    expect(useAppStore.getState().toast).toBe("orchestrator: error");
     expect(screen.queryByTestId("artifact-row-art-1")).toBeNull();
   });
 

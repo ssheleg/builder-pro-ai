@@ -13,6 +13,7 @@ import type { FsEntry, FsError } from "../ipc/fs";
 import { pickFolder, addWorkspaceRoot } from "../ipc/commands";
 import type { Workspace } from "../ipc/types";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 /** Fixed row height the windowing math is built on (spec §6.4 "plain scroll-offset windowing,
  * no new dependency"). A real DOM height, not measured — every row (loading, dir, file) renders
@@ -49,17 +50,17 @@ export function describeFsError(err: unknown): string {
   const e = err as Partial<FsError> | undefined;
   switch (e?.kind) {
     case "notFound":
-      return "файл не найден";
+      return strings.errors.fs.notFound;
     case "permissionDenied":
-      return "нет доступа";
+      return strings.errors.fs.noAccess;
     case "outsideRoot":
-      return "путь вне корня воркспейса";
+      return strings.errors.fs.outsideRoot;
     case "tooLarge":
-      return "файл слишком большой";
+      return strings.errors.fs.tooLarge;
     case "alreadyExists":
-      return "файл с таким именем уже существует";
+      return strings.errors.fs.alreadyExists;
     case "io":
-      return e.message ?? "ошибка ввода-вывода";
+      return e.message ?? strings.errors.fs.io;
     default:
       return err instanceof Error ? err.message : String(err);
   }
@@ -71,17 +72,17 @@ function describeCommandError(err: unknown): string {
   const e = err as { kind?: string; message?: string; code?: string; reason?: string } | undefined;
   switch (e?.kind) {
     case "daemon":
-      return e.message ?? e.code ?? "ошибка демона";
+      return e.message ?? e.code ?? strings.errors.command.daemon;
     case "disconnected":
-      return "демон отключён";
+      return strings.errors.command.disconnected;
     case "internal":
-      return e.message ?? "внутренняя ошибка";
+      return e.message ?? strings.errors.command.internal;
     case "incompatibleDaemon":
-      return "демон несовместим — требуется обновление";
+      return strings.errors.command.incompatible;
     case "upgradeFailed":
-      return e.reason ?? "не удалось выполнить";
+      return e.reason ?? strings.errors.command.failed;
     case "tooLarge":
-      return "запрос слишком большой";
+      return strings.errors.command.tooLarge;
     default:
       return err instanceof Error ? err.message : String(err);
   }
@@ -132,7 +133,7 @@ function computeFlatten(
         id: `${key}::loading`,
         root,
         rel,
-        name: "Загрузка…",
+        name: strings.files.loading,
         isDir: false,
         isIgnored: false,
         depth,
@@ -278,7 +279,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
       listDir(root, rel, showIgnored)
         .then((entries) => cacheDir(root, rel, entries))
         .catch((err: unknown) => {
-          showToast(`Не удалось прочитать папку: ${describeFsError(err)}`);
+          showToast(strings.files.readFolderFailed(describeFsError(err)));
         })
         .finally(() => {
           fetchingRef.current.delete(key);
@@ -318,7 +319,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
       const entries = await listDir(root, rel, showIgnored);
       cacheDir(root, rel, entries);
     } catch (err) {
-      showToast(`Не удалось обновить папку: ${describeFsError(err)}`);
+      showToast(strings.files.refreshFolderFailed(describeFsError(err)));
     }
   }
 
@@ -338,7 +339,12 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
       else await createDir(root, relDir, name);
       await refreshDir(root, relDir);
     } catch (err) {
-      showToast(`Не удалось создать ${kind === "file" ? "файл" : "папку"}: ${describeFsError(err)}`);
+      showToast(
+        strings.files.createFailed(
+          kind === "file" ? strings.files.fileWord : strings.files.folderWord,
+          describeFsError(err),
+        ),
+      );
     }
   }
 
@@ -352,13 +358,13 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
         setSelectedFile({ root, rel: parent === "" ? newName : `${parent}/${newName}` });
       }
     } catch (err) {
-      showToast(`Не удалось переименовать: ${describeFsError(err)}`);
+      showToast(strings.files.renameFailed(describeFsError(err)));
     }
   }
 
   async function doDelete(root: string, rel: string, isDir: boolean): Promise<void> {
-    const label = isDir ? "папку" : "файл";
-    if (!window.confirm(`Удалить ${label} «${rel}»? Будет перемещено в корзину.`)) return;
+    const label = isDir ? strings.files.folderWord : strings.files.fileWord;
+    if (!window.confirm(strings.files.deleteConfirm(label, rel))) return;
     try {
       await deleteEntry(root, rel);
       await refreshDir(root, dirnameOf(rel));
@@ -367,7 +373,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
         setSelectedFile(null);
       }
     } catch (err) {
-      showToast(`Не удалось удалить: ${describeFsError(err)}`);
+      showToast(strings.files.deleteFailed(describeFsError(err)));
     }
   }
 
@@ -375,7 +381,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
     try {
       await revealInFinder(root, rel);
     } catch (err) {
-      showToast(`Не удалось показать в Finder: ${describeFsError(err)}`);
+      showToast(strings.files.revealFailed(describeFsError(err)));
     }
   }
 
@@ -383,7 +389,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
     try {
       await openExternal(root, rel);
     } catch (err) {
-      showToast(`Не удалось открыть во внешнем приложении: ${describeFsError(err)}`);
+      showToast(strings.files.openExternalFailed(describeFsError(err)));
     }
   }
 
@@ -394,7 +400,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
       const ws = await addWorkspaceRoot(workspace.id, dir);
       useAppStore.getState().upsertWorkspace(ws);
     } catch (err) {
-      showToast(`Не удалось добавить корень: ${describeCommandError(err)}`);
+      showToast(strings.files.addRootFailed(describeCommandError(err)));
     }
   }
 
@@ -436,7 +442,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
       <div
         ref={popoverRef}
         role="menu"
-        aria-label={`Меню: ${node.name}`}
+        aria-label={strings.files.menuAria(node.name)}
         style={popoverStyle}
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
@@ -452,7 +458,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
               openNewFileForm(node);
             }}
           >
-            Новый файл
+            {strings.files.newFile}
           </button>
         )}
         {node.isDir && (
@@ -465,7 +471,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
               openNewDirForm(node);
             }}
           >
-            Новая папка
+            {strings.files.newFolder}
           </button>
         )}
         {!isRoot && (
@@ -478,7 +484,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
               openRenameForm(node);
             }}
           >
-            Переименовать
+            {strings.files.rename}
           </button>
         )}
         {!isRoot && (
@@ -492,7 +498,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
               void doDelete(node.root, node.rel, node.isDir);
             }}
           >
-            Удалить
+            {strings.common.delete}
           </button>
         )}
         <button
@@ -505,7 +511,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
             void doReveal(node.root, node.rel);
           }}
         >
-          Показать в Finder
+          {strings.files.reveal}
         </button>
         <button
           type="button"
@@ -517,7 +523,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
             void doOpenExternal(node.root, node.rel);
           }}
         >
-          Открыть во внешнем приложении
+          {strings.files.openExternal}
         </button>
       </div>
     );
@@ -527,10 +533,10 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
     if (!formFor) return null;
     const label =
       formFor.mode === "new-file"
-        ? "Имя нового файла"
+        ? strings.files.newFileNamePlaceholder
         : formFor.mode === "new-dir"
-          ? "Имя новой папки"
-          : "Новое имя";
+          ? strings.files.newFolderNamePlaceholder
+          : strings.files.newNamePlaceholder;
     return (
       <div
         ref={popoverRef}
@@ -623,7 +629,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
         </span>
         <button
           type="button"
-          aria-label={`Действия: ${node.name}`}
+          aria-label={strings.files.actionsAria(node.name)}
           onClick={(e) => {
             e.stopPropagation();
             setFormFor(null);

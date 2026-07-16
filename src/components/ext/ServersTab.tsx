@@ -11,13 +11,14 @@ import {
 import type { McpAuthKind, McpScope, McpServer } from "../../ipc/orchd-types";
 import { ConnectDialog } from "./ConnectDialog";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const AUTH_LABEL: Record<McpAuthKind, string> = {
-  none: "без авторизации",
-  bearer: "bearer-токен",
-  oauth: "OAuth (скоро)",
+  none: strings.ext.servers.authKind.none,
+  bearer: strings.ext.servers.authKind.bearer,
+  oauth: strings.ext.servers.authKind.oauth,
 };
 
 const createFormStyle: CSSProperties = {
@@ -112,10 +113,10 @@ const primaryButtonStyle: CSSProperties = {
 };
 
 /**
- * «Серверы» tab (S-EXT §8, T8): MCP server registry — list + add-server form + per-server
+ * Servers tab (S-EXT §8, T8): MCP server registry — list + add-server form + per-server
  * enable/disable, connect/disconnect, and a masked set-bearer input. Phase 1 ships HTTP transport
  * only (spec D6) — the add form's transport picker is fixed at `"http"`; a `"stdio"` option is
- * present but disabled ("скоро"), matching the brief's "a stdio option can be present but
+ * present but disabled ("soon"), matching the brief's "a stdio option can be present but
  * disabled".
  *
  * Every connect attempt routes through `ConnectDialog` (see that component's doc for why: there
@@ -188,7 +189,7 @@ export function ServersTab(): JSX.Element {
   }
 
   async function handleDelete(server: McpServer): Promise<void> {
-    if (!window.confirm(`удалить сервер «${server.name}»?`)) return;
+    if (!window.confirm(strings.ext.servers.deleteConfirm(server.name))) return;
     try {
       await mcpDeleteServer(server.id);
       await refreshMcpServers();
@@ -205,7 +206,7 @@ export function ServersTab(): JSX.Element {
       // Never keep the token in local state once submitted — the input is cleared, matching
       // "masked, never echoed back" (spec §8): even THIS component never re-displays it.
       setBearerDrafts((prev) => ({ ...prev, [server.id]: "" }));
-      showToast("Токен сохранён");
+      showToast(strings.ext.servers.tokenSaved);
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -216,25 +217,25 @@ export function ServersTab(): JSX.Element {
       <div style={createFormStyle}>
         <input
           data-testid="server-create-name"
-          aria-label="Имя сервера"
-          placeholder="имя"
+          aria-label={strings.ext.servers.nameAria}
+          placeholder={strings.ext.servers.namePlaceholder}
           value={name}
           onChange={(e) => setName(e.target.value)}
           style={createInputStyle}
         />
         <select
           data-testid="server-create-transport"
-          aria-label="Транспорт"
+          aria-label={strings.ext.servers.transportAria}
           value="http"
           disabled
           style={selectStyle}
         >
           <option value="http">HTTP</option>
-          <option value="stdio">stdio (скоро)</option>
+          <option value="stdio">{strings.ext.servers.stdioSoon}</option>
         </select>
         <input
           data-testid="server-create-url"
-          aria-label="URL сервера"
+          aria-label={strings.ext.servers.urlAria}
           placeholder="https://…/mcp"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
@@ -242,19 +243,19 @@ export function ServersTab(): JSX.Element {
         />
         <select
           data-testid="server-create-scope"
-          aria-label="Область"
+          aria-label={strings.ext.servers.scopeAria}
           value={scope}
           onChange={(e) => setScope(e.target.value as McpScope)}
           style={selectStyle}
         >
-          <option value="global">глобально</option>
+          <option value="global">{strings.common.scope.global}</option>
           <option value="project" disabled>
-            проект (скоро)
+            {strings.ext.projectSoon}
           </option>
         </select>
         <select
           data-testid="server-create-auth"
-          aria-label="Авторизация"
+          aria-label={strings.ext.servers.authAria}
           value={authKind}
           onChange={(e) => setAuthKind(e.target.value as McpAuthKind)}
           style={selectStyle}
@@ -272,13 +273,13 @@ export function ServersTab(): JSX.Element {
           onClick={() => void handleAdd()}
           style={{ ...primaryButtonStyle, opacity: addBlocked ? 0.5 : 1 }}
         >
-          + сервер
+          {strings.ext.servers.addServer}
         </button>
       </div>
 
       {servers.length === 0 ? (
         <div data-testid="servers-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          нет серверов
+          {strings.ext.servers.empty}
         </div>
       ) : (
         <div role="list">
@@ -295,11 +296,13 @@ export function ServersTab(): JSX.Element {
                 {server.name}
               </span>
               <span style={metaStyle}>{server.transport}</span>
-              <span style={metaStyle}>{server.scope === "global" ? "глобально" : "проект"}</span>
+              <span style={metaStyle}>
+                {server.scope === "global" ? strings.common.scope.global : strings.common.scope.project}
+              </span>
               <span data-testid={`server-status-${server.id}`} style={metaStyle}>
                 {server.protocolVersion !== null
-                  ? `протокол ${server.protocolVersion}`
-                  : "ещё не подключался"}
+                  ? strings.ext.servers.protocol(server.protocolVersion)
+                  : strings.ext.servers.notConnected}
               </span>
               <button
                 type="button"
@@ -308,7 +311,7 @@ export function ServersTab(): JSX.Element {
                 onClick={() => void handleToggleEnabled(server)}
                 style={textButtonStyle}
               >
-                {server.enabled ? "выключить" : "включить"}
+                {server.enabled ? strings.ext.servers.disable : strings.ext.servers.enable}
               </button>
               <button
                 type="button"
@@ -317,7 +320,7 @@ export function ServersTab(): JSX.Element {
                 onClick={() => setConnectTarget(server)}
                 style={textButtonStyle}
               >
-                подключить
+                {strings.ext.servers.connect}
               </button>
               <button
                 type="button"
@@ -326,13 +329,13 @@ export function ServersTab(): JSX.Element {
                 onClick={() => void handleDisconnect(server)}
                 style={textButtonStyle}
               >
-                отключить
+                {strings.ext.servers.disconnect}
               </button>
               <input
                 type="password"
                 data-testid={`server-bearer-input-${server.id}`}
-                aria-label={`Токен для ${server.name}`}
-                placeholder="bearer-токен"
+                aria-label={strings.ext.servers.tokenFor(server.name)}
+                placeholder={strings.ext.servers.bearerPlaceholder}
                 disabled={orchdDown}
                 value={bearerDrafts[server.id] ?? ""}
                 onChange={(e) =>
@@ -347,7 +350,7 @@ export function ServersTab(): JSX.Element {
                 onClick={() => void handleSetBearer(server)}
                 style={textButtonStyle}
               >
-                задать токен
+                {strings.ext.servers.setToken}
               </button>
               <button
                 type="button"
@@ -356,7 +359,7 @@ export function ServersTab(): JSX.Element {
                 onClick={() => void handleDelete(server)}
                 style={deleteButtonStyle}
               >
-                удалить
+                {strings.ext.delete}
               </button>
             </div>
           ))}

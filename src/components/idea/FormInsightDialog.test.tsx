@@ -10,7 +10,7 @@ const orchdSetIdeaLifecycleMock = vi.fn();
 const orchdGraphNeighborhoodMock = vi.fn();
 const orchdListGoalsMock = vi.fn();
 const orchdGraphListProjectMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../../ipc/orchd", () => ({
   orchdCreateInsight: (...a: unknown[]) => orchdCreateInsightMock(...a),
@@ -31,7 +31,7 @@ import type { Goal, GraphNode, Insight, McpArtifact } from "../../ipc/orchd-type
 const ideaWithProject = {
   id: "idea-1",
   projectId: "p1",
-  title: "Проверить спрос",
+  title: "Validate demand",
   body: "",
   lifecycle: "researching" as const,
   createdAt: 1,
@@ -62,7 +62,7 @@ function makeGoal(over: Partial<Goal> = {}): Goal {
     projectId: "p1",
     parentId: null,
     kind: "strategic",
-    title: "Расти на 20%",
+    title: "Grow by 20%",
     body: "",
     ord: 0,
     status: "active",
@@ -80,7 +80,7 @@ function makeNode(over: Partial<GraphNode> = {}): GraphNode {
     kind: "entityRef",
     entityType: "idea",
     entityId: ideaWithProject.id,
-    label: "Проверить спрос",
+    label: "Validate demand",
     body: "",
     posX: 0,
     posY: 0,
@@ -96,7 +96,7 @@ function makeInsight(over: Partial<Insight> = {}): Insight {
     id: "in1",
     projectId: "p1",
     source: `research-run:r1`,
-    title: "Проверить спрос",
+    title: "Validate demand",
     body: "market is large",
     fitVerdict: null,
     fitReasoning: "",
@@ -123,7 +123,7 @@ beforeEach(() => {
   orchdGraphListProjectMock
     .mockReset()
     .mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState(
     {
       goalsByProject: {},
@@ -168,7 +168,7 @@ describe("FormInsightDialog", () => {
     await waitFor(() => expect(orchdListGoalsMock).toHaveBeenCalledWith("p1"));
     await waitFor(() => {
       const row = screen.getByTestId("form-insight-goal-g1");
-      expect(row.textContent).toContain("Расти на 20%");
+      expect(row.textContent).toContain("Grow by 20%");
       expect(row.textContent).toContain("mrr");
     });
   });
@@ -203,7 +203,7 @@ describe("FormInsightDialog", () => {
     expect(orchdGraphListProjectMock).not.toHaveBeenCalled();
   });
 
-  it("«Создать» is blocked with an empty title", () => {
+  it('"Create" is blocked with an empty title', () => {
     render(
       <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={() => {}} />,
     );
@@ -212,7 +212,7 @@ describe("FormInsightDialog", () => {
     expect(orchdCreateInsightMock).not.toHaveBeenCalled();
   });
 
-  it("«Создать» fires orchdCreateInsight then orchdSetInsightFitVerdict, in order, with source research-run:<id>", async () => {
+  it('"Create" fires orchdCreateInsight then orchdSetInsightFitVerdict, in order, with source research-run:<id>', async () => {
     render(
       <FormInsightDialog
         idea={ideaWithProject}
@@ -224,7 +224,7 @@ describe("FormInsightDialog", () => {
 
     fireEvent.change(screen.getByTestId("form-insight-verdict"), { target: { value: "fit" } });
     fireEvent.change(screen.getByTestId("form-insight-reasoning"), {
-      target: { value: "хороший рынок" },
+      target: { value: "good market" },
     });
     fireEvent.click(screen.getByTestId("form-insight-create"));
 
@@ -237,14 +237,14 @@ describe("FormInsightDialog", () => {
       ),
     );
     await waitFor(() =>
-      expect(orchdSetInsightFitVerdictMock).toHaveBeenCalledWith("in1", "fit", "хороший рынок"),
+      expect(orchdSetInsightFitVerdictMock).toHaveBeenCalledWith("in1", "fit", "good market"),
     );
     expect(
       orchdCreateInsightMock.mock.invocationCallOrder[0]!,
     ).toBeLessThan(orchdSetInsightFitVerdictMock.mock.invocationCallOrder[0]!);
   });
 
-  it("once created, «Принять» fires orchdSetInsightStatus(id, accepted, null)", async () => {
+  it('once created, "Accept" fires orchdSetInsightStatus(id, accepted, null)', async () => {
     render(
       <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={() => {}} />,
     );
@@ -257,7 +257,7 @@ describe("FormInsightDialog", () => {
     );
   });
 
-  it("once accepted, «В backlog» fires orchdCreateTask then orchdSetIdeaLifecycle(specced), then closes", async () => {
+  it('once accepted, "To backlog" fires orchdCreateTask then orchdSetIdeaLifecycle(specced), then closes', async () => {
     const onClose = vi.fn();
     render(
       <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={onClose} />,
@@ -273,7 +273,7 @@ describe("FormInsightDialog", () => {
       expect(orchdCreateTaskMock).toHaveBeenCalledWith(
         "p1",
         null,
-        "Проверить спрос",
+        "Validate demand",
         "market is large",
         null,
         "insight",
@@ -290,7 +290,7 @@ describe("FormInsightDialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("«В backlog» is disabled for an orphan idea (no project to file the task under)", async () => {
+  it('"To backlog" is disabled for an orphan idea (no project to file the task under)', async () => {
     render(<FormInsightDialog idea={ideaOrphan} runId="r1" artifact={null} onClose={() => {}} />);
     fireEvent.click(screen.getByTestId("form-insight-create"));
     await waitFor(() => expect(screen.getByTestId("form-insight-accept")).toBeTruthy());
@@ -337,13 +337,13 @@ describe("FormInsightDialog", () => {
     expect(orchdCreateInsightMock).not.toHaveBeenCalled();
   });
 
-  // Regression guard (T6 review, Finding 1): «Принять»/«В backlog» are gated behind
+  // Regression guard (T6 review, Finding 1): "Accept"/"To backlog" are gated behind
   // `insight !== null` (and, for backlog, `status === "accepted"`), so the create-only orchdDown
   // test above can NEVER reach them — a regression dropping `orchdDown` from `acceptBlocked`/
   // `backlogBlocked` would go undetected. This test first drives past those gates (create, then
   // accept) so each button renders in the state where `orchdDown` is its ONLY remaining blocking
   // term, then flips orchdDown and asserts the disabled + click-not-called invariant for BOTH.
-  it("while orchdDown after create/accept: «Принять» (status new) and «В backlog» (status accepted) are disabled and click NEITHER wrapper", async () => {
+  it('while orchdDown after create/accept: "Accept" (status new) and "To backlog" (status accepted) are disabled and click NEITHER wrapper', async () => {
     render(
       <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={() => {}} />,
     );
@@ -352,7 +352,7 @@ describe("FormInsightDialog", () => {
     fireEvent.click(screen.getByTestId("form-insight-create"));
     await waitFor(() => expect(screen.getByTestId("form-insight-accept")).toBeTruthy());
 
-    // Phase A — «Принять» with status "new": `acceptBlocked = orchdDown || insight===null ||
+    // Phase A — "Accept" with status "new": `acceptBlocked = orchdDown || insight===null ||
     // insight.status!=="new"`. insight is non-null and status is "new", so orchdDown is the ONLY
     // term that can block it here — a dropped-orchdDown regression flips this assertion.
     act(() => {
@@ -363,7 +363,7 @@ describe("FormInsightDialog", () => {
     fireEvent.click(acceptButton);
     expect(orchdSetInsightStatusMock).not.toHaveBeenCalled();
 
-    // Restore and actually accept (resolves to status "accepted") so «В backlog» renders.
+    // Restore and actually accept (resolves to status "accepted") so "To backlog" renders.
     act(() => {
       useAppStore.setState({ orchdDown: false }, false);
     });
@@ -371,7 +371,7 @@ describe("FormInsightDialog", () => {
     await waitFor(() => expect(screen.getByTestId("form-insight-backlog")).toBeTruthy());
     orchdSetInsightStatusMock.mockClear(); // drop the successful accept call before Phase B
 
-    // Phase B — «В backlog» with status "accepted" and a concrete projectId: `backlogBlocked =
+    // Phase B — "To backlog" with status "accepted" and a concrete projectId: `backlogBlocked =
     // orchdDown || insight===null || insight.status!=="accepted" || idea.projectId===null`. All
     // three non-orchdDown terms are satisfied (non-null, accepted, project set), so orchdDown is
     // again the ONLY term that can block it — the regression guard for the backlog expression.
