@@ -300,30 +300,44 @@ fn resolve_ruleset_write_path(
     }
 }
 
-/// Writes a ruleset's `mdContent` (spec §8 ruleset-file rule: write only under `app_support`,
-/// otherwise repoint to the default app-support path) and inserts its raw row inside the
-/// already-open import transaction. `md_content: None` (file was missing/unreadable at export
-/// time) writes nothing — there is no content to write — but the row is still inserted, and
-/// `md_hash` is preserved verbatim regardless (this function never re-stamps `md_hash` from
-/// `write_atomic`'s return value, per D7 field-verbatim preservation).
+/// One ruleset markdown file write deferred to AFTER the import transaction commits (BL-90). A
+/// file write cannot be rolled back with the DB transaction, so writing it inside the tx left an
+/// orphan `.md` on disk whenever a LATER bundle in the same import failed on a `Conflict`. The
+/// path is fully validated (traversal + symlink guard) at COLLECTION time — before commit — so a
+/// crafted `md_path` still fails the whole import before anything is written; only the atomic
+/// content write itself is deferred.
+struct PendingRulesetWrite {
+    path: std::path::PathBuf,
+    content: String,
+}
+
+/// Validates a ruleset's write path (spec §8 ruleset-file rule: write only under `app_support`,
+/// otherwise repoint to the default app-support path), inserts its raw row inside the already-open
+/// import transaction, and — when there is `mdContent` — QUEUES the file write into `pending` for
+/// execution after commit (BL-90). `md_content: None` (file was missing/unreadable at export time)
+/// queues nothing; the row is still inserted, and `md_hash` is preserved verbatim regardless (this
+/// function never re-stamps `md_hash`, per D7 field-verbatim preservation).
 ///
 /// SECURITY: the write path is resolved fail-closed by [`resolve_ruleset_write_path`] (rejects
 /// `..`), then — as defense-in-depth against a symlink planted inside the app-support tree — the
-/// realized parent directory is canonicalized and re-checked to be contained within `app_support`
-/// via the shared `bpa_paths::validate_path_within` validator BEFORE the file is written.
+/// realized parent directory is created and canonicalized-and-re-checked to be contained within
+/// `app_support` via the shared `bpa_paths::validate_path_within` validator. This full check runs
+/// HERE (pre-commit) so a traversal/symlink attempt fails the whole import before any row commits
+/// and before any file is written; the deferred step is purely the content write.
 fn import_ruleset(
     tx: &rusqlite::Transaction,
     app_support: &Path,
     bundle: &RuleSetBundle,
+    pending: &mut Vec<PendingRulesetWrite>,
 ) -> Result<(), OrchdPersistError> {
     let mut rule = bundle.rule.clone();
     let effective_path = resolve_ruleset_write_path(app_support, &rule)?;
 
     if let Some(content) = &bundle.md_content {
-        // Create the (lexically-contained) parent, then canonicalize-and-contain it before the
-        // write catches any symlink escape the lexical `..` check can't see. `write_atomic` also
-        // creates parent dirs, but doing it here lets `validate_path_within` (which requires an
-        // existing path) run on the realized parent first.
+        // Create the (lexically-contained) parent, then canonicalize-and-contain it: this catches
+        // any symlink escape the lexical `..` check can't see. Done here (pre-commit) so a bad
+        // path fails the whole import before commit — but the actual content write is deferred to
+        // after commit so a later `Conflict` can't leave an orphan file (BL-90).
         let parent = effective_path.parent().ok_or_else(|| {
             OrchdPersistError::Validation("ruleset md_path has no parent directory".to_string())
         })?;
@@ -332,8 +346,10 @@ fn import_ruleset(
         bpa_paths::validate_path_within(app_support, parent).map_err(|e| {
             OrchdPersistError::Validation(format!("ruleset md_path escapes app-support: {e}"))
         })?;
-        ruleset_files::write_atomic(&effective_path, content)
-            .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+        pending.push(PendingRulesetWrite {
+            path: effective_path.clone(),
+            content: content.clone(),
+        });
     }
     rule.md_path = effective_path.to_string_lossy().into_owned();
     persistence::insert_ruleset_raw(tx, &rule)
@@ -349,6 +365,7 @@ fn import_one_project(
     app_support: &Path,
     bundle: &ProjectBundle,
     counts: &mut ImportCounts,
+    pending: &mut Vec<PendingRulesetWrite>,
 ) -> Result<(), OrchdPersistError> {
     persistence::insert_project_raw(tx, &bundle.project)?;
     counts.projects += 1;
@@ -369,7 +386,7 @@ fn import_one_project(
         counts.tasks += 1;
     }
     if let Some(ruleset) = &bundle.ruleset {
-        import_ruleset(tx, app_support, ruleset)?;
+        import_ruleset(tx, app_support, ruleset, pending)?;
         counts.rulesets += 1;
     }
     Ok(())
@@ -398,12 +415,16 @@ fn import_project_bundles(
     // topologically re-sort every family first.
     tx.pragma_update(None, "defer_foreign_keys", "ON")?;
 
+    // Ruleset markdown writes are COLLECTED here (path fully validated) and executed only after a
+    // successful commit (BL-90) — a file write cannot roll back with the transaction, so writing
+    // inside the tx left an orphan `.md` whenever a later bundle hit a `Conflict`.
     let mut counts = ImportCounts::default();
+    let mut pending_writes: Vec<PendingRulesetWrite> = Vec::new();
     for bundle in project_bundles {
-        import_one_project(&tx, app_support, bundle, &mut counts)?;
+        import_one_project(&tx, app_support, bundle, &mut counts, &mut pending_writes)?;
     }
     if let Some(ruleset) = global_ruleset {
-        import_ruleset(&tx, app_support, ruleset)?;
+        import_ruleset(&tx, app_support, ruleset, &mut pending_writes)?;
         counts.rulesets += 1;
     }
     for idea in orphan_ideas {
@@ -416,6 +437,14 @@ fn import_project_bundles(
     }
 
     tx.commit()?;
+
+    // Commit succeeded and is durable — NOW write the ruleset files. If a write fails here the row
+    // is already committed (the file is best-effort recreatable via the ruleset editor), so surface
+    // it but the import has otherwise landed.
+    for write in &pending_writes {
+        ruleset_files::write_atomic(&write.path, &write.content)
+            .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+    }
     Ok(counts)
 }
 
@@ -742,6 +771,54 @@ mod tests {
             table_counts(&target),
             "a Conflict must roll back EVERY row the doomed import attempted, not just the \
              colliding one"
+        );
+    }
+
+    /// BL-90 regression: a ruleset markdown file must NOT survive on disk when a LATER row in the
+    /// same import fails on a `Conflict`. A file write cannot roll back with the DB transaction, so
+    /// the ruleset `.md` write is deferred to after commit. A whole-store bundle imports a project
+    /// WITH a ruleset (queueing a `.md` write), then an orphan idea whose id is forced to collide
+    /// with an existing target idea — imported AFTER every project bundle — so the rollback must
+    /// leave NO orphan `.md` behind.
+    #[test]
+    fn import_conflict_leaves_no_orphan_ruleset_file() {
+        // Staging: one project (build_fixture creates its ruleset + mdContent) plus one orphan idea.
+        let staging = Db::open_in_memory().unwrap();
+        let staging_support = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&staging, staging_support.path(), "w1");
+        staging.create_idea(None, "Orphan idea", "").unwrap();
+        let exported = export_all(&staging, 1).unwrap();
+
+        // Target: pre-create an orphan idea, then force the bundle's orphan idea id to collide.
+        let target = Db::open_in_memory().unwrap();
+        let app_support = tempfile::tempdir().unwrap();
+        let existing_idea = target.create_idea(None, "Existing orphan", "").unwrap();
+
+        let mut value: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        value["orphanIdeas"][0]["id"] = serde_json::Value::String(existing_idea.id.clone());
+        let patched = serde_json::to_string(&value).unwrap();
+
+        // The project's ruleset `.md` would be written at this repointed path.
+        let expected_md = app_support
+            .path()
+            .join("rules")
+            .join(format!("project-{}.md", fixture.project_id));
+
+        let err = import_bundle(&target, app_support.path(), &patched).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Conflict(_)),
+            "expected Conflict, got {err:?}"
+        );
+
+        assert!(
+            !expected_md.exists(),
+            "a rolled-back import must not leave an orphan ruleset file at {}",
+            expected_md.display()
+        );
+        // The DB is fully rolled back too — the imported project never lands.
+        assert!(
+            target.get_project(&fixture.project_id).is_err(),
+            "the rolled-back import must not leave the project either"
         );
     }
 
