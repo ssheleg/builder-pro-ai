@@ -41,7 +41,7 @@ beforeEach(() => {
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
-  useAppStore.setState({ workspaces: {}, projects: [], ideas: [], toast: null, orchdDown: false }, false);
+  useAppStore.setState({ workspaces: {}, projects: [], ideas: [], toast: null, toastQueue: [], orchdDown: false }, false);
 });
 
 describe("SpawnProjectFromIdea", () => {
@@ -150,7 +150,12 @@ describe("SpawnProjectFromIdea", () => {
       await Promise.resolve();
     });
 
-    await waitFor(() => expect(useAppStore.getState().toast).toBe(strings.ideas.spawn.createdFromIdea));
+    // The failed-link attempt already surfaced its own error toast, so under the FIFO toast queue
+    // (BL-97) the success notice is ENQUEUED behind it rather than clobbering it — assert it was
+    // surfaced by checking the queue contains it (the error shows first, then this).
+    await waitFor(() =>
+      expect(useAppStore.getState().toastQueue).toContain(strings.ideas.spawn.createdFromIdea),
+    );
 
     // Completed steps were NOT re-run — no second project/workspace/picker.
     expect(pickFolderMock).toHaveBeenCalledTimes(1);

@@ -196,7 +196,7 @@ beforeEach(() => {
     {
       graphByProject: { p1: view },
       orchdDown: false,
-      toast: null,
+      toast: null, toastQueue: [],
       // Swap the store's real `refreshGraph` for a stable no-op in EVERY test (T7 review #1): the
       // component calls it on mount, and the real one would (via the mocked module) touch
       // orchd wrappers and could pre-populate a toast. Tests that need to ASSERT on the refresh

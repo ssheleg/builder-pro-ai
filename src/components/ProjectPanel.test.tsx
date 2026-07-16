@@ -144,7 +144,7 @@ beforeEach(() => {
       tasksByProject: {},
       ideas: [],
       insights: [],
-      toast: null,
+      toast: null, toastQueue: [],
       orchdDown: false,
     },
     false,

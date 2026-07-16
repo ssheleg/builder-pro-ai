@@ -172,7 +172,7 @@ beforeEach(() => {
     workspaces: {},
     selectedFile: null,
     filesRailOpen: false,
-    toast: null,
+    toast: null, toastQueue: [],
   });
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
     constructor(cb: () => void) {

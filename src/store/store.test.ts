@@ -37,6 +37,7 @@ const connectorListAccountsMock = vi.fn();
 const skillListMock = vi.fn();
 const trustListPoliciesMock = vi.fn();
 const trustListAuditMock = vi.fn();
+const orchdStorageStatusMock = vi.fn();
 vi.mock("../ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -54,6 +55,7 @@ vi.mock("../ipc/orchd", () => ({
   skillList: (...a: unknown[]) => skillListMock(...a),
   trustListPolicies: (...a: unknown[]) => trustListPoliciesMock(...a),
   trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
+  orchdStorageStatus: (...a: unknown[]) => orchdStorageStatusMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -94,6 +96,7 @@ describe("useAppStore", () => {
     skillListMock.mockReset();
     trustListPoliciesMock.mockReset();
     trustListAuditMock.mockReset();
+    orchdStorageStatusMock.mockReset();
     useAppStore.setState(
       {
         sessions: {},
@@ -112,6 +115,8 @@ describe("useAppStore", () => {
         filesRailOpen: false,
         watchPaused: false,
         toast: null,
+        toastQueue: [],
+        storageStatus: null,
         activeProjectId: null,
         projects: [],
         goalsByProject: {},
@@ -516,49 +521,75 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().toast).toBeNull();
   });
 
-  it("showToast replaces the message when called again (queue-of-one — no queueing)", () => {
+  it("showToast APPENDS to a FIFO queue (BL-97) — a second toast never clobbers the visible first", () => {
     useAppStore.getState().showToast("first");
     expect(useAppStore.getState().toast).toBe("first");
+    expect(useAppStore.getState().toastQueue).toEqual(["first"]);
     useAppStore.getState().showToast("second");
-    expect(useAppStore.getState().toast).toBe("second");
+    // The visible toast stays "first" (not clobbered); "second" is queued behind it.
+    expect(useAppStore.getState().toast).toBe("first");
+    expect(useAppStore.getState().toastQueue).toEqual(["first", "second"]);
   });
 
-  it("auto-dismisses ~4s after showToast (fake timers)", () => {
+  it("dismissToast advances the queue to the next toast (manual close), not straight to empty", () => {
+    useAppStore.getState().showToast("first");
+    useAppStore.getState().showToast("second");
+    expect(useAppStore.getState().toast).toBe("first");
+    useAppStore.getState().dismissToast();
+    expect(useAppStore.getState().toast).toBe("second");
+    expect(useAppStore.getState().toastQueue).toEqual(["second"]);
+    useAppStore.getState().dismissToast();
+    expect(useAppStore.getState().toast).toBeNull();
+    expect(useAppStore.getState().toastQueue).toEqual([]);
+  });
+
+  it("caps the queue at 5, dropping the OLDEST (drop-oldest)", () => {
+    for (const m of ["a", "b", "c", "d", "e", "f"]) useAppStore.getState().showToast(m);
+    // "a" (oldest) was dropped when "f" arrived; the visible head advances to "b".
+    expect(useAppStore.getState().toastQueue).toEqual(["b", "c", "d", "e", "f"]);
+    expect(useAppStore.getState().toast).toBe("b");
+  });
+
+  it("auto-advances ~4s after showToast, walking the whole queue then clearing (fake timers)", () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.getState().showToast("first");
+      useAppStore.getState().showToast("second");
+      expect(useAppStore.getState().toast).toBe("first");
+      vi.advanceTimersByTime(3999);
+      expect(useAppStore.getState().toast).toBe("first");
+      vi.advanceTimersByTime(1); // first's 4s deadline -> advance to second
+      expect(useAppStore.getState().toast).toBe("second");
+      vi.advanceTimersByTime(4000); // second's 4s deadline -> queue empties
+      expect(useAppStore.getState().toast).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a single toast auto-dismisses to null after 4s", () => {
     vi.useFakeTimers();
     try {
       useAppStore.getState().showToast("will vanish");
       expect(useAppStore.getState().toast).toBe("will vanish");
-      vi.advanceTimersByTime(3999);
-      expect(useAppStore.getState().toast).toBe("will vanish");
-      vi.advanceTimersByTime(1);
+      vi.advanceTimersByTime(4000);
       expect(useAppStore.getState().toast).toBeNull();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("a later showToast's auto-dismiss timer does not clear an even-later toast (stale-timer guard)", () => {
+  it("dismissToast re-arms the timer for the newly-visible toast (no stale early clear)", () => {
     vi.useFakeTimers();
     try {
       useAppStore.getState().showToast("first");
-      vi.advanceTimersByTime(2000); // first is at 2s of its 4s life, not yet dismissed
-      useAppStore.getState().showToast("second"); // restarts the window
-      vi.advanceTimersByTime(2000); // first's original 4s deadline passes; second is at 2s
-      expect(useAppStore.getState().toast).toBe("second"); // must NOT have been cleared
-      vi.advanceTimersByTime(2000); // second's own 4s deadline passes
-      expect(useAppStore.getState().toast).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("dismissToast before the auto-dismiss timer fires prevents a later stray clear", () => {
-    vi.useFakeTimers();
-    try {
-      useAppStore.getState().showToast("first");
-      useAppStore.getState().dismissToast();
       useAppStore.getState().showToast("second");
-      vi.advanceTimersByTime(4000); // only "second"'s own timer should fire
+      vi.advanceTimersByTime(2000); // "first" is 2s into its life
+      useAppStore.getState().dismissToast(); // manually advance to "second"; its 4s clock restarts
+      expect(useAppStore.getState().toast).toBe("second");
+      vi.advanceTimersByTime(3999); // "first"'s original 4s would have fired at 4000ms — must not clear "second"
+      expect(useAppStore.getState().toast).toBe("second");
+      vi.advanceTimersByTime(1); // "second"'s own 4s deadline (from the dismiss) fires
       expect(useAppStore.getState().toast).toBeNull();
     } finally {
       vi.useRealTimers();
@@ -1130,6 +1161,24 @@ describe("useAppStore", () => {
     trustListPoliciesMock.mockRejectedValueOnce(err);
     await useAppStore.getState().refreshPolicies();
     expect(useAppStore.getState().policies).toEqual([]);
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  // ---- storage-degradation status (spec D3, BL-94) ----
+
+  it("refreshStorageStatus replaces storageStatus from orchdStorageStatus()", async () => {
+    const status = { storageMode: "in_memory_fallback" as const, quarantinedPath: null };
+    orchdStorageStatusMock.mockResolvedValueOnce(status);
+    await useAppStore.getState().refreshStorageStatus();
+    expect(orchdStorageStatusMock).toHaveBeenCalledWith();
+    expect(useAppStore.getState().storageStatus).toEqual(status);
+  });
+
+  it("refreshStorageStatus surfaces a rejection as a toast, leaving storageStatus untouched", async () => {
+    const err = { kind: "disconnected" };
+    orchdStorageStatusMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshStorageStatus();
+    expect(useAppStore.getState().storageStatus).toBeNull();
     expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 });

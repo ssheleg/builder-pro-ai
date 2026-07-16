@@ -58,7 +58,7 @@ beforeEach(() => {
   orchdDeleteGoalMock.mockReset().mockResolvedValue(undefined);
   orchdListGoalsMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
-  useAppStore.setState({ goalsByProject: {}, toast: null, orchdDown: false }, false);
+  useAppStore.setState({ goalsByProject: {}, toast: null, toastQueue: [], orchdDown: false }, false);
 });
 
 describe("GoalTree", () => {

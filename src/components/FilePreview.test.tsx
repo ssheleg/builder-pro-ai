@@ -14,7 +14,7 @@ import { strings } from "../strings";
 afterEach(cleanup);
 beforeEach(() => {
   readFilePreviewMock.mockReset();
-  useAppStore.setState({ selectedFile: null, toast: null }, false);
+  useAppStore.setState({ selectedFile: null, toast: null, toastQueue: [] }, false);
 });
 
 describe("FilePreview", () => {

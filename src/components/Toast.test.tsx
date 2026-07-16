@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { render, screen, cleanup, act } from "@testing-library/react";
+import { render, screen, cleanup, act, fireEvent } from "@testing-library/react";
 import { Toast } from "./Toast";
 import { useAppStore } from "../store/store";
 
 afterEach(cleanup);
 beforeEach(() => {
-  useAppStore.setState({ toast: null }, false);
+  useAppStore.setState({ toast: null, toastQueue: [] }, false);
 });
 
 describe("Toast (S2 T9, design-system.md Toast atom, spec §7 honest error surface)", () => {
@@ -18,7 +18,8 @@ describe("Toast (S2 T9, design-system.md Toast atom, spec §7 honest error surfa
   it("renders the current toast message with role=alert when showToast is called", () => {
     render(<Toast />);
     act(() => useAppStore.getState().showToast("Failed to connect to the daemon"));
-    expect(screen.getByRole("alert").textContent).toBe("Failed to connect to the daemon");
+    // The alert also carries the manual-dismiss "×" button now (BL-97), so match on containment.
+    expect(screen.getByRole("alert").textContent).toContain("Failed to connect to the daemon");
   });
 
   it("clears when dismissToast is called", () => {
@@ -44,12 +45,26 @@ describe("Toast (S2 T9, design-system.md Toast atom, spec §7 honest error surfa
     }
   });
 
-  it("reactively swaps to a newer message when showToast is called again", () => {
+  it("keeps showing the first message when a second is queued behind it (BL-97 — not clobbered)", () => {
     render(<Toast />);
     act(() => useAppStore.getState().showToast("first"));
-    expect(screen.getByRole("alert").textContent).toBe("first");
+    expect(screen.getByRole("alert").textContent).toContain("first");
     act(() => useAppStore.getState().showToast("second"));
-    expect(screen.getByRole("alert").textContent).toBe("second");
+    // The visible toast stays "first"; "second" waits in the queue behind it.
+    expect(screen.getByRole("alert").textContent).toContain("first");
     expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("the close button advances the queue to the next toast, then clears it (BL-97)", () => {
+    render(<Toast />);
+    act(() => useAppStore.getState().showToast("first"));
+    act(() => useAppStore.getState().showToast("second"));
+    expect(screen.getByRole("alert").textContent).toContain("first");
+
+    fireEvent.click(screen.getByTestId("toast-dismiss"));
+    expect(screen.getByRole("alert").textContent).toContain("second");
+
+    fireEvent.click(screen.getByTestId("toast-dismiss"));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

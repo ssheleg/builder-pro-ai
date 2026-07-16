@@ -55,7 +55,7 @@ beforeEach(() => {
   orchdDeleteTaskMock.mockReset().mockResolvedValue(undefined);
   orchdListTasksMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
-  useAppStore.setState({ tasksByProject: {}, toast: null, orchdDown: false }, false);
+  useAppStore.setState({ tasksByProject: {}, toast: null, toastQueue: [], orchdDown: false }, false);
 });
 
 describe("TasksList", () => {

@@ -65,6 +65,7 @@ export const strings = {
   // ── chrome: banners, upgrade dialog, sidebar, toasts ─────────────────────────────────────────
   chrome: {
     daemonOutdated: "Background service is outdated — update required",
+    orchdOutdated: "Orchestrator service is outdated — update required",
     orchdUnavailable: "Orchestrator unavailable",
     upgrade: {
       required: "Update required",

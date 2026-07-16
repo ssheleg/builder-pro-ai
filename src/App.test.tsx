@@ -163,6 +163,12 @@ const skillListMock = vi.fn().mockResolvedValue([]);
 // call straight through to these — mocked here for the same reason as the wrappers above.
 const trustListPoliciesMock = vi.fn().mockResolvedValue([]);
 const trustListAuditMock = vi.fn().mockResolvedValue([]);
+// spec D3/BL-94 + D8: the storage-degradation status is pulled on the initial connect and on every
+// orchd://up — default to the healthy `persistent` mode so no banner/toast noise leaks into the
+// DaemonBanner-focused assertions below.
+const orchdStorageStatusMock = vi
+  .fn()
+  .mockResolvedValue({ storageMode: "persistent", quarantinedPath: null });
 vi.mock("./ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -185,6 +191,7 @@ vi.mock("./ipc/orchd", () => ({
   skillList: (...a: unknown[]) => skillListMock(...a),
   trustListPolicies: (...a: unknown[]) => trustListPoliciesMock(...a),
   trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
+  orchdStorageStatus: (...a: unknown[]) => orchdStorageStatusMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -312,6 +319,9 @@ beforeEach(() => {
   skillListMock.mockReset().mockResolvedValue([]);
   trustListPoliciesMock.mockReset().mockResolvedValue([]);
   trustListAuditMock.mockReset().mockResolvedValue([]);
+  orchdStorageStatusMock
+    .mockReset()
+    .mockResolvedValue({ storageMode: "persistent", quarantinedPath: null });
   useAppStore.setState(
     {
       sessions: {},
@@ -348,6 +358,9 @@ beforeEach(() => {
       orchdDown: false,
       orchdIncompatible: false,
       orchdUpgradeDialogOpen: false,
+      storageStatus: null,
+      toast: null,
+      toastQueue: [],
     },
     false,
   );
@@ -1326,6 +1339,91 @@ describe("S3 T13: orchd domain event wiring", () => {
     expect(orchdListGoalsMock).not.toHaveBeenCalled();
     expect(orchdListTasksMock).not.toHaveBeenCalled();
     expect(orchdGraphListProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("orchd://up rehydrates the FULL D8 slice list (BL-92): ext slices + research runs + global ruleset + storage status", async () => {
+    const globalView = {
+      rule: {
+        id: "gr", scope: "global" as const, projectId: null, mdPath: "/g", mdHash: "h",
+        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        createdAt: 1, updatedAt: 1,
+      },
+      mdContent: null,
+      fileState: "ok" as const,
+    };
+    orchdGetRulesetMock.mockResolvedValue(globalView);
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    // Seed the two "refetch only if currently held" slices: an idea holding runs, and the global
+    // ruleset surface already opened (proxied by "global" present in `rulesets`). Open a project so
+    // the per-project surfaces are in scope too.
+    act(() =>
+      useAppStore.setState(
+        { researchRunsByIdea: { "idea-1": [] }, rulesets: { global: globalView } },
+        false,
+      ),
+    );
+    act(() => useAppStore.getState().openProject("p1"));
+
+    // Clear every mock so we observe ONLY the up-driven refetch (mount + openProject already fired
+    // some of these).
+    for (const m of [
+      orchdListProjectsMock, orchdListGoalsMock, orchdListTasksMock, orchdListIdeasMock,
+      orchdListInsightsMock, orchdGraphListProjectMock, orchdGetRulesetMock, mcpListServersMock,
+      mcpListArtifactsMock, connectorListAccountsMock, skillListMock, trustListPoliciesMock,
+      mcpListInvocationsMock, researchListRunsMock, orchdStorageStatusMock,
+    ]) {
+      m.mockClear();
+    }
+
+    await act(async () => {
+      cbs.orchdUp(null);
+    });
+
+    // projects + the open project's goals/ideas/insights/tasks/ruleset/graph (spec D8)
+    expect(orchdListProjectsMock).toHaveBeenCalled();
+    expect(orchdListGoalsMock).toHaveBeenCalledWith("p1");
+    expect(orchdListTasksMock).toHaveBeenCalledWith("p1");
+    expect(orchdListIdeasMock).toHaveBeenCalledWith(null);
+    expect(orchdListInsightsMock).toHaveBeenCalledWith(null);
+    expect(orchdGraphListProjectMock).toHaveBeenCalledWith("p1");
+    expect(orchdGetRulesetMock).toHaveBeenCalledWith("project", "p1");
+    // mcp servers + artifacts + accounts + skills + policies + invocations (spec D8)
+    expect(mcpListServersMock).toHaveBeenCalledWith(null);
+    expect(mcpListArtifactsMock).toHaveBeenCalledWith(null, null, null);
+    expect(connectorListAccountsMock).toHaveBeenCalledWith();
+    expect(skillListMock).toHaveBeenCalledWith(null);
+    expect(trustListPoliciesMock).toHaveBeenCalledWith();
+    expect(mcpListInvocationsMock).toHaveBeenCalledWith(null, null, null);
+    // research runs for every idea currently holding runs in the store (spec D8)
+    expect(researchListRunsMock).toHaveBeenCalledWith("idea-1");
+    // the global ruleset, since its surface has been opened (proxied by "global" in rulesets)
+    expect(orchdGetRulesetMock).toHaveBeenCalledWith("global", null);
+    // orchd_storage_status (spec D3)
+    expect(orchdStorageStatusMock).toHaveBeenCalled();
+  });
+
+  it("orchd://up does NOT refetch research runs or the global ruleset when neither is currently held", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    researchListRunsMock.mockClear();
+    orchdGetRulesetMock.mockClear();
+
+    await act(async () => {
+      cbs.orchdUp(null);
+    });
+
+    expect(researchListRunsMock).not.toHaveBeenCalled();
+    expect(orchdGetRulesetMock).not.toHaveBeenCalled();
+  });
+
+  it("initial connect pulls orchd_storage_status once (spec D3, BL-94)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(orchdStorageStatusMock).toHaveBeenCalled();
   });
 
   it("orchd://incompatible sets orchdIncompatible (never auto-clears)", async () => {

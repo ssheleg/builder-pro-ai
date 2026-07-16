@@ -48,7 +48,7 @@ beforeEach(() => {
     {
       projects: [],
       orchdDown: false,
-      toast: null,
+      toast: null, toastQueue: [],
       daemonIncompatible: false,
       upgradeDialogOpen: false,
       orchdIncompatible: false,

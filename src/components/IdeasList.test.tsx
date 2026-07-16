@@ -130,7 +130,7 @@ beforeEach(() => {
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
   useAppStore.setState(
-    { ideas: [], projects: [], toast: null, orchdDown: false, researchRunsByIdea: {}, mcpServers: [] },
+    { ideas: [], projects: [], toast: null, toastQueue: [], orchdDown: false, researchRunsByIdea: {}, mcpServers: [] },
     false,
   );
 });

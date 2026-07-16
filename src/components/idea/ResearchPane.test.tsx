@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
 const mcpGetArtifactMock = vi.fn();
 const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
+// The self-poll (spec D8, BL-92) drives the store's real `refreshResearchRuns`, which calls this
+// wrapper — mocked here so the poll resolves deterministically under fake timers.
+const researchListRunsMock = vi.fn();
 
 vi.mock("../../ipc/orchd", () => ({
   mcpGetArtifact: (...a: unknown[]) => mcpGetArtifactMock(...a),
+  researchListRuns: (...a: unknown[]) => researchListRunsMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
 }));
 
@@ -95,9 +99,16 @@ afterEach(cleanup);
 beforeEach(() => {
   mcpGetArtifactMock.mockReset().mockResolvedValue(makeArtifact());
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
+  researchListRunsMock.mockReset().mockResolvedValue([]);
   formInsightDialogPropsLog.length = 0;
   useAppStore.setState(
-    { researchRunsByIdea: {}, mcpServers: [makeServer()], toast: null, orchdDown: false },
+    {
+      researchRunsByIdea: {},
+      mcpServers: [makeServer()],
+      toast: null,
+      toastQueue: [],
+      orchdDown: false,
+    },
     false,
   );
 });
@@ -250,5 +261,87 @@ describe("ResearchPane", () => {
     fireEvent.click(formInsightBtn);
     fireEvent.click(noResearchBtn);
     expect(screen.queryByTestId("form-insight-dialog-mock")).toBeNull();
+  });
+
+  // ── self-poll (spec D8, BL-92): stuck-run self-heal without a wire push ──────────────────────
+
+  it("polls researchListRuns every 2s while a run is non-terminal, and stops once all runs are terminal", async () => {
+    vi.useFakeTimers();
+    try {
+      researchListRunsMock.mockResolvedValue([makeRun({ id: "r1", status: "running" })]);
+      useAppStore.setState(
+        { researchRunsByIdea: { [idea.id]: [makeRun({ id: "r1", status: "running" })] } },
+        false,
+      );
+      render(<ResearchPane idea={idea} disabled={false} />);
+      // No immediate poll on mount — only on the 2s cadence.
+      expect(researchListRunsMock).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(researchListRunsMock).toHaveBeenCalledTimes(1);
+      expect(researchListRunsMock).toHaveBeenCalledWith(idea.id);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(researchListRunsMock).toHaveBeenCalledTimes(2);
+
+      // The next poll returns a TERMINAL run -> the store flips to done -> polling must stop.
+      researchListRunsMock.mockResolvedValue([
+        makeRun({ id: "r1", status: "done", artifactId: "art-1" }),
+      ]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(researchListRunsMock).toHaveBeenCalledTimes(3);
+
+      // Well past several more intervals: no further polls once terminal.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+      expect(researchListRunsMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not poll when the only run is already terminal", async () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.setState(
+        {
+          researchRunsByIdea: {
+            [idea.id]: [makeRun({ id: "r1", status: "done", artifactId: "art-1" })],
+          },
+        },
+        false,
+      );
+      render(<ResearchPane idea={idea} disabled={false} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+      expect(researchListRunsMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not poll while orchd is down (disabled) — no toast-spam against a known-down daemon", async () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.setState(
+        { researchRunsByIdea: { [idea.id]: [makeRun({ id: "r1", status: "running" })] } },
+        false,
+      );
+      render(<ResearchPane idea={idea} disabled={true} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+      expect(researchListRunsMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

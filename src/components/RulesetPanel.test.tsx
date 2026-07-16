@@ -57,7 +57,7 @@ beforeEach(() => {
   orchdAcknowledgeRuleFileMock.mockReset().mockResolvedValue(makeView());
   orchdRevealRulesFileMock.mockReset().mockResolvedValue(undefined);
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
-  useAppStore.setState({ rulesets: {}, toast: null, orchdDown: false }, false);
+  useAppStore.setState({ rulesets: {}, toast: null, toastQueue: [], orchdDown: false }, false);
 });
 
 describe("RulesetPanel", () => {

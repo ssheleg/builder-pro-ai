@@ -40,7 +40,7 @@ const ev = (over: Partial<CommandEvent>): CommandEvent => ({
 afterEach(cleanup);
 beforeEach(() => {
   getCommandEventsMock.mockReset();
-  useAppStore.setState({ sessions: { s1: meta() }, toast: null }, false);
+  useAppStore.setState({ sessions: { s1: meta() }, toast: null, toastQueue: [] }, false);
 });
 
 describe("CommandStrip", () => {
@@ -174,7 +174,7 @@ describe("CommandStrip", () => {
         sessions: {
           s1: meta({ isActive: false, lifecycle: { kind: "exited", code: 0, signal: null } }),
         },
-        toast: null,
+        toast: null, toastQueue: [],
       },
       false,
     );
@@ -206,7 +206,7 @@ describe("CommandStrip", () => {
         sessions: {
           s1: meta({ isActive: false, lifecycle: { kind: "exited", code: 0, signal: null } }),
         },
-        toast: null,
+        toast: null, toastQueue: [],
       },
       false,
     );

@@ -21,6 +21,7 @@ import type {
   RuleScope,
   RuleSetView,
   Skill,
+  StorageStatus,
 } from "../ipc/orchd-types";
 import {
   orchdGetRuleset,
@@ -39,6 +40,7 @@ import {
   trustListPolicies,
   trustListAudit,
   researchListRuns,
+  orchdStorageStatus,
   describeOrchdError,
 } from "../ipc/orchd";
 
@@ -122,13 +124,21 @@ export interface AppState {
   watchPaused: boolean;
 
   /**
-   * Queue-of-ONE toast message (design-system.md Toast atom, spec §7 "honest error surface" —
-   * every async failure is a toast with the mapped human message, never console-only). `null`
-   * means no toast is showing. `showToast` REPLACES whatever is currently shown — there is no
-   * queue behind it, matching the design-system's "one inbox" spirit applied to transient
-   * notices: at most one thing asks for the owner's attention via a toast at a time.
+   * The CURRENTLY-VISIBLE toast message — the head of `toastQueue`, or `null` when the queue is
+   * empty (design-system.md Toast atom, spec §7 "honest error surface": every async failure is a
+   * toast with the mapped human message, never console-only). Kept in lockstep with
+   * `toastQueue[0]` on every mutation so `<Toast/>` (`src/components/Toast.tsx`) can stay a pure
+   * reader of this one field.
    */
   toast: string | null;
+  /**
+   * FIFO toast queue (BL-97, spec D8): `showToast` APPENDS (no longer clobbers) so a burst of
+   * failures is shown one after another instead of only the last surviving. Capped at
+   * `TOAST_QUEUE_CAP` (drop-oldest) so a runaway producer can never grow it unboundedly. The head
+   * (`toastQueue[0]`) is the visible toast (`toast`); it auto-advances every `TOAST_AUTO_DISMISS_MS`
+   * and can be advanced early via `dismissToast` (the manual close button).
+   */
+  toastQueue: string[];
 
   /**
    * App-domain slice (spec §10, S3 T13): projects/goals/ideas/insights/tasks/rulesets live in
@@ -225,6 +235,11 @@ export interface AppState {
    * `orchdIncompatible`). */
   orchdUpgradeDialogOpen: boolean;
 
+  /** The daemon's storage-degradation mode (spec D3, BL-94), or `null` before the first fetch.
+   * Fixed at boot, so it is pulled once on connect and on every `orchd://up` reconnect (no push).
+   * `StorageBanner` renders a persistent honest banner for the two non-`persistent` modes. */
+  storageStatus: StorageStatus | null;
+
   /** Insert or replace a session by `meta.id`. Idempotent. */
   upsertSession: (meta: SessionMeta) => void;
   /** Delete a session; clears `activeSessionId` if it pointed at the removed session. */
@@ -287,13 +302,15 @@ export interface AppState {
   setWatchPaused: (b: boolean) => void;
 
   /**
-   * Show a toast (replacing any current one) and auto-dismiss it after `TOAST_AUTO_DISMISS_MS`.
-   * See `toast`'s doc above. `<Toast/>` (`src/components/Toast.tsx`) is a pure reader of `toast`
-   * — it never owns this timer itself, so the auto-dismiss fires even across a remount.
+   * APPEND a toast to `toastQueue` (BL-97, spec D8 — no longer clobbers a still-showing one) and,
+   * if a fresh toast became visible, start its `TOAST_AUTO_DISMISS_MS` auto-advance timer. See
+   * `toastQueue`'s doc above. `<Toast/>` (`src/components/Toast.tsx`) is a pure reader of `toast`
+   * — it never owns this timer itself, so the auto-advance fires even across a remount.
    */
   showToast: (message: string) => void;
-  /** Clear the current toast immediately (e.g. a manual dismiss action) and cancel its pending
-   * auto-dismiss timer so it cannot later clear a DIFFERENT toast shown after this one. */
+  /** Advance the queue by one (drop the visible head, show the next) — the manual close button's
+   * action AND the auto-advance path. Reschedules the timer for the newly-visible toast, or
+   * cancels it when the queue empties, so a stale timer can never clear a later toast. */
   dismissToast: () => void;
 
   /** Re-fetch `projects` wholesale from orchd (`orchd_list_projects` has no filter). The
@@ -349,6 +366,10 @@ export interface AppState {
   /** Re-fetch `policies` wholesale (`trustListPolicies()` has no filter). Mirrors
    * `refreshMcpServers` exactly. */
   refreshPolicies: () => Promise<void>;
+  /** Re-fetch `storageStatus` (`orchdStorageStatus()` — spec D3, BL-94). Called on connect and on
+   * every `orchd://up`. Mirrors `refreshMcpServers` exactly: try/catch -> toast on failure,
+   * replace on success. */
+  refreshStorageStatus: () => Promise<void>;
   /** Set `orchdDown`. See its doc above. */
   setOrchdDown: (v: boolean) => void;
   /** Set `orchdIncompatible`. See its doc above — never auto-clears, mirrors
@@ -376,24 +397,35 @@ function parseRulesetKey(key: string): { scope: RuleScope; projectId: string | n
   return { scope: "project", projectId };
 }
 
-/** How long a toast stays up before auto-dismissing (Toast atom, spec §7). */
+/** How long the visible toast stays up before auto-advancing to the next (Toast atom, spec §7). */
 const TOAST_AUTO_DISMISS_MS = 4000;
 
+/** FIFO toast-queue cap (BL-97, spec D8): a runaway producer drops the OLDEST rather than growing
+ * unboundedly, so the queue never holds more than this many pending notices. */
+const TOAST_QUEUE_CAP = 5;
+
 export const useAppStore = create<AppState>((set, get) => {
-  // Toast auto-dismiss bookkeeping (closure state, not store state — it's write-only plumbing,
-  // like terminal-manager's attachGeneration guard). `token` is bumped by every showToast/
-  // dismissToast call; a pending timeout only clears the toast if its OWN token still matches the
-  // current one, so an earlier toast's timer can never clear a later, different toast (it always
-  // can't anyway, since we clearTimeout the previous timer below — the token is defense in depth
-  // matching the rest of this codebase's race-guard style).
+  // Toast auto-advance bookkeeping (closure state, not store state — it's write-only plumbing,
+  // like terminal-manager's attachGeneration guard). A single timer drives the visible head; it is
+  // (re)started whenever a NEW toast becomes visible and cancelled when the queue drains, so it
+  // can never advance a toast that has already been superseded.
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  let toastToken = 0;
 
   const clearToastTimer = (): void => {
     if (toastTimer !== undefined) {
       clearTimeout(toastTimer);
       toastTimer = undefined;
     }
+  };
+
+  // (Re)arm the auto-advance timer for the current head. On fire it advances the queue via
+  // `dismissToast`, which itself re-arms for the next head (or cancels when the queue empties).
+  const armToastTimer = (): void => {
+    clearToastTimer();
+    toastTimer = setTimeout(() => {
+      toastTimer = undefined;
+      get().dismissToast();
+    }, TOAST_AUTO_DISMISS_MS);
   };
 
   return {
@@ -432,7 +464,9 @@ export const useAppStore = create<AppState>((set, get) => {
     orchdDown: false,
     orchdIncompatible: false,
     orchdUpgradeDialogOpen: false,
+    storageStatus: null,
     toast: null,
+    toastQueue: [],
 
     upsertSession: (meta) =>
       set((s) => ({ sessions: { ...s.sessions, [meta.id]: meta } })),
@@ -546,22 +580,28 @@ export const useAppStore = create<AppState>((set, get) => {
     setWatchPaused: (b) => set({ watchPaused: b }),
 
     showToast: (message) => {
-      clearToastTimer();
-      const token = ++toastToken;
-      set({ toast: message });
-      toastTimer = setTimeout(() => {
-        // Only this call's own token still being current proves no later showToast/dismissToast
-        // has superseded it — otherwise this stale timer must not touch whatever toast is showing
-        // now (see the doc comment above `toastTimer`).
-        if (token === toastToken) set({ toast: null });
-        toastTimer = undefined;
-      }, TOAST_AUTO_DISMISS_MS);
+      const prevHead = get().toast;
+      set((s) => {
+        const queue = [...s.toastQueue, message];
+        // Cap at TOAST_QUEUE_CAP, dropping the OLDEST first (BL-97, spec D8).
+        while (queue.length > TOAST_QUEUE_CAP) queue.shift();
+        return { toastQueue: queue, toast: queue[0] ?? null };
+      });
+      // (Re)start the timer only when the VISIBLE toast actually changed — either the queue was
+      // empty (a first toast appeared) or drop-oldest bumped the head. A steady head keeps its
+      // original deadline, so a burst of queued toasts never resets the visible one's clock.
+      if (get().toast !== prevHead) armToastTimer();
     },
 
     dismissToast: () => {
-      clearToastTimer();
-      toastToken += 1;
-      set({ toast: null });
+      set((s) => {
+        const queue = s.toastQueue.slice(1);
+        return { toastQueue: queue, toast: queue[0] ?? null };
+      });
+      // Re-arm for the newly-visible toast, or cancel outright when the queue drained — so a stale
+      // timer can never clear a toast shown after this one (the honest-close invariant).
+      if (get().toast !== null) armToastTimer();
+      else clearToastTimer();
     },
 
     // ── app-domain slice (spec §10, S3 T13) ─────────────────────────────────────────────────
@@ -721,6 +761,17 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const policies = await trustListPolicies();
         set({ policies });
+      } catch (e) {
+        get().showToast(describeOrchdError(e));
+      }
+    },
+
+    // ── storage-degradation status (spec D3, BL-94) ──────────────────────────────────────────
+
+    refreshStorageStatus: async () => {
+      try {
+        const storageStatus = await orchdStorageStatus();
+        set({ storageStatus });
       } catch (e) {
         get().showToast(describeOrchdError(e));
       }

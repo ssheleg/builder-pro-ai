@@ -43,7 +43,7 @@ beforeEach(() => {
   orchdSetInsightStatusMock.mockReset().mockResolvedValue(makeInsight({ id: "in1" }));
   orchdListInsightsMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
-  useAppStore.setState({ insights: [], toast: null, orchdDown: false }, false);
+  useAppStore.setState({ insights: [], toast: null, toastQueue: [], orchdDown: false }, false);
 });
 
 describe("InsightsList", () => {

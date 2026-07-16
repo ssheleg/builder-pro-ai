@@ -45,7 +45,7 @@ beforeEach(() => {
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
-  useAppStore.setState({ projects: [], workspaces: { w2: wsB }, toast: null }, false);
+  useAppStore.setState({ projects: [], workspaces: { w2: wsB }, toast: null, toastQueue: [] }, false);
 });
 
 describe("CreateProjectDialog", () => {

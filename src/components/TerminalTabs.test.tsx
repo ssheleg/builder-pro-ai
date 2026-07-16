@@ -59,7 +59,7 @@ beforeEach(() => {
       activeSessionId: "s1",
       daemonConnected: true,
       selectedFile: null,
-      toast: null,
+      toast: null, toastQueue: [],
     },
     false,
   );

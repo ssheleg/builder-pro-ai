@@ -39,6 +39,7 @@ import type {
   RuleSetView,
   Skill,
   SkillScope,
+  StorageStatus,
   TaskSource,
   TaskStatus,
 } from "./orchd-types";
@@ -453,6 +454,20 @@ export function orchdReconnect(): Promise<void> {
  */
 export function orchdUpgrade(): Promise<void> {
   return invoke<void>("orchd_upgrade");
+}
+
+// ── storage status (spec D3, BL-94) ────────────────────────────────────────────────────────────
+
+/**
+ * Reads the daemon's storage-degradation mode (spec D3, BL-94): whether it opened its on-disk DB
+ * normally (`persistent`), fell back to a non-persistent in-memory DB (`in_memory_fallback`), or
+ * recovered from a quarantined corrupt image (`recovered_from_corruption`, with `quarantinedPath`).
+ * The mode is fixed at boot, so this is pulled once on connect and on every `orchd://up` reconnect
+ * — there is no push. Proxies the `orchd_storage_status` `#[tauri::command]` (`commands.rs`),
+ * `GetStorageStatus` → `StorageStatus` on the wire; a rejection is the caller's to map/gate (the
+ * store's `refreshStorageStatus`), same as every wrapper above. */
+export function orchdStorageStatus(): Promise<StorageStatus> {
+  return invoke<StorageStatus>("orchd_storage_status");
 }
 
 // ── MCP (S-EXT §8, T7's mcp_*/trust_* commands) ─────────────────────────────────────────────

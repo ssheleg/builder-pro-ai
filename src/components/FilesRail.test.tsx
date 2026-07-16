@@ -40,7 +40,7 @@ beforeEach(() => {
       showIgnored: false,
       filesRailOpen: false,
       watchPaused: false,
-      toast: null,
+      toast: null, toastQueue: [],
       workspaces: {},
     },
     false,

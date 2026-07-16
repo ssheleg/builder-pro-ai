@@ -42,6 +42,8 @@ import { CommandStrip } from "./components/CommandStrip";
 import { DaemonBanner } from "./components/DaemonBanner";
 import { UpgradeDialog } from "./components/UpgradeDialog";
 import { OrchdDownBanner } from "./components/OrchdDownBanner";
+import { OrchdUpgradeBanner } from "./components/OrchdUpgradeBanner";
+import { StorageBanner } from "./components/StorageBanner";
 import { QuickCapture } from "./components/QuickCapture";
 import { FilesRail } from "./components/FilesRail";
 import { HomeView } from "./components/HomeView";
@@ -253,10 +255,16 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         // orchd's async bring-up: `bring_up_orchd` is spawned and `setup()` returns immediately,
         // and orchd's bounded connect-retry can take up to ~4s — so on a cold boot that race is
         // routinely LOST, that first fetch rejects with `Disconnected`, and without this refetch
-        // `projects` would stay `[]` permanently until some unrelated `orchd://projects-changed`
-        // happened to fire (the core "open the app → see my projects" path silently never
-        // populating). So re-load the project list here, and — if a project panel is currently
-        // open — repopulate its lists too, so an open panel isn't left stale after a reconnect.
+        // the slices would stay empty permanently until some unrelated `orchd://*-changed` push
+        // happened to fire.
+        //
+        // Spec D8 (BL-92): a reconnect must rehydrate EVERY LIVE SLICE, not just projects — during
+        // the outage any coarse `orchd://*-changed` push is lost, so anything the frontend holds
+        // can be stale until an unrelated later change. So refetch: projects; the open project's
+        // goals/ideas/insights/tasks/ruleset/graph; the Extensions slices (servers/artifacts/
+        // accounts/skills/policies/invocations); research runs for every idea currently holding
+        // runs; the global ruleset when its surface has been opened; and the storage-degradation
+        // status (D3).
         const s = useAppStore.getState();
         s.setOrchdDown(false);
         void s.refreshProjects();
@@ -272,6 +280,26 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           // not stay stale after an orchd reconnect any more than Goals/Tasks/Ideas/Insights do.
           void s.refreshGraph(projectId);
         }
+        // Extensions slices (S-EXT §8): whole-store, project-independent — refetch unconditionally
+        // (spec D8's "mcp servers + artifacts + accounts + skills + policies + invocations").
+        void s.refreshMcpServers();
+        void s.refreshMcpArtifacts();
+        void s.refreshAccounts();
+        void s.refreshSkills();
+        void s.refreshPolicies();
+        void s.refreshInvocations();
+        // Research runs self-heal on reconnect for every idea currently holding runs in the store
+        // (spec D8) — the mounted `ResearchPane` self-poll covers the visible pane; this covers
+        // every loaded idea whether or not its pane is on screen right now.
+        for (const ideaId of Object.keys(s.researchRunsByIdea)) {
+          void s.refreshResearchRuns(ideaId);
+        }
+        // The global ruleset only when its surface has actually been opened — proxied by "already
+        // loaded into the store" (there is no always-mounted global-rules surface; a project
+        // ruleset is handled above). Mirrors the "for every idea currently holding runs" pattern.
+        if ("global" in s.rulesets) void s.refreshRuleset("global");
+        // Storage-degradation mode (spec D3, BL-94) — fixed at boot, so pull it on every reconnect.
+        void s.refreshStorageStatus();
       }),
     );
     // FATAL (Pv2 §6.2, mirrors `onDaemonIncompatible` above): the orchd client's connection task
@@ -368,6 +396,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // leaving `projects` empty forever. Later `orchd://projects-changed` pushes keep it live
     // thereafter.
     void useAppStore.getState().refreshProjects();
+    // Storage-degradation status (spec D3, BL-94): pulled once on the initial connect, mirroring
+    // the `refreshProjects()` above. A lost cold-boot race self-heals via `onOrchdUp` (which also
+    // refetches it) exactly like the project list does.
+    void useAppStore.getState().refreshStorageStatus();
 
     return () => {
       disposed = true;
@@ -435,6 +467,13 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       }}
     >
       <DaemonBanner />
+      {/* Persistent honest storage-degradation banner (spec D3, BL-94): self-reads `storageStatus`
+          and renders only for the two non-persistent modes — mounted once, globally. */}
+      <StorageBanner />
+      {/* Re-entry banner for a cancelled orchd upgrade (BL-96, spec D8): self-reads
+          `orchdIncompatible && !orchdUpgradeDialogOpen` and re-opens the mandatory dialog — mirrors
+          the sessiond `DaemonBanner` pattern for the second daemon. */}
+      <OrchdUpgradeBanner />
       {/* Shared orchd connectivity banner (spec §10/§11): "every domain surface" is satisfied by
           mounting it once, globally, next to the sessiond equivalent above — it is purely
           presentational (`OrchdDownBanner.tsx`), so this is the one place that reads `orchdDown`

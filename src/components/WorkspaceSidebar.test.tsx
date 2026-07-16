@@ -58,7 +58,7 @@ beforeEach(() => {
       view: "home",
       projects: [],
       activeProjectId: null,
-      toast: null,
+      toast: null, toastQueue: [],
     },
     false,
   );

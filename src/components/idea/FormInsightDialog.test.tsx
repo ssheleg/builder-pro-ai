@@ -130,7 +130,7 @@ beforeEach(() => {
       goalsByProject: {},
       graphByProject: {},
       orchdDown: false,
-      toast: null,
+      toast: null, toastQueue: [],
     },
     false,
   );

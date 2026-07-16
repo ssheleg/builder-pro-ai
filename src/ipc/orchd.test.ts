@@ -59,6 +59,7 @@ import {
   orchdImportFromFile,
   orchdReconnect,
   orchdUpgrade,
+  orchdStorageStatus,
   mcpAddServer,
   mcpListServers,
   mcpUpdateServer,
@@ -533,6 +534,21 @@ describe("ipc/orchd", () => {
     const err = { kind: "upgradeFailed", reason: "Operation not permitted" };
     invokeMock.mockRejectedValueOnce(err);
     await expect(orchdUpgrade()).rejects.toEqual(err);
+  });
+
+  // ── storage status (spec D3, BL-94) ─────────────────────────────────────────────────────────
+
+  it("orchdStorageStatus calls orchd_storage_status with no args and returns the status", async () => {
+    invokeMock.mockResolvedValueOnce({
+      storageMode: "recovered_from_corruption",
+      quarantinedPath: "/tmp/orchd.db.corrupt-1",
+    });
+    const status = await orchdStorageStatus();
+    expect(invokeMock).toHaveBeenCalledWith("orchd_storage_status");
+    expect(status).toEqual({
+      storageMode: "recovered_from_corruption",
+      quarantinedPath: "/tmp/orchd.db.corrupt-1",
+    });
   });
 
   // ── MCP (S-EXT §8, T8) ─────────────────────────────────────────────────────────────────────

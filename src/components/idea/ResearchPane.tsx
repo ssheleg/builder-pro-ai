@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type JSX } from "react";
+import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../../store/store";
 import { mcpGetArtifact, describeOrchdError } from "../../ipc/orchd";
 import type { Idea, McpArtifact, ResearchRun, ResearchStatus } from "../../ipc/orchd-types";
@@ -8,6 +8,17 @@ import { theme } from "../../theme";
 import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+
+/** Self-poll cadence (spec D8, BL-92): while a non-terminal run is on screen, re-list the idea's
+ * runs on this interval so a lost `orchd://research-runs-changed` push (or a boot-reconcile) can
+ * never leave a run permanently stuck at `pending`/`running`. */
+const RESEARCH_POLL_MS = 2000;
+
+/** A run is TERMINAL once it has reached `done` or `failed`; `pending`/`running` are the two
+ * non-terminal states that keep the self-poll alive. */
+function isNonTerminal(status: ResearchStatus): boolean {
+  return status === "pending" || status === "running";
+}
 
 const RESEARCH_STATUS_LABEL: Record<ResearchStatus, string> = {
   pending: strings.research.runStatus.pending,
@@ -109,6 +120,24 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
   const [artifacts, setArtifacts] = useState<Record<string, McpArtifact>>({});
   const [shown, setShown] = useState<Record<string, boolean>>({});
   const [openInsight, setOpenInsight] = useState<OpenInsightTarget | null>(null);
+
+  // Research-run self-heal (spec D8, BL-92): the run driver's terminal `orchd://research-runs-
+  // changed` push can be lost (a disconnect mid-run, or a boot-reconcile where the run finished
+  // while the client was away), leaving a run visibly stuck at `pending`/`running` forever. While
+  // this pane is mounted AND at least one run is non-terminal, re-list the idea's runs every 2s via
+  // the store's own `refreshResearchRuns` (which replaces the slice, so a now-terminal run lands and
+  // the badge updates), and STOP the moment every run is terminal — the interval is cleared on
+  // unmount and whenever `hasNonTerminal` flips false. Skipped while `disabled` (orchd is down): the
+  // shared down-banner already tells the truth and `onOrchdUp` refetches on reconnect, so polling a
+  // known-down daemon would only spam failure toasts to no end.
+  const hasNonTerminal = runs.some((run) => isNonTerminal(run.status));
+  useEffect(() => {
+    if (disabled || !hasNonTerminal) return;
+    const timer = setInterval(() => {
+      void useAppStore.getState().refreshResearchRuns(idea.id);
+    }, RESEARCH_POLL_MS);
+    return () => clearInterval(timer);
+  }, [disabled, hasNonTerminal, idea.id]);
 
   const serverNames: Record<string, string> = {};
   for (const s of mcpServers) serverNames[s.id] = s.name;

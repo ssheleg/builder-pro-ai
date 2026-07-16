@@ -104,7 +104,7 @@ beforeEach(() => {
       mcpToolsByServer: {},
       policies: [],
       orchdDown: false,
-      toast: null,
+      toast: null, toastQueue: [],
       researchRunsByIdea: {},
     },
     false,
