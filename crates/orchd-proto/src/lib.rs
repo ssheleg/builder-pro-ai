@@ -1206,6 +1206,104 @@ pub enum OrchdRequest {
     GetStorageStatus,
 }
 
+impl OrchdRequest {
+    /// A stable, low-cardinality `&'static str` name for this request's variant — the ONLY
+    /// request-derived value allowed into a structured completion-trace field (spec D4, O-6).
+    ///
+    /// This is the single per-verb tracing choke-point's name source, reused by BOTH layers that
+    /// see an `OrchdRequest`: the daemon's `socket_server::dispatch` completion trace and the
+    /// core's `orchd_client::request` trace (which together cover all 77 daemon verbs and all 117
+    /// command handlers without a per-arm edit). Living next to the enum keeps them in lockstep.
+    ///
+    /// The match is deliberately **exhaustive with no `_` wildcard**: adding a future variant to
+    /// `OrchdRequest` fails to compile until it is named here — that is the point, so a new verb
+    /// can never ship silently untraced. Fields are matched with `{ .. }` and never bound, so no
+    /// argument, body, token, id, or other payload value can ever be captured into the name (a
+    /// completion trace carries verb + outcome + error_code + elapsed only — never args/PII).
+    pub fn verb_name(&self) -> &'static str {
+        match self {
+            Self::Ping => "Ping",
+            Self::CreateProject { .. } => "CreateProject",
+            Self::UpdateProject { .. } => "UpdateProject",
+            Self::ArchiveProject { .. } => "ArchiveProject",
+            Self::ListProjects => "ListProjects",
+            Self::AddProjectWorkspace { .. } => "AddProjectWorkspace",
+            Self::RemoveProjectWorkspace { .. } => "RemoveProjectWorkspace",
+            Self::CreateGoal { .. } => "CreateGoal",
+            Self::UpdateGoal { .. } => "UpdateGoal",
+            Self::MoveGoal { .. } => "MoveGoal",
+            Self::DeleteGoal { .. } => "DeleteGoal",
+            Self::ListGoals { .. } => "ListGoals",
+            Self::CreateIdea { .. } => "CreateIdea",
+            Self::UpdateIdea { .. } => "UpdateIdea",
+            Self::SetIdeaProject { .. } => "SetIdeaProject",
+            Self::SetIdeaLifecycle { .. } => "SetIdeaLifecycle",
+            Self::DeleteIdea { .. } => "DeleteIdea",
+            Self::ListIdeas { .. } => "ListIdeas",
+            Self::CreateInsight { .. } => "CreateInsight",
+            Self::UpdateInsight { .. } => "UpdateInsight",
+            Self::SetInsightFitVerdict { .. } => "SetInsightFitVerdict",
+            Self::SetInsightStatus { .. } => "SetInsightStatus",
+            Self::DeleteInsight { .. } => "DeleteInsight",
+            Self::ListInsights { .. } => "ListInsights",
+            Self::CreateTask { .. } => "CreateTask",
+            Self::UpdateTask { .. } => "UpdateTask",
+            Self::SetTaskStatus { .. } => "SetTaskStatus",
+            Self::SetTaskRank { .. } => "SetTaskRank",
+            Self::DeleteTask { .. } => "DeleteTask",
+            Self::ListTasks { .. } => "ListTasks",
+            Self::GetRuleSet { .. } => "GetRuleSet",
+            Self::UpsertRuleSet { .. } => "UpsertRuleSet",
+            Self::AcknowledgeRuleFile { .. } => "AcknowledgeRuleFile",
+            Self::ExportProject { .. } => "ExportProject",
+            Self::ExportAll => "ExportAll",
+            Self::ImportBundle { .. } => "ImportBundle",
+            Self::OrchdShutdown { .. } => "OrchdShutdown",
+            Self::GraphAddNode { .. } => "GraphAddNode",
+            Self::GraphUpdateNode { .. } => "GraphUpdateNode",
+            Self::GraphMoveNode { .. } => "GraphMoveNode",
+            Self::GraphDeleteNode { .. } => "GraphDeleteNode",
+            Self::GraphAddEdge { .. } => "GraphAddEdge",
+            Self::GraphDeleteEdge { .. } => "GraphDeleteEdge",
+            Self::GraphListProject { .. } => "GraphListProject",
+            Self::GraphNeighborhood { .. } => "GraphNeighborhood",
+            Self::GraphSearch { .. } => "GraphSearch",
+            Self::McpAddServer { .. } => "McpAddServer",
+            Self::McpListServers { .. } => "McpListServers",
+            Self::McpUpdateServer { .. } => "McpUpdateServer",
+            Self::McpSetServerEnabled { .. } => "McpSetServerEnabled",
+            Self::McpDeleteServer { .. } => "McpDeleteServer",
+            Self::McpSetServerBearer { .. } => "McpSetServerBearer",
+            Self::McpConnect { .. } => "McpConnect",
+            Self::McpDisconnect { .. } => "McpDisconnect",
+            Self::McpListTools { .. } => "McpListTools",
+            Self::McpSetToolEnabled { .. } => "McpSetToolEnabled",
+            Self::McpCallTool { .. } => "McpCallTool",
+            Self::McpListInvocations { .. } => "McpListInvocations",
+            Self::McpListArtifacts { .. } => "McpListArtifacts",
+            Self::McpGetArtifact { .. } => "McpGetArtifact",
+            Self::TrustGrantConsent { .. } => "TrustGrantConsent",
+            Self::ConnectorBeginOAuth { .. } => "ConnectorBeginOAuth",
+            Self::ConnectorCompleteOAuth { .. } => "ConnectorCompleteOAuth",
+            Self::ConnectorAddApiKey { .. } => "ConnectorAddApiKey",
+            Self::ConnectorListAccounts => "ConnectorListAccounts",
+            Self::ConnectorDeleteAccount { .. } => "ConnectorDeleteAccount",
+            Self::ConnectorListOps { .. } => "ConnectorListOps",
+            Self::ConnectorInvoke { .. } => "ConnectorInvoke",
+            Self::SkillAdd { .. } => "SkillAdd",
+            Self::SkillList { .. } => "SkillList",
+            Self::SkillDelete { .. } => "SkillDelete",
+            Self::TrustSetPolicy { .. } => "TrustSetPolicy",
+            Self::TrustListPolicies => "TrustListPolicies",
+            Self::TrustListAudit { .. } => "TrustListAudit",
+            Self::ResearchStartRun { .. } => "ResearchStartRun",
+            Self::ResearchListRuns { .. } => "ResearchListRuns",
+            Self::ResearchGetRun { .. } => "ResearchGetRun",
+            Self::GetStorageStatus => "GetStorageStatus",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum OrchdResponse {
     Ack,

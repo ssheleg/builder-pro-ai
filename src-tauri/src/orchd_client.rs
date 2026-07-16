@@ -371,6 +371,48 @@ impl OrchdClient {
     /// out after `REQUEST_TIMEOUT` as a last-resort safety net. Mirrors `DaemonClient::request`
     /// exactly, including the pre-enqueue `live` liveness check.
     pub async fn request(&self, req: OrchdRequest) -> Result<OrchdResponse, OrchdClientError> {
+        // The single per-request completion-tracing choke-point on the CORE side (spec D4, O-6):
+        // one structured `info!` line per request, covering ALL 117 Tauri command handlers at the
+        // one layer they share (they all funnel through here) instead of a per-handler edit.
+        // `verb` is the exhaustive, low-cardinality `OrchdRequest::verb_name` (reused verbatim from
+        // the daemon's own dispatch trace); the line carries verb + outcome + error_code + elapsed
+        // only — never the request args/body/tokens or the error `message` (which can hold paths).
+        let verb = req.verb_name();
+        let started = std::time::Instant::now();
+        let result = self.request_inner(req).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(_) => {
+                tracing::info!(verb, outcome = "ok", elapsed_ms, "orchd request completed");
+            }
+            Err(e) => {
+                // A low-cardinality code name only — the daemon-side `OrchdErrorCode` debug name
+                // for a rejected request, or the client-transport failure variant otherwise. Never
+                // the accompanying `message`.
+                let error_code: &str = match e {
+                    OrchdClientError::Daemon { code, .. } => code,
+                    OrchdClientError::Disconnected => "Disconnected",
+                    OrchdClientError::IncompatibleOrchd { .. } => "IncompatibleOrchd",
+                    OrchdClientError::RequestTooLarge { .. } => "RequestTooLarge",
+                };
+                tracing::info!(
+                    verb,
+                    outcome = "err",
+                    error_code,
+                    elapsed_ms,
+                    "orchd request completed"
+                );
+            }
+        }
+        result
+    }
+
+    /// The transport half of [`request`](Self::request): allocate a monotonic id, send
+    /// `OrchdFrame::Request { id, .. }`, and await the correlated `OrchdResponse` (an
+    /// `OrchdResponse::Error` already arrives here as `Err(OrchdClientError::Daemon)` — mapped by
+    /// the connection task). Split out so the completion trace above wraps a single call and sees
+    /// every outcome, including the pre-enqueue disconnected short-circuit.
+    async fn request_inner(&self, req: OrchdRequest) -> Result<OrchdResponse, OrchdClientError> {
         if !self.shared.live.load(Ordering::Acquire) {
             return Err(OrchdClientError::Disconnected);
         }

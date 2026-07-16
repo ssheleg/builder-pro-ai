@@ -799,14 +799,44 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
 }
 
+/// The single per-request completion-tracing choke-point (spec D4, O-6), mirroring orchd's
+/// `socket_server::dispatch` wrapper. Wraps [`dispatch_inner`] so every verb emits exactly one
+/// structured `info!` line when its response is ready — captured on every return path (including
+/// `dispatch_inner`'s early `return`s) with no per-arm edit. The line carries `verb` (from the
+/// exhaustive [`Request::verb_name`]), `outcome` (`"ok"`/`"err"`), `error_code` (the wire code
+/// string, present only on an error), and `elapsed_ms` — never args, bodies, or the raw
+/// `WriteStdin` terminal `bytes`.
+async fn dispatch(
+    deps: &Arc<ServerDeps>,
+    conn_id: u64,
+    push_sink: &PushSink,
+    broadcaster: &Broadcaster,
+    req: Request,
+) -> Response {
+    let verb = req.verb_name();
+    let started = std::time::Instant::now();
+    let res = dispatch_inner(deps, conn_id, push_sink, broadcaster, req).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &res {
+        Response::Error { code, .. } => {
+            tracing::info!(verb, outcome = "err", error_code = %code, elapsed_ms, "request completed");
+        }
+        _ => {
+            tracing::info!(verb, outcome = "ok", elapsed_ms, "request completed");
+        }
+    }
+    res
+}
+
 /// Dispatch one `Request` to the right subsystem and produce the correlated `Response` (spec §7).
 /// `conn_id` identifies the calling connection so attach/detach ownership is connection-scoped
 /// (spec §7: single-attach per session, but teardown per connection). `broadcaster` is the SAME
 /// registry `serve`'s accept loop uses to fan supervisor callbacks out to every connected client
 /// (spec §7) — the `AddWorkspaceRoot`/`RemoveWorkspaceRoot` arms (spec §3.3) reuse it for
 /// `Push::WorkspaceUpdated` so a workspace-root change is visible to every window/tab, not just the
-/// one that issued the request.
-async fn dispatch(
+/// one that issued the request. The per-request completion trace is added ONCE by the [`dispatch`]
+/// wrapper above, so no arm here logs its own outcome.
+async fn dispatch_inner(
     deps: &Arc<ServerDeps>,
     conn_id: u64,
     push_sink: &PushSink,

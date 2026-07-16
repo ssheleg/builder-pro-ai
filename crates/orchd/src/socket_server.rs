@@ -831,11 +831,45 @@ fn import_touched_pushes(json: &str) -> Vec<OrchdPush> {
     pushes
 }
 
+/// The single per-request completion-tracing choke-point (spec D4, O-6). Wraps [`dispatch_inner`]
+/// so EVERY verb — the whole `OrchdRequest` enum, plus any future one — emits exactly one
+/// structured `info!` line when its response is ready, without a per-arm edit and without any arm
+/// being able to opt out (the wrap captures every return path, including `dispatch_inner`'s early
+/// `return`s).
+///
+/// The line carries `verb` (from the exhaustive [`OrchdRequest::verb_name`] — a compile-time guard
+/// that a new verb is named), `outcome` (`"ok"`/`"err"` derived from whether the response is
+/// [`OrchdResponse::Error`]), `error_code` (the `OrchdErrorCode` debug name, present only on an
+/// error), and `elapsed_ms`. It NEVER carries args, bodies, tokens, tool output, ids, or any other
+/// payload value — only that low-cardinality quartet (enforced by
+/// `tests/no_secrets_in_logs_tracing.rs`).
+async fn dispatch(
+    deps: &Arc<ServerDeps>,
+    broadcaster: &Broadcaster,
+    req: OrchdRequest,
+) -> OrchdResponse {
+    let verb = req.verb_name();
+    let started = std::time::Instant::now();
+    let res = dispatch_inner(deps, broadcaster, req).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &res {
+        OrchdResponse::Error { code, .. } => {
+            tracing::info!(verb, outcome = "err", error_code = ?code, elapsed_ms, "request completed");
+        }
+        _ => {
+            tracing::info!(verb, outcome = "ok", elapsed_ms, "request completed");
+        }
+    }
+    res
+}
+
 /// Dispatch one `OrchdRequest` to the right subsystem and produce the correlated `OrchdResponse`
 /// (spec §4.2, §5, §6, §7): every domain verb below is a thin translation between the wire
 /// request and a `persistence::Db` (T6-T8) / `export` (T9) call, plus — on success only — the
-/// matching coarse push via `broadcaster` (spec §6: "Failed requests broadcast NOTHING").
-async fn dispatch(
+/// matching coarse push via `broadcaster` (spec §6: "Failed requests broadcast NOTHING"). The
+/// per-request completion trace is added ONCE by the [`dispatch`] wrapper above, so no arm here
+/// logs its own outcome.
+async fn dispatch_inner(
     deps: &Arc<ServerDeps>,
     broadcaster: &Broadcaster,
     req: OrchdRequest,

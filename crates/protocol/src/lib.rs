@@ -202,6 +202,36 @@ pub enum Request {
     },
 }
 
+impl Request {
+    /// A stable, low-cardinality `&'static str` name for this request's variant — the ONLY
+    /// request-derived value allowed into the daemon's structured completion-trace field
+    /// (spec D4, O-6), consumed by the single per-verb choke-point in `socket_server::dispatch`.
+    ///
+    /// The match is deliberately **exhaustive with no `_` wildcard**: a future `Request` variant
+    /// fails to compile until named here, so a new verb can never ship silently untraced. Fields
+    /// are matched with `{ .. }` and never bound, so no payload value (notably `WriteStdin`'s raw
+    /// terminal `bytes`) can ever be captured into the name — a completion trace carries verb +
+    /// outcome + error_code + elapsed only.
+    pub fn verb_name(&self) -> &'static str {
+        match self {
+            Self::ListWorkspaces => "ListWorkspaces",
+            Self::CreateWorkspace { .. } => "CreateWorkspace",
+            Self::ListSessions => "ListSessions",
+            Self::CreateSession { .. } => "CreateSession",
+            Self::AttachSession { .. } => "AttachSession",
+            Self::DetachSession { .. } => "DetachSession",
+            Self::WriteStdin { .. } => "WriteStdin",
+            Self::Resize { .. } => "Resize",
+            Self::KillSession { .. } => "KillSession",
+            Self::GetSessionState { .. } => "GetSessionState",
+            Self::DaemonShutdown { .. } => "DaemonShutdown",
+            Self::AddWorkspaceRoot { .. } => "AddWorkspaceRoot",
+            Self::RemoveWorkspaceRoot { .. } => "RemoveWorkspaceRoot",
+            Self::GetCommandEvents { .. } => "GetCommandEvents",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Response {
     Workspaces(Vec<Workspace>),

@@ -29,6 +29,14 @@ use bpa_sessiond::protocol::{Frame, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+/// True when SOME single log line contains every one of `needles` — robust to `tracing`'s
+/// within-line field ordering (each completion trace is exactly one line).
+fn has_line_with(contents: &str, needles: &[&str]) -> bool {
+    contents
+        .lines()
+        .any(|l| needles.iter().all(|n| l.contains(n)))
+}
+
 async fn send_frame(s: &mut UnixStream, f: &Frame) {
     // `encode_frame` already prepends the u32-LE length prefix — write its output verbatim,
     // do NOT add a second prefix on top.
@@ -167,6 +175,38 @@ async fn planted_secret_never_appears_in_logs() {
         }
     };
 
+    // A deliberately-failing verb so the completion trace's err branch (outcome=err + error_code)
+    // is exercised on a real dispatch path (spec D4, O-6): an `AddWorkspaceRoot` to a path that is
+    // not an existing directory is rejected with `Response::Error{ code: "InvalidWorkspaceRoot" }`
+    // (never touches the DB). `ws_id` is cloned because `CreateSession` below moves it.
+    send_frame(
+        &mut c,
+        &Frame::Request {
+            id: 100,
+            req: Request::AddWorkspaceRoot {
+                workspace_id: ws_id.clone(),
+                path: tmp.path().join("no-such-dir-xyz").display().to_string(),
+            },
+        },
+    )
+    .await;
+    loop {
+        match recv_frame(&mut c).await {
+            Frame::Response {
+                id: 100,
+                res: Response::Error { code, .. },
+            } => {
+                assert_eq!(
+                    code, "InvalidWorkspaceRoot",
+                    "expected the invalid-root rejection to drive the err completion trace"
+                );
+                break;
+            }
+            Frame::Push(_) => continue,
+            other => panic!("expected an Error response for AddWorkspaceRoot, got {other:?}"),
+        }
+    }
+
     send_frame(
         &mut c,
         &Frame::Request {
@@ -284,6 +324,32 @@ async fn planted_secret_never_appears_in_logs() {
     assert!(
         !contents.contains(secret),
         "planted secret leaked into logs:\n{contents}"
+    );
+
+    // Per-request completion tracing (spec D4, O-6): the single `dispatch` choke-point emits one
+    // structured line per request. A successful mutating verb carries verb + outcome=ok + elapsed;
+    // the deliberately-failing `AddWorkspaceRoot` above carries outcome=err + its wire error_code.
+    assert!(
+        has_line_with(
+            &contents,
+            &[
+                r#"verb="CreateWorkspace""#,
+                r#"outcome="ok""#,
+                "elapsed_ms="
+            ],
+        ),
+        "expected a completion trace for CreateWorkspace with outcome=ok:\n{contents}"
+    );
+    assert!(
+        has_line_with(
+            &contents,
+            &[
+                r#"verb="AddWorkspaceRoot""#,
+                r#"outcome="err""#,
+                "error_code=InvalidWorkspaceRoot",
+            ],
+        ),
+        "expected a completion trace for AddWorkspaceRoot with outcome=err error_code=InvalidWorkspaceRoot:\n{contents}"
     );
 
     std::env::remove_var("DAEMON_SECRET");
