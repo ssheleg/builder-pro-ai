@@ -644,3 +644,410 @@ src/components/InsightsList.test.tsx src/components/idea/ResearchPane.test.tsx` 
 | B-04 (нет per-verb tracing) | подтверждён (систем.) | idea/project-армы socket_server.rs — 0 tracing; всего в файле 9 |
 
 **Тесты:** `npx vitest run QuickCapture/IdeasList/SpawnProjectFromIdea` → **40 passed**. Партиал-фейл spawn (E-07) и двойной сабмит (E-08) — не покрыты. P-27 (revert) — не покрыт.
+
+## Волна 2 — эпики C, A, H (2026-07-16)
+
+# Эпик C — Проект (C-01…C-09). Результаты инвестигейта
+
+Репо: `/Users/sshlg/DATA/builder-pro-ai` (main, v0.7.0). READ-ONLY.
+Модель: opus. Пути прослежены UI-контрол → ipc → command → wire → dispatch → persistence/export.
+Тесты (существующие, не менял): `cargo test -p bpa-orchd --lib -- create_project_creates_strategic_goal_and_ruleset_row remove_project_workspace_last_link_is_invariant archive_project_sets_status_archived archived_project_blocks_archive_project_again import_task_id_collision_is_conflict_and_rolls_back_everything create_project_workspace_linked_to_another_project_is_conflict` → **6 passed**.
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть |
+|---|---|---|---|
+| C-01 | ✅ OK | — | `create_project` в одной tx сеет strategic-цель «Стратегическая цель» + ruleset-строку + entity_ref граф-узел; toast «Проект создан», диалог закрыт, sidebar-группа появляется |
+| C-02 | 🟡 UX-GAP | Minor | **P-06:** «+ проект» (sidebar) и submit CreateProjectDialog НЕ гейтятся `orchdDown`; но при down `orchdCreateProject` быстро реджектится `disconnected` → «оркестратор недоступен» inline-alert+toast, диалог открыт (честно, но негейчено — рассинхрон с остальным app) |
+| C-03 | 🟡 UX-GAP | Minor | Главный гвард ✅ («нужен хотя бы один workspace» + disabled submit). **P-17:** вложенный «+ создать workspace» на отказе показывает сырой `e.message` (с generic-fallback), мимо `describeOrchdError`/локализации |
+| C-04 | ✅ OK | — (📄 O-2) | Гонка «workspace привязан в другом окне» → `Conflict` → «конфликт: workspace \<id\> is already linked to a project» inline+toast, диалог открыт; читаемо, но хвост сообщения — англ. |
+| C-05 | 🟡 UX-GAP | Minor | **F-5/BL-61:** отвязка последнего workspace → «недопустимая операция: **cannot remove the project's last workspace link**» — юзер видит англ. Invariant-текст (locked-копия «у проекта должен остаться workspace» кодом НЕ производится). **P-06:** весь таб «Обзор» негейчен по `orchdDown` (только баннер), но каждая мутация → честный toast + `refreshProjects` |
+| C-06 | 🟡 UX-GAP | Minor | **P-28:** «Скопировать JSON» — один catch сливает отказ экспорта (orchd `Io`) и отказ clipboard (DOMException); clipboard-ошибка не распознаётся → «неизвестная ошибка оркестратора» (врёт про виновника). «Сохранить в файл…» — честно |
+| C-07 | 🔴 BUG | Minor | **B-07 ПОДТВЕРЖДЁН:** `import_ruleset` пишет .md (`write_atomic`, export.rs:335) ДО `insert_ruleset_raw` (339) и ДО `tx.commit()` (418) → при коллизии позже по бандлу DB откатывается, а .md-файл раннего бандла ПЕРЕЖИВАЕТ rollback (противоречит doc-коммент «nothing survives» + spec §8). Латентно/self-healing/контейнед → Minor. Остальные import-ошибки честны |
+| C-08 | 📄 DOC-GAP | Minor | **F-8 ПОДТВЕРЖДЁН:** verb `ArchiveProject` полностью прошит (ipc:96 + socket:887 + persistence:1368 + тесты), но НИ ОДИН UI-контрол его не зовёт (grep `src/components/**`+`App.tsx` = 0 вызовов, нет лейбла «Архивировать»). Архивирование проекта UI-НЕДОСТИЖИМО в v1. **BL-53:** разархивирования нет (un-archive verb отсутствует; повторный archive → `Invariant`) |
+| C-09 | ✅ OK | — | Чип «workspace недоступен» (ProjectPanel:335-337) + [Отвязать] (339-346) есть и работает; ref «unresolvable» = id отсутствует в sessiond-слайсе `workspaces` (soft-ref, не FK); покрыт тестом `detach-ghost-ws` |
+
+**Итог по эпику:** 3×✅ OK · 5×🟡 UX-GAP (все Minor) · 1×🔴 BUG (Minor, латентный) · внутри — 1×📄 DOC-GAP (C-08/F-8). Ключевые подтверждения: F-8 (архив-контрола нет), F-5/BL-61 (англ. Invariant-текст), P-06 (весь «Обзор» + CreateProject негейчены), B-07 (md переживает rollback), P-28 (слитые причины отказа).
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где подтверждено |
+|---|---|---|
+| F-8 (ArchiveProject verb без UI-контрола) | 📄 **ПОДТВЕРЖДЁН** | C-08 |
+| BL-53 (нет разархивирования) | ✅ подтверждён (кода un-archive нет) | C-08 |
+| P-06 (нет orchdDown-гейта: CreateProject submit + весь «Обзор») | 🟡 **ПОДТВЕРЖДЁН** | C-02, C-05 |
+| F-5/BL-61 (англ. Invariant-текст вместо locked-копии) | 🟡 **ПОДТВЕРЖДЁН** | C-05 |
+| P-17 (сырой message в nested create-workspace) | 🟡 подтверждён | C-03 |
+| P-28 (слитые export vs clipboard отказы) | 🟡 подтверждён | C-06 |
+| B-07 (md-файл переживает rollback) | 🔴 подтверждён (латентный) | C-07 |
+
+---
+
+## Результаты
+
+### C-01 — «+ проект»: имя + ≥1 workspace → создать (strategic-цель автосоздана?)
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `WorkspaceSidebar.tsx:257-274` («+ проект» → `setShowCreateDialog(true)`) → `CreateProjectDialog.tsx:230-242 handleSubmit` → `orchdCreateProject(name.trim(), description, selectedIds)` → `orchd_create_project` → `socket_server` dispatch → `persistence.rs:1276 create_project`. Внутри ОДНОЙ tx: insert project → insert `project_workspace` (ord 0..) → insert strategic `goal` (`STRATEGIC_GOAL_TITLE = "Стратегическая цель"`, persistence.rs:604; строка вставки 1306-1313) → `crate::graph::seed_strategic_entity_ref` (1316-1319, S4 §5 D6) → ruleset-строка. Тест `create_project_creates_strategic_goal_and_ruleset_row` → **ok**.
+- **Обработка ошибок:** есть, честная. `handleSubmit` guard `blocked || name.trim()===""` (231); success → `showToast("Проект создан")` + `onClose()` (235-236); fail → `describeOrchdError` → `setCreateError` inline `role="alert"` (323-326) + toast, диалог открыт.
+- **Логи:** пер-верб tracing нет (B-04-класс, системное). Секретов нет.
+- **Что видит пользователь:** проект создан, toast «Проект создан», диалог закрыт; sidebar-группа появляется (push `orchd://projects-changed` + пере-рендер по стору). Открыв таб «Цели», сразу видит корневую «Стратегическая цель» (D-01 смежно — цель реально автосоздаётся в create_project, не отдельным шагом).
+- **Действие:** ничего.
+
+### C-02 — orchd down: «+ проект» → заполнить → submit (P-06)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-06 подтверждён.)
+- **Проверено:** «+ проект» кнопка (`WorkspaceSidebar.tsx:257-274`) — `onClick` без `disabled={orchdDown}`. `CreateProjectDialog.handleSubmit` (230) — НЕТ проверки `orchdDown` (в компоненте `orchdDown` вообще не читается). Submit disabled только на `blocked || name.trim()===""` (335).
+- **Что реально происходит при down:** при `orchdDown===true` соединение сброшено → `orchdCreateProject`.invoke реджектится `CommandError{kind:"disconnected"}` БЫСТРО (не 30-сек висяк: клиент считает себя отключённым) → catch → `describeOrchdError` → «оркестратор недоступен» → inline `role="alert"` (load-bearing, переживает clobber toast-очереди) + toast, диалог остаётся открыт.
+- **Обработка ошибок:** есть, честная — но реактивная, а не проактивный гейт. Каталог C-02 допускает «disabled ИЛИ честная ошибка» → честная ошибка присутствует. Дельта: остальной app disable-ит мутирующие контролы при down; здесь — нет (несогласованность UX, юзер тратит клик на обречённую операцию, хотя баннер «оркестратор недоступен» уже виден в панели проекта; в sidebar баннера нет вовсе).
+- **Логи:** FE-toast; секретов нет.
+- **Действие:** BL/фикс (Minor): гейтить submit CreateProjectDialog (и/или кнопку «+ проект») на `orchdDown` — зеркально ConnectDialog/остальным диалогам.
+
+### C-03 — Диалог проекта: 0 workspaces выбрано (+ P-17 nested create)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (Главный путь ✅; P-17 подтверждён.)
+- **Проверено:** `blocked = selectedIds.length === 0` (CreateProjectDialog.tsx:197). При blocked — inline `role="alert"` `BLOCKED_TEXT = "нужен хотя бы один workspace"` (25, 311-315) + submit `disabled` (335) + `handleSubmit` ранний `return` (231). Всё корректно.
+- **P-17 (nested «+ создать workspace»):** `handleCreateWorkspace` (216-228) → `pickFolder` → `createWorkspace(basename(dir), dir)` (sessiond-путь, НЕ `orchd_*`). Catch: `const message = e instanceof Error ? e.message : "не удалось создать workspace"` (224) → сырой `e.message` (или generic-fallback), в обход `describeOrchdError`/локализованного маппера. Осознанно по doc-комменту (174-176: «sessiond createWorkspace failure … lighter, non-`describeOrchdError` message»), но это НЕлокализованная/техническая поверхность (P-17 фактически подтверждён).
+- **Что видит пользователь:** без workspace — красная строка «нужен хотя бы один workspace», submit серый. При отказе создания вложенного workspace — inline-alert + toast с сырым/generic текстом.
+- **Действие:** BL (Minor): прогнать nested-create-workspace ошибку через какой-либо локализованный маппер (или хотя бы `describeCommandError`), чтобы юзер не видел сырой сессионд-message.
+
+### C-04 — Диалог проекта: workspace, уже привязанный к другому проекту (гонка → Conflict)
+
+- **Вердикт:** ✅ OK (📄 Minor: англ. хвост, O-2).
+- **Проверено:** UI прячет привязанные workspace (`unlinked = filter(!linkedIds.has(w.id))`, CreateProjectDialog.tsx:194-196) — unlinked-only. Гонка (привязали в другом окне между открытием и submit): `create_project` вставляет `project_workspace` (persistence.rs:1298-1303); `project_workspace.workspace_id` — UNIQUE (263-267) → `map_workspace_conflict` (662-671) → `Conflict("workspace {workspace_id} is already linked to a project")`, откат всей tx. `describeOrchdError` → «конфликт: workspace \<id\> is already linked to a project» → inline+toast, диалог открыт. Тест `create_project_workspace_linked_to_another_project_is_conflict` → **ok**.
+- **Обработка ошибок:** есть, честная; вся транзакция откатывается (проект-строка не остаётся).
+- **Что видит пользователь:** читаемое «конфликт: …», но `{message}`-хвост английский + сырой uuid workspace (не имя) — минорная читаемость (O-2).
+- **Действие:** ничего по коду; при желании — Minor: локализовать/подставлять имя workspace вместо id в сообщение конфликта.
+
+### C-05 — Таб «Обзор»: привязать/отвязать workspace (F-5/BL-61 + P-06)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (F-5/BL-61 + P-06 подтверждены.)
+- **Проверено (F-5/BL-61):** «Отвязать» (`ProjectPanel.tsx:339-346 handleDetachWorkspace:204-211`) → `orchdRemoveProjectWorkspace` → `persistence.rs:1434 remove_project_workspace`: если `is_linked>0 && total<=1` → `OrchdPersistError::Invariant("cannot remove the project's last workspace link")` (1452-1456). Обёртка `describeOrchdError`: `case "Invariant": return "недопустимая операция: ${message}"` (orchd.ts:769-770) → пользователь видит **«недопустимая операция: cannot remove the project's last workspace link»** — англ. Invariant-текст. Locked-копия из backlog.md:71 «у проекта должен остаться workspace» кодом НЕ производится (F-5). Тест `remove_project_workspace_last_link_is_invariant` → **ok**.
+- **Проверено (P-06):** ВЕСЬ таб «Обзор» негейчен: `grep orchdDown|disabled` по `ProjectPanel.tsx` → только рендер баннера (283), НИ ОДНОГО `disabled` на detach/add-select/copy/export/import. При down каждая мутация → catch → `showToast(describeOrchdError)` = «оркестратор недоступен» (честно, но реактивно). Add: `handleAddWorkspace` (213-223) → `orchdAddProjectWorkspace` + `refreshProjects` + сброс select. Push/refresh: каждая мутация, меняющая `workspaceIds`, явно `refreshProjects()` (207, 218) → sidebar сводится.
+- **Что видит пользователь:** ряд появился/исчез, sidebar обновлён; при последнем workspace — англ. Invariant-toast; при down — «оркестратор недоступен»-toast (контролы кликабельны).
+- **Действие:** (1) BL/фикс (Minor): гейтить контролы «Обзора» на `orchdDown` (P-06). (2) Док/локализация (F-5/O-2): либо маппить last-workspace Invariant в русскую копию, либо принять англ. Invariant-хвост как политику.
+
+### C-06 — Таб «Обзор»: «Скопировать JSON» / «Сохранить в файл…» (P-28)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-28 подтверждён.)
+- **Проверено:** `handleCopyJson` (ProjectPanel.tsx:225-233): `try { json = orchdExportProject(); navigator.clipboard.writeText(json); showToast("JSON скопирован") } catch (e) { showToast(describeOrchdError(e)) }`. Один catch на ДВА разных источника: (1) отказ экспорта — orchd `Io` (>16MiB и пр.) → `describeOrchdError` → «ошибка сервиса: …» (честно); (2) отказ clipboard — `navigator.clipboard.writeText` бросает DOMException (нет `kind`) → `describeOrchdError` не распознаёт → «неизвестная ошибка оркестратора» — **врёт про виновника** (orchd ни при чём, это браузер/permission). `handleExportToFile` (235-244) — отдельный путь, `Io` честно → «ошибка сервиса».
+- **Что видит пользователь:** при clipboard-отказе — сообщение, обвиняющее оркестратор, вместо «не удалось скопировать в буфер обмена».
+- **Действие:** BL (Minor): развести две причины — обернуть `navigator.clipboard.writeText` в свой try и показывать честное «не удалось скопировать в буфер»; `describeOrchdError` — только для отказа экспорта.
+
+### C-07 — Таб «Обзор»: «Импорт из файла…» → .json (B-07 rollback)
+
+- **Вердикт:** 🔴 BUG. **Severity: Minor** (латентный, self-healing, не user-visible). B-07 ПОДТВЕРЖДЁН статически + существующим тестом (который дефект НЕ ловит).
+- **Проверено (B-07):** `handleImportFile` (ProjectPanel.tsx:258-272) → `orchdImportFromFile` → `export.rs:429 import_bundle` → `import_project_bundles` (384-420). Порядок: `tx` открыт (392), `defer_foreign_keys=ON` (399), цикл по `project_bundles` (402-404) → `import_one_project` → внутри бандла порядок project→goals→ideas→insights→tasks→**ruleset** (353-373). `import_ruleset` (314-340): `ruleset_files::write_atomic(&effective_path, content)` (335) — реальная запись .md на диск (`std::fs::write` + `rename`, ruleset_files.rs:39-47) — **ДО** `insert_ruleset_raw` (339) и **ДО** `tx.commit()` (418). При коллизии PK/UNIQUE позже (второй project-бандл в whole-store импорте / global_ruleset / orphan-insert / либо ruleset-id-коллизия в том же бандле) → `?` роняет `tx` без commit → **DB полностью откатывается, но уже записанный .md раннего бандла ОСТАЁТСЯ на диске**. Это противоречит doc-комменту `import_project_bundles` (380-383: «nothing survives — tx is simply dropped without commit()») и spec §8 атомарности.
+- **Границы урона (почему Minor):** путь fail-closed валидирован (`resolve_ruleset_write_path` реджектит `..`, `validate_path_within` кэнонизирует parent — export.rs:310-334) → эскейпа из `app_support` нет; путь scope-детерминированный (`project-<id>.md` / global default) → повторный УСПЕШНЫЙ импорт перезапишет его атомарно; без соответствующей DB-строки осиротевший файл не всплывает ни в одном `RuleSetView`. Итог: латентная нецелостность (FS-side-effect переживает DB-rollback), НЕ видимая пользователю и самозаживающая.
+- **Тест-доказательство:** `import_task_id_collision_is_conflict_and_rolls_back_everything` (export.rs:693-746) → **ok**, но ассертит ТОЛЬКО `table_counts` (DB rollback), .md-файл не проверяет (грепы `.exists()/read_dir/orphan` по export.rs — ноль FS-ассертов). Причём в ЭТОМ тесте (single-project bundle) task-коллизия (368) опережает ruleset-запись (372) → орфан не создаётся; репро — именно multi-bundle whole-store (`orchd_export_all` даёт ключ `projects`) с коллизией в позднем бандле. `build_fixture` (523) реально сеет ruleset с md_content (upsert_ruleset, 66-70) → путь записи в импортах задействуется.
+- **Остальные import-ошибки честны:** Conflict→«конфликт: … already exists», Validation (малформ/`bundleFormat`≠1)→«неверные данные: …» (export.rs:434-472), 0 json → «Нет .json файлов в выбранной папке» (ProjectPanel:402-403), success → покатегорийные счётчики (262-265) + `refreshProjects`.
+- **Действие:** BL (🔴 Minor): либо отложить ВСЕ `write_atomic` до после `tx.commit()` (собрать записи, применить на success), либо чистить записанные .md при rollback (`?`-guard), либо честно ослабить doc/spec-инвариант. Добавить FS-ассерт в collision-тест (multi-bundle).
+
+### C-08 — Проект существует: Архивировать проект (F-8 / BL-53)
+
+- **Вердикт:** 📄 DOC-GAP. **Severity: Minor.** F-8 ПОДТВЕРЖДЁН.
+- **Проверено (нет UI-контрола):** verb `ArchiveProject` полностью прошит — `orchdArchiveProject` (`ipc/orchd.ts:96` → `invoke("orchd_archive_project")`), wire `socket_server.rs:887 OrchdRequest::ArchiveProject`, `persistence.rs:1368 archive_project`, юнит-тест `orchd.test.ts:124`. НО: `grep -rn "orchdArchiveProject|ArchiveProject|Архивир" src/components/ src/App.tsx` → **0 вызовов**; единственные вхождения `orchdArchiveProject` во всём `src/` — сам ipc-враппер (orchd.ts:96) и его юнит-тест. Лейбла «Архивировать»/«Архив проекта» нет нигде. `InsightsList`-«archive» вхождения — про АРХИВ ИНСАЙТА, не проекта. ⇒ **архивирование проекта UI-НЕДОСТИЖИМО в v1** (verb есть, кнопки нет).
+- **Проверено (BL-53 — нет разархивирования):** `archive_project` (1368-1378) — one-way: `ensure_project_active(&tx, id)` до `UPDATE status='archived'`; un-archive verb в кодовой базе отсутствует. Повторный archive архивного → `Invariant` (тест `archived_project_blocks_archive_project_again` → **ok**). Бэкенд корректно делает архивный проект read-only: все мутации → `Invariant` через `ensure_project_active` (15+ тестов `archived_project_blocks_*`, напр. `archived_project_blocks_update_project/_create_goal/_add_project_workspace/_remove_project_workspace` → ok). Тест `archive_project_sets_status_archived` → **ok**.
+- **Что видит пользователь:** никак не может архивировать проект (нет контрола). Если бы контрол появился — архив был бы необратим (нет un-archive), архивный проект — только чтение (списки/экспорт работают: `list_goals`/`get_project` без archived-guard, 1145/1395).
+- **Дельта от ожидания:** каталог C-08 «Ожидаемо: ???» + F-8 «кнопки архива, похоже, нет» — подтверждено: нет. Это осознанный gap (открытый вопрос O-3): verb-плюс-нет-UI = capability прошита, но не выставлена в v1.
+- **Действие:** 📄 DOC + владелец (O-3): либо задокументировать «архив проекта отложен из v1 UI» (и, при выставлении, — обязательно un-archive-путь, BL-53), либо завести BL на UI-контрол «Архивировать» с confirm + честной нотой о необратимости.
+
+### C-09 — Проект с недоступным workspace: открыть «Обзор» (unresolvable soft-ref)
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `ProjectPanel.tsx:328-349` — для каждого `project.workspaceIds`: `const ws = workspaces[wsId]`; если `ws` резолвится → имя (333), иначе → чип `data-testid="project-workspace-unresolved-{wsId}"` **«workspace недоступен»** (335-337, стиль `chipStyle` — statusExited-рамка) + кнопка **[Отвязать]** (339-346 → `handleDetachWorkspace(wsId)`), а не тихий дроп ряда. `workspaces` — sessiond-слайс (soft-ref join, spec §10); ref «unresolvable», когда id отсутствует в слайсе (workspace удалён/никогда не существовал — soft ref, не FK). Покрыт тестом (`ProjectPanel.test.tsx:245` кликает `project-workspace-detach-ghost-ws`).
+- **Обработка ошибок:** detach-путь честный (try/catch→toast + refreshProjects). Edge: отвязка недоступного, если он ПОСЛЕДНИЙ → `Invariant` (honest toast, C-05).
+- **Что видит пользователь:** чип «workspace недоступен» + рабочая [Отвязать] — может почистить висячий ref.
+- **Действие:** ничего.
+
+---
+
+## Не удалось проверить рантаймом
+
+1. **B-07 (C-07) физический орфан .md после rollback** — вердикт построен на статик-трейсе (`write_atomic` до `tx.commit`) + факте, что существующий collision-тест не проверяет файл; НОВЫЙ репро-тест не писал (read-only мандат). Multi-bundle whole-store репро выведён из порядка цикла `import_project_bundles` + write-before-commit; уверенность высокая, но не исполнен как свежий репро.
+2. **C-02/C-05 рантайм-поведение негейченных контролов при orchd down** (что реджект быстрый `disconnected`, а не 30-сек висяк) — выведено из connection-модели orchd_client (документирована в предыдущем анализе F-03), здесь повторно не исполнялось.
+3. **C-04 реальная гонка двух окон** — single-instance-модель (K-05) не проверял; Conflict-путь доказан юнит-тестом create_project, не мульти-оконным репро.
+
+# Эпик A — Первый запуск и здоровье демонов: инвестигейт A-01..A-10 (READ-ONLY, v0.7.0)
+
+> Пути прослежены: launchd bring-up (`launchd.rs` → `lib.rs::ensure_daemon_running`/`bring_up_daemon`/`bring_up_orchd`)
+> → connect (`socket_client.rs`/`orchd_client.rs`) → события (`broker`) → UI (`App.tsx`, баннеры, `UpgradeDialog`).
+> Тесты прогнаны: `npx vitest run UpgradeDialog/DaemonBanner/OrchdDownBanner/HomeView/WorkspaceSidebar` → **50 passed**.
+> Rust-пути (launchd/boot/persistence/reconnect) прослежены статически + сверены с существующими юнит-тестами в этих же файлах.
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть |
+|---|---|---|---|
+| A-01 | 🟡 UX-GAP | Important | Окно открывается сразу, оба демона поднимаются параллельно, паники нет. НО жёсткий отказ install/bootstrap/kickstart (TCC/права/нет бинаря) → generic `daemon://disconnected` («…reconnecting…») / `orchd://down` — типизированный `LaunchdError` только логируется, юзеру не показан; «reconnecting…» вводит в заблуждение при перманентном отказе; онбординга нет (F-6) |
+| A-02 | 🟡 UX-GAP | Minor | 0 workspaces/0 projects: sidebar показывает голый заголовок «Без проекта» (P-11) но CTA «+ Add workspace»/«+ проект» есть; Home (дефолт-view) при 0 workspaces показывает ТОЛЬКО «Нет активных сессий.» без CTA (протестировано). Нет empty-state-текста и онбординга (F-6) |
+| A-03 | 🟡 UX-GAP | Minor | Reconnect-машинерия честна и полна: disconnect→in-flight fail Disconnected→баннер→bounded backoff (100ms→5s)→reconnect→re-attach всех сессий (видимая eager, скрытые lazy, replay-only). НО ввод в мёртвый PTY: `term.onData→writeStdin` fire-and-forget, без `.catch`, без гейта → символы молча теряются (нет локального эха, нет фидбека), потеряны навсегда (свежий shell при reconnect) |
+| A-04 | 🟡 UX-GAP | Minor | OrchdDownBanner + [Повторить] есть; чтения живут; гейт мутаций по `orchdDown` работает для дисциплинированных контролов. Гэпы: [Повторить] даёт НОЛЬ фидбека (нет busy/disabled/спиннера; команда возвращает Ok мгновенно, реконнект — только через orchd://down|up); P-06-дыры реальны (submit CreateProjectDialog и attach-select sidebar НЕ гейтятся) — но кликаются и падают в честный toast «оркестратор недоступен», не молча |
+| A-05 | ✅ OK | — | Несовместимый sessiond → UpgradeDialog с локед-копией про N живых сессий (hydrated-гейт честен, finding [14]); «Обновить» fire-and-forget + `.catch`→inline-ошибка+retry; рестарт по успеху |
+| A-06 | ✅ OK | — | Несовместимый orchd → orchd-вариант UpgradeDialog (локед-копия, БЕЗ предупреждения о сессиях); «Обновить»→`orchdUpgrade`→рестарт; `.catch`→orchd-специфичная inline-ошибка. (Отмена → см. A-10) |
+| A-07 | ✅ OK | — | Оба несовместимы → sessiond первым (precedence: `sessiondOpen` проверяется ПЕРВЫМ и выигрывает; `orchdOpen = !sessiondOpen && …`), ровно ОДИН диалог за раз; после разрешения sessiond (upgrade→restart→re-detect ИЛИ Cancel→orchd показывается следующим, тест :303) — orchd. Порядок соблюдён |
+| A-08 | 🟡 UX-GAP | Important | Повреждённый orchd.db → `Db::open` карантинит `orchd.db.corrupt-<ts>` + чистит -wal/-shm + создаёт свежую БД, стартует; логирует `warn!`. **UI не сообщает НИЧЕГО** — юзер видит пустой аккаунт без объяснения. Данные не уничтожены (карантин восстановим), но юзеру про это никто не говорит |
+| A-09 | 🟡 UX-GAP | Important | Диск/директория недоступна → `open_db_degrading` ловит Err, логирует `error!` «continuing in degraded (in-memory) mode», поднимает in-memory БД. Демон живёт, **НИЧЕГО не персистится, НОЛЬ индикации в UI**. Юзер может отработать целую сессию и потерять 100% при рестарте без предупреждения (граничит с 🔴 silent data-loss) |
+| A-10 | 🟡 UX-GAP | Important | «Отмена» закрывает только `*UpgradeDialogOpen`, фатальный `*Incompatible` остаётся. **Возвратный путь ЕСТЬ только для sessiond** (DaemonBanner incompatible-ветка → «Обновить» → reopen). Для **orchd** после Cancel: `orchdIncompatible=true` но `orchdDown=false` → OrchdDownBanner не монтируется, `orchdIncompatible` не читает НИ ОДИН баннер → пусто, диалог не вернуть до рестарта app |
+
+**Итог:** 3×✅ OK · 7×🟡 UX-GAP (5 Important + 2 Minor) · 0×🔴. Две самые ценные находки — A-08/A-09 (молчаливая потеря/неперсистентность данных без индикации) и A-10-orchd (потерянный upgrade-диалог orchd без возвратного пути).
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где |
+|---|---|---|
+| P-05 ([Повторить] без `.catch`) | 🟡 переквалифицирован | A-04 — не «нет .catch» (команда возвращает Ok сразу, ловить нечего), а «нет busy/feedback-стейта» |
+| P-06 (негейченные мутации при orchdDown) | 🟡 подтверждён | A-04 — CreateProjectDialog `blocked=selectedIds.length===0` (без orchdDown); attach-select sidebar без гейта; оба падают в честный toast |
+| P-11 (голый заголовок sidebar при 0 ws) | 🟡 подтверждён | A-02 — «Без проекта» рендерится безусловно даже с 0 workspaces |
+| F-6 (нет онбординга/первого запуска) | 📄 подтверждён | A-01/A-02 — ни в одном доке, ни в UI |
+
+---
+
+## Результаты
+
+### A-01 — Чистая машина, первый запуск .app
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.**
+- **Проверено (полный boot-путь):**
+  - `lib.rs::run` → `.setup()` (760-810): строит `Broker`, пре-создаёт orchd slot/status + агент, **спавнит `bring_up_daemon` и `bring_up_orchd` двумя независимыми задачами** на `tauri::async_runtime` и **сразу возвращает `Ok(())`** → окно открывается немедленно, никакого блокирования на launchctl/сети, паники нет ни при каком исходе (док-модуля §"Always-managed AppState").
+  - Успех-путь: `ensure_daemon_running` (`lib.rs:261-266` = `install_agent`→`bootstrap`→`kickstart`, все идемпотентны, `launchd.rs`) → `connect_with_retry` (BOOT_CONNECT_ATTEMPTS=8 × 500ms ≈ до 4с) → `Ok(client)` → slot заполнен, `register`/`register_orchd` вешают push/conn. Событий на первый успешный коннект НЕ шлётся (только `daemon://reconnected` на ПОЗДНИЙ reconnect) — начальную гидрацию делает `App.tsx::hydrate(0)` + `refreshProjects()` с retry. Баннеров нет, Home открыт.
+  - **Отказ-путь (ключевой вопрос сценария):** любой из трёх шагов падает → `ensure_daemon_running` возвращает `Err(LaunchdError::{Install|Command|Io|DaemonPath})`. В `bring_up_daemon` (434-448): `error!(error=%e, …)` + `emit_disconnected(&app, "could not start background service")` → `daemon://disconnected` → `App` `setDaemonConnected(false)` → **DaemonBanner показывает «Daemon disconnected — reconnecting…»** (красный). Для orchd (`bring_up_orchd:550-555`): `emit_orchd_down("could not start orchd background service")` → **OrchdDownBanner «Оркестратор недоступен» + [Повторить]**. Отказ резолва бинаря (`build_launchd_agent` Err) → `emit_disconnected("could not resolve the background service binary")` — тот же generic баннер.
+- **Обработка ошибок:** честная в смысле «не паника, не тихий висяк» (spec §13). НО типизированная причина (`LaunchdError::Install(stderr)` — например «Operation not permitted (TCC)», тест `hard_failure_surfaces_install_error` в `launchd.rs`) **только логируется `error!`, юзеру не показывается**. Юзер видит generic «reconnecting…», что при перманентном отказе (TCC-денайл прав, отсутствие бинаря) **вводит в заблуждение**: приложение действительно крутит hydrate-retry-петлю, но она никогда не преуспеет — а хинта «нужно выдать разрешение / переустановить» нет.
+- **Логи:** `installed LaunchAgent plist` (info); при отказе `failed to bring up the launchd-managed daemon` / `…orchd daemon` (error, с `%e`); `emitting daemon://disconnected` / `orchd://down` (warn, reason). Секретов нет.
+- **Что видит пользователь:** окно и Home сразу (интерактивность немедленная, реальные данные подтягиваются ~до 4с + hydrate-retry). При жёстком отказе демона — красный баннер «reconnecting…» / «Оркестратор недоступен» без указания причины и без онбординга (F-6: первый запуск не описан ни в одном доке).
+- **Дельта от ожидания:** каталог «Отказ install/bootstrap любого демона — что видит юзер?» → видит generic-баннер, а не actionable-сообщение про TCC/права. «Сколько ждать до интерактивности» → мгновенно (окно), реальные списки — до ~4с.
+- **Действие:** BL-кандидат (Important): при `ensure_daemon_running`-отказе прокидывать типизированную причину в отдельный actionable-баннер («не удалось запустить фоновый сервис: проверьте разрешения launchctl» вместо «reconnecting…»); онбординг/пустой первый запуск (F-6).
+
+### A-02 — Первый запуск, 0 workspaces / 0 projects
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-11 подтверждён; F-6.)
+- **Проверено:**
+  - **Sidebar** (`WorkspaceSidebar.tsx`): при пустых `projects`/`workspaces` — `sortedProjects=[]` (нет групп проектов), `unlinkedWorkspaces=[]` (пустой `<ul>`), но заголовок **«Без проекта» рендерится безусловно** (214-226) → голый заголовок (P-11). Кнопки **«+ проект»** (257-274) и **«+ Add workspace»** (275-291) присутствуют ВСЕГДА → discoverable CTA для создания workspace ЕСТЬ. Нет только empty-state-ТЕКСТА («ещё нет workspace — создайте первый»).
+  - **HomeView** (`HomeView.tsx:230-247`): при `all.length===0` — блок `home-empty` с «Нет активных сессий.» + кнопка «Открыть {firstWorkspace.name}» **только если `firstWorkspace` существует**. При 0 workspaces `firstWorkspace===undefined` → **НИ ОДНОЙ CTA**, только dim-строка. Подтверждено тестом `HomeView.test.tsx:205` «empty state with zero workspaces shows only the dim sentence (no action)».
+  - `HomeGoals` монтируется ниже, но сам ничего не рендерит при 0 активных проектов.
+- **Обработка ошибок:** н/д (пустой стейт — не ошибка).
+- **Логи:** н/д.
+- **Что видит пользователь:** на дефолтном Home — только «0 workspaces · 0 live · 0 waiting» + «Нет активных сессий.», без CTA прямо на экране. Единственный путь создать workspace — кнопка «+ Add workspace» в левом рейле (видима, но не подсвечена как «начни отсюда»). Нет empty-state-подсказки/онбординга (F-6).
+- **Дельта от ожидания:** каталог ждал «внятный empty-state с CTA "создай workspace"». Фактически: CTA есть в sidebar (не тупик), но Home-экран без CTA, empty-state-текста нет, P-11 (голый заголовок) реален.
+- **Действие:** BL-кандидат (Minor): empty-state-текст в sidebar при 0 workspaces; CTA «создать первый workspace» на Home при 0 workspaces; онбординг (F-6).
+
+### A-03 — Приложение работает → убить bpa-sessiond
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (reconnect/re-attach — ✅; ввод в мёртвый PTY — 🟡.)
+- **Проверено (полный reconnect-путь):**
+  - Обрыв: `connection_task` (`socket_client.rs:950-977`): `run_connection` вернулся → `shared.live=false` → дренаж `pending` (каждый in-flight → `Err(Disconnected)`, честно, не висит) → `fire_conn(ConnState::Disconnected)` → broker → `daemon://disconnected` → `App.tsx:159` `setDaemonConnected(false)` → **DaemonBanner «Daemon disconnected — reconnecting…»** (красный, `statusExited`).
+  - Reconnect: `connect_with_backoff` (`:796-813`) — bounded экспоненциальный backoff `BACKOFF_START=100ms` ×2 до `BACKOFF_CAP=5s`, петля пока не поднимется (Io/TransientHandshake ретраятся внутри; только fatal Incompatible выходит). На успехе (`:980-986`): `live=true` → `fire_conn(Connected)` → `daemon://reconnected`.
+  - Re-attach ВСЕХ (`App.tsx:160-181` `onDaemonReconnected`): `manager.resetAllAttachments()` (сбрасывает флаг attach у КАЖДОЙ сессии) → `hydrate(0)` → **видимая** сессия ре-attach eager (`manager.attach(id)`), **скрытые** — lazy при следующем tab-switch (пейн ремоунтится, его эффект зовёт attach). Replay-only (crash убил все shell'ы; scrollback реплеится до последнего flush). Соответствует ожиданию «сессии переприкреплены».
+- **Ввод в мёртвый PTY (ключевой вопрос):** `terminal-manager.ts:147-148` — `term.onData((data) => { void writeStdin(sessionId, data); })` — **fire-and-forget, без `.catch`, без гейта на `daemonConnected`**. Пока sessiond мёртв: slot ещё `Some` (клиент реконнектится внутри), `write_stdin` → `client.request(WriteStdin)` → `live=false` → `Err(Disconnected)` → промис реджектится → `void` глотает (unhandled rejection, без фидбека). Локального эха нет (xterm в PTY-режиме не эхоит; эхо даёт shell, которого нет) → **символы молча теряются, экран не реагирует, ввод потерян навсегда** (после reconnect — свежий shell).
+- **Обработка ошибок:** reconnect-путь — образцово-честный (spec §13, тесты `socket_client.rs`: `…fires_conn_state`, disconnect→reconnect последовательности). Ввод-путь — тихий проглот.
+- **Логи:** `daemon connection lost; reconnecting` (warn); `daemon connect failed; will retry` (warn). Ввод-дроп нигде не логируется.
+- **Что видит пользователь:** глобальный красный баннер «reconnecting…»; терминал НЕ дизейблится, набранное не эхоится и молча пропадает; после reconnect — чистый ре-attach со scrollback.
+- **Дельта от ожидания:** reconnect/replay соответствуют каталогу. «Что с вводом, набранным в мёртвый PTY» → молча теряется, без per-keystroke-фидбека (только глобальный баннер сигналит, что что-то не так).
+- **Действие:** BL-кандидат (Minor): при `!daemonConnected` дизейблить/визуально гасить ввод терминала или показывать «ввод недоступен — переподключение», а не молча ронять `writeStdin`.
+
+### A-04 — Приложение работает → убить bpa-orchd
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-05 переквалифицирован; P-06 подтверждён.)
+- **Проверено:**
+  - Баннер: `App.tsx:442` `{orchdDown && <OrchdDownBanner/>}`; `orchd://down` → `setOrchdDown(true)`. OrchdDownBanner — красный left-edge + [Повторить] (`OrchdDownBanner.tsx`).
+  - **[Повторить]** (`:47-52`): `onClick={() => void orchdReconnect()}` → `orchd_reconnect` (`commands.rs:1928-1939`): `state.orchd.write().take()` (дропает slot) → `spawn(bring_up_orchd(...))` → **возвращает `Ok(())` МГНОВЕННО**. Результат наблюдается ТОЛЬКО через `orchd://down`/`orchd://up`. Т.е. P-05 «без `.catch`» — формально верно, но ловить нечего (Ok сразу); реальный гэп — **нет busy/feedback-стейта**.
+  - Гейт: `orchdDown` дизейблит дисциплинированные мутирующие контролы (идеи/research/insight — эпики E/F/G). Чтения (списки, «показать артефакт») живут.
+  - **P-06-дыры (подтверждены статически):** `CreateProjectDialog.tsx:197` `blocked = selectedIds.length===0` — **orchdDown НЕ входит** → «Создать» кликабелен; клик → `orchdCreateProject` реджект `Disconnected` → `catch` → `describeOrchdError`→«оркестратор недоступен» inline+toast (не молча). `WorkspaceSidebar.tsx:75-85` `handleAttach` — без orchdDown-гейта, select всегда рендерится → клик → `orchdAddProjectWorkspace` реджект → toast «оркестратор недоступен».
+- **[Повторить] при всё ещё мёртвом orchd (ключевой вопрос):** клик → slot дропнут, `bring_up_orchd` спавнится, `ensure_daemon_running` (bootstrap идемпотентен) ок, `connect_orchd_with_retry` (8×500ms≈4с) падает → `emit_orchd_down` → `orchd://down` → `setOrchdDown(true)` (уже true → no-op). **Весь ~4с — НОЛЬ видимых изменений**: кнопка не дизейблится, спиннера нет, баннер стоит. Юзер не понимает, идёт ли попытка.
+- **Обработка ошибок:** мутации при down недостижимы (где гейт есть) ИЛИ падают в честный toast (P-06-дыры). Ни silent-no-op, ни ложь. Гэп — отсутствие фидбека у [Повторить].
+- **Логи:** `orchd connect failed after bounded retry` (error) на каждой неудачной попытке.
+- **Что видит пользователь:** красный баннер + [Повторить]; клик по [Повторить] ничего видимо не меняет; негейченные контролы кликаются, но честно падают в toast.
+- **Дельта от ожидания:** каталог «[Повторить] при мёртвом orchd — что видит юзер?» → ничего (нет busy-стейта). P-06 «реально кликабельны при down?» → да (submit CreateProject, attach-select), но с честной деградацией, не молча.
+- **Действие:** BL-кандидат (Minor): busy/«переподключение…»-стейт на [Повторить] (нужен временный флаг, т.к. результат только в событиях); привести CreateProjectDialog submit и sidebar-attach к orchdDown-гейту как в идея/research-диалогах.
+
+### A-05 — Установлен несовместимый sessiond → запуск/reconnect
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `lib.rs` connect → `ClientError::IncompatibleDaemon` (fatal, без retry, `connect_with_retry` док) → `emit_incompatible` → `daemon://incompatible` → `App.tsx:182-191` `setDaemonIncompatible(true)`+`setUpgradeDialogOpen(true)` (+ pull-fallback через `daemon_status()` на случай гонки listen, `App.tsx:337-350`). `UpgradeDialog` sessiond-ветка (`:106-210`): копия **hydrated** → «Обновить фоновый сервис — N живых сессий завершатся. Их записи и scrollback сохранены…»; **not-hydrated** → без N (finding [14]: `sessions` наполняется только успешным hydrate; при boot-incompatible slot=None → hydrate невозможен → честно не называть счёт). «Обновить»→`handleUpgradeClick` (`:75-80`): `upgradeDaemon().catch(...)` fire-and-forget (успех = never-resolve, т.к. kickstart_force+`app.restart()` убивает webview); реджект → `upgradeError` inline-строка (red, «Не удалось перезапустить… Проверьте разрешения (launchctl)…») + retry (тест :167). Копия соответствует локед-тексту.
+- **Обработка ошибок:** есть, честная. `Отмена` (`:177`) `setUpgradeDialogOpen(false)` — не трогает `daemonIncompatible` (тест :136) → см. A-10 (для sessiond возврат есть).
+- **Логи:** `daemon speaks an incompatible protocol version` (error, min/max).
+- **Что видит пользователь:** модалка «Требуется обновление» с честной копией; «Обновить»→рестарт; при отказе upgrade — inline-ошибка + повторный «Обновить».
+- **Действие:** ничего.
+
+### A-06 — Несовместимый orchd → запуск
+
+- **Вердикт:** ✅ OK. (Отмена → A-10.)
+- **Проверено:** `bring_up_orchd` → `IncompatibleOrchd` → `emit_orchd_incompatible` → `orchd://incompatible` → `App.tsx:283-289` `setOrchdIncompatible(true)`+`setOrchdUpgradeDialogOpen(true)`. `UpgradeDialog` orchd-ветка (`:216-309`): локед-копия «Обновить фоновый сервис оркестратора — записи (проекты, цели, задачи) сохранены» — **без предупреждения о живых сессиях** (у orchd нет PTY). «Обновить»→`handleOrchdUpgradeClick` (`:84-89`): `orchdUpgrade().catch(...)` → локальный `orchdUpgradeError` (не store-поле; тест :286) → рестарт по успеху. Тесты `UpgradeDialog.test.tsx:232` (orchd-копия+`orchdUpgrade`), `:286` (rejected orchd upgrade → inline).
+- **Обработка ошибок:** зеркалит sessiond (`orchd_upgrade_core` = `upgrade_daemon_core` вербатим, `commands.rs:1946-1959`): best-effort drain + honest `kickstart_force`-fail → `UpgradeFailed`.
+- **Логи:** `orchd speaks an incompatible protocol version` (error).
+- **Что видит пользователь:** orchd-вариант диалога; «Обновить»→рестарт; отказ→orchd-специфичная inline-ошибка.
+- **Действие:** ничего (по happy). Возврат после Отмены → A-10 (там дефект).
+
+### A-07 — Оба демона несовместимы → запуск
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** precedence в `UpgradeDialog.tsx:61-65`: `sessiondOpen = daemonIncompatible && upgradeDialogOpen` проверяется ПЕРВЫМ; `orchdOpen = !sessiondOpen && orchdIncompatible && orchdUpgradeDialogOpen`; `open = sessiondOpen || orchdOpen` → рендерится ровно ОДИН диалог, sessiond безусловно выигрывает (spec §11 «sequential, sessiond first — no combined flow»). Порядок разрешения: (штатно) sessiond «Обновить»→`app.restart()`→свежий запуск→orchd re-detect→его диалог; (либо) sessiond «Отмена» → `sessiondOpen`=false → orchd-диалог показывается следующим. Оба покрыты: тест `:251` «both incompatible → SESSIOND copy (precedence), never orchd», тест `:303` «once the sessiond dialog is dismissed (Cancel), a still-pending orchd incompatibility shows its own dialog next».
+- **Обработка ошибок:** н/д (чистая маршрутизация).
+- **Логи:** оба incompatible-error лога (sessiond+orchd) эмитятся независимо на буте.
+- **Что видит пользователь:** сначала sessiond-диалог; orchd-диалог — только после того, как sessiond перестал показываться. Никогда не оба одновременно, не комбинированный.
+- **Действие:** ничего.
+
+### A-08 — Повреждённый orchd.db → запуск
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.** (честность к юзеру — нарушена.)
+- **Проверено:** `boot.rs:90-110 open_db_degrading` → `Db::open` (`persistence.rs:123-145`): `open_inner` форсит чтение `PRAGMA user_version` → `classify` → при `DatabaseCorrupt|NotADatabase` → `PersistError::Corrupt`. `Db::open` ловит `Corrupt` → `quarantine(path)` = `orchd.db.corrupt-<unix_ts>` (`:111-116`) → `std::fs::rename(path, dst)` → удаляет sidecar `-wal`/`-shm` → `open_inner(path)` заново (свежая БД) → **возвращает `Ok(db)`**. Демон стартует нормально, дальше персистит на диск. `warn!(?path, ?dst, "database corrupt, quarantining and recreating: …")`.
+- **Ключевая проверка «говорит ли UI что-нибудь»:** НЕТ. Карантин целиком внутри `Db::open`, возвращает `Ok` → ни `open_db_degrading`, ни `boot::run`, ни `socket_server` не эмитят никакого события/флага. Греп по `src/`/протоколу на `degraded|corrupt|quarantine` — ноль каналов в UI. Список orchd-событий в `App.tsx` — только domain-changed + down/up/incompatible. **Никакого «данные были повреждены и отправлены в карантин»-сигнала нет.**
+- **Обработка ошибок:** на уровне демона честная и корректная (не паника, данные не уничтожены — карантинный файл восстановим оператором). Дефект — на уровне **прозрачности для юзера**.
+- **Логи:** `warn!` с `path`/`dst` (без секретов) — только в orchd-логе, недоступном юзеру в UI.
+- **Что видит пользователь:** пустой аккаунт (0 проектов/целей/задач/идей) без единого объяснения — неотличимо от «свежая установка». Он не знает, что (а) данные были, (б) они в `orchd.db.corrupt-<ts>`, (в) их можно попытаться восстановить.
+- **Дельта от ожидания:** каталог «Данные исчезли — говорит ли UI об этом хоть что-нибудь? Честность: юзер видит пустой аккаунт без объяснения?» → **UI молчит; юзер видит пустой аккаунт без объяснения — честность нарушена.**
+- **Действие:** BL-кандидат (Important): эмитить одноразовое событие/баннер при карантине БД («обнаружено повреждение базы; данные сохранены в резервной копии orchd.db.corrupt-<ts>, продолжаем с чистой базой») — protocol/Hello может нести флаг `db_recovered`, UI показывает dismissible-баннер.
+
+### A-09 — Диск/директория недоступна → запуск orchd
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.** (граничит с 🔴 — silent data-loss-on-restart.)
+- **Проверено:** `boot.rs:90-110 open_db_degrading`: `Db::open` возвращает `Err` для НЕ-corruption-ошибок — `open_inner` при недоступной директории/файле → `PersistError::Open("create dir failed…"/…)` (не Corrupt) → `Db::open` матчит `Err(other) => Err(other)`. Тогда `open_db_degrading` (95-108): `error!(error=%e, path, "DB open failed; continuing in degraded (in-memory) mode")` → `Db::open_in_memory()` → in-memory БД. Демон живёт весь lifetime на in-memory (`boot::run:192`). Только отказ самого in-memory-фолбэка = паника (недостижимо в норме).
+- **Ключевая проверка «есть ли индикация неперсистентного режима»:** НЕТ. In-memory-режим не отражается ни в каком событии/ответе/Hello. UI неотличим от нормального. **Всё, что юзер создаёт (проекты, идеи, задачи, инсайты, граф) — живёт только в RAM демона и исчезает при его рестарте/краше без единого предупреждения.**
+- **Обработка ошибок:** демон деградирует «честно» в своём логе, но UI-контракт про режим не знает → для юзера это тихий data-loss-режим.
+- **Логи:** `DB open failed; continuing in degraded (in-memory) mode` (error, path) — только в orchd-логе.
+- **Что видит пользователь:** полностью рабочее приложение; создаёт данные весь сеанс; при следующем запуске (или краше orchd, KeepAlive перезапустит) — всё пусто, без объяснения. Опаснее A-08: там данные хотя бы в карантине, здесь их не было на диске вообще.
+- **Дельта от ожидания:** каталог «Юзер не знает, что данные НЕ сохраняются; есть ли любая индикация неперсистентного режима» → **индикации нет.** Это самый серьёзный из A-08/A-09.
+- **Действие:** BL-кандидат (Important, кандидат в 🔴): постоянный persistent-баннер «работаем в непостоянном режиме — данные не сохраняются на диск» при in-memory-фолбэке (флаг в Hello/статусе → UI-баннер, не dismissible).
+
+### A-10 — UpgradeDialog открыт → «Отмена»
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.** (для orchd-варианта; sessiond — OK.)
+- **Проверено:**
+  - «Отмена» sessiond (`UpgradeDialog.tsx:177`) → `setUpgradeDialogOpen(false)`; orchd (`:276`) → `setOrchdUpgradeDialogOpen(false)`. Оба **НЕ трогают** `daemonIncompatible`/`orchdIncompatible` (фатальный флаг остаётся; тесты `:136`, `:278`). Мутации остаются мертвы (slot=None → `Disconnected`).
+  - **Возврат к диалогу — sessiond:** DaemonBanner incompatible-ветка (`DaemonBanner.tsx:25-58`) при `daemonIncompatible` показывает «Фоновый сервис устарел — требуется обновление» + кнопку «Обновить» → `setUpgradeDialogOpen(true)` → **диалог возвращается** (тест `DaemonBanner.test.tsx:52`). ✅
+  - **Возврат к диалогу — orchd:** после Cancel `orchdIncompatible=true`, но **`orchdDown=false`** (incompatible-путь `bring_up_orchd:583-591` зовёт ТОЛЬКО `emit_orchd_incompatible`, не `emit_orchd_down`; `store.ts:218` комментарий: orchdDown флипается только `orchd://down`/`up`). Греп readers `orchdIncompatible`: только `UpgradeDialog` (сам диалог) + `QuickCapture` (блок ⌘K) + `App.tsx` (коммент). **Ни один БАННЕР не читает `orchdIncompatible`.** `OrchdDownBanner` монтируется только при `orchdDown===true` → не показывается. ⇒ **после Cancel — пустой экран, ноль индикации что orchd несовместим, ноль пути вернуть диалог до рестарта app.**
+- **Обработка ошибок:** флаг-инвариант честен (фатальность переживает Cancel). Дыра — асимметрия возвратного пути между демонами.
+- **Логи:** н/д на Cancel.
+- **Что видит пользователь:** sessiond — баннер «устарел» с «Обновить» (возврат есть). orchd — после Cancel НИЧЕГО (нет баннера); orchd-мутации не дизейблены (orchdDown=false) но падают в toast «оркестратор недоступен» при попытке; вернуть upgrade-диалог нельзя.
+- **Дельта от ожидания:** каталог «Как вернуть диалог? Возвратный путь существует?» → для sessiond да, **для orchd — нет**. «Все мутации мертвы?» → да (slot None), но без баннера, объясняющего почему.
+- **Действие:** BL-кандидат (Important): баннер, читающий `orchdIncompatible` (зеркало DaemonBanner incompatible-ветки) с кнопкой «Обновить» → `setOrchdUpgradeDialogOpen(true)`; либо на incompatible-пути также выставлять индикатор, чтобы orchd-несовместимость была видима и обратима после Cancel.
+
+---
+
+## Сводка ключевого
+
+1. **A-08 / A-09 — честность к юзеру про состояние данных.** Оба пути деградации БД (карантин повреждённой / in-memory при недоступном диске) корректны на уровне демона и логируются, но **UI не сообщает ничего**: A-08 — пустой аккаунт без объяснения (данные в восстановимом `orchd.db.corrupt-<ts>`); A-09 — полностью рабочее приложение, где ничего не персистится и всё теряется при рестарте, без единого предупреждения (самый опасный, граничит с 🔴). Нужен канал (флаг в Hello/статусе → баннер).
+2. **A-10 (orchd) — потерянный upgrade-диалог.** После «Отмена» на orchd-варианте `orchdIncompatible` остаётся, но `orchdDown=false` и ни один баннер не читает `orchdIncompatible` → пустой экран, диалог не вернуть до рестарта. Для sessiond симметричный возврат есть (DaemonBanner «Обновить»).
+3. **A-01 — под-информативная деградация bring-up.** Окно всегда открывается, паники нет, но жёсткий отказ launchctl (TCC/права/нет бинаря) показывается как generic «reconnecting…» / «Оркестратор недоступен»; типизированный `LaunchdError` только логируется. «reconnecting…» вводит в заблуждение при перманентном отказе. + F-6 (нет онбординга).
+4. **A-03 / A-04 — мелкие фидбек-гэпы.** A-03: reconnect/re-attach образцовы, но ввод в мёртвый PTY молча теряется (fire-and-forget `writeStdin` без гейта/эха). A-04: [Повторить] даёт ноль фидбека; P-06-контролы (CreateProject submit, sidebar-attach) не гейтятся, но падают в честный toast.
+5. **Хорошо (✅):** A-05/A-06/A-07 — upgrade-флоу честен, копии соответствуют локед-текстам, hydrated-гейт счётчика честен (finding [14]), precedence sessiond-first строго соблюдён, `.catch` на upgrade ловит единственный честный отказ.
+
+**Не удалось проверить рантаймом:** реальный первый запуск .app с настоящим launchd/TCC-денайлом и с настоящей повреждённой/недоступной orchd.db (SAFETY: не трогаю launchd/`~/Library/Application Support` реальной машины). Вердикты A-01/A-08/A-09 построены статически на исходниках (`launchd.rs`, `lib.rs::bring_up_*`, `boot.rs::open_db_degrading`, `persistence.rs::Db::open`/`quarantine`) + существующих юнит-тестах в этих файлах (`hard_failure_surfaces_install_error`, `ensure_daemon_running_uses_non_force_kickstart_on_boot`, `is_loaded_reads_print_exit_code`, `reconcile_interrupted_research_runs_on_fresh_db_is_a_noop`, `ensure_global_ruleset_*`). Фронт-вердикты (A-02/A-05/A-06/A-07/A-10) подтверждены прогоном `npx vitest run UpgradeDialog/DaemonBanner/OrchdDownBanner/HomeView/WorkspaceSidebar` → **50 passed** (в т.ч. `HomeView.test.tsx:205` zero-workspace-no-action, `UpgradeDialog.test.tsx:251/278/303` precedence/cancel).
+
+# Эпик H — Задачи (фичи): инвестигейт H-01..H-07
+
+> READ-ONLY инвестигейт по каталогу `docs/qa/ux-first-session-scenarios.md` §2 Эпик H.
+> Модель: opus. Пути прослежены UI-контрол → ipc → wire → dispatch → persistence.
+> Тесты: `npx vitest run src/components/TasksList.test.tsx` → **13 passed**;
+> `cargo test -p bpa-orchd --lib task` → **26 passed** (create/update/status/rank/delete/cascade/cycle).
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть одной строкой |
+|---|---|---|---|
+| H-01 | 🟡 UX-GAP | Minor | Happy-create + error-toast + сохранение полей + orchdDown-гейт — всё ✅; но **P-19**: «+ задача» без in-flight-гварда → двойной клик = две задачи (теста нет) |
+| H-02 | 🟡 UX-GAP | Minor | Связь с инсайтом сохранена в БД (`source=insight`, `sourceId=insight.id`), но `TaskRow` рендерит только title/status/▲▼/Удалить — источник и sourceId **невидимы в UI** |
+| H-03 | ✅ OK | — | any→any **осознанно**: спека §5.2 без transition-инварианта, `set_task_status` = голый `UPDATE`, селект даёт все 6 статусов (kanban-free; доска — S5) |
+| H-04 | 🟡 UX-GAP | Minor | Rank-математика **collision-safe** (один вызов, midpoint distinct-f64 либо край ±1024; same-row=идемпотентно, different-row=distinct) — ни коллизий, ни jumble; но push-only refresh → в окне латентности двойной ▲ = второй клик no-op; теста на гонку нет |
+| H-05 | ✅ OK | — | cycle-Invariant **недостижим из UI**: parent-select только в create-форме (новая задача без id/потомков, reparent-verb-а нет) → селект НЕ включает саму задачу/потомков; серверный guard защитный (прямой тест) |
+| H-06 | ✅ OK | — | confirm называет точное число потомков (рекурсивный `countDescendants`); каскад через FK `ON DELETE CASCADE` + `foreign_keys=ON`; тесты `delete_task_cascades_subtasks` + «удалит 2 подзадач» зелёные |
+| H-07 | ✅ OK | — | cross-project parent **недостижим**: селект листает только `tasksByProject[projectId]` (текущий проект); сервер всё равно защищает `Invariant` (тест `create_task_cross_project_parent_is_invariant` зелёный) |
+
+**Итог по эпику:** 4×✅ OK · 3×🟡 UX-GAP (все Minor). Ноль 🔴, ноль 📄.
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где подтверждено |
+|---|---|---|
+| P-19 (двойной сабмит) | 🟡 подтверждён для `TasksList` «+ задача» | H-01 |
+| F-5 / BL-61 / O-2 (mixed ru/en в Invariant-тексте) | 🟡 подтверждён, но недостижим | H-05/H-07 |
+
+---
+
+## H-01 — Таб «Задачи»: заполнить форму → «+ задача»
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** Happy-path и обработка ошибок ✅; double-submit (P-19) подтверждён.
+- **Проверено:** `TasksList.tsx:384-403 handleCreate` → `orchdCreateTask(projectId, parentId, title, createBody, null, createSource, null, tags)` (ipc/orchd.ts:235-255) → `OrchdRequest::CreateTask` (socket_server.rs:1106-1130) → `db.create_task` (persistence.rs:2149-2220) → `respond_task` пушит `TasksChanged{project_id}` (socket_server.rs:565-574). Тест «the create dialog passes source, parent, and comma-split tags correctly» + «create submit disabled while title blank» — зелёные.
+- **Обработка ошибок:** есть, честная. Submit `disabled={orchdDown || createTitle.trim()===""}` (463); теги режутся `split(",").map(trim).filter(!=="")` (387-390); `parentId = createParentId===""?null:createParentId` (391). На успехе — очистка всех пяти полей (395-398) + `refreshTasks(projectId)` (399). На отказе — `showToast(describeOrchdError(e))` (401), поля **НЕ** сбрасываются (сброс только в success-ветке до `await`-резолва) → «поля сохранены» соблюдено.
+- **Логи:** UI-слой — toast. Демон `create_task` — INSERT без пер-верб tracing (класс B-04, системное решение). Секретов нет.
+- **Что видит пользователь:** новый ряд в группе `бэклог` (дефолт-статус когда `status=null`, persistence.rs:2195), форма сброшена, счётчик группы +1. Rank новой задачи = `MAX(rank)+1024` scoped-по-проекту (persistence.rs:2186-2191) → всегда в конце.
+- **Дельта от ожидания (P-19):** **на «+ задача» НЕТ in-flight/busy-гварда.** `disabled` завязан только на `orchdDown||blank-title`; `createTitle` (React state) очищается лишь ПОСЛЕ резолва `await orchdCreateTask` (строка 395). В окне между кликом и резолвом `createTitle` остаётся непустым → кнопка активна → быстрый второй клик снова зовёт `handleCreate` с тем же title → **два `orchdCreateTask` → две задачи.** Контраст: `ConnectDialog` держит `disabled={busy}`. Теста на double-submit для `TasksList` нет. Цена ниже, чем у F-08 (нет внешнего вызова/spend — просто дубль-ряд, легко удаляемый) → Minor.
+- **Действие:** BL/фикс (Minor): добавить `busy`-гвард на «+ задача» (зеркально ConnectDialog) — единый паттерн с P-19 по всем диалогам.
+
+## H-02 — Из G-03: найти задачу-из-инсайта (видна ли связь с инсайтом в UI?)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** данные связи КОРРЕКТНЫ. `FormInsightDialog.tsx:289-313 handleBacklog` зовёт `orchdCreateTask(idea.projectId, null, insight.title, insight.body, null, "insight", insight.id, [])` — т.е. `source="insight"` И `source_id=insight.id` реально записываются (persistence.rs:2197-2215 INSERT ... source, source_id). Верб/схема хранят `source_id TEXT` (persistence.rs:309). Рендер: `TaskRow` (`TasksList.tsx:226-281`) выводит ТОЛЬКО `task.title` (span 233-235), status-select, ▲/▼, «Удалить». **Ни `task.source`, ни `task.sourceId`, ни `tags`/`body` не рендерятся нигде в списке задач.** `SOURCE_LABEL` (TasksList.tsx:31-36) используется исключительно в create-форме (селект источника, стр. 434) — не в ряду. Единственный `.source`-рендер в кодовой базе — `InsightsList.tsx:221 insight.source`, к задачам отношения не имеет.
+- **Обработка ошибок:** н/д (визуальный вопрос, не ошибка).
+- **Логи:** н/д.
+- **Что видит пользователь:** обычный ряд задачи с заголовком инсайта — **неотличимый** от задачи, созданной вручную. Нет бейджа «из инсайта», нет ссылки/крышки на исходный insight, нет отображения `sourceId`. Провенанс инсайт→задача полностью теряется в UI (перекликается с F-7/BL-84 «provenance-крошек нет»).
+- **Дельта от ожидания:** каталог H-02 «source=insight, sourceId корректен» — на уровне ДАННЫХ да (доказано вызовом в FormInsightDialog). «Видна ли связь с инсайтом в UI» — **нет**, невидима полностью.
+- **Действие:** BL-кандидат (Minor): в `TaskRow` показывать бейдж источника (`SOURCE_LABEL[task.source]`) и, для `source∈{insight,idea}`, кликабельную крошку к исходной сущности по `sourceId`. Behavior-safe, чисто observability.
+
+## H-03 — Задача: гонять статусы (any→any, state-machine нет)
+
+- **Вердикт:** ✅ OK (by-design).
+- **Проверено:** UI — `TaskRow` status-`<select value={task.status}>` (TasksList.tsx:236-249) безусловно рендерит все шесть `STATUS_VALUES` как опции → любой статус выбираем из любого. Верб — `set_task_status` (persistence.rs:2267-2291): голый `UPDATE task SET status=?2` без проверки перехода. Спека — S3 `§5.2 Invariants` (design-doc:370-382): для задач перечислены ТОЛЬКО «parent same-project + cycle» и rank-математика; **строки про transition-graph/state-machine НЕТ**. `SetTaskStatus{id,status}` (spec:218) — параметр-статус без ограничений. Тест `set_task_status_updates_status_and_db_literal` — зелёный.
+- **Обработка ошибок:** отказ (напр. archived-project → `Invariant`) → `handleStatusChange` (329-335) `showToast(describeOrchdError)`. Тест «a rejecting status-change mutation surfaces via showToast» — зелёный.
+- **Логи:** пер-верб нет (B-04); toast на UI.
+- **Что видит пользователь:** `бэклог → готово` (или любой другой) одним кликом проходит. Осознанно: доска-kanban с free-movement — S5 (design-doc:27 «kanban board (S5)»); в v1 статус — плоский enum-select без машины состояний. Минорная косметика: `<select>` контролируемый по `value={task.status}` без оптимистика — до прихода push`а нативный селект кратко «отскакивает» к старому значению (локальный roundtrip — миллисекунды).
+- **Дельта от ожидания:** нет. Каталог «Осознанно ли (backlog→done одним кликом)» — да, спека сознательно не задаёт state-machine.
+- **Действие:** ничего. (O-опционально: если бизнес захочет ограничить переходы — это новый инвариант, сейчас его нет намеренно.)
+
+## H-04 — Группа задач: ▲/▼ (rank, push-only; гонка двух реордеров)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** Данные collision-safe; гэп — только push-only stale-окно + отсутствие теста на гонку.
+- **Проверено (rank-математика):** `handleMoveUp` (TasksList.tsx:352-359) / `handleMoveDown` (364-371) считают `newRank` из ТЕКУЩЕГО `group` (= `groupByStatus(tasksByProject[projectId])`, отсортирован по rank asc): между двумя соседями — их midpoint `(prevPrev.rank+prev.rank)/2` / `(next.rank+nextNext.rank)/2`; на краю (нет дальнего соседа) — `firstRank-1024` / `lastRank+1024` (`RANK_GAP=1024`). ОДИН вызов `orchdSetTaskRank(id, newRank)` (337-343) → `set_task_rank` пишет f64 verbatim (persistence.rs:2296-2316, «fractional insert-between is the CLIENT's move»). Тесты midpoint/edge (5 UI-кейсов) + `set_task_rank_persists_f64_midpoint` — зелёные.
+- **Гонка двух быстрых реордеров (проанализировано):** refresh **только по push** — `applyRank` НЕ зовёт `refreshTasks`; статус/rank-правки полагаются на `orchd://tasks-changed → refreshTasks` (App.tsx:202, док-коммент TasksList.tsx:290-295). Значит в окне латентности push`а второй клик считает newRank по СТАРЫМ ранкам. Разбор:
+  1. **Тот же ряд дважды** (двойной ▲ на C при A,B,C,D): оба клика по одинаковому stale-`group` считают ОДИН и тот же midpoint `(A+B)/2` → второй `orchdSetTaskRank` пишет то же значение → **идемпотентно** (ряд едет на 1 позицию, не на 2). Не коррупция — но «▲ будто не сработал второй раз».
+  2. **Разные ряды**: каждый использует РАЗНУЮ пару соседей → разные midpoint-значения; для distinct f64 midpoint distinct от обоих концов → **коллизии рангов нет**.
+  3. Край (floor/ceiling): `firstRank-1024` достижим лишь для ряда на idx=1 с одним и тем же первым рядом → повтор = то же значение (идемпотентно), два РАЗНЫХ ряда одновременно floor не берут.
+  ⇒ **Ни коллизий рангов, ни «jumble».** Даже гипотетический tie ломается сервером `ORDER BY rank, id` (persistence.rs:2347) и клиентским stable-sort — не краш, максимум неоднозначный порядок.
+- **Обработка ошибок:** отказ `applyRank` → `showToast(describeOrchdError)` (341); края — кнопки `disabled` (`canMoveUp=idx>0`, `canMoveDown=idx<len-1`, стр. 254/264/490-491). Тест «▲ on first / ▼ on last disabled» — зелёный.
+- **Логи:** UI-toast; демон — UPDATE без tracing (B-04).
+- **Что видит пользователь:** порядок меняется после прихода push`а (`TasksChanged → refreshTasks` перечитывает весь список с серверными ранками). В окне латентности список показывает СТАРЫЙ порядок (нет оптимистика) → двойной ▲ визуально продвигает на 1 позицию (второй клик — тихий no-op, п.1 выше).
+- **Дельта от ожидания:** каталог «гонка двух реордеров; ранги collide/jumble? Любой тест?» — **коллизий/jumble НЕТ** (математика безопасна); теста на быструю гонку нет; единственный реальный минус — stale-окно push-only + идемпотентный второй клик.
+- **Действие:** BL-кандидат (Minor): оптимистичное локальное применение rank (или лёгкий disable на время in-flight) убрало бы stale-окно и «no-op второго клика»; плюс тест на rapid-double-reorder. Данным ничего не угрожает — приоритет низкий.
+
+## H-05 — Форма задачи: parent = сама задача / потомок
+
+- **Вердикт:** ✅ OK (защитный guard; путь недостижим из v1-UI).
+- **Проверено:** parent-`<select>` существует ТОЛЬКО в create-форме (`TasksList.tsx:438-451`), его опции = `tasks.map(...)` где `tasks = tasksByProject[projectId] ?? []` (стр. 311) — существующие задачи текущего проекта. Т.к. форма СОЗДАЁТ новую задачу (id ещё нет, потомков нет), **селект структурно не может включать саму задачу или её потомков.** Reparent/edit-parent верба в v1 НЕТ: `orchdUpdateTask` принимает только `title/body/tags` (ipc/orchd.ts:257-264; persistence.rs:2225-2263). Серверный cycle-guard `task_ancestor_chain_contains` (persistence.rs:1243-1263) вызывается в `create_task` защитно против собственного pre-generated id (persistence.rs:2179-2183), но, как гласит его док (1235-1242), «в v1 нет reparent-verb-а → новая задача не может быть своим предком, эта ветка не триггерится через публичный API». Функция покрыта ПРЯМЫМ тестом `task_ancestor_chain_contains_detects_direct_and_transitive_cycle` (не через create_task) — зелёный.
+- **Обработка ошибок:** серверный guard честный и типизированный (`Invariant`), но недостижим. Реальная достижимая ошибка из parent-селекта — гонка «родителя удалили в другом окне между populate и submit» → `parent.ok_or(NotFound)` (persistence.rs:2173) → тост «не найдено».
+- **Логи:** пер-верб нет (B-04).
+- **Что видит пользователь:** в норме — ничего проблемного; сам себя/потомка выбрать нельзя. ЕСЛИ бы cycle-Invariant всплыл (будущий reparent), `describeOrchdError` (ipc/orchd.ts:769-770) даст `недопустимая операция: cannot create a task under itself or one of its own descendants` — **ru-префикс + en-тело** (смешанный язык, откр. вопрос O-2 / класс F-5/BL-61).
+- **Дельта от ожидания:** каталог «does the parent select really include the task itself/descendants?» — **нет**, невозможно (create-форма). «Текст ошибки читаем?» — читаем, но mixed ru/en (moot, т.к. недостижим).
+- **Действие:** ничего для v1. Заметка на будущее: когда появится reparent-verb — нужен клиентский cycle-guard в селекте + локализация Invariant-текста (O-2).
+
+## H-06 — Задача с подзадачами: «Удалить» (confirm с числом потомков → каскад)
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `handleDelete` (TasksList.tsx:373-382): `countDescendants(tasks, task.id)` (60-73 — рекурсивный обход по `parentId`, не только прямые дети) → `deleteConfirmText(n)` (52-55: `n===0 → "удалить задачу?"`, иначе `"удалить задачу? удалит N подзадач"`) → `window.confirm` gate → `orchdDeleteTask` → `refreshTasks`. Каскад: FK `parent_id TEXT REFERENCES task(id) ON DELETE CASCADE` (persistence.rs:304) + `PRAGMA foreign_keys=ON` установлен на ОБОИХ путях — on-disk (persistence.rs:154) и in-memory (:202). `delete_task` = простой `DELETE WHERE id=?1` (persistence.rs:2321-2336), поддерево уносит FK. Тесты: `delete_task_cascades_subtasks` (backend) + «delete … shows «удалит 2 подзадач» warning and only calls orchdDeleteTask after confirm» + «no children confirms without naming a subtask count» — зелёные.
+- **Обработка ошибок:** confirm=false → ранний `return`, вызова нет (тест доказывает). Отказ `orchdDeleteTask` → `showToast(describeOrchdError)` (380-381). Структурная мутация → явный `refreshTasks(projectId)` (378) поверх push.
+- **Логи:** UI-toast; демон — DELETE без tracing (B-04).
+- **Что видит пользователь:** для задачи с детьми — честный confirm «удалит N подзадач» (точный рекурсивный счёт), после подтверждения — ряд и всё поддерево исчезают.
+- **Дельта от ожидания:** нет.
+- **Действие:** ничего.
+
+## H-07 — Верб: cross-project parent (достижимо ли из UI?)
+
+- **Вердикт:** ✅ OK (недостижимо из UI; сервер всё равно защищает).
+- **Проверено:** parent-`<select>` листает `tasks = tasksByProject[projectId]` (TasksList.tsx:311, 446) — задачи ТОЛЬКО текущего проекта; чужого проекта в опциях нет → cross-project parent из UI не выбрать. Селект де-факто фильтрует по проекту (по построению слайса). Сервер: `create_task` сверяет `parent_project != project_id` → `Invariant("task parent_id must belong to the same project")` (persistence.rs:2174-2178). Тест `create_task_cross_project_parent_is_invariant` — зелёный.
+- **Обработка ошибок:** серверный guard честный/типизированный, но из UI не достигается.
+- **Логи:** пер-верб нет (B-04).
+- **Что видит пользователь:** ничего проблемного — выбрать чужой проект нельзя. (ЕСЛИ бы всплыло — `недопустимая операция: task parent_id must belong to the same project`, mixed ru/en, как H-05.)
+- **Дельта от ожидания:** каталог «Достижимо ли из UI (select фильтрует по проекту?)» — **нет, недостижимо**; селект скоуплен на текущий проект.
+- **Действие:** ничего.
+
+---
+
+## Сводка ключевого
+
+1. **H-02 — 🟡 Minor, самая содержательная находка эпика.** Связь инсайт→задача сохраняется в БД честно (`source=insight`, `sourceId=insight.id` — доказано вызовом в `FormInsightDialog.handleBacklog`), но `TaskRow` рендерит только заголовок+контролы: источник и sourceId **не видны нигде** в списке задач. Провенанс полностью теряется в UI (смежно F-7/BL-84).
+2. **H-01 / P-19 — 🟡 Minor.** «+ задача» без in-flight-гварда (`disabled` только `orchdDown||blank-title`, `createTitle` очищается лишь после резолва) → двойной клик = две задачи. Цена ниже F-08 (нет внешнего spend). Теста нет.
+3. **H-04 — 🟡 Minor, но данные безопасны.** Rank-математика collision-safe: один вызов, midpoint distinct-f64 либо край ±1024 — same-row-повтор идемпотентен, different-row дают distinct-значения. **Ни коллизий, ни jumble.** Единственный минус — push-only refresh даёт stale-окно, в котором двойной ▲ = второй клик no-op (ряд едет на 1 позицию). Теста на гонку нет.
+4. **H-03 — ✅ by-design.** any→any статус осознан: спека §5.2 не задаёт transition-машину; доска-kanban отложена в S5.
+5. **H-05 / H-07 — ✅ недостижимо.** cycle- и cross-project-Invariant`ы — защитные серверные guard`ы, недостижимые из v1-UI: parent-select живёт только в create-форме и скоуплен на текущий проект; reparent-verb-а нет. Если бы всплыли — текст mixed ru/en (O-2/F-5/BL-61).
+6. **H-06 — ✅ полностью.** confirm с точным рекурсивным счётом потомков; каскад через FK + `foreign_keys=ON` (оба пути); всё покрыто зелёными тестами.
+
+**Не удалось проверить рантаймом:** реальную гонку двух физических кликов ▲/▼ в живом webview (нет запущенного стенда Tauri) — вердикт H-04 построен статически на коде `handleMoveUp/Down` + `applyRank` (push-only, без оптимистика) + анализе midpoint-математики для stale-`group`; коллизия/jumble опровергнуты рассуждением (идемпотентность same-row, distinct-соседи different-row), не рантайм-стресс-тестом. Двойной сабмит «+ задача» (H-01/P-19) также подтверждён статически (нет busy-гварда; `createTitle` очищается после `await`), не физическим дабл-кликом.
