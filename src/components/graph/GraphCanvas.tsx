@@ -20,14 +20,17 @@ import "@xyflow/react/dist/style.css";
 import { useAppStore } from "../../store/store";
 import {
   orchdGraphAddNode,
+  orchdGraphUpdateNode,
   orchdGraphMoveNode,
   orchdGraphDeleteNode,
   orchdGraphAddEdge,
+  orchdGraphUpdateEdge,
   orchdGraphDeleteEdge,
   orchdGraphSearch,
   describeOrchdError,
 } from "../../ipc/orchd";
-import type { GraphNodeKind } from "../../ipc/orchd-types";
+import type { GraphNodeKind, GraphEdgeKind } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   toFlowNodes,
   toFlowEdges,
@@ -56,7 +59,17 @@ const SEARCH_DEBOUNCE_MS = 400;
  * entity refs"). */
 const ADDABLE_KINDS: GraphNodeKind[] = ["concept", "fact", "artifact", "decision", "note"];
 
-const NEW_NODE_LABEL = strings.graph.newNodeLabel;
+/** Every `GraphEdgeKind` the edge-editing `<select>` may set — the FULL wire enum (unlike nodes,
+ * there is no excluded kind: an edge's kind is always user-chosen). Rendering an edge's kind IS its
+ * label (spec D7), so this select is the whole edge-editing surface. */
+const EDGE_KINDS: GraphEdgeKind[] = [
+  "relates",
+  "depends",
+  "derives",
+  "supports",
+  "contradicts",
+  "parent",
+];
 
 /** Locked confirm copy (mirrors `GoalTree.tsx`/`TasksList.tsx`/`IdeasList.tsx`'s identical
  * `window.confirm` guard before a destructive delete — same terse-question register). */
@@ -179,6 +192,54 @@ const kindLabelStyle: CSSProperties = {
   color: theme.colors.textDim,
 };
 
+/** Add-node form row — the title input + body textarea + kind select + "Add node" button (spec
+ * D7): a group of controls (not an HTML `<form>` — the codebase submits via a guarded button
+ * `onClick`, mirroring `CreateProjectDialog`). Aligns its controls to the top so a multi-line body
+ * textarea grows downward without stretching its neighbors. */
+const formStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  flexWrap: "wrap",
+  marginBottom: 8,
+};
+
+const textInputStyle: CSSProperties = {
+  fontFamily: "inherit",
+  fontSize: 12,
+  color: theme.colors.text,
+  background: "transparent",
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 4,
+  padding: "4px 8px",
+  minWidth: 160,
+};
+
+const bodyTextareaStyle: CSSProperties = {
+  ...textInputStyle,
+  minWidth: 200,
+  minHeight: 30,
+  resize: "vertical",
+  fontFamily: MONO_FONT,
+};
+
+/** Inline-rename bar — appears (below the add-node form) only while a LOCAL node is being renamed
+ * after a double-click. Mirrors `GoalRow`'s inline title-edit (input + Enter-to-commit). */
+const renameBarStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  marginBottom: 8,
+};
+
+/** Wraps the edge-kind `<select>` with its "edge:" caption when exactly one edge is selected. */
+const edgeEditLabelStyle: CSSProperties = {
+  ...kindLabelStyle,
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+};
+
 const nodeLabelStyle: CSSProperties = {
   fontSize: 12,
   color: theme.colors.text,
@@ -273,6 +334,17 @@ const nodeTypes: NodeTypes = {
  * other domain surface's convention (`GoalTree`/`TasksList`/`RulesetPanel`: explicit refresh after
  * a structural mutation, never waiting on the push alone).
  *
+ * Graph editing (spec D7, O-7): (a) an add-node FORM — a required title `<input>`, an optional
+ * body `<textarea>`, and the kind `<select>` — replaces the old hardcoded "New node" placeholder:
+ * `handleAddNode` sends the TYPED title/body to `orchdGraphAddNode`. (b) Inline rename —
+ * double-clicking a LOCAL (non-`entityRef`, non-external) node opens a rename bar whose input
+ * commits via `orchdGraphUpdateNode` on Enter/Save; `entityRef` and external ghost nodes are NOT
+ * renameable (an `entityRef`'s label is a server-resolved soft-ref; a ghost belongs to a foreign
+ * project). (c) Edge editing — selecting exactly one edge reveals a kind `<select>` firing
+ * `orchdGraphUpdateEdge(id, kind)`; the edge's rendered "label" IS its kind, so this select is the
+ * whole edge-editing surface. Every one of these mutating controls is `disabled={orchdDown ||
+ * submitting}` and routed through a single `useSubmitGuard` (spec D6 double-fire lock).
+ *
  * Node click navigation: an EXTERNAL ghost node (`data.isExternal`, `data.projectId` is the
  * FOREIGN project it lives in — `graphMapping.ts`'s `toFlowNodes`) navigates there concretely via
  * `openProject(data.projectId)`. A LOCAL `entityRef` node click is deliberately left as an honest
@@ -298,9 +370,17 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
   const showToast = useAppStore((s) => s.showToast);
   const openProject = useAppStore((s) => s.openProject);
 
+  const { submitting, guard } = useSubmitGuard();
+
   const [nodes, setNodes] = useState<GraphFlowNode[]>([]);
   const [edges, setEdges] = useState<GraphFlowEdge[]>([]);
   const [addKind, setAddKind] = useState<GraphNodeKind>(ADDABLE_KINDS[0]);
+  const [addTitle, setAddTitle] = useState("");
+  const [addBody, setAddBody] = useState("");
+  // Inline-rename state: the id of the node currently being renamed (or `null`) + the in-flight
+  // edit text. Set on a double-click of a LOCAL node; cleared on commit/cancel.
+  const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [matchIds, setMatchIds] = useState<Set<string>>(new Set());
 
@@ -434,15 +514,76 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     [openProject],
   );
 
+  // Double-click → inline rename, but ONLY for a LOCAL, non-`entityRef` node (spec D7): an
+  // `entityRef`'s label is a server-resolved soft-ref (renaming it here is meaningless) and an
+  // external ghost lives in a foreign project (read-only on this canvas). Non-renameable
+  // double-clicks are an honest no-op.
+  const onNodeDoubleClick: NodeMouseHandler = useCallback((_event, node) => {
+    const data = node.data as GraphNodeData;
+    if (data.isExternal || data.kind === "entityRef") return;
+    setRenamingNodeId(node.id);
+    setRenameValue(data.label);
+  }, []);
+
   async function handleAddNode(): Promise<void> {
+    const title = addTitle.trim();
+    // Belt-and-braces: the button is already `disabled` on an empty title / orchdDown, but a
+    // guarded handler must never send a blank-title node or a wire call while orchd is down.
+    if (title === "") return;
+    if (useAppStore.getState().orchdDown) return;
     const { posX, posY } = nextNewNodePosition(nodes.length);
     try {
-      await orchdGraphAddNode(projectId, addKind, NEW_NODE_LABEL, "", posX, posY);
+      await orchdGraphAddNode(projectId, addKind, title, addBody, posX, posY);
+      setAddTitle("");
+      setAddBody("");
       await refreshGraph(projectId);
     } catch (e) {
       showToast(describeOrchdError(e));
     }
   }
+
+  async function handleRenameCommit(): Promise<void> {
+    const id = renamingNodeId;
+    if (id === null) return;
+    const trimmed = renameValue.trim();
+    if (trimmed === "") return; // required — a blank rename is a silent no-op, never a wire call
+    if (useAppStore.getState().orchdDown) return;
+    try {
+      await orchdGraphUpdateNode(id, trimmed, null);
+      setRenamingNodeId(null);
+      setRenameValue("");
+      await refreshGraph(projectId);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  function cancelRename(): void {
+    setRenamingNodeId(null);
+    setRenameValue("");
+  }
+
+  async function handleEdgeKindChange(edgeId: string, kind: GraphEdgeKind): Promise<void> {
+    if (useAppStore.getState().orchdDown) return;
+    try {
+      await orchdGraphUpdateEdge(edgeId, kind);
+      await refreshGraph(projectId);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  // One shared `useSubmitGuard` fronts every mutating editor control (spec D6): a rapid double
+  // Add / Save / kind-change fires its verb at most once, and `submitting` disables every such
+  // control while any one is in flight (mirrors `GoalTree`'s single-guard-for-all-mutations shape).
+  const addNode = guard(handleAddNode);
+  const commitRename = guard(handleRenameCommit);
+  const changeEdgeKind = guard(handleEdgeKindChange);
+
+  // Exactly-one-edge selection reveals the edge-kind editor (D7). Zero or many selected ⇒ hidden:
+  // the kind select edits a single edge, so a multi-select has no single kind to show.
+  const selectedEdges = edges.filter((e) => e.selected);
+  const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : undefined;
 
   async function handleDeleteSelected(): Promise<void> {
     const selectedNodeIds = nodes.filter((n) => n.selected).map((n) => n.id);
@@ -474,14 +615,37 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
 
   const isEmpty = displayNodes.length === 0;
 
+  const addTitleEmpty = addTitle.trim() === "";
+  const renameValueEmpty = renameValue.trim() === "";
+
   return (
     <div data-testid="graph-canvas">
-      <div style={toolbarStyle}>
+      {/* Add-node form (spec D7): required title + optional body + kind + guarded Add button. */}
+      <div style={formStyle} data-testid="graph-add-form">
+        <input
+          data-testid="graph-add-title-input"
+          aria-label={strings.graph.titleAria}
+          placeholder={strings.graph.titlePlaceholder}
+          value={addTitle}
+          disabled={orchdDown || submitting}
+          onChange={(e) => setAddTitle(e.target.value)}
+          style={textInputStyle}
+        />
+        <textarea
+          data-testid="graph-add-body-input"
+          aria-label={strings.graph.bodyAria}
+          placeholder={strings.graph.bodyPlaceholder}
+          value={addBody}
+          disabled={orchdDown || submitting}
+          rows={2}
+          onChange={(e) => setAddBody(e.target.value)}
+          style={bodyTextareaStyle}
+        />
         <select
           data-testid="graph-add-kind-select"
           aria-label={strings.graph.newNodeTypeAria}
           value={addKind}
-          disabled={orchdDown}
+          disabled={orchdDown || submitting}
           onChange={(e) => setAddKind(e.target.value as GraphNodeKind)}
           style={selectStyle}
         >
@@ -494,12 +658,56 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
         <button
           type="button"
           data-testid="graph-add-node-button"
-          disabled={orchdDown}
-          onClick={() => void handleAddNode()}
+          disabled={orchdDown || submitting || addTitleEmpty}
+          onClick={() => void addNode()}
           style={primaryButtonStyle}
         >
-          {strings.common.add}
+          {strings.graph.addNode}
         </button>
+      </div>
+
+      {/* Inline-rename bar — only while a local node is being renamed (double-click). */}
+      {renamingNodeId !== null && (
+        <div style={renameBarStyle} data-testid="graph-rename-bar">
+          <input
+            data-testid="graph-rename-input"
+            aria-label={strings.graph.renameAria}
+            value={renameValue}
+            disabled={orchdDown || submitting}
+            autoFocus
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void commitRename();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                cancelRename();
+              }
+            }}
+            style={textInputStyle}
+          />
+          <button
+            type="button"
+            data-testid="graph-rename-save"
+            disabled={orchdDown || submitting || renameValueEmpty}
+            onClick={() => void commitRename()}
+            style={primaryButtonStyle}
+          >
+            {strings.graph.renameSave}
+          </button>
+          <button
+            type="button"
+            data-testid="graph-rename-cancel"
+            onClick={cancelRename}
+            style={buttonStyle}
+          >
+            {strings.graph.renameCancel}
+          </button>
+        </div>
+      )}
+
+      <div style={toolbarStyle}>
         <button
           type="button"
           data-testid="graph-delete-selected-button"
@@ -509,6 +717,26 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
         >
           {strings.graph.deleteSelection}
         </button>
+        {/* Edge-kind editor — shown only when exactly one edge is selected (spec D7). */}
+        {selectedEdge && (
+          <label style={edgeEditLabelStyle}>
+            {strings.graph.edgeKindLabel}
+            <select
+              data-testid="graph-edge-kind-select"
+              aria-label={strings.graph.edgeKindAria}
+              value={(selectedEdge.data?.kind as GraphEdgeKind | undefined) ?? "relates"}
+              disabled={orchdDown || submitting}
+              onChange={(e) => void changeEdgeKind(selectedEdge.id, e.target.value as GraphEdgeKind)}
+              style={selectStyle}
+            >
+              {EDGE_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <input
           data-testid="graph-search-input"
           aria-label={strings.graph.searchAria}
@@ -529,6 +757,7 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onNodeClick={onNodeClick}
+            onNodeDoubleClick={onNodeDoubleClick}
             fitView
           />
         </ReactFlowProvider>

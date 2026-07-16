@@ -47,6 +47,7 @@ import {
   orchdGraphMoveNode,
   orchdGraphDeleteNode,
   orchdGraphAddEdge,
+  orchdGraphUpdateEdge,
   orchdGraphDeleteEdge,
   orchdGraphListProject,
   orchdGraphNeighborhood,
@@ -430,6 +431,14 @@ describe("ipc/orchd", () => {
       targetNodeId: "n2",
       kind: "depends",
       label: "blocks",
+    });
+  });
+
+  it("orchdGraphUpdateEdge sends id/kind", async () => {
+    await orchdGraphUpdateEdge("e1", "supports");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_update_edge", {
+      id: "e1",
+      kind: "supports",
     });
   });
 

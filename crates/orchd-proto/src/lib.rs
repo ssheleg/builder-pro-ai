@@ -1211,6 +1211,15 @@ pub enum OrchdRequest {
     UnarchiveProject {
         id: String,
     },
+    /// → `OrchdResponse::GraphEdge` + pushes `GraphChanged` for BOTH endpoint projects (spec D7,
+    /// O-7). Changes an existing edge's `kind` (its rendered "label" IS its `kind`, so no separate
+    /// label column is edited — no v5 migration). Unknown `id` ⇒ `NotFound`; an archived endpoint
+    /// project ⇒ `Invariant` — the guards mirror `GraphAddEdge`. Appended at the enum TAIL
+    /// (append-only wire rule).
+    GraphUpdateEdge {
+        id: String,
+        kind: GraphEdgeKind,
+    },
 }
 
 impl OrchdRequest {
@@ -1308,6 +1317,7 @@ impl OrchdRequest {
             Self::ResearchGetRun { .. } => "ResearchGetRun",
             Self::GetStorageStatus => "GetStorageStatus",
             Self::UnarchiveProject { .. } => "UnarchiveProject",
+            Self::GraphUpdateEdge { .. } => "GraphUpdateEdge",
         }
     }
 }

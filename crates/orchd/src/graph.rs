@@ -542,6 +542,49 @@ impl Db {
         Ok(edge)
     }
 
+    /// `GraphUpdateEdge` (spec D7, O-7): changes an existing edge's `kind`. Unknown id ⇒
+    /// `NotFound`; archived guard rejects if EITHER endpoint's project is archived (`Invariant`) —
+    /// mirroring [`Db::add_edge`]/[`Db::delete_edge`]. Changing `kind` to one that already exists
+    /// for the same `(source, target)` pair hits the `graph_edge_uniq` unique index ⇒ `Conflict`
+    /// (the same mapping `add_edge` applies to a duplicate insert). The free-text `label` column is
+    /// left untouched: an edge's rendered label IS its `kind` (D7), so there is nothing else to
+    /// edit — the wire verb carries only `id` + `kind`, no new schema column.
+    pub fn update_edge(
+        &self,
+        id: &str,
+        kind: GraphEdgeKind,
+    ) -> Result<GraphEdge, OrchdPersistError> {
+        let tx = self.conn().unchecked_transaction()?;
+        // One JOIN yields BOTH the NotFound check (unknown edge ⇒ no row) and the two endpoint
+        // projects for the archived guard — mirrors `delete_edge`. The node ids ride along purely
+        // to build a precise `Conflict` message if the new kind collides on the unique index.
+        let endpoints: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT sn.project_id, tn.project_id, e.source_node_id, e.target_node_id
+                 FROM graph_edge e
+                 JOIN graph_node sn ON sn.id = e.source_node_id
+                 JOIN graph_node tn ON tn.id = e.target_node_id
+                 WHERE e.id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let (source_project, target_project, source_node_id, target_node_id) =
+            endpoints.ok_or(OrchdPersistError::NotFound)?;
+        ensure_project_active(&tx, &source_project)?;
+        if target_project != source_project {
+            ensure_project_active(&tx, &target_project)?;
+        }
+        tx.execute(
+            "UPDATE graph_edge SET kind = ?2 WHERE id = ?1",
+            rusqlite::params![id, encode_edge_kind(&kind)],
+        )
+        .map_err(|e| map_edge_conflict(e, &source_node_id, &target_node_id, &kind))?;
+        let edge = load_edge(&tx, id)?;
+        tx.commit()?;
+        Ok(edge)
+    }
+
     /// `GraphDeleteEdge` (S4 spec §5). Unknown id ⇒ `NotFound`; archived guard rejects if EITHER
     /// endpoint's project is archived (`Invariant`) — mirroring `add_edge` and matching the §5
     /// invariants table ("delete node OR edge on an archived project [either endpoint for edges] ⇒
@@ -1534,6 +1577,116 @@ mod tests {
         db.archive_project(&project_b).unwrap();
         let err = db
             .add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "")
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- update_edge ----
+
+    #[test]
+    fn update_edge_changes_kind() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let a = add_concept(&db, &project_id, "a");
+        let b = add_concept(&db, &project_id, "b");
+        let edge = db
+            .add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "note")
+            .unwrap();
+
+        let updated = db.update_edge(&edge.id, GraphEdgeKind::Depends).unwrap();
+        assert_eq!(updated.id, edge.id);
+        assert_eq!(updated.kind, GraphEdgeKind::Depends);
+        // Endpoints and the free-text label are untouched — only `kind` changes.
+        assert_eq!(updated.source_node_id, a.id);
+        assert_eq!(updated.target_node_id, b.id);
+        assert_eq!(updated.label, "note");
+
+        // The persisted `kind` column reflects the new value.
+        let raw_kind: String = db
+            .conn()
+            .query_row(
+                "SELECT kind FROM graph_edge WHERE id = ?1",
+                rusqlite::params![edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_kind, "depends");
+    }
+
+    #[test]
+    fn update_edge_unknown_id_is_not_found() {
+        let db = new_db();
+        let err = db
+            .update_edge("no-such-edge", GraphEdgeKind::Depends)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn update_edge_to_a_kind_that_already_exists_between_the_same_endpoints_is_conflict() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let a = add_concept(&db, &project_id, "a");
+        let b = add_concept(&db, &project_id, "b");
+        // Two edges between the SAME endpoints, distinct kinds.
+        db.add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+        let depends = db
+            .add_edge(&a.id, &b.id, GraphEdgeKind::Depends, "")
+            .unwrap();
+        // Re-kinding `depends` to `relates` collides with the existing (a,b,relates) row.
+        let err = db
+            .update_edge(&depends.id, GraphEdgeKind::Relates)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Conflict(_)));
+    }
+
+    #[test]
+    fn update_edge_blocked_when_source_project_archived() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        let a = add_concept(&db, &project_a, "a");
+        let b = add_concept(&db, &project_b, "b");
+        let edge = db
+            .add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+        db.archive_project(&project_a).unwrap();
+
+        let err = db
+            .update_edge(&edge.id, GraphEdgeKind::Depends)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+
+        // The guard rejects BEFORE the UPDATE — the row's kind must be untouched.
+        let raw_kind: String = db
+            .conn()
+            .query_row(
+                "SELECT kind FROM graph_edge WHERE id = ?1",
+                rusqlite::params![edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            raw_kind, "relates",
+            "update must not run on an archived endpoint"
+        );
+    }
+
+    #[test]
+    fn update_edge_blocked_when_target_project_archived() {
+        let db = new_db();
+        let project_a = new_project(&db);
+        let project_b = new_project(&db);
+        let a = add_concept(&db, &project_a, "a");
+        let b = add_concept(&db, &project_b, "b");
+        let edge = db
+            .add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "")
+            .unwrap();
+        db.archive_project(&project_b).unwrap();
+
+        let err = db
+            .update_edge(&edge.id, GraphEdgeKind::Depends)
             .unwrap_err();
         assert!(matches!(err, OrchdPersistError::Invariant(_)));
     }

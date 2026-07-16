@@ -1204,6 +1204,93 @@ async fn graph_add_edge_same_project_broadcasts_exactly_one_graph_changed() {
 }
 
 #[tokio::test]
+async fn graph_update_edge_returns_edge_and_broadcasts_graph_changed_for_both_endpoint_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Node B").await;
+    // `add_edge` (test helper) creates a cross-project `Relates` edge.
+    let edge = add_edge(&mut c1, &node_a.id, &node_b.id).await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let updated = expect_graph_edge(
+        c1.request(OrchdRequest::GraphUpdateEdge {
+            id: edge.id.clone(),
+            kind: GraphEdgeKind::Depends,
+        })
+        .await,
+    );
+    assert_eq!(updated.id, edge.id);
+    assert_eq!(updated.kind, GraphEdgeKind::Depends);
+
+    let seen = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the source endpoint's project in {seen:?}"
+    );
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the target endpoint's project in {seen:?}"
+    );
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a cross-project GraphUpdateEdge must broadcast exactly two GraphChanged pushes"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_update_edge_unknown_id_is_not_found_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    // A second observer proves a FAILED update broadcasts nothing (spec §6).
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let res = c1
+        .request(OrchdRequest::GraphUpdateEdge {
+            id: "no-such-edge".to_string(),
+            kind: GraphEdgeKind::Depends,
+        })
+        .await;
+    match res {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
+        other => panic!("expected NotFound Error, got {other:?}"),
+    }
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a failed (NotFound) GraphUpdateEdge must broadcast nothing"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
 async fn graph_delete_node_cross_project_broadcasts_graph_changed_for_foreign_project_too() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");

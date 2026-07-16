@@ -1382,6 +1382,34 @@ async fn dispatch_inner(
                 Err(e) => map_err(e),
             }
         }
+        // `GraphUpdateEdge` (spec D7, O-7): only `kind` changes, so the edge's endpoints are the
+        // same before and after — `edge_endpoint_projects` is read AFTER the update (the row still
+        // exists) to broadcast `GraphChanged` to both endpoint projects, deduped, exactly like
+        // `GraphAddEdge` above.
+        OrchdRequest::GraphUpdateEdge { id, kind } => {
+            let db = deps.db.lock().await;
+            match db.update_edge(&id, kind) {
+                Ok(edge) => {
+                    match db.edge_endpoint_projects(&edge.id) {
+                        Ok((source_project, target_project)) => {
+                            broadcast_graph_changed(broadcaster, [source_project, target_project]);
+                        }
+                        Err(e) => {
+                            // Unreachable in practice: the edge was JUST updated (still present)
+                            // under the same serializing `db` guard.
+                            tracing::error!(
+                                edge_id = %edge.id,
+                                error = %e,
+                                "edge_endpoint_projects failed immediately after a successful \
+                                 update_edge; GraphChanged push skipped"
+                            );
+                        }
+                    }
+                    OrchdResponse::GraphEdge(edge)
+                }
+                Err(e) => map_err(e),
+            }
+        }
         // `edge_endpoint_projects` is resolved BEFORE `delete_edge`: the row (and its endpoint
         // join) is gone afterward.
         OrchdRequest::GraphDeleteEdge { id } => {

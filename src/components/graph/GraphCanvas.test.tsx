@@ -76,6 +76,13 @@ vi.mock("@xyflow/react", async (importOriginal) => {
         >
           stub-select-both
         </button>
+        <button
+          type="button"
+          data-testid="stub-select-edge-e1"
+          onClick={() => props.onEdgesChange?.([{ type: "select", id: "e1", selected: true }])}
+        >
+          stub-select-edge-e1
+        </button>
         {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
         {(props.nodes ?? []).map((n: any) => (
           <div
@@ -83,6 +90,7 @@ vi.mock("@xyflow/react", async (importOriginal) => {
             data-testid={`stub-node-${n.id}`}
             data-match={String(Boolean(n.data?.isMatch))}
             onClick={(e) => props.onNodeClick?.(e, n)}
+            onDoubleClick={(e) => props.onNodeDoubleClick?.(e, n)}
           >
             {n.data?.label}
           </div>
@@ -97,6 +105,7 @@ const orchdGraphUpdateNodeMock = vi.fn();
 const orchdGraphMoveNodeMock = vi.fn();
 const orchdGraphDeleteNodeMock = vi.fn();
 const orchdGraphAddEdgeMock = vi.fn();
+const orchdGraphUpdateEdgeMock = vi.fn();
 const orchdGraphDeleteEdgeMock = vi.fn();
 const orchdGraphSearchMock = vi.fn();
 // The store's real `refreshGraph` (which the component calls on mount) invokes this — mocking the
@@ -113,6 +122,7 @@ vi.mock("../../ipc/orchd", () => ({
   orchdGraphMoveNode: (...a: unknown[]) => orchdGraphMoveNodeMock(...a),
   orchdGraphDeleteNode: (...a: unknown[]) => orchdGraphDeleteNodeMock(...a),
   orchdGraphAddEdge: (...a: unknown[]) => orchdGraphAddEdgeMock(...a),
+  orchdGraphUpdateEdge: (...a: unknown[]) => orchdGraphUpdateEdgeMock(...a),
   orchdGraphDeleteEdge: (...a: unknown[]) => orchdGraphDeleteEdgeMock(...a),
   orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGraphSearch: (...a: unknown[]) => orchdGraphSearchMock(...a),
@@ -187,6 +197,7 @@ beforeEach(() => {
   orchdGraphMoveNodeMock.mockReset().mockResolvedValue({});
   orchdGraphDeleteNodeMock.mockReset().mockResolvedValue(undefined);
   orchdGraphAddEdgeMock.mockReset().mockResolvedValue({});
+  orchdGraphUpdateEdgeMock.mockReset().mockResolvedValue({});
   orchdGraphDeleteEdgeMock.mockReset().mockResolvedValue(undefined);
   orchdGraphListProjectMock.mockReset().mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
   orchdGraphSearchMock.mockReset().mockResolvedValue([]);
@@ -295,9 +306,15 @@ describe("GraphCanvas", () => {
     }
   });
 
-  it('toolbar "Add" calls orchdGraphAddNode with the selected kind', async () => {
+  it("the add-node form sends the TYPED title/body (not a hardcoded 'New node') + selected kind", async () => {
     render(<GraphCanvas projectId="p1" />);
 
+    fireEvent.change(screen.getByTestId("graph-add-title-input"), {
+      target: { value: "My concept" },
+    });
+    fireEvent.change(screen.getByTestId("graph-add-body-input"), {
+      target: { value: "some detail" },
+    });
     const select = screen.getByTestId("graph-add-kind-select") as HTMLSelectElement;
     fireEvent.change(select, { target: { value: "decision" } });
     fireEvent.click(screen.getByTestId("graph-add-node-button"));
@@ -307,10 +324,44 @@ describe("GraphCanvas", () => {
       const call = orchdGraphAddNodeMock.mock.calls[0];
       expect(call[0]).toBe("p1");
       expect(call[1]).toBe("decision");
-      expect(call[2]).toBe(strings.graph.newNodeLabel);
-      expect(call[3]).toBe("");
+      expect(call[2]).toBe("My concept"); // the TYPED title, not "New node"
+      expect(call[3]).toBe("some detail"); // the TYPED body
       expect(typeof call[4]).toBe("number");
       expect(typeof call[5]).toBe("number");
+    });
+  });
+
+  it("the add-node button is disabled until a (non-blank) title is typed (title REQUIRED)", () => {
+    render(<GraphCanvas projectId="p1" />);
+    const button = screen.getByTestId("graph-add-node-button") as HTMLButtonElement;
+    // Empty title -> disabled.
+    expect(button.disabled).toBe(true);
+    // Whitespace-only title -> still disabled.
+    fireEvent.change(screen.getByTestId("graph-add-title-input"), { target: { value: "   " } });
+    expect(button.disabled).toBe(true);
+    // A real title -> enabled.
+    fireEvent.change(screen.getByTestId("graph-add-title-input"), { target: { value: "Idea" } });
+    expect(button.disabled).toBe(false);
+  });
+
+  it("two rapid Add clicks create the node ONCE (double-submit guard, spec D6)", async () => {
+    let resolveAdd!: (v: unknown) => void;
+    orchdGraphAddNodeMock.mockReset().mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveAdd = res;
+        }),
+    );
+    render(<GraphCanvas projectId="p1" />);
+    fireEvent.change(screen.getByTestId("graph-add-title-input"), { target: { value: "Dup" } });
+
+    const button = screen.getByTestId("graph-add-node-button");
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(orchdGraphAddNodeMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveAdd({});
     });
   });
 
@@ -361,6 +412,125 @@ describe("GraphCanvas", () => {
     fireEvent.click(screen.getByTestId("graph-add-node-button"));
 
     expect(orchdGraphAddNodeMock).not.toHaveBeenCalled();
+  });
+
+  // ── inline rename (double-click a LOCAL node) ────────────────────────────────────────────────
+
+  it("double-clicking a LOCAL node opens a rename input pre-filled with its label, and committing fires orchdGraphUpdateNode(id, newLabel, null)", async () => {
+    const refreshGraphMock = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ refreshGraph: refreshGraphMock }, false);
+    render(<GraphCanvas projectId="p1" />);
+
+    // No rename bar until a double-click.
+    expect(screen.queryByTestId("graph-rename-bar")).toBeNull();
+
+    fireEvent.doubleClick(screen.getByTestId("stub-node-n1"));
+
+    const input = screen.getByTestId("graph-rename-input") as HTMLInputElement;
+    expect(input.value).toBe("Node one"); // pre-filled with the node's current label
+
+    fireEvent.change(input, { target: { value: "Renamed node" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(orchdGraphUpdateNodeMock).toHaveBeenCalledWith("n1", "Renamed node", null);
+      expect(refreshGraphMock).toHaveBeenCalledWith("p1");
+    });
+    // The bar closes after a successful commit.
+    await waitFor(() => expect(screen.queryByTestId("graph-rename-bar")).toBeNull());
+  });
+
+  it("the rename Save button also commits, and Cancel closes the bar without a wire call", async () => {
+    render(<GraphCanvas projectId="p1" />);
+
+    fireEvent.doubleClick(screen.getByTestId("stub-node-n1"));
+    fireEvent.change(screen.getByTestId("graph-rename-input"), { target: { value: "Via save" } });
+    fireEvent.click(screen.getByTestId("graph-rename-save"));
+    await waitFor(() =>
+      expect(orchdGraphUpdateNodeMock).toHaveBeenCalledWith("n1", "Via save", null),
+    );
+
+    // Re-open, then Cancel: no additional wire call, bar closes.
+    orchdGraphUpdateNodeMock.mockClear();
+    fireEvent.doubleClick(screen.getByTestId("stub-node-n1"));
+    fireEvent.click(screen.getByTestId("graph-rename-cancel"));
+    expect(screen.queryByTestId("graph-rename-bar")).toBeNull();
+    expect(orchdGraphUpdateNodeMock).not.toHaveBeenCalled();
+  });
+
+  it("double-clicking an entityRef node does NOT open a rename bar (entityRef is not renameable)", () => {
+    render(<GraphCanvas projectId="p1" />);
+
+    // n2 is an entityRef node (see the fixture `view`).
+    fireEvent.doubleClick(screen.getByTestId("stub-node-n2"));
+
+    expect(screen.queryByTestId("graph-rename-bar")).toBeNull();
+    expect(orchdGraphUpdateNodeMock).not.toHaveBeenCalled();
+  });
+
+  it("a blank rename is a silent no-op: Save is disabled and Enter fires no wire call", () => {
+    render(<GraphCanvas projectId="p1" />);
+    fireEvent.doubleClick(screen.getByTestId("stub-node-n1"));
+
+    const input = screen.getByTestId("graph-rename-input");
+    fireEvent.change(input, { target: { value: "   " } });
+    expect((screen.getByTestId("graph-rename-save") as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(orchdGraphUpdateNodeMock).not.toHaveBeenCalled();
+  });
+
+  it("while orchdDown: the rename input and Save are disabled", () => {
+    useAppStore.setState({ orchdDown: true }, false);
+    render(<GraphCanvas projectId="p1" />);
+    // Double-click still opens the bar (no orchd call needed to open it) — its controls disabled.
+    fireEvent.doubleClick(screen.getByTestId("stub-node-n1"));
+    expect((screen.getByTestId("graph-rename-input") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByTestId("graph-rename-save") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // ── edge kind editing (select an edge) ───────────────────────────────────────────────────────
+
+  it("selecting exactly one edge reveals a kind select pre-set to the edge's kind; changing it fires orchdGraphUpdateEdge(id, kind)", async () => {
+    const refreshGraphMock = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ refreshGraph: refreshGraphMock }, false);
+    render(<GraphCanvas projectId="p1" />);
+
+    // Hidden until an edge is selected.
+    expect(screen.queryByTestId("graph-edge-kind-select")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("stub-select-edge-e1"));
+
+    const select = screen.getByTestId("graph-edge-kind-select") as HTMLSelectElement;
+    expect(select.value).toBe("relates"); // e1's current kind (see fixture)
+
+    fireEvent.change(select, { target: { value: "depends" } });
+
+    await waitFor(() => {
+      expect(orchdGraphUpdateEdgeMock).toHaveBeenCalledWith("e1", "depends");
+      expect(refreshGraphMock).toHaveBeenCalledWith("p1");
+    });
+  });
+
+  it("while orchdDown: the edge-kind select is disabled", () => {
+    useAppStore.setState({ orchdDown: true }, false);
+    render(<GraphCanvas projectId="p1" />);
+    fireEvent.click(screen.getByTestId("stub-select-edge-e1"));
+
+    const select = screen.getByTestId("graph-edge-kind-select") as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+  });
+
+  it("a failed orchdGraphUpdateEdge surfaces the mapped error via a toast", async () => {
+    orchdGraphUpdateEdgeMock.mockRejectedValue({ kind: "daemon", code: "Conflict", message: "boom" });
+    render(<GraphCanvas projectId="p1" />);
+    fireEvent.click(screen.getByTestId("stub-select-edge-e1"));
+    fireEvent.change(screen.getByTestId("graph-edge-kind-select"), { target: { value: "depends" } });
+
+    await waitFor(() => {
+      expect(describeOrchdErrorMock).toHaveBeenCalled();
+      expect(useAppStore.getState().toast).toBe("orchestrator: error");
+    });
   });
 
   it("Delete selection asks for confirmation and only calls orchdGraphDeleteNode after it is accepted", async () => {

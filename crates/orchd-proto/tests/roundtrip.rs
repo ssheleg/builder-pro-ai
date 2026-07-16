@@ -688,6 +688,10 @@ fn all_requests() -> Vec<OrchdRequest> {
         OrchdRequest::UnarchiveProject {
             id: "proj-1".into(),
         },
+        OrchdRequest::GraphUpdateEdge {
+            id: "edge-1".into(),
+            kind: GraphEdgeKind::Supports,
+        },
     ]
 }
 

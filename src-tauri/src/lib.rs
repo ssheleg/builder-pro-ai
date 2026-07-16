@@ -710,6 +710,7 @@ pub fn run() {
             commands::orchd_graph_move_node,
             commands::orchd_graph_delete_node,
             commands::orchd_graph_add_edge,
+            commands::orchd_graph_update_edge,
             commands::orchd_graph_delete_edge,
             commands::orchd_graph_list_project,
             commands::orchd_graph_neighborhood,

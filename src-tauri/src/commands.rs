@@ -2083,6 +2083,20 @@ pub async fn orchd_graph_add_edge(
 }
 
 #[tauri::command]
+pub async fn orchd_graph_update_edge(
+    state: State<'_, AppState>,
+    id: String,
+    kind: GraphEdgeKind,
+) -> Result<GraphEdge, CommandError> {
+    expect_graph_edge(
+        state
+            .orchd()?
+            .request(OrchdRequest::GraphUpdateEdge { id, kind })
+            .await?,
+    )
+}
+
+#[tauri::command]
 pub async fn orchd_graph_delete_edge(
     state: State<'_, AppState>,
     id: String,
@@ -4863,6 +4877,33 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn orchd_graph_update_edge_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::GraphUpdateEdge { id, kind } => {
+                OrchdResponse::GraphEdge(bpa_orchd_proto::GraphEdge {
+                    id,
+                    source_node_id: "n1".into(),
+                    target_node_id: "n2".into(),
+                    kind,
+                    label: String::new(),
+                    created_at: 0,
+                })
+            }
+            other => panic!("expected GraphUpdateEdge, got {other:?}"),
+        })
+        .await;
+
+        let req = OrchdRequest::GraphUpdateEdge {
+            id: "edge-1".into(),
+            kind: GraphEdgeKind::Depends,
+        };
+        let res = client.request(req).await.unwrap();
+        let edge = expect_graph_edge(res).unwrap();
+        assert_eq!(edge.id, "edge-1");
+        assert_eq!(edge.kind, GraphEdgeKind::Depends);
     }
 
     // ── S-EXT MCP orchd_mcp_*/trust_* commands (spec §5, S-EXT T7) ─────────────────────────────

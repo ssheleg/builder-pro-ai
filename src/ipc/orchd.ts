@@ -383,6 +383,10 @@ export function orchdGraphAddEdge(
   return invoke<GraphEdge>("orchd_graph_add_edge", { sourceNodeId, targetNodeId, kind, label });
 }
 
+export function orchdGraphUpdateEdge(id: string, kind: GraphEdgeKind): Promise<GraphEdge> {
+  return invoke<GraphEdge>("orchd_graph_update_edge", { id, kind });
+}
+
 export function orchdGraphDeleteEdge(id: string): Promise<void> {
   return invoke<void>("orchd_graph_delete_edge", { id });
 }

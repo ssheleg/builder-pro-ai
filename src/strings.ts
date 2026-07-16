@@ -426,7 +426,6 @@ export const strings = {
 
   // ── graph canvas ─────────────────────────────────────────────────────────────────────────────
   graph: {
-    newNodeLabel: "New node",
     deleteConfirm: "delete selection?",
     sourceRemoved: "source removed",
     newNodeTypeAria: "New node type",
@@ -434,6 +433,19 @@ export const strings = {
     searchAria: "Search the graph",
     searchPlaceholder: "search…",
     empty: "empty",
+    // add-node form (P4-T5, spec D7 O-7)
+    titleAria: "New node title",
+    titlePlaceholder: "node title",
+    bodyAria: "New node body",
+    bodyPlaceholder: "body (optional)",
+    addNode: "Add node",
+    // inline rename (double-click a local node)
+    renameAria: "Rename node",
+    renameSave: "Save",
+    renameCancel: "Cancel",
+    // edge kind editing (select an edge)
+    edgeKindAria: "Edge kind",
+    edgeKindLabel: "edge:",
   },
 
   // ── extensions view (all ext/* tabs) ─────────────────────────────────────────────────────────
