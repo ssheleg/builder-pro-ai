@@ -133,6 +133,88 @@ attach guards in component refs (a pane instance is reused across tab switches �
   — same test pattern as the Extensions view: populate the form first, flip `orchdDown`, assert
   `disabled` AND assert the wrapper is never called on a click (userEvent, not `fireEvent`).
 
+## Frontend reliability (S-POLISH P3)
+
+Cross-cutting reliability contracts every mutating/read surface now obeys. Added by S-POLISH P3
+(BL-92..97, D3/D6/D8) — see `docs/superpowers/plans/2026-07-16-s-polish.md`. These extend, never
+replace, the honest-degradation discipline above.
+
+- **`useSubmitGuard` on EVERY mutating submit (`src/hooks/useSubmitGuard.ts`, spec D6):** a rapid
+  double click/Enter on a create/connect/run/set control fires the handler twice before React
+  re-renders `disabled` — producing a duplicate row, a duplicate external call, or duplicate spend
+  (findings E-08/F-08/G-08/H-01/J-03..05, P-19). The hook is the single shared fix: `const
+  {submitting, guard} = useSubmitGuard(); const submit = guard(handler);` and the control renders
+  `disabled={… || submitting}`. The re-entry lock is a `useRef` (synchronous — blocks the
+  same-tick second call, which the batched `submitting` state cannot), and `submitting` toggles in
+  a `finally` so a rejected handler still releases the lock. `guard` does NOT swallow errors — each
+  wrapped handler keeps its own `try/catch → showToast`. Every dialog/list with a mutating submit
+  has a double-fire test (two rapid clicks → wrapper called once). Do not add a new mutating submit
+  without wrapping it.
+- **Toast is a FIFO queue with manual dismiss, not a single clobbered slot (`store.ts`
+  `showToast`/`dismissToast` + `src/components/Toast.tsx`, BL-97/D8):** `showToast` APPENDS to
+  `toastQueue` (capped at 5, drop-oldest) — a burst of failures shows each in turn instead of the
+  last one erasing the rest. `toast` (the visible one) is always `toastQueue[0]`; it auto-advances
+  after `TOAST_AUTO_DISMISS_MS` (4s) and can be advanced early via the close button (`dismissToast`).
+  The auto-advance timer is closure state re-armed for each new head and cancelled when the queue
+  drains, so a stale timer can never clear a later toast. **Test consequence:** a component test that
+  asserts on `useAppStore.getState().toast` must reset `{toast: null, toastQueue: []}` before the
+  action if an earlier action in the same test (or a prior test without a reset in `beforeEach`)
+  already queued one — otherwise it reads the stale HEAD, not the message it just fired.
+- **Persistent storage-degradation banner (`src/components/StorageBanner.tsx`, D3/BL-94):** reads the
+  store's `storageStatus` (pulled once on connect + every `orchd://up`; the mode is a boot fact, no
+  push) and renders a red-accent `role="alert"` for `in_memory_fallback` ("changes will NOT survive
+  a restart") and `recovered_from_corruption` (names the quarantined path). `persistent` (or a
+  not-yet-fetched `null`) renders NOTHING — the healthy path shows no chrome, and there is no dismiss
+  (only a daemon restart into a healthy state clears it). Copy lives in `strings.storage.*`. The
+  cancelled-orchd-upgrade dead-end has the sibling reopenable banner `OrchdUpgradeBanner` (BL-96).
+- **Reconnect rehydrates EVERY live slice + research self-poll (`App.tsx` `onOrchdUp`,
+  `ResearchPane`, BL-92/D8):** `orchd://up` fires on the initial connect AND every reconnect; during
+  any outage every coarse `orchd://*-changed` push is lost, so `onOrchdUp` refetches the WHOLE live
+  surface — projects; the open project's goals/tasks/ideas/insights/ruleset/graph; the Extensions
+  slices (servers/artifacts/accounts/skills/policies/invocations); research runs for every idea
+  currently holding runs; the global ruleset when its surface has been opened; and the
+  storage-degradation status. Adding a new store slice means adding its `refresh*` here — a slice
+  that reconnects stale is the exact BL-92 bug. Separately, `ResearchPane` self-polls
+  `researchListRuns` every 2s WHILE a mounted run is non-terminal (`pending`/`running`) and stops the
+  moment all are terminal — the terminal `orchd://research-runs-changed` push can be missed during an
+  outage, which would strand a run's badge forever; `onOrchdUp` covers loaded-but-unmounted ideas,
+  the self-poll covers the visible pane.
+- **Empty-state vs loading vs failed — three DISTINCT states, never conflated (Tier-3, P-11..15):**
+  a read surface must not let "still loading" or "load failed" masquerade as "genuinely empty".
+  - *loading ≠ empty:* while the first fetch is in flight render a distinct placeholder, not the
+    empty copy (`CommandStrip`'s `command-strip-loading` vs `command-strip-empty`).
+  - *failed ≠ empty, and offer a retry:* a rejected fetch renders an inline retry affordance (and a
+    toast), never `null` forever with no recovery path (`CommandStrip`'s `command-strip-failed` +
+    retry; `ConnectorsTab`'s per-account `ops-load-failed` + `ops-retry`, distinct from a `ready`
+    account with an empty op catalog).
+  - *empty is honest, not blank:* a genuinely-empty result renders a calm dim placeholder
+    (`WorkspaceSidebar`'s `sidebar-empty` at zero projects+workspaces; `FileTree`'s `file-row-empty`
+    marker for an expanded directory that loaded with no entries, distinct from the `file-row`
+    loading placeholder and from a failed load, which toasts).
+- **A rejected inline edit REVERTS to the store value (P-27):** a row that holds an in-flight
+  title/body edit as local state (`GoalTree`'s `GoalRow`, `IdeasList`'s `IdeaRow`) must revert that
+  local draft to the store's copy when the save is rejected — the commit handler returns
+  `Promise<boolean>` and the row does `if (!ok) setLocal(store.value)`. A stale edit left hanging
+  never self-heals (the sync `useEffect([store.value])` only fires when the store value CHANGES,
+  which a failed save does not). Mirror `GoalRow.commit` — do not leave a rejected edit on screen.
+- **On-row error signal for a control with no optimistic flip (J-01):** a toggle/checkbox bound
+  directly to the wire value (`ToolsBrowser`'s `tool-enabled` = `tool.enabled`, no optimistic flip)
+  shows NO visible change on a rejected mutation — a bare toast (clobber-prone before the queue, and
+  easy to miss) is not enough. Surface an inline `role="alert"` on the row itself
+  (`tool-toggle-error-*`), cleared on the next attempt.
+- **Consent denials point at their recovery (P-20):** a `Consent`-kind rejection (a stale/changed
+  consent grant, from `mcpCallTool`/`connectorInvoke`) is only recoverable via `ConnectDialog`,
+  which is reachable ONLY from the Servers tab. `isConsentError(e)` (`ipc/orchd.ts`) gates appending
+  `strings.errors.consentRecovery` ("… Extensions → Servers → Connect.") to the surfaced message, so
+  the toast/inline error names the path forward instead of dead-ending.
+- **`describeError` must match the error union (P-16/P-17):** a sessiond native-picker/workspace
+  round-trip rejects with a `CommandError` (`src-tauri/src/commands.rs`), NOT an orchd error — map it
+  with the per-surface `describeCommandError` (which preserves the real message), never
+  `describeOrchdError` (which flattens a sessiond error to a generic "unknown orchestrator error")
+  and never a raw `e.message`. `FileTree`/`WorkspaceSidebar`/`CreateProjectDialog`/`SkillsTab` each
+  keep an identical local `describeCommandError` copy (same independently-deployable-per-surface
+  rationale as `describeFsError`).
+
 ## Testing contract (per frontend slice)
 
 Three layers, all required:

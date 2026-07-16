@@ -6,10 +6,15 @@ import userEvent from "@testing-library/user-event";
 const mcpSetToolEnabledMock = vi.fn();
 const mcpCallToolMock = vi.fn();
 const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
+// Faithful reimplementation of the real `isConsentError` (a rejected daemon error whose Debug
+// `code` is "Consent") so the consent-recovery path can be exercised against the mocked module.
 vi.mock("../../ipc/orchd", () => ({
   mcpSetToolEnabled: (...a: unknown[]) => mcpSetToolEnabledMock(...a),
   mcpCallTool: (...a: unknown[]) => mcpCallToolMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
+  isConsentError: (e: unknown) =>
+    (e as { kind?: string; code?: string })?.kind === "daemon" &&
+    (e as { code?: string })?.code === "Consent",
 }));
 
 import { ToolsBrowser } from "./ToolsBrowser";
@@ -96,6 +101,45 @@ describe("ToolsBrowser", () => {
     await waitFor(() => {
       expect(mcpSetToolEnabledMock).toHaveBeenCalledWith("t1", false);
     });
+  });
+
+  it("a failed toggle shows an on-row error signal (J-01), not just a toast; the checkbox stays at the server value", async () => {
+    mcpSetToolEnabledMock.mockReset().mockRejectedValueOnce({ kind: "daemon", code: "Io" });
+    render(<ToolsBrowser />);
+    useAppStore.setState({ toast: null, toastQueue: [] }, false); // FIFO queue: start clean
+    const checkbox = screen.getByTestId("tool-enabled-t1") as HTMLInputElement;
+    expect(checkbox.checked).toBe(true); // enabled tool
+
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(screen.getByTestId("tool-toggle-error-t1")).toBeTruthy());
+    expect(screen.getByTestId("tool-toggle-error-t1").textContent).toBe("orchestrator: error");
+    // Controlled by `tool.enabled`, no optimistic flip — it stays at the (unchanged) server value.
+    expect(checkbox.checked).toBe(true);
+    expect(useAppStore.getState().toast).toBe("orchestrator: error");
+  });
+
+  it("a Consent-kind call failure appends the recovery hint pointing to Servers → Connect (P-20)", async () => {
+    mcpCallToolMock.mockReset().mockRejectedValueOnce({ kind: "daemon", code: "Consent", message: "stale grant" });
+    render(<ToolsBrowser />);
+    useAppStore.setState({ toast: null, toastQueue: [] }, false); // FIFO queue: start clean
+    fireEvent.click(screen.getByTestId("tool-call-t1"));
+
+    await waitFor(() => expect(screen.getByTestId("tool-call-error-t1")).toBeTruthy());
+    expect(screen.getByTestId("tool-call-error-t1").textContent).toContain(
+      strings.errors.consentRecovery,
+    );
+    expect(useAppStore.getState().toast).toContain(strings.errors.consentRecovery);
+  });
+
+  it("a non-Consent call failure does NOT append the recovery hint", async () => {
+    mcpCallToolMock.mockReset().mockRejectedValueOnce({ kind: "daemon", code: "Io" });
+    render(<ToolsBrowser />);
+    fireEvent.click(screen.getByTestId("tool-call-t1"));
+
+    await waitFor(() => expect(screen.getByTestId("tool-call-error-t1")).toBeTruthy());
+    expect(screen.getByTestId("tool-call-error-t1").textContent).not.toContain(
+      strings.errors.consentRecovery,
+    );
   });
 
   it("\"invoke\" calls mcpCallTool with the entered JSON args and renders the result with the untrusted banner", async () => {

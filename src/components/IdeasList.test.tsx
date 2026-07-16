@@ -179,6 +179,54 @@ describe("IdeasList", () => {
     );
   });
 
+  it("reverts the title draft to the store value when the save is rejected (P-27, mirrors GoalTree)", async () => {
+    const idea = makeIdea({ id: "i1", title: "old title" });
+    useAppStore.setState({ ideas: [idea] }, false);
+    orchdUpdateIdeaMock.mockReset().mockRejectedValueOnce({ kind: "daemon", code: "Io", message: "disk" });
+
+    render(<IdeasList projectId={projectId} />);
+    const input = screen.getByTestId("idea-title-input-i1") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "new title" } });
+    await act(async () => {
+      fireEvent.blur(input);
+    });
+
+    // A rejected save must NOT leave the stale edit hanging — it reverts to the store's copy.
+    expect(input.value).toBe("old title");
+    expect(useAppStore.getState().toast).toBe("orchestrator: error");
+  });
+
+  it("reverts the body draft to the store value when the save is rejected (P-27)", async () => {
+    const idea = makeIdea({ id: "i1", body: "old body" });
+    useAppStore.setState({ ideas: [idea] }, false);
+    orchdUpdateIdeaMock.mockReset().mockRejectedValueOnce({ kind: "daemon", code: "Io", message: "disk" });
+
+    render(<IdeasList projectId={projectId} />);
+    const textarea = screen.getByTestId("idea-body-input-i1") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "new body" } });
+    await act(async () => {
+      fireEvent.blur(textarea);
+    });
+
+    expect(textarea.value).toBe("old body");
+  });
+
+  it("keeps the committed title on a SUCCESSFUL save (no spurious revert)", async () => {
+    const idea = makeIdea({ id: "i1", title: "old title" });
+    useAppStore.setState({ ideas: [idea] }, false);
+    orchdUpdateIdeaMock.mockReset().mockResolvedValueOnce(makeIdea({ id: "i1", title: "new title" }));
+
+    render(<IdeasList projectId={projectId} />);
+    const input = screen.getByTestId("idea-title-input-i1") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "new title" } });
+    await act(async () => {
+      fireEvent.blur(input);
+    });
+
+    expect(input.value).toBe("new title");
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
   it("delete asks for confirmation and only calls orchdDeleteIdea after it is accepted", async () => {
     const idea = makeIdea({ id: "i1" });
     useAppStore.setState({ ideas: [idea] }, false);

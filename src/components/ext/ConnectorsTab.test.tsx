@@ -23,6 +23,10 @@ vi.mock("../../ipc/orchd", () => ({
   connectorListOps: (...a: unknown[]) => connectorListOpsMock(...a),
   connectorInvoke: (...a: unknown[]) => connectorInvokeMock(...a),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
+  // Faithful reimplementation of the real `isConsentError` (daemon error, Debug `code` "Consent").
+  isConsentError: (e: unknown) =>
+    (e as { kind?: string; code?: string })?.kind === "daemon" &&
+    (e as { code?: string })?.code === "Consent",
 }));
 
 const openUrlMock = vi.fn().mockResolvedValue(undefined);
@@ -33,6 +37,7 @@ vi.mock("@tauri-apps/plugin-shell", () => ({
 import { ConnectorsTab } from "./ConnectorsTab";
 import { useAppStore } from "../../store/store";
 import type { Account } from "../../ipc/orchd-types";
+import { strings } from "../../strings";
 
 function makeAccount(over: Partial<Account> = {}): Account {
   return {
@@ -282,6 +287,69 @@ describe("ConnectorsTab", () => {
     await waitFor(() => {
       expect(screen.getByTestId("ops-result-untrusted-a1")).toBeTruthy();
     });
+  });
+
+  it("a FAILED ops-list load shows a retry affordance distinct from 'no ops' (P-15)", async () => {
+    connectorListOpsMock.mockReset().mockRejectedValueOnce({ kind: "daemon", code: "Io" });
+    connectorListAccountsMock.mockResolvedValue([
+      makeAccount({ id: "a1", provider: "generic-rest" }),
+    ]);
+    useAppStore.setState(
+      { accounts: [makeAccount({ id: "a1", provider: "generic-rest" })] },
+      false,
+    );
+    render(<ConnectorsTab />);
+
+    await waitFor(() => expect(screen.getByTestId("ops-load-failed-a1")).toBeTruthy());
+    expect(screen.getByTestId("ops-load-failed-a1").textContent).toContain(
+      strings.ext.connectors.opsLoadFailed,
+    );
+    expect(screen.getByTestId("ops-retry-a1")).toBeTruthy();
+
+    // [Retry] re-fetches; on success the failed marker clears and the ops select is populated.
+    connectorListOpsMock.mockResolvedValueOnce([{ name: "get", description: null }]);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("ops-retry-a1"));
+    });
+    await waitFor(() => expect(screen.queryByTestId("ops-load-failed-a1")).toBeNull());
+    expect(connectorListOpsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("a ready account with an empty op catalog shows NO load-failed marker (empty ≠ failed, P-15)", async () => {
+    connectorListOpsMock.mockReset().mockResolvedValue([]); // genuinely empty, not a failure
+    connectorListAccountsMock.mockResolvedValue([
+      makeAccount({ id: "a1", provider: "generic-rest" }),
+    ]);
+    useAppStore.setState(
+      { accounts: [makeAccount({ id: "a1", provider: "generic-rest" })] },
+      false,
+    );
+    render(<ConnectorsTab />);
+    await waitFor(() => expect(screen.getByTestId("ops-select-a1")).toBeTruthy());
+    expect(screen.queryByTestId("ops-load-failed-a1")).toBeNull();
+  });
+
+  it("a Consent-kind invoke failure appends the recovery hint (Servers → Connect, P-20)", async () => {
+    connectorListOpsMock.mockResolvedValue([{ name: "get", description: null }]);
+    connectorInvokeMock.mockRejectedValueOnce({ kind: "daemon", code: "Consent", message: "stale" });
+    connectorListAccountsMock.mockResolvedValue([
+      makeAccount({ id: "a1", provider: "generic-rest" }),
+    ]);
+    useAppStore.setState(
+      { accounts: [makeAccount({ id: "a1", provider: "generic-rest" })] },
+      false,
+    );
+    render(<ConnectorsTab />);
+    await waitFor(() => screen.getByTestId("ops-select-a1"));
+    useAppStore.setState({ toast: null, toastQueue: [] }, false); // FIFO queue: start clean
+    fireEvent.change(screen.getByTestId("ops-select-a1"), { target: { value: "get" } });
+    fireEvent.click(screen.getByTestId("ops-invoke-a1"));
+
+    await waitFor(() => expect(screen.getByTestId("ops-call-error-a1")).toBeTruthy());
+    expect(screen.getByTestId("ops-call-error-a1").textContent).toContain(
+      strings.errors.consentRecovery,
+    );
+    expect(useAppStore.getState().toast).toContain(strings.errors.consentRecovery);
   });
 
   it("a non-generic-rest account renders no ops runner", () => {

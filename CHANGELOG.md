@@ -46,6 +46,70 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
   performed only after `tx.commit()` succeeds, so a rolled-back import leaves NO orphan file; the
   `app_support`/path-traversal validation is unchanged.
 
+S-POLISH Phase P2 — English-only UI + docs (O-2, spec D1/D2). No behavior change: every webview
+string routed through `src/strings.ts` (English), Rust-side user-facing strings/templates
+translated in place, and the `scripts/check-english.sh` gate (Cyrillic-outside-allowlist → fail)
+wired into `scripts/final-suite.sh` + CI.
+
+S-POLISH Phase P3 — frontend reliability (React/TS; no wire version bump). Consumes P1's
+`orchd_storage_status`. See `docs/superpowers/plans/2026-07-16-s-polish.md` and the new
+"Frontend reliability (S-POLISH P3)" section in `docs/frontend-conventions.md`.
+
+### Added
+- **Double-submit guard on every mutating submit (`useSubmitGuard`, BL-95/spec D6):** a shared hook
+  (`src/hooks/useSubmitGuard.ts`) whose `guard(handler)` runs at most one invocation at a time (a
+  synchronous `useRef` lock, not the batched `submitting` state) and whose `submitting` flag drives
+  `disabled={… || submitting}`. Wrapped around every create/connect/run/set control (QuickCapture,
+  CreateProjectDialog, ResearchRunDialog, FormInsightDialog, SpawnProjectFromIdea, the
+  Ideas/Tasks/Goals create-forms, the Servers/Connectors/Skills add-forms, the log's set-policy),
+  killing the duplicate-row / duplicate-external-call / duplicate-spend double-fire (P-19,
+  E-08/F-08/G-08/H-01/J-03..05).
+- **Honest storage-degradation banner (`StorageBanner`, BL-94 frontend/spec D3):** reads P1's
+  `orchd_storage_status` (pulled on connect + every reconnect) and shows a persistent red-accent
+  `role="alert"` for `in_memory_fallback` ("changes will NOT survive a restart") and
+  `recovered_from_corruption` (names the quarantined path); `persistent` shows nothing. Copy in
+  `strings.storage.*`.
+- **Toast FIFO queue with manual dismiss (BL-97/spec D8):** `showToast` now APPENDS to a capped-at-5
+  queue instead of clobbering a single slot, so a burst of failures is shown in turn; the visible
+  toast auto-advances after 4s and can be closed early via a new close button (`dismissToast`), with
+  the auto-advance timer re-armed per head so a stale timer never clears a later toast.
+- **Tier-3 UX polish (empty-states, edit-revert, error signals, consent-recovery):** empty ≠
+  loading ≠ failed across read surfaces — `WorkspaceSidebar` gains a dim zero-projects/zero-
+  workspaces empty-state (P-11), `FileTree` an "empty folder" marker for a loaded-but-empty expanded
+  directory (P-12), `CommandStrip` a distinct loading placeholder plus a retry-on-failure instead of
+  rendering `null` forever (P-13), and `ConnectorsTab`'s ops list a "load failed" state with retry,
+  distinct from a genuinely empty op catalog (P-15). `IdeasList` row title/body edits now REVERT to
+  the server value on a rejected save (mirrors `GoalTree`, P-27); `ToolsBrowser`'s enable toggle
+  shows an on-row error on failure (not just a toast, J-01); and a `Consent`-kind denial in
+  `ToolsBrowser`/`ConnectorsTab` appends a recovery hint pointing to Extensions → Servers → Connect
+  (P-20).
+
+### Fixed
+- **No silent no-op / no zombie terminal tab on a mutation failure (BL-93):** a rejected
+  new-terminal / close-terminal / add-workspace round-trip now surfaces an honest toast
+  (`describeCommandError`) instead of failing silently; a close disposes the xterm instance AND
+  removes the tab in a `finally` (fixing the dead `removeSession` wiring), so a failed close never
+  strands a zombie tab.
+- **Reconnect rehydrates all live slices + research runs self-poll (BL-92/spec D8):** `onOrchdUp`
+  now refetches the entire live surface (projects; the open project's goals/tasks/ideas/insights/
+  ruleset/graph; the Extensions slices; research runs for every loaded idea; the global ruleset when
+  opened; the storage status) rather than only projects, so nothing reconnects stale after an
+  outage swallowed its `orchd://*-changed` push. `ResearchPane` additionally self-polls
+  `researchListRuns` every 2s while a mounted run is non-terminal (and stops on terminal), so a
+  missed terminal push never strands a run's badge at `pending`/`running`.
+- **Partial-failure resume for spawn-project + insight-backlog (BL-95/spec D6):** when
+  `SpawnProjectFromIdea`'s `setIdeaProject` fails after the project/workspace were created (or
+  `FormInsightDialog`'s backlog `setIdeaLifecycle` fails after the task was created), the component
+  now holds the created ids, names exactly what was created, and retry RESUMES from the failed step
+  — never creating a second project/task.
+- **Reopenable banner for a cancelled orchd upgrade (BL-96/spec D8):** cancelling the orchd upgrade
+  dialog while the daemon is incompatible no longer dead-ends — a persistent banner
+  (`OrchdUpgradeBanner`) with an "Update" button reopens the dialog.
+- **`describeError` matches the error union in two more surfaces (P-16/P-17):** `SkillsTab`'s native
+  file-picker failure and `CreateProjectDialog`'s nested "+ create workspace" failure now map their
+  sessiond `CommandError` through `describeCommandError` (preserving the real message) instead of the
+  orchd-specific `describeOrchdError` / a raw `Error.message`.
+
 ## [0.7.0] — 2026-07-16
 
 ### Added

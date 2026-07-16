@@ -100,6 +100,9 @@ interface FlatNode {
   depth: number;
   size: number;
   loading?: boolean;
+  /** Synthetic marker for an expanded directory that loaded successfully but has zero visible
+   * entries (P-12) — rendered non-interactively, distinct from the `loading` placeholder. */
+  empty?: boolean;
 }
 
 function sortEntries(entries: FsEntry[]): FsEntry[] {
@@ -142,8 +145,24 @@ function computeFlatten(
       });
       return;
     }
-    for (const e of sortEntries(cached)) {
-      if (e.isIgnored && !showIgnored) continue;
+    const visibleChildren = sortEntries(cached).filter((e) => showIgnored || !e.isIgnored);
+    if (visibleChildren.length === 0) {
+      // Loaded, genuinely empty (P-12): a distinct dim marker rather than rendering nothing —
+      // so an empty dir never looks like a dir that failed to load or is still fetching.
+      nodes.push({
+        id: `${key}::empty`,
+        root,
+        rel,
+        name: strings.files.emptyFolder,
+        isDir: false,
+        isIgnored: false,
+        depth,
+        size: 0,
+        empty: true,
+      });
+      return;
+    }
+    for (const e of visibleChildren) {
       const childKey = fsKey(root, e.relPath);
       nodes.push({
         id: childKey,
@@ -574,12 +593,17 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
   }
 
   function renderRow(node: FlatNode): JSX.Element {
-    if (node.loading) {
+    if (node.loading || node.empty) {
       return (
         <div
           key={node.id}
-          data-testid="file-row"
-          style={{ ...rowBaseStyle(node.depth), color: theme.colors.textDim, cursor: "default" }}
+          data-testid={node.empty ? "file-row-empty" : "file-row"}
+          style={{
+            ...rowBaseStyle(node.depth),
+            color: theme.colors.textDim,
+            cursor: "default",
+            fontStyle: node.empty ? "italic" : undefined,
+          }}
         >
           <span aria-hidden style={{ width: 12, flexShrink: 0 }} />
           <span>{node.name}</span>

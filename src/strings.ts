@@ -39,6 +39,10 @@ export const strings = {
     io: (msg: string) => `service error: ${msg}`,
     consent: (msg: string) => `connection consent required: ${msg}`,
     policy: (msg: string) => `blocked by policy: ${msg}`,
+    /** Recovery hint appended to a `Consent`-kind toast (P-20): `ConnectDialog` is only reachable
+     * from the Servers tab, so a consent denial must point there instead of dead-ending. Consumed
+     * by `ToolsBrowser`/`ConnectorsTab` via `isConsentError` (see `ipc/orchd.ts`). */
+    consentRecovery: "To reconnect, open Extensions → Servers → Connect.",
     orchdError: "orchestrator error",
     unavailable: "orchestrator unavailable",
     unknown: "unknown orchestrator error",
@@ -90,6 +94,10 @@ export const strings = {
       addWorkspaceAria: "Add workspace",
       /** Honest toast for a rejected `pickFolder`/`createWorkspace` (BL-93 — no more silent no-op). */
       addWorkspaceFailed: (msg: string) => `Failed to add workspace: ${msg}`,
+      /** Dim empty-state sentence shown when there are zero projects AND zero workspaces (P-11) —
+       * the bare «No project» header is otherwise the only thing on screen. The CTAs below it
+       * ("+ project" / "+ Add workspace") stay visible; this is onboarding copy, not a dead end. */
+      emptyState: "No workspaces yet — add a workspace or create a project to begin.",
     },
   },
 
@@ -120,6 +128,10 @@ export const strings = {
     showIgnored: "show ignored",
     liveUpdatesPaused: "live updates paused — refresh",
     loading: "Loading…",
+    /** Marker for an expanded directory that loaded successfully but has no entries (P-12) —
+     * distinct from the "Loading…" placeholder (a still-fetching dir) and from a failed load
+     * (which toasts). Renders as a dim, non-interactive row under the empty directory. */
+    emptyFolder: "empty folder",
     fileWord: "file",
     folderWord: "folder",
     readFolderFailed: (msg: string) => `Failed to read folder: ${msg}`,
@@ -155,6 +167,9 @@ export const strings = {
     fileOutsideWorkspace: "file is outside the workspace or not found",
     commandHistory: "Command history",
     noCommands: "No commands yet",
+    /** In-flight placeholder while the first `getCommandEvents` is still resolving (P-13) — kept
+     * DISTINCT from `noCommands` so a loading strip never reads as a genuinely empty one. */
+    loadingCommands: "Loading command history…",
     loadHistoryFailed: "Failed to load command history",
     interrupted: "interrupted",
     interruptedTitle: "Interrupted — the session ended before the command finished",
@@ -440,6 +455,9 @@ export const strings = {
       expiresLabel: "expires:",
       operationFor: (label: string) => `Operation for ${label}`,
       operationOption: "— operation —",
+      /** Ops-list load failed (P-15): distinguishes a failed `connectorListOps` (retryable) from a
+       * genuinely empty op catalog — the select alone can't tell the two apart. */
+      opsLoadFailed: "Failed to load operations.",
       argsFor: (label: string) => `Arguments for ${label}`,
       operationError: "the operation returned an error",
       addApiKeyTitle: "Add API key",

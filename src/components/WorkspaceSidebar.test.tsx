@@ -71,6 +71,21 @@ describe("WorkspaceSidebar", () => {
     expect(screen.getByText("beta")).toBeTruthy();
   });
 
+  it("shows a dim empty-state sentence when there are zero projects AND zero workspaces (P-11)", () => {
+    useAppStore.setState({ workspaces: {}, projects: [] }, false);
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(screen.getByTestId("sidebar-empty").textContent).toBe(strings.chrome.sidebar.emptyState);
+    // The CTAs are still there — it's onboarding copy, not a dead end.
+    expect(screen.getByText(strings.chrome.sidebar.addWorkspace)).toBeTruthy();
+    expect(screen.getByText(strings.chrome.sidebar.addProject)).toBeTruthy();
+  });
+
+  it("does NOT show the empty-state once at least one workspace exists", () => {
+    // default beforeEach state has w1/w2
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(screen.queryByTestId("sidebar-empty")).toBeNull();
+  });
+
   it("clicking a workspace calls onSelectWorkspace with its id and switches view to workspace", () => {
     const onSelect = vi.fn();
     render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={onSelect} />);

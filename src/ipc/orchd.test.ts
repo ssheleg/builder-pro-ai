@@ -89,6 +89,7 @@ import {
   trustListPolicies,
   trustListAudit,
   describeOrchdError,
+  isConsentError,
 } from "./orchd";
 import { strings } from "../strings";
 
@@ -897,6 +898,23 @@ describe("ipc/orchd", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "SomeFutureCode", message: "details" }),
       ).toBe("details");
+    });
+  });
+
+  // ── isConsentError (P-20 consent-recovery gate) ────────────────────────────────────────────
+  describe("isConsentError", () => {
+    it("is true ONLY for a daemon/Consent rejection", () => {
+      expect(isConsentError({ kind: "daemon", code: "Consent", message: "x" })).toBe(true);
+    });
+
+    it("is false for every other daemon code, kind, and non-error value", () => {
+      expect(isConsentError({ kind: "daemon", code: "Policy" })).toBe(false);
+      expect(isConsentError({ kind: "daemon", code: "Io" })).toBe(false);
+      expect(isConsentError({ kind: "disconnected" })).toBe(false);
+      expect(isConsentError(new Error("boom"))).toBe(false);
+      expect(isConsentError("Consent")).toBe(false);
+      expect(isConsentError(null)).toBe(false);
+      expect(isConsentError(undefined)).toBe(false);
     });
   });
 });

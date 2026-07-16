@@ -132,6 +132,22 @@ describe("CreateProjectDialog", () => {
     expect(createWorkspaceMock).not.toHaveBeenCalled();
   });
 
+  it('inline "create workspace" failure surfaces the MAPPED CommandError (not a raw message) inline + toast (P-17)', async () => {
+    pickFolderMock.mockResolvedValue("/Users/me/projects/gamma");
+    createWorkspaceMock.mockRejectedValueOnce({ kind: "disconnected" });
+    render(<CreateProjectDialog onClose={() => {}} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-new-workspace"));
+    });
+
+    const expected = strings.errors.command.disconnected;
+    expect(useAppStore.getState().toast).toBe(expected);
+    expect((await screen.findByTestId("create-project-error")).textContent).toBe(expected);
+    // The sessiond `createWorkspace` error must NOT be routed through the orchd-specific mapper.
+    expect(describeOrchdErrorMock).not.toHaveBeenCalled();
+  });
+
   it("cancel closes the dialog without creating a project", () => {
     const onClose = vi.fn();
     render(<CreateProjectDialog onClose={onClose} />);

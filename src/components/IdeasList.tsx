@@ -166,8 +166,10 @@ interface IdeaRowProps {
    * via `useAppStore`, which would risk the same fresh-array-per-render infinite-loop pitfall
    * `ResearchPane` guards against — see that component's own doc comment). */
   researchRuns: ResearchRun[];
-  onTitleCommit: (id: string, title: string) => Promise<void>;
-  onBodyCommit: (id: string, body: string) => Promise<void>;
+  /** Resolves `true` on a committed edit, `false` on a rejected one — the row reverts the local
+   * draft to the store's value on `false` (mirrors `GoalTree`'s `GoalRow.commit`, P-27). */
+  onTitleCommit: (id: string, title: string) => Promise<boolean>;
+  onBodyCommit: (id: string, body: string) => Promise<boolean>;
   onLifecycleChange: (id: string, lifecycle: IdeaLifecycle) => void;
   onDelete: (id: string) => void;
   onAttach: (id: string, projectId: string) => void;
@@ -217,15 +219,20 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
   async function commitTitle(): Promise<void> {
     const trimmed = title.trim();
     if (trimmed === "" || trimmed === idea.title) {
-      setTitle(idea.title);
+      setTitle(idea.title); // blank/unchanged -> silent revert, never a malformed empty-title save
       return;
     }
-    await onTitleCommit(idea.id, trimmed);
+    // A rejected save must REVERT the local draft to the store's value (P-27) — otherwise the stale
+    // edit hangs on screen and never self-heals (the `useEffect([idea.title])` above only fires when
+    // the store value CHANGES, which a failed save does not). Mirrors `GoalTree`'s `GoalRow.commit`.
+    const ok = await onTitleCommit(idea.id, trimmed);
+    if (!ok) setTitle(idea.title);
   }
 
   async function commitBody(): Promise<void> {
     if (body === idea.body) return;
-    await onBodyCommit(idea.id, body);
+    const ok = await onBodyCommit(idea.id, body);
+    if (!ok) setBody(idea.body);
   }
 
   const latestRun = researchRuns[0] ?? null;
@@ -396,19 +403,23 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowIds]);
 
-  async function handleTitleCommit(id: string, title: string): Promise<void> {
+  async function handleTitleCommit(id: string, title: string): Promise<boolean> {
     try {
       await orchdUpdateIdea(id, title, null);
+      return true;
     } catch (e) {
       showToast(describeOrchdError(e));
+      return false;
     }
   }
 
-  async function handleBodyCommit(id: string, body: string): Promise<void> {
+  async function handleBodyCommit(id: string, body: string): Promise<boolean> {
     try {
       await orchdUpdateIdea(id, null, body);
+      return true;
     } catch (e) {
       showToast(describeOrchdError(e));
+      return false;
     }
   }
 

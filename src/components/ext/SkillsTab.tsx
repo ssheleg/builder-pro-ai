@@ -9,6 +9,31 @@ import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
+/** Honest message for a rejected `CommandError` (`pickSkillFile` is a sessiond native-picker
+ * round-trip — `src-tauri/src/commands.rs::CommandError`, a DIFFERENT error union than orchd's).
+ * `describeOrchdError` maps a sessiond error's `kind:"internal"` to the generic "unknown
+ * orchestrator error", losing the real message (P-16) — this mapper preserves it. Deliberately
+ * duplicated per-surface, mirroring `FileTree.tsx`/`WorkspaceSidebar.tsx`. */
+function describeCommandError(err: unknown): string {
+  const e = err as { kind?: string; message?: string; code?: string; reason?: string } | undefined;
+  switch (e?.kind) {
+    case "daemon":
+      return e.message ?? e.code ?? strings.errors.command.daemon;
+    case "disconnected":
+      return strings.errors.command.disconnected;
+    case "internal":
+      return e.message ?? strings.errors.command.internal;
+    case "incompatibleDaemon":
+      return strings.errors.command.incompatible;
+    case "upgradeFailed":
+      return e.reason ?? strings.errors.command.failed;
+    case "tooLarge":
+      return strings.errors.command.tooLarge;
+    default:
+      return err instanceof Error ? err.message : String(err);
+  }
+}
+
 const bannerStyle: CSSProperties = {
   fontSize: 12,
   lineHeight: 1.5,
@@ -174,7 +199,9 @@ export function SkillsTab(): JSX.Element {
       if (path === null) return; // cancelled -> no-op, mirrors CreateProjectDialog's pickFolder
       setMdPath(path);
     } catch (e) {
-      showToast(describeOrchdError(e));
+      // `pickSkillFile` is a sessiond `CommandError`, NOT an orchd error — `describeCommandError`
+      // keeps its real message instead of the generic orchd fallback `describeOrchdError` gives it.
+      showToast(describeCommandError(e));
     }
   }
 

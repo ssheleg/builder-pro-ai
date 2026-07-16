@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, act } from "@testing-library/react";
+import { render, screen, cleanup, act, fireEvent } from "@testing-library/react";
 
 const getCommandEventsMock = vi.fn();
 vi.mock("../ipc/commands", () => ({
@@ -103,11 +103,51 @@ describe("CommandStrip", () => {
     expect(useAppStore.getState().toast).toBeNull();
   });
 
-  it("a rejected getCommandEvents fires a toast and renders nothing", async () => {
+  it("a rejected getCommandEvents fires a toast AND offers an inline retry (P-13, not null forever)", async () => {
     getCommandEventsMock.mockRejectedValue(new Error("boom"));
-    const { container } = await act(async () => render(<CommandStrip sessionId="s1" />));
-    expect(container.innerHTML).toBe("");
+    await act(async () => render(<CommandStrip sessionId="s1" />));
     expect(useAppStore.getState().toast).toBe(strings.terminal.loadHistoryFailed);
+    // Not a permanent blank — an honest failed state with a working [Retry] button.
+    expect(screen.getByTestId("command-strip-failed")).toBeTruthy();
+    expect(screen.getByTestId("command-strip-retry")).toBeTruthy();
+    expect(screen.queryByTestId("command-strip-empty")).toBeNull();
+  });
+
+  it("[Retry] after a failure re-fetches and, on success, renders the strip", async () => {
+    getCommandEventsMock.mockRejectedValueOnce(new Error("boom"));
+    await act(async () => render(<CommandStrip sessionId="s1" />));
+    expect(screen.getByTestId("command-strip-failed")).toBeTruthy();
+    expect(getCommandEventsMock).toHaveBeenCalledTimes(1);
+
+    getCommandEventsMock.mockResolvedValueOnce([
+      ev({ seq: 2, kind: "finished", exitCode: 0 }),
+      ev({ seq: 1, kind: "started" }),
+    ]);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("command-strip-retry"));
+    });
+    expect(getCommandEventsMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("command-strip-failed")).toBeNull();
+    expect(screen.getByTestId("command-chip-ok").textContent).toBe("✓");
+  });
+
+  it("shows a DISTINCT loading placeholder while the first fetch is in flight (not the empty one)", async () => {
+    let resolveFetch!: (v: CommandEvent[]) => void;
+    getCommandEventsMock.mockReturnValueOnce(
+      new Promise<CommandEvent[]>((res) => {
+        resolveFetch = res;
+      }),
+    );
+    render(<CommandStrip sessionId="s1" />);
+    // Still resolving: the loading placeholder, never the "no commands yet" empty one.
+    expect(screen.getByTestId("command-strip-loading")).toBeTruthy();
+    expect(screen.queryByTestId("command-strip-empty")).toBeNull();
+    await act(async () => {
+      resolveFetch([]);
+    });
+    // Resolved empty: now the empty placeholder, distinct from loading.
+    expect(screen.queryByTestId("command-strip-loading")).toBeNull();
+    expect(screen.getByTestId("command-strip-empty")).toBeTruthy();
   });
 
   it("refetches when the active session's lifecycle changes (state-changed)", async () => {

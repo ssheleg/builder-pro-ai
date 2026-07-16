@@ -234,6 +234,20 @@ describe("SkillsTab", () => {
     expect(screen.getByTestId("skill-picked-path")).toBeTruthy();
   });
 
+  it("a failed file picker keeps the sessiond CommandError message via describeCommandError, not the generic orchd fallback (P-16)", async () => {
+    useAppStore.setState({ toast: null, toastQueue: [] }, false);
+    pickSkillFileMock.mockReset().mockRejectedValueOnce({ kind: "internal", message: "native picker crashed" });
+    render(<SkillsTab />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("skill-pick-path"));
+    });
+    // The real (unmocked) `describeCommandError` preserves the sessiond message …
+    expect(useAppStore.getState().toast).toBe("native picker crashed");
+    // … and the orchd-specific mapper (which would flatten it to "unknown orchestrator error") is
+    // NOT on the picker path anymore.
+    expect(describeOrchdErrorMock).not.toHaveBeenCalled();
+  });
+
   // ---- delete ----
 
   it("clicking delete confirms then calls skillDelete", async () => {

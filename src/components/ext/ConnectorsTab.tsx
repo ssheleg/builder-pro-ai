@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type JSX } from "react";
+import { useCallback, useEffect, useState, type CSSProperties, type JSX } from "react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { useAppStore } from "../../store/store";
 import {
@@ -9,6 +9,7 @@ import {
   connectorInvoke,
   connectorListOps,
   describeOrchdError,
+  isConsentError,
 } from "../../ipc/orchd";
 import type { Account, AccountAuthKind, ConnectorOp, OAuthChallenge } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -186,6 +187,18 @@ interface OpsCallResult {
   isError: boolean;
 }
 
+/** Per-account ops-list fetch state (P-15): `failed` is distinct from a `ready` account whose op
+ * catalog is genuinely empty — the select alone cannot tell "load broke" from "no ops". */
+type OpsLoadStatus = "loading" | "ready" | "failed";
+
+/** Human message for a rejected orchd call, with the consent-recovery hint appended when the
+ * rejection is a `Consent` denial (P-20) — `ConnectDialog` is reachable only from the Servers tab,
+ * so a bare "consent required" toast would dead-end. Mirrors `ToolsBrowser`'s identical helper. */
+function describeWithRecovery(e: unknown): string {
+  const message = describeOrchdError(e);
+  return isConsentError(e) ? `${message} ${strings.errors.consentRecovery}` : message;
+}
+
 function formatExpiry(expiresAt: number | null): string {
   return expiresAt === null ? "—" : new Date(expiresAt).toLocaleString();
 }
@@ -250,6 +263,7 @@ export function ConnectorsTab(): JSX.Element {
 
   // ---- per-account ops runner (generic-rest only) ----
   const [opsByAccount, setOpsByAccount] = useState<Record<string, ConnectorOp[]>>({});
+  const [opsStatus, setOpsStatus] = useState<Record<string, OpsLoadStatus>>({});
   const [selectedOp, setSelectedOp] = useState<Record<string, string>>({});
   const [opsArgsDraft, setOpsArgsDraft] = useState<Record<string, string>>({});
   const [opsCallError, setOpsCallError] = useState<Record<string, string | null>>({});
@@ -265,13 +279,31 @@ export function ConnectorsTab(): JSX.Element {
     .map((a) => a.id)
     .join(",");
 
+  // Fetch (or re-fetch, via the [Retry] button) one account's op catalog, tracking a per-account
+  // status so a FAILED load (P-15) is distinguishable from a `ready` account with zero ops — the
+  // select alone cannot tell them apart. A failure records `failed` (not just a toast) so the
+  // effect below won't loop on it and the row can offer an inline retry.
+  const loadOps = useCallback(
+    (accountId: string) => {
+      setOpsStatus((prev) => ({ ...prev, [accountId]: "loading" }));
+      connectorListOps({ accountId })
+        .then((ops) => {
+          setOpsByAccount((prev) => ({ ...prev, [accountId]: ops }));
+          setOpsStatus((prev) => ({ ...prev, [accountId]: "ready" }));
+        })
+        .catch((e: unknown) => {
+          setOpsStatus((prev) => ({ ...prev, [accountId]: "failed" }));
+          showToast(describeWithRecovery(e));
+        });
+    },
+    [showToast],
+  );
+
   useEffect(() => {
     for (const account of accounts) {
       if (account.provider !== GENERIC_REST_PROVIDER) continue;
-      if (account.id in opsByAccount) continue;
-      connectorListOps({ accountId: account.id })
-        .then((ops) => setOpsByAccount((prev) => ({ ...prev, [account.id]: ops })))
-        .catch((e: unknown) => showToast(describeOrchdError(e)));
+      if (account.id in opsStatus) continue; // already loading / loaded / failed
+      loadOps(account.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [genericRestAccountIds]);
@@ -372,7 +404,9 @@ export function ConnectorsTab(): JSX.Element {
         [accountId]: { contentJson: res.contentJson, isError: res.isError },
       }));
     } catch (e) {
-      const message = describeOrchdError(e);
+      // A stale/URL-changed consent grant surfaces here as a `Consent` denial — append the recovery
+      // hint pointing at the Servers-tab connect flow (P-20), the only place consent is re-granted.
+      const message = describeWithRecovery(e);
       setOpsCallError((prev) => ({ ...prev, [accountId]: message }));
       showToast(message);
     }
@@ -430,6 +464,30 @@ export function ConnectorsTab(): JSX.Element {
 
                   {isGenericRest && (
                     <div>
+                      {opsStatus[account.id] === "failed" && (
+                        <div
+                          data-testid={`ops-load-failed-${account.id}`}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            marginBottom: 4,
+                          }}
+                        >
+                          <span style={{ color: theme.colors.statusExited, fontSize: 12 }}>
+                            {strings.ext.connectors.opsLoadFailed}
+                          </span>
+                          <button
+                            type="button"
+                            data-testid={`ops-retry-${account.id}`}
+                            disabled={orchdDown}
+                            onClick={() => loadOps(account.id)}
+                            style={textButtonStyle}
+                          >
+                            {strings.common.retry}
+                          </button>
+                        </div>
+                      )}
                       <div style={invokeRowStyle}>
                         <select
                           data-testid={`ops-select-${account.id}`}

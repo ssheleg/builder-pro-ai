@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../../store/store";
-import { mcpSetToolEnabled, mcpCallTool, describeOrchdError } from "../../ipc/orchd";
+import { mcpSetToolEnabled, mcpCallTool, describeOrchdError, isConsentError } from "../../ipc/orchd";
 import type { McpTool } from "../../ipc/orchd-types";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
@@ -103,6 +103,14 @@ interface ToolCallResult {
   isError: boolean;
 }
 
+/** Human message for a rejected orchd call, with the consent-recovery hint appended when the
+ * rejection is a `Consent` denial (P-20) — `ConnectDialog` is only reachable from the Servers tab,
+ * so a bare "consent required" toast would dead-end. Shared by the toggle and invoke handlers. */
+function describeWithRecovery(e: unknown): string {
+  const message = describeOrchdError(e);
+  return isConsentError(e) ? `${message} ${strings.errors.consentRecovery}` : message;
+}
+
 /**
  * Tools tab (S-EXT §8, T8): tools across every registered server's cached tool list
  * (`mcpToolsByServer`, fetched via `refreshMcpTools` — this component eagerly fetches any server's
@@ -132,6 +140,7 @@ export function ToolsBrowser(): JSX.Element {
 
   const [argsDraft, setArgsDraft] = useState<Record<string, string>>({});
   const [callError, setCallError] = useState<Record<string, string | null>>({});
+  const [toggleError, setToggleError] = useState<Record<string, string | null>>({});
   const [result, setResult] = useState<Record<string, ToolCallResult | undefined>>({});
 
   const serverIds = servers.map((s) => s.id).join(",");
@@ -144,11 +153,17 @@ export function ToolsBrowser(): JSX.Element {
   }, [serverIds]);
 
   async function handleToggle(tool: McpTool): Promise<void> {
+    setToggleError((prev) => ({ ...prev, [tool.id]: null })); // clear any stale failure first
     try {
       await mcpSetToolEnabled(tool.id, !tool.enabled);
       await refreshMcpTools(tool.serverId);
     } catch (e) {
-      showToast(describeOrchdError(e));
+      // The checkbox is controlled by `tool.enabled` (no optimistic flip), so on a rejection it
+      // simply stays at the server value — visually UNCHANGED. Without an explicit on-row signal
+      // the failure would be a silent no-flip plus a clobber-prone toast (J-01); surface it inline.
+      const message = describeWithRecovery(e);
+      setToggleError((prev) => ({ ...prev, [tool.id]: message }));
+      showToast(message);
     }
   }
 
@@ -169,7 +184,9 @@ export function ToolsBrowser(): JSX.Element {
         [tool.id]: { contentJson: res.contentJson, isError: res.isError },
       }));
     } catch (e) {
-      const message = describeOrchdError(e);
+      // A stale/URL-changed consent grant surfaces here as a `Consent` denial — append the recovery
+      // hint pointing at the Servers-tab connect flow (P-20), the only place consent is re-granted.
+      const message = describeWithRecovery(e);
       setCallError((prev) => ({ ...prev, [tool.id]: message }));
       showToast(message);
     }
@@ -213,6 +230,16 @@ export function ToolsBrowser(): JSX.Element {
                   {strings.ext.tools.enabled}
                 </label>
               </div>
+
+              {toggleError[tool.id] != null && (
+                <div
+                  role="alert"
+                  data-testid={`tool-toggle-error-${tool.id}`}
+                  style={inlineErrorStyle}
+                >
+                  {toggleError[tool.id]}
+                </div>
+              )}
 
               <details>
                 <summary style={{ fontSize: 11, color: theme.colors.textDim, cursor: "pointer" }}>

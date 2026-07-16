@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../store/store";
 import { getCommandEvents } from "../ipc/commands";
 import type { SessionId } from "../ipc/commands";
@@ -109,6 +109,18 @@ const emptyStyle: CSSProperties = {
   background: theme.colors.bgElevated,
 };
 
+const retryButtonStyle: CSSProperties = {
+  marginLeft: 8,
+  border: `1px solid ${theme.colors.border}`,
+  background: "transparent",
+  color: theme.colors.text,
+  cursor: "pointer",
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  borderRadius: 4,
+  padding: "1px 6px",
+};
+
 /**
  * Per-session command history strip (spec §6.3): the first honest consumer of the Pv2
  * `command_events` table. Fetches the active session's last `COMMAND_STRIP_LIMIT` events and
@@ -122,43 +134,80 @@ const emptyStyle: CSSProperties = {
  * itself (not just `sessionId`) is a correct and sufficient refetch trigger with no separate IPC
  * subscription needed here.
  *
- * Error handling (spec §7): a rejected `getCommandEvents` fires a toast and renders nothing (never
- * a silent blank AND never a raw error dump). An empty result (no events yet, or a session
- * rehydrated from before the v2 `command_events` table existed) is NOT an error — spec §7 calls
- * this out explicitly ("honest, not an error") — so it renders a calm dim placeholder instead.
+ * Error handling (spec §7, P-13): three honest, DISTINCT states before the strip itself —
+ * `loading` (the first `getCommandEvents` is still in flight: a calm "loading" placeholder, never
+ * the same copy as an empty result), `failed` (a rejected fetch: the toast fired AND an inline
+ * "failed — retry" affordance, instead of rendering null forever with no way to recover), and a
+ * genuinely-empty result (no events yet, or a session rehydrated from before the v2
+ * `command_events` table existed — spec §7 "honest, not an error", a calm dim placeholder).
  */
-export function CommandStrip(props: { sessionId: SessionId }): JSX.Element | null {
+export function CommandStrip(props: { sessionId: SessionId }): JSX.Element {
   const { sessionId } = props;
   const sessionMeta = useAppStore((s) => s.sessions[sessionId]);
   const showToast = useAppStore((s) => s.showToast);
 
   const [events, setEvents] = useState<CommandEvent[]>([]);
-  const [failed, setFailed] = useState(false);
+  const [status, setStatus] = useState<"loading" | "ready" | "failed">("loading");
   // Token guard (same pattern as FilePreview.tsx's `requestRef`): a fast lifecycle churn (or a
   // tab switch) can leave an earlier request resolving AFTER a later one; only the latest
   // request's own token may still apply its result.
   const requestRef = useRef(0);
 
-  useEffect(() => {
+  // Extracted so the [Retry] button (failed state, P-13) re-runs the exact same fetch as the
+  // mount/refetch effect — a genuine retry, not a page-level reload.
+  const load = useCallback(() => {
     const token = ++requestRef.current;
     // Clear synchronously so a session switch never flashes the PREVIOUS session's command
     // history while the new fetch is in flight (mirrors FilePreview's clear-on-selection-change).
     setEvents([]);
-    setFailed(false);
+    setStatus("loading");
     getCommandEvents(sessionId, COMMAND_STRIP_LIMIT)
       .then((evts) => {
         if (requestRef.current !== token) return;
         setEvents(evts);
+        setStatus("ready");
       })
       .catch(() => {
         if (requestRef.current !== token) return;
-        setFailed(true);
+        setStatus("failed");
         showToast(strings.terminal.loadHistoryFailed);
       });
-  }, [sessionId, sessionMeta, showToast]);
+  }, [sessionId, showToast]);
 
-  // An error already told the owner via the toast — no redundant inline error surface.
-  if (failed) return null;
+  useEffect(() => {
+    load();
+    // `sessionMeta` (not just `sessionId`) is a refetch trigger: `setLifecycle`/`markExited`
+    // replace the whole store entry with a fresh object even when the visible fields end up equal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load, sessionMeta]);
+
+  // The fetch failed — the toast already told the owner; offer an inline [Retry] rather than
+  // rendering null forever (P-13), which left the strip permanently blank with no recovery path.
+  if (status === "failed") {
+    return (
+      <div data-testid="command-strip-failed" style={emptyStyle}>
+        {strings.terminal.loadHistoryFailed}
+        <button
+          type="button"
+          data-testid="command-strip-retry"
+          onClick={() => load()}
+          style={retryButtonStyle}
+        >
+          {strings.common.retry}
+        </button>
+      </div>
+    );
+  }
+
+  // Still fetching the first result — a DISTINCT placeholder so an in-flight strip never reads as
+  // a genuinely empty one (P-13).
+  if (status === "loading") {
+    return (
+      <div data-testid="command-strip-loading" style={emptyStyle}>
+        {strings.terminal.loadingCommands}
+      </div>
+    );
+  }
 
   // Honest-state input for pairing (see `pairCommandEvents` above): a lone `started` on a session
   // that is no longer live must never render as a live "running" dot. `sessionMeta` can be

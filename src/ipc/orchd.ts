@@ -806,3 +806,23 @@ export function describeOrchdError(e: unknown): string {
   }
   return strings.errors.unknown;
 }
+
+/**
+ * `true` when `e` is a trust-choke-point `Consent` denial — i.e. a rejected `CommandError` whose
+ * `kind === "daemon"` and Debug-formatted `code === "Consent"` (the exact shape
+ * `describeOrchdError` reads above; `McpConnect`/`McpCallTool`/`ConnectorInvoke` reject with it when
+ * no valid consent grant exists yet for the server's current URL). The only recovery is
+ * `ConnectDialog`, which is reachable ONLY from the Servers tab — so callers append
+ * `strings.errors.consentRecovery` to the surfaced message pointing there (P-20), instead of
+ * dead-ending on a toast with no path forward.
+ */
+export function isConsentError(e: unknown): boolean {
+  return (
+    e !== null &&
+    typeof e === "object" &&
+    "kind" in e &&
+    (e as { kind: unknown }).kind === "daemon" &&
+    "code" in e &&
+    (e as { code: unknown }).code === "Consent"
+  );
+}

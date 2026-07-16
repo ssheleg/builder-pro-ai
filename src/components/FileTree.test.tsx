@@ -101,6 +101,36 @@ describe("FileTree", () => {
     expect(listDirMock).toHaveBeenCalledTimes(1);
   });
 
+  it("an expanded dir that loaded EMPTY shows a distinct 'empty folder' marker (P-12)", async () => {
+    listDirMock.mockResolvedValueOnce([]);
+    render(<FileTree workspace={ws} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("proj"));
+    });
+    expect(listDirMock).toHaveBeenCalledTimes(1);
+    const marker = screen.getByTestId("file-row-empty");
+    expect(marker.textContent).toContain(strings.files.emptyFolder);
+    // Loaded empty is NOT an error — no toast, and no lingering "Loading…" placeholder.
+    expect(useAppStore.getState().toast).toBeNull();
+    expect(screen.queryByText(strings.files.loading)).toBeNull();
+  });
+
+  it("a FAILED dir load keeps the loading placeholder + toasts — NOT the empty marker (P-12 distinctness)", async () => {
+    listDirMock.mockRejectedValueOnce({ kind: "notFound" });
+    render(<FileTree workspace={ws} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("proj"));
+      await Promise.resolve();
+    });
+    // A failed load must never masquerade as an empty directory.
+    expect(screen.queryByTestId("file-row-empty")).toBeNull();
+    expect(useAppStore.getState().toast).toBe(
+      strings.files.readFolderFailed(strings.errors.fs.notFound),
+    );
+  });
+
   it("(b) clearing a still-expanded dir's cache entry (simulating invalidation) triggers a refetch", async () => {
     const firstEntries: FsEntry[] = [
       { name: "a.txt", relPath: "a.txt", isDir: false, size: 3, isIgnored: false },

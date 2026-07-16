@@ -15,6 +15,31 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+/** Honest message for a rejected sessiond `CommandError` (`createWorkspace` — a sessiond
+ * round-trip, NOT an `orchd_*` call, `src-tauri/src/commands.rs::CommandError`). Mirrors
+ * `WorkspaceSidebar.tsx`'s identical helper so the two "add workspace" surfaces map the same error
+ * union the same way (P-17: the nested "+ create workspace" previously surfaced the raw
+ * `Error.message`, bypassing this mapper and localized fallback). */
+function describeCommandError(err: unknown): string {
+  const e = err as { kind?: string; message?: string; code?: string; reason?: string } | undefined;
+  switch (e?.kind) {
+    case "daemon":
+      return e.message ?? e.code ?? strings.errors.command.daemon;
+    case "disconnected":
+      return strings.errors.command.disconnected;
+    case "internal":
+      return e.message ?? strings.errors.command.internal;
+    case "incompatibleDaemon":
+      return strings.errors.command.incompatible;
+    case "upgradeFailed":
+      return e.reason ?? strings.errors.command.failed;
+    case "tooLarge":
+      return strings.errors.command.tooLarge;
+    default:
+      return err instanceof Error ? err.message : strings.project.createWorkspaceFailed;
+  }
+}
+
 /** Every workspace id linked to at least one project (spec §10) — the dialog's multi-select
  * offers only the complement (unlinked workspaces), matching `ProjectPanel`'s add-workspace
  * select and `WorkspaceSidebar`'s "No project" group. */
@@ -174,8 +199,9 @@ const inlineErrorStyle: CSSProperties = {
  * fix the input and retry, mirroring `UpgradeDialog`'s "stays open so the primary button can be
  * retried" contract. The toast is still fired too (belt-and-suspenders), but the inline alert is
  * the one that must never vanish. The sessiond `createWorkspace` failure path (not an `orchd_*`
- * call) reuses the same inline-alert surface with a lighter, non-`describeOrchdError` message since
- * that helper is documented as orchd-specific.
+ * call) reuses the same inline-alert surface, mapped through this file's `describeCommandError`
+ * (the sessiond `CommandError` union — NOT `describeOrchdError`, which is orchd-specific), so it
+ * shows an honest mapped message rather than a raw `Error.message` (P-17).
  */
 export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element {
   const { onClose } = props;
@@ -224,7 +250,9 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
       upsertWorkspace(ws);
       setSelectedIds((prev) => (prev.includes(ws.id) ? prev : [...prev, ws.id]));
     } catch (e) {
-      const message = e instanceof Error ? e.message : strings.project.createWorkspaceFailed;
+      // Map the sessiond `CommandError` through `describeCommandError` (P-17) rather than dumping a
+      // raw `e.message` — same honest, mapped surface `WorkspaceSidebar`'s "+ Add workspace" uses.
+      const message = describeCommandError(e);
       setCreateError(message);
       showToast(message);
     }

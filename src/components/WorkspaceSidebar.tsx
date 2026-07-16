@@ -209,6 +209,19 @@ export function WorkspaceSidebar(props: {
         </button>
 
         <div style={{ flex: 1, overflowY: "auto" }}>
+          {sortedProjects.length === 0 && list.length === 0 && (
+            <div
+              data-testid="sidebar-empty"
+              style={{
+                padding: "12px",
+                fontSize: 12,
+                lineHeight: 1.5,
+                color: theme.colors.textDim,
+              }}
+            >
+              {strings.chrome.sidebar.emptyState}
+            </div>
+          )}
           {sortedProjects.map((project) => {
             const projectWorkspaces = project.workspaceIds
               .map((id) => workspaces[id])
