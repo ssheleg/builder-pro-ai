@@ -64,13 +64,27 @@ where
         (server, bearer)
     };
     let server_id_owned = server.id.clone();
+    // (BL-89, spec D5): bound BOTH the connect/`initialize` handshake and the follow-up
+    // `list_tools` by `server.timeout_ms` — mirrors `invoke::call_tool`'s D12 wrap. Without this,
+    // the explicit `McpConnect` verb hangs this connection's dispatch task forever on a peer that
+    // accepts the socket but never answers (dead peer, silent firewall drop, overloaded stdio
+    // child), and since the app holds a single shared orchd connection that would wedge the whole
+    // pipeline. An elapsed handshake maps to the SAME `McpError::Timeout` the `tools/call` path
+    // produces.
+    let timeout = std::time::Duration::from_millis(server.timeout_ms.max(0) as u64);
 
     // ---- Phase 2: network. NO `Db`/`MutexGuard` reference is alive here. ----
-    let session = connect_fn(server, bearer)
-        .await
-        .map_err(OrchdMcpError::Mcp)?;
+    let session = match tokio::time::timeout(timeout, connect_fn(server, bearer)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(bpa_mcp::McpError::Timeout),
+    }
+    .map_err(OrchdMcpError::Mcp)?;
 
-    let tools = session.list_tools().await.map_err(OrchdMcpError::Mcp)?;
+    let tools = match tokio::time::timeout(timeout, session.list_tools()).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(bpa_mcp::McpError::Timeout),
+    }
+    .map_err(OrchdMcpError::Mcp)?;
     let protocol_version = session.protocol_version();
     let tool_count = tools.len() as i64;
 
@@ -449,6 +463,111 @@ mod tests {
             touched.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "connect_fn must not run: a grant for command A must not authorize spawning command B"
+        );
+    }
+
+    // ---- handshake timeout (BL-89, spec D5) ----
+
+    /// An http server with a short `timeout_ms`, so a never-resolving handshake trips the timeout
+    /// quickly. Consent is granted separately by the test so the trust gate lets it reach the
+    /// network step.
+    async fn add_server_with_timeout(db: &Arc<Mutex<Db>>, timeout_ms: i64) -> McpServerRow {
+        db.lock()
+            .await
+            .add_mcp_server(NewMcpServer {
+                name: "Prowl".to_string(),
+                transport: McpTransport::Http,
+                url: Some("https://example.com/mcp".to_string()),
+                command: None,
+                args: vec![],
+                env: Default::default(),
+                scope: McpScope::Global,
+                project_id: None,
+                auth_kind: McpAuthKind::None,
+                secret_ref: None,
+                account_id: None,
+                enabled: true,
+                timeout_ms,
+                max_retries: 2,
+            })
+            .unwrap()
+    }
+
+    /// A `ToolCaller` whose `list_tools()` never resolves — models a peer that completes the
+    /// connect handshake but then goes silent on the tool listing. `call_tool` is unreachable in
+    /// the connect path.
+    struct NeverListTools;
+
+    impl ToolCaller for NeverListTools {
+        async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
+            std::future::pending().await
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _args: serde_json::Value,
+        ) -> Result<bpa_mcp::McpToolResult, McpError> {
+            unreachable!("call_tool is not exercised by the connect path")
+        }
+
+        fn protocol_version(&self) -> String {
+            "2025-11-25".to_string()
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_times_out_when_connect_fn_never_resolves() {
+        let db = new_db();
+        let server = add_server_with_timeout(&db, 50).await;
+        db.lock()
+            .await
+            .grant_consent(&server.id, "connect", &server.url.clone().unwrap())
+            .unwrap();
+
+        // The peer accepts the connection but the handshake future never resolves.
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            std::future::pending::<Result<FakeSession, McpError>>()
+        };
+
+        // Outer guard: a regression that drops the timeout would hang HERE, not the whole suite.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connect(&db, &server.id, connect_fn),
+        )
+        .await
+        .expect("connect must return within the server timeout, not hang");
+
+        assert!(
+            matches!(result, Err(OrchdMcpError::Mcp(McpError::Timeout))),
+            "a never-resolving connect handshake must map to McpError::Timeout, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_times_out_when_list_tools_never_resolves() {
+        let db = new_db();
+        let server = add_server_with_timeout(&db, 50).await;
+        db.lock()
+            .await
+            .grant_consent(&server.id, "connect", &server.url.clone().unwrap())
+            .unwrap();
+
+        // The connect succeeds, but the session's list_tools() never returns.
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| async move {
+            Ok::<NeverListTools, McpError>(NeverListTools)
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connect(&db, &server.id, connect_fn),
+        )
+        .await
+        .expect("connect must return within the server timeout, not hang");
+
+        assert!(
+            matches!(result, Err(OrchdMcpError::Mcp(McpError::Timeout))),
+            "a never-resolving list_tools must map to McpError::Timeout, got {result:?}"
         );
     }
 }
