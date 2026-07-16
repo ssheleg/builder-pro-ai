@@ -203,6 +203,28 @@ everything else reuses shipped S3/S4/S-EXT verbs. Shipped `[0.7.0]`.
 | E2E — the roadmap DoD proof: idea → research → evaluated insight → task lands in the backlog, survives an orchd restart, WITHOUT the S6 agent org (§8) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 8, log prefix `[e2e-orchd] phase8 …`) |
 | E2E — boot-reconcile (D11 DoD): a run interrupted mid-flight (still `running` at shutdown, driven via a BLOCKING stub research server) reconciles to `failed{interrupted}` on the next boot, not a stuck `running` row (§8, D11) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 9, log prefix `[e2e-orchd] phase9 …`) |
 
+## S-POLISH contract rows (`docs/superpowers/plans/2026-07-16-s-polish.md`; objectives `…/specs/2026-07-16-s-polish-program-design.md`)
+
+Reliability + observability + English-only + Tier-2 feature completeness (P1–P4). Four net-new
+verbs (`GetStorageStatus`, `UnarchiveProject`, `GraphUpdateEdge`, `ConnectorListProviders`), all
+append-only (orchd stays `[1,1]`); no schema migration. Shipped `[0.8.0]`.
+
+| Contract (S-POLISH obj / BL) | Test (command) |
+|---|---|
+| McpConnect handshake timeout (BL-89, spec D5): a `connect_fn`/`list_tools` that never resolves makes `mcp::lifecycle::connect` return `McpError::Timeout` within `timeout_ms`, not a hang | `cargo test -p bpa-orchd --lib mcp::lifecycle::tests::connect_times_out_when_connect_fn_never_resolves mcp::lifecycle::tests::connect_times_out_when_list_tools_never_resolves` |
+| OAuth token-exchange timeout (BL-91, spec D5): the SSRF-guarded token-exchange client (`ssrf_guarded_http_client_with_timeout`, `redirect::Policy::none()` + a 30 s request timeout) is used by `complete_oauth`; the SSRF guard (which exercises that guarded client) is proven | `cargo test -p bpa-orchd --lib connectors::accounts::tests::complete_oauth_ssrf_guard_does_not_follow_token_endpoint_redirect` |
+| Import writes ruleset `.md` files only after `tx.commit()` (BL-90): a whole-store import that rolls back on a later PK collision leaves NO orphan ruleset file on disk | `cargo test -p bpa-orchd --lib export::tests::import_conflict_leaves_no_orphan_ruleset_file` |
+| Storage-degradation mode on the wire (BL-94, spec D3): `Db::open_with_outcome` reports `Clean` on a fresh DB and `RecoveredFromCorruption{quarantined_to}` on a corrupt one; `GetStorageStatus` returns `persistent` for a fresh daemon; the `orchd_storage_status` command round-trips + maps a daemon error | `cargo test -p bpa-orchd --lib persistence::tests::open_with_outcome_reports_clean_on_a_fresh_db persistence::tests::open_with_outcome_reports_recovery_on_a_corrupt_db` + `cargo test -p bpa-orchd --test dispatch_integration get_storage_status_reports_persistent_for_a_fresh_daemon` + `cargo test -p builder-pro-ai --lib commands::orchd_commands_over_stub_daemon::orchd_storage_status_round_trips_through_real_orchd_client commands::orchd_commands_over_stub_daemon::orchd_storage_status_error_response_becomes_command_error_daemon_end_to_end` |
+| Per-request completion tracing (O-6, spec D4): the dispatch wrapper emits a `verb`/`outcome`/`error_code`/`elapsed_ms` completion line and NEVER leaks a planted secret (args/body/token) into it | `cargo test -p bpa-orchd --test no_secrets_in_logs_tracing dispatch_emits_completion_trace_without_leaking_secrets` |
+| Project un-archive (O-3, closes BL-53): `Db::unarchive_project` flips `archived→active`, unknown id ⇒ `NotFound`, already-active ⇒ `Invariant`; the `UnarchiveProject` dispatch replies the active project + broadcasts `ProjectsChanged` (and broadcasts nothing on the `Invariant`); the `orchd_unarchive_project` command round-trips + maps the `Invariant` | `cargo test -p bpa-orchd --lib persistence::domain_tests::unarchive_project_sets_status_active persistence::domain_tests::unarchive_project_unknown_id_is_not_found persistence::domain_tests::unarchive_project_already_active_is_invariant` + `cargo test -p bpa-orchd --test dispatch_integration unarchive_project_returns_active_project_and_broadcasts_projects_changed unarchive_active_project_is_invariant_and_broadcasts_nothing` + `cargo test -p builder-pro-ai --lib commands::orchd_commands_over_stub_daemon::orchd_unarchive_project_round_trips_through_real_orchd_client commands::orchd_commands_over_stub_daemon::orchd_unarchive_project_invariant_error_becomes_command_error_daemon` |
+| Graph edge-kind editing (O-7): `graph::update_edge` changes an edge's kind, unknown id ⇒ `NotFound`, a duplicate `(source,target,kind)` ⇒ `Conflict`, either endpoint's project archived ⇒ `Invariant`; the `GraphUpdateEdge` dispatch replies the edge + broadcasts `GraphChanged` for BOTH endpoint projects (nothing on unknown id); the `orchd_graph_update_edge` command round-trips | `cargo test -p bpa-orchd --lib graph::tests::update_edge_changes_kind graph::tests::update_edge_unknown_id_is_not_found graph::tests::update_edge_to_a_kind_that_already_exists_between_the_same_endpoints_is_conflict graph::tests::update_edge_blocked_when_source_project_archived graph::tests::update_edge_blocked_when_target_project_archived` + `cargo test -p bpa-orchd --test dispatch_integration graph_update_edge_returns_edge_and_broadcasts_graph_changed_for_both_endpoint_projects graph_update_edge_unknown_id_is_not_found_and_broadcasts_nothing` + `cargo test -p builder-pro-ai --lib commands::orchd_commands_over_stub_daemon::orchd_graph_update_edge_round_trips_through_real_orchd_client` |
+| Config-backed OAuth provider registry (O-5): `load_oauth_providers` — missing file ⇒ empty registry (no error), valid file ⇒ every provider registered + retrievable, malformed/schema-mismatch/unknown-field ⇒ empty registry (daemon still boots), empty `{}` ⇒ valid empty; `ConnectorListProviders` returns names from the config file with NO secrets, empty when no file, and `ConnectorBeginOAuth` on an unregistered provider errors; a planted `client_secret` never reaches the log (the provider name does); the `connector_list_providers` command round-trips names | `cargo test -p bpa-orchd --lib connectors::registry_config::tests::missing_file_leaves_registry_empty_and_does_not_error connectors::registry_config::tests::valid_file_registers_every_provider_and_they_are_retrievable connectors::registry_config::tests::malformed_json_leaves_registry_empty_and_daemon_boots connectors::registry_config::tests::schema_mismatch_missing_required_field_is_treated_as_malformed connectors::registry_config::tests::unknown_field_typo_is_rejected_as_malformed connectors::registry_config::tests::empty_json_object_is_a_valid_empty_registry` + `cargo test -p bpa-orchd --test dispatch_integration connector_list_providers_returns_empty_when_no_config_file connector_list_providers_returns_names_from_config_file_no_secrets connector_begin_oauth_unregistered_provider_is_error_no_pending_challenge` + `cargo test -p bpa-orchd --test no_secrets_in_logs_connectors planted_client_secret_never_appears_in_logs_but_provider_name_does` + `cargo test -p builder-pro-ai --lib commands::orchd_commands_over_stub_daemon::connector_list_providers_round_trips_names_through_real_orchd_client` |
+| `bpa-orchd-proto`: every new request variant (`GetStorageStatus`/`UnarchiveProject`/`GraphUpdateEdge`/`ConnectorListProviders`) CBOR round-trips; `StorageStatus`/`StorageMode` + the graph-edge types are ts-rs-exported (camelCase, i64 as `number`); version space stays `[1,1]` | `cargo test -p bpa-orchd-proto --test roundtrip every_request_variant_roundtrips` + `cargo test -p bpa-orchd-proto --test ts_export storage_status_types_are_exported graph_node_and_edge_use_camelcase_fields_and_ts_number_timestamps` then `git diff --exit-code -- src/ipc/orchd-types.ts` |
+| `metric_refs` owner chip editor (O-4, pure frontend): `GoalTree` renders `metricRefs` as chips + an add input, dedupes an existing ref, and persists the full next array through the shipped `orchd_update_goal` | `npx vitest run src/components/GoalTree.test.tsx` |
+| Frontend reliability (P3): the `useSubmitGuard` double-fire lock; the `StorageBanner` degraded-mode alert; the reopenable `OrchdUpgradeBanner`; the archive/un-archive controls; the OAuth provider dropdown + empty-state (BL-92..97, O-3/O-5) | `npx vitest run src/hooks/useSubmitGuard.test.ts src/components/StorageBanner.test.tsx src/components/OrchdUpgradeBanner.test.tsx src/components/ProjectPanel.test.tsx src/components/WorkspaceSidebar.test.tsx src/components/ext/ConnectorsTab.test.tsx` |
+| Frontend: graph editor controls (O-7) — add-node title/body form, inline rename (local nodes), edge-kind dropdown; ghosts read-only; mutating controls disabled while `orchd://down` | `npx vitest run src/components/graph/GraphCanvas.test.tsx` |
+| English-only gate (O-2): no Cyrillic (`U+0400..U+04FF`) outside the frozen-record allowlist | `bash scripts/check-english.sh` (stage 1 of `scripts/final-suite.sh`) |
+
 ## Uncovered rows
 
 None in the S0+S1/S2/S3/S4 rows above — every §14.2 row (and every S2/S3/S4 contract row) resolves
@@ -214,9 +236,42 @@ regression test on BOTH daemons, and the durable-artifact e2e proof for both an 
 a connector invoke. **None in the S-IDEA section above either:** every S-IDEA contract row resolves
 to at least one real, currently-passing test — incl. the D11 boot-reconcile unit test AND its own
 e2e phase (a genuinely interrupted-mid-flight run, not just the happy-path survival phase), and the
-D12 connect-timeout regression test in the shipped S-EXT invoke path.
+D12 connect-timeout regression test in the shipped S-EXT invoke path. **None in the S-POLISH section
+above either:** every S-POLISH contract row (BL-89..97, O-2..O-7) resolves to at least one real,
+currently-passing test — the two connect/OAuth timeout regressions, the import-after-commit
+orphan-file test, the storage-mode wire + command round-trips, the completion-trace no-secrets test,
+the un-archive / `GraphUpdateEdge` / OAuth-registry unit + dispatch + command tests, and the
+frontend reliability + Tier-2 component suites; the English-only gate is itself a build stage.
 
-## Test totals — current (S-IDEA, `[0.7.0]`, 2026-07-16)
+## Test totals — current (S-POLISH, `[0.8.0]`, 2026-07-17)
+
+- Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **1062 tests**, 0 failed —
+  measured this pass via `cargo test --workspace -- --list | grep -c ': test$'` → 1062. Delta vs.
+  the prior S-IDEA pass (1023): **+39**, entirely inside the S-POLISH surface — `bpa-orchd` (the
+  un-archive persistence + dispatch tests, the `graph::update_edge` unit + dispatch tests, the
+  `connectors::registry_config` loader tests + the `ConnectorListProviders` dispatch tests, the
+  `open_with_outcome`/`GetStorageStatus` storage-mode tests, and the new
+  `no_secrets_in_logs_tracing`/extended `no_secrets_in_logs_connectors` integration tests),
+  `bpa-orchd-proto` (the four new append-only request variants in `every_request_variant_roundtrips`
+  + the `storage_status_types_are_exported` ts-rs check), and `builder-pro-ai` (the
+  `orchd_unarchive_project`/`orchd_graph_update_edge`/`orchd_storage_status`/`connector_list_providers`
+  command round-trips). No wire version bump (orchd stays `[1,1]`); no schema migration. Re-run
+  `cargo test --workspace -- --list | grep -c ': test$'` yourself for the current per-crate
+  breakdown.
+- TypeScript (`npx vitest run`): **870 tests**, **51 test files**, 0 failed (freshly re-measured this
+  pass). Delta vs. the prior S-IDEA pass (772, 47 files): **+98 tests, +4 files** — the four new
+  files are `src/hooks/useSubmitGuard.test.ts` (double-fire guard), `src/components/StorageBanner.test.tsx`
+  (degraded-mode alert), `src/components/OrchdUpgradeBanner.test.tsx` (reopenable upgrade banner), and
+  `src/strings.test.ts` (the English `strings.ts` centralization, O-2); the remaining growth is inside
+  existing suites — archive/un-archive (`ProjectPanel`/`WorkspaceSidebar`), `metric_refs` (`GoalTree`),
+  graph-editor (`GraphCanvas`), provider-dropdown (`ext/ConnectorsTab`), and the Tier-3
+  empty/loading/failed coverage.
+- E2E: `npm run e2e:survive` and `npm run e2e:orchd` unchanged by S-POLISH (P1–P4 add no new e2e
+  phase — the reliability + feature work is covered by unit/integration/component tests above); both
+  stay green. `scripts/final-suite.sh` is now **10 stages** (the English-only gate
+  `scripts/check-english.sh` added as stage 1, ahead of the Rust suite).
+
+## Test totals — historical (S-IDEA, `[0.7.0]`, 2026-07-16) — superseded above
 
 - Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **1023 tests**, 0 failed
   (freshly re-measured this pass, incl. a full clean run of `bash scripts/final-suite.sh` — every

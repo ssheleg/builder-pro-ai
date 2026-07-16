@@ -1,5 +1,42 @@
 # UX-инвестигейт — единый отчёт (фаза 2)
 
+> **Remediated in S-POLISH `[0.8.0]` (2026-07-17) — English addendum.** This report is a FROZEN
+> pre-S-POLISH investigation record (kept verbatim, Cyrillic and all, in the English-only
+> allowlist). The findings it prioritised were remediated in the S-POLISH program
+> (`docs/superpowers/plans/2026-07-16-s-polish.md`) and shipped in `[0.8.0]`. Mapping to the
+> closing backlog rows (`docs/backlog.md`) and fixes:
+>
+> - **F-03 / B-01 (Critical, `McpConnect` no timeout) → BL-89** — connect + `list_tools` bounded by
+>   `timeout_ms` (P1, commit 1f28536).
+> - **C-07 / B-07 (import writes files before commit) → BL-90** — files staged, applied after
+>   `tx.commit()`; no orphan on rollback (P1, commit 4c49642).
+> - **J-05 / B-02 (OAuth token-exchange no timeout) → BL-91** — `.timeout(30s)` on the SSRF-guarded
+>   client, now reachable via the O-5 provider registry (P1, commit c234511).
+> - **A-08 / A-09 (silent DB-degradation modes) → BL-94** — storage mode surfaced on the wire
+>   (`GetStorageStatus`) + a persistent `StorageBanner` (P1 + P3, commits 48742d2 + 9ea6cdd).
+> - **K-02 / F-10 / F-11 / P-24 (incomplete reconnect rehydration; runs never self-refresh) →
+>   BL-92** — `onOrchdUp` refetches every live slice + `ResearchPane` self-polls (P3, commit 9ea6cdd).
+> - **P-01 / P-02 / P-03 / B-05 / B-06 (silent no-op triad + zombie terminal tab) → BL-93** —
+>   try/catch toasts + dispose-and-remove on close (P3, commit 0fdee94).
+> - **E-07 / P-09 / G-08 / P-19 + E-08 / F-08 / H-01 / J-03..05 (partial-failure + no double-submit
+>   guard) → BL-95** — `useSubmitGuard` on every mutating submit + resume-from-failed-step (P3,
+>   commit 0fdee94).
+> - **A-10 (cancelled orchd-upgrade dead-end) → BL-96** — reopenable `OrchdUpgradeBanner` (P3,
+>   commit 9ea6cdd).
+> - **K-01 / P-21 (single-slot clobbering toast, dead `dismissToast`) → BL-97** — FIFO toast queue +
+>   wired close button (P3, commit 9ea6cdd).
+> - **Tier-3 UX gaps (P-11..P-15 empty/loading/failed states; P-27 rejected-edit revert; J-01 on-row
+>   error; P-20 consent-recovery hint; P-16/P-17 `describeError` union match)** — addressed in the P3
+>   Tier-3 polish pass (commit 21258d6); see `docs/frontend-conventions.md` "Frontend reliability".
+> - **Feature-completeness gaps** — C-08 (archive UI reachability) is resolved by the **O-3**
+>   archive/un-archive controls (commit 64618d7); the goal `metric_refs` editor (**O-4**, 1c8c701),
+>   the graph node/rename/edge-kind editor (**O-7**, fe43412), and the OAuth provider dropdown
+>   (**O-5**, ce2fb0f) close the remaining Tier-2 UI gaps.
+>
+> The many remaining 🟡 UX-GAP items not listed above stay OPEN as tracked polish (they were scoped
+> out of S-POLISH); this addendum only records what `[0.8.0]` actually fixed. The Russian text below
+> is unchanged.
+
 > Заполняется циклом глубокой проверки по каталогу `docs/qa/ux-first-session-scenarios.md`.
 > Один сценарий = одна секция ниже + отметка в чек-листе. Цикл идёт, пока есть ⬜.
 

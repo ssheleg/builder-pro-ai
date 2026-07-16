@@ -730,6 +730,59 @@ wrapper per layer rather than a per-arm edit, adding a verb needs no tracing cha
 `verb_name` match is the only place a new verb touches. Field-level operational detail is in
 `docs/runbook-orchd.md` ("Per-request tracing fields").
 
+## Tier-2 feature completeness — SHIPPED in S-POLISH (P4)
+
+S-POLISH P4 (`docs/superpowers/plans/2026-07-16-s-polish.md`) closes four Tier-2 gaps the earlier
+slices had deliberately left half-built. All four are ADDITIVE — three new wire verbs appended at
+the TAIL of `bpa-orchd-proto`'s frozen enums (the orchd version space stays `[1,1]`, same
+append-only discipline S-EXT/S-IDEA used) and one pure-frontend feature that reuses a shipped verb.
+No schema migration: none of the four adds or alters a column.
+
+**Project un-archive (O-3, closes BL-53):** S3 shipped `ArchiveProject` with no inverse — an
+archived project was a one-way trap. P4 adds the exact reverse, `Db::unarchive_project`
+(`crates/orchd/src/persistence.rs`) + the append-only wire verb `UnarchiveProject { id } ->
+OrchdResponse::Project` that flips `archived → active` and pushes `ProjectsChanged`. Its guards
+MIRROR `ArchiveProject`'s: an unknown `id` ⇒ `NotFound`; an already-`active` project ⇒ `Invariant`
+(nothing to un-archive — the mirror of `ArchiveProject`'s already-archived `Invariant`). The Tauri
+core exposes it as `orchd_unarchive_project`. Frontend controls (an «Archived (N)» collapsed group
+in the sidebar, an archived-project read-only banner + «Un-archive» button) are in
+`docs/frontend-conventions.md`.
+
+**Graph edge-kind editing + node/rename editor (O-7):** S4's graph canvas could add and delete
+edges but never RE-KIND an existing one, and had no node title/body form or rename. P4 adds the
+append-only wire verb `GraphUpdateEdge { id, kind } -> OrchdResponse::GraphEdge`
+(`crates/orchd/src/graph.rs`) — an edge's rendered "label" IS its `kind`, so changing the kind is
+the whole edit; there is no separate label column and therefore **no v5 migration**. It pushes
+`GraphChanged` for BOTH endpoint projects (a cross-project edge re-kind invalidates both sides,
+same fan-out rule as `GraphAddEdge`); an unknown `id` ⇒ `NotFound`; an archived endpoint project ⇒
+`Invariant` — guards mirroring `GraphAddEdge`. Node add (title/body form) and inline rename reuse
+the ALREADY-shipped S4 `GraphAddNode`/`GraphUpdateNode` verbs (no new wire for those two); the
+editor UI is in `docs/frontend-conventions.md`. The Tauri core exposes `orchd_graph_update_edge`.
+
+**Config-backed OAuth provider registry (O-5):** before P4, `bpa-orchd` booted with an EMPTY OAuth
+provider registry, so every `ConnectorBeginOAuth` failed with `UnknownProvider` and the BL-91
+token-exchange timeout (P1) sat on an unreachable path. P4 adds the "real IdP config" seam: at boot
+(`boot::run`) `connectors/registry_config.rs::load_oauth_providers` reads an OPTIONAL
+`<app-support>/oauth_providers.json` and registers every provider it declares into
+`ConnectorsState`'s in-memory registry — activating the P1 timeout on a now-reachable path. Honest
+degradation matches `boot::open_db_degrading`/`ensure_global_ruleset`: a MISSING file is the normal
+default (info-logged, empty registry, boot proceeds); a MALFORMED file (bad JSON, a missing
+required field, or a typo'd key — `deny_unknown_fields`) is error-logged and leaves the registry
+empty; NEITHER case blocks boot. A new append-only read verb `ConnectorListProviders ->
+OrchdResponse::ConnectorProviders` returns the provider NAMES ONLY — a provider's
+`client_id`/`client_secret`/endpoint URLs NEVER cross the wire, and `client_secret` lives only in
+memory, never in `orchd.db` and never in a log (the boot line logs only the provider count +
+names). The Tauri core exposes `orchd_connector_list_providers`; the UI's provider dropdown +
+honest empty-state is in `docs/frontend-conventions.md`. File format, shape, and the degradation
+table are in `docs/runbook-orchd.md` ("OAuth provider registry — `oauth_providers.json`").
+
+**`metric_refs` owner editor (O-4) — pure frontend, no new wire:** the `Goal.metric_refs` field
+and the `UpdateGoal` verb that carries it BOTH already shipped in S3; P4 only builds the missing
+owner-facing editor (a chip editor on each goal row, `src/components/GoalTree.tsx`), which persists
+the row's full next `metric_refs` array through the existing `orchd_update_goal` command — no
+schema change, no new verb, no backend change at all. Detail is in
+`docs/frontend-conventions.md`.
+
 ## Resource envelope (per session)
 
 Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live

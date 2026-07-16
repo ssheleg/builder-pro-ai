@@ -215,6 +215,48 @@ replace, the honest-degradation discipline above.
   keep an identical local `describeCommandError` copy (same independently-deployable-per-surface
   rationale as `describeFsError`).
 
+## Tier-2 feature controls (S-POLISH P4)
+
+The four owner-facing controls S-POLISH P4 added (O-3/O-4/O-5/O-7, spec D7 — see
+`docs/superpowers/plans/2026-07-16-s-polish.md`). Each obeys the honest-degradation +
+`useSubmitGuard` disciplines above; the notes here are the P4-specific shape only.
+
+- **Archive / un-archive controls (O-3):** a project is no longer a one-way archive trap. The
+  sidebar (`WorkspaceSidebar.tsx`) renders a collapsed, dimmed «Archived (N)» group below the active
+  project groups (copy `strings.sidebar.archivedGroup`), toggled by a disclosure header. An archived
+  project's Overview (`ProjectPanel.tsx`) shows a read-only `role="status"` banner
+  (`strings.project.archivedBanner`, "This project is archived and read-only. Un-archive it to make
+  changes.") with an «Un-archive» button calling `orchdUnarchiveProject`; the «Archive» control
+  confirms first (`strings.project.archiveConfirm`). Both mutating buttons are
+  `disabled={orchdDown || submitting}` and route through `useSubmitGuard`. Every OTHER mutating
+  control inside an archived project stays disabled by the existing archived-project guard — the
+  banner is the honest signal for WHY, not a new disable path.
+- **`metric_refs` chip editor (O-4):** each `GoalTree` row (`GoalRow`) renders `goal.metricRefs` as
+  a chip list plus an add input (`strings.goal.addMetricPlaceholder` = "+ metric"), persisting the
+  row's FULL next array via `onMetricRefsChange → orchdUpdateGoal` (the shipped verb — no new IPC
+  wrapper). It follows the SAME "chips render straight off the store value, no local optimistic copy"
+  model as the row's title edit, so a rejected save simply leaves the store value on screen (the
+  chips never diverge); an add of an already-present ref is deduped client-side to skip a redundant
+  round-trip. Each chip has a remove affordance (`strings.goal.removeMetricAria(ref)`). Disabled
+  while `orchdDown`.
+- **Graph editor — node form / inline rename / edge kind (O-7):** the S4 `GraphCanvas` toolbar gains
+  an add-node FORM (title + optional body inputs → `graphAddNode`, `strings.graph.addNode`), a
+  LOCAL-node inline rename (double-click a local node → an inline title/body editor →
+  `graphUpdateNode`, with Save/Cancel — `strings.graph.renameAria`), and edge-kind editing (select an
+  edge → a kind dropdown, `strings.graph.edgeKindAria`, → the new `graphUpdateEdge`; an edge's
+  rendered label IS its kind). Only LOCAL nodes/edges are editable — a cross-project ghost node/edge
+  stays read-only (its edit belongs to its own project's canvas), consistent with S4's ghost-styling
+  rule. Every mutating control is `disabled` while `orchd://down`; the search input stays live (a
+  read).
+- **OAuth provider dropdown + honest empty-state (O-5):** `ConnectorsTab.tsx`'s OAuth-begin flow
+  replaces the old free-text provider field with a `<select>` (`strings.ext.connectors.oauthProviderAria`)
+  populated once from `connectorListProviders()`. When the config-backed registry is empty the tab
+  shows the honest empty-state `strings.ext.connectors.noProviders` ("No OAuth providers configured
+  — add one in oauth_providers.json (see runbook).") and the «begin OAuth» button stays disabled —
+  never a dead dropdown that silently fails on submit. Provider NAMES only reach the UI (the backend
+  never sends a `client_id`/secret/URL). The «add API key» path is unaffected — it needs no provider
+  registry. Disabled (like every ext mutating control) while `orchdDown`.
+
 ## Testing contract (per frontend slice)
 
 Three layers, all required:

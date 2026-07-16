@@ -11,7 +11,7 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI). Ships as a universal m
 
 ## Status
 
-**S0+S1+Pv2+S2+S3+S4+S-EXT+S-IDEA implemented.** The foundation slice, the terminal core
+**S0+S1+Pv2+S2+S3+S4+S-EXT+S-IDEA+S-POLISH implemented.** The foundation slice, the terminal core
 (daemon-owned PTYs, OSC-driven status, sanitized scrollback replay, SQLite persistence,
 launchd-supervised survival), Protocol v2 (CBOR wire, version negotiation, multi-subscriber
 attach), S2 (multi-root workspaces, a core-owned file explorer + read-only preview + live watch,
@@ -25,10 +25,15 @@ network egress + macOS Keychain surface, gated by a trust layer of consent/allow
 audit), and S-IDEA (a research pipeline in that same `bpa-orchd` daemon — the idea→research→
 insight→task loop: `research_run` schema v4, orchd's first long-lived background run driver with
 boot-reconcile of interrupted runs, and the frontend flow that stitches ideas, MCP research, the
-knowledge graph, and the task backlog into one loop, WITHOUT the S6 agent org) are done, tested,
-and documented. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this
-implementation is derived from and [`docs/traceability.md`](docs/traceability.md) for the
-contract → test matrix.
+knowledge graph, and the task backlog into one loop, WITHOUT the S6 agent org), and S-POLISH (a
+reliability + honesty + Tier-2-completeness consolidation slice, `[0.8.0]`: connect/OAuth
+hang-forever timeouts, storage-degradation honestly surfaced on the wire + a banner, per-verb
+structured tracing, a full **English-only** sweep enforced by a CI no-Cyrillic gate, frontend
+reliability across every mutating/read surface, and four closed feature gaps — project un-archive,
+a `metric_refs` editor, a fully editable graph, and a config-backed OAuth provider registry) are
+done, tested, and documented. **The app UI is English.** See
+[`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this implementation is derived
+from and [`docs/traceability.md`](docs/traceability.md) for the contract → test matrix.
 
 - **Platform overview & roadmap:** [`2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md)
 - **S0+S1 spec:** [`2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
@@ -144,6 +149,25 @@ contract → test matrix.
   → «To backlog» forms a task. `SpawnProjectFromIdea` closes BL-56 (spawn-project-from-idea UI, an
   S3-deferred flow) — pure frontend orchestration over existing verbs, no new orchd verb. Every
   mutating control disabled while `orchdDown`.
+- **English-only UI + a CI-enforced gate (S-POLISH, O-2):** every webview string routes through
+  `src/strings.ts` (English) and every living doc is English; `scripts/check-english.sh` fails the
+  build on any Cyrillic outside a closed frozen-record allowlist (stage 1 of `final-suite.sh`).
+- **Reliability + honesty (S-POLISH, BL-89..97):** `McpConnect` + OAuth token-exchange are now
+  timeout-bounded (no single hung endpoint can wedge orchd's sequential dispatch); import writes
+  ruleset files only after commit (no orphan on rollback); a `StorageBanner` honestly surfaces the
+  two non-persistent storage modes (in-memory fallback / recovered-from-corruption) the wire now
+  carries via `GetStorageStatus`; `useSubmitGuard` kills double-submits on every mutating control;
+  toasts are a FIFO queue with manual dismiss; reconnect rehydrates every live slice; and a
+  cancelled orchd upgrade is reopenable. Per-verb structured completion tracing
+  (`verb`/`outcome`/`error_code`/`elapsed_ms`, no secrets) is added at one choke-point per dispatch
+  layer.
+- **Tier-2 feature completeness (S-POLISH):** project **un-archive** (`UnarchiveProject` — no more
+  one-way archive trap, closes BL-53) with sidebar/banner controls; a **`metric_refs` chip editor**
+  on goals; a fully **editable knowledge graph** (a `GraphUpdateEdge` edge-kind verb + a node
+  title/body form + inline rename); and a **config-backed OAuth provider registry**
+  (`<app-support>/oauth_providers.json`, honest missing/malformed degradation, provider names only
+  on the wire via `ConnectorListProviders`) that makes the OAuth connector flow reachable. All
+  additive — orchd's wire version space stays `[1,1]`; no schema migration.
 
 ## Principles
 
@@ -271,12 +295,12 @@ bash scripts/build-universal.sh
 
 | Suite | Command | What it covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | three daemons/daemon-adjacent crates (`bpa-sessiond`, `bpa-orchd`, `bpa-daemon-core`), the MCP client + Keychain wrapper (`bpa-mcp`, `bpa-secrets`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **1023 tests** as of the last full run (S-IDEA, `[0.7.0]`), 0 failed. A handful of `bpa-orchd`/`bpa-secrets` tests touch the real macOS Keychain (connector/MCP-bearer round-trips) and can hit a one-time ACL-prompt stall on a fully headless runner with no prior Keychain interaction in that session — a pre-existing S-EXT-era environment quirk, not a code defect; CI's keychain-unlock step (S-EXT T19) covers it, and this run completed clean end-to-end with no stall |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`/`researchRunsByIdea`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`/the `ext/` «Extensions» components/the `idea/` research-flow components) — **772 tests, 47 files** (S-IDEA, `[0.7.0]`), 0 failed |
+| Rust workspace | `cargo test --workspace` | three daemons/daemon-adjacent crates (`bpa-sessiond`, `bpa-orchd`, `bpa-daemon-core`), the MCP client + Keychain wrapper (`bpa-mcp`, `bpa-secrets`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **1062 tests** as of the last full run (S-POLISH, `[0.8.0]`), 0 failed. A handful of `bpa-orchd`/`bpa-secrets` tests touch the real macOS Keychain (connector/MCP-bearer round-trips) and can hit a one-time ACL-prompt stall on a fully headless runner with no prior Keychain interaction in that session — a pre-existing S-EXT-era environment quirk, not a code defect; CI's keychain-unlock step (S-EXT T19) covers it |
+| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`/`researchRunsByIdea`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), the `useSubmitGuard` double-submit hook, components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`/`StorageBanner`/`OrchdUpgradeBanner`/the `ext/` «Extensions» components/the `idea/` research-flow components), and the English `strings.ts` centralization — **870 tests, 51 files** (S-POLISH, `[0.8.0]`), 0 failed |
 | End-to-end (sessiond) | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
 | End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof); phase 5 creates two projects + a cross-project graph edge, restarts the daemon, and asserts the edge survives on both projects' sides (S4 spec §8 DoD proof); phase 6 registers a local stub MCP server, connects, calls a tool, restarts, and asserts the artifact survived (S-EXT spec §9 Phase-1 DoD); phase 7 does the connector-invoke analogue against a local stub, gracefully skipping on a Keychain-unavailable runner (S-EXT spec §9 Phase-2 DoD); phase 8 (S-IDEA) drives the whole idea→research→insight→task loop against a local stub research server, restarts the daemon, and asserts every row survives (S-IDEA spec §8, the roadmap DoD proof); phase 9 (S-IDEA) starts a run against a BLOCKING stub, shuts the daemon down mid-run, and asserts boot-reconcile flips it to `failed{interrupted}` on restart (S-IDEA spec D11) |
 | Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — real, enforcing ≥80% line-coverage gates on BOTH daemon crates (requires `cargo install cargo-llvm-cov`) |
-| Everything, in order | `bash scripts/final-suite.sh` | 9 stages: Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff (`bpa-protocol` + `bpa-orchd-proto`) → coverage gate (both daemons) → e2e:survive → e2e:orchd; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) / [`docs/runbook-orchd.md`](docs/runbook-orchd.md) |
+| Everything, in order | `bash scripts/final-suite.sh` | 10 stages: English-only gate (`scripts/check-english.sh` — no Cyrillic outside the frozen-record allowlist) → Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff (`bpa-protocol` + `bpa-orchd-proto`) → coverage gate (both daemons) → e2e:survive → e2e:orchd; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) / [`docs/runbook-orchd.md`](docs/runbook-orchd.md) |
 
 See [`docs/traceability.md`](docs/traceability.md) for the full contract → test matrix (every
 locked spec §14.2 contract mapped to the concrete test(s) proving it), and

@@ -2,24 +2,32 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
-## [Unreleased]
+## [0.8.0] — 2026-07-17
 
-S-POLISH Phase P1 — backend reliability + observability (Rust only; no frontend, no wire version
-bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-16-s-polish.md`.
+**S-POLISH — reliability, honesty, English-only, and Tier-2 feature completeness (P1–P4).** A
+consolidation slice: backend reliability + observability (P1), a full English-only sweep with a
+CI-enforced no-Cyrillic gate (P2), frontend reliability across every mutating/read surface (P3),
+and four Tier-2 feature gaps closed (P4). **No wire version bump** — `bpa-orchd` stays `[1,1]`; the
+four net-new verbs (`GetStorageStatus`, `UnarchiveProject`, `GraphUpdateEdge`,
+`ConnectorListProviders`) are all appended at the enum TAIL (append-only), and no schema migration
+lands. Closes BL-89..97 and objectives O-2..O-7 (plus BL-53, the un-archive verb). See
+`docs/superpowers/plans/2026-07-16-s-polish.md`.
 
 ### Added
-- **Storage-degradation mode on the wire (BL-94 backend, spec D3):** `bpa-orchd` already degraded
-  honestly to an in-memory DB on an unusable disk and quarantined a corrupt on-disk image aside,
-  but the resulting mode was invisible to the GUI (which kept implying data was durable). New:
-  `Db::open_with_outcome(path) -> Result<(Db, DbOpenOutcome)>` (`Clean` /
-  `RecoveredFromCorruption{quarantined_to}`; the existing `Db::open` delegates + discards);
-  `boot::open_db_degrading` maps the outcome to a `StorageStatus { storage_mode, quarantined_path }`
-  (`StorageMode` = `persistent` / `recovered_from_corruption` / `in_memory_fallback`) stored in
-  `ServerDeps` at boot; an append-only `GetStorageStatus -> StorageStatus` wire verb returns it
-  verbatim (a pure read, no push — the mode is a boot fact only a restart changes); and a
-  `orchd_storage_status` Tauri command exposes it, pulled on connect and every reconnect. The honest
-  degraded-storage banner that consumes it is P3 (BL-94 frontend); this ships the backend + wire.
-  Documented in `docs/runbook-orchd.md` ("Storage-degradation modes") and `docs/architecture.md`.
+- **Storage-degradation mode on the wire + honest banner (BL-94, spec D3):** `bpa-orchd` already
+  degraded honestly to an in-memory DB on an unusable disk and quarantined a corrupt on-disk image
+  aside, but the resulting mode was invisible to the GUI (which kept implying data was durable). P1
+  plumbs the boot fact to the frontend: `Db::open_with_outcome(path) -> Result<(Db, DbOpenOutcome)>`
+  (`Clean` / `RecoveredFromCorruption{quarantined_to}`; the existing `Db::open` delegates +
+  discards); `boot::open_db_degrading` maps the outcome to a `StorageStatus { storage_mode,
+  quarantined_path }` (`StorageMode` = `persistent` / `recovered_from_corruption` /
+  `in_memory_fallback`) stored in `ServerDeps` at boot; an append-only `GetStorageStatus ->
+  StorageStatus` wire verb returns it verbatim (a pure read, no push — the mode is a boot fact only
+  a restart changes); the `orchd_storage_status` Tauri command exposes it. P3 consumes it in a
+  `StorageBanner` (`src/components/StorageBanner.tsx`) — a persistent red-accent `role="alert"` for
+  `in_memory_fallback` ("changes will NOT survive a restart") and `recovered_from_corruption` (names
+  the quarantined path), pulled on connect + every reconnect; `persistent` shows nothing. Copy in
+  `strings.storage.*`; ops detail in `docs/runbook-orchd.md` ("Storage-degradation modes").
 - **Structured per-request completion tracing (O-6, spec D4):** each dispatch layer wraps its
   dispatch call ONCE and emits a single completion line carrying only a low-cardinality quartet —
   `verb` / `outcome` (`ok`/`err`) / `error_code` (error lines only) / `elapsed_ms` — with no
@@ -28,34 +36,14 @@ bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-
   the Tauri core's `orchd_client::request`, and `bpa-sessiond`'s dispatch wrapper, so a request is
   followed end-to-end (core → daemon) by the same field names. NO args, bodies, tokens, tool
   output, ids, or PII are ever logged — enforced by the extended `no_secrets_in_logs*` tests.
-  Documented in `docs/runbook-orchd.md` ("Per-request tracing fields") and `docs/architecture.md`.
-
-### Fixed
-- **McpConnect handshake timeout (BL-89, spec D5):** `mcp/lifecycle.rs::connect` previously awaited
-  `connect_fn(...)` and `session.list_tools()` unbounded — a peer that accepts the connection but
-  never completes the handshake hung the calling task forever. Both awaits are now bounded by the
-  per-server `timeout_ms` (`OrchdMcpError::Mcp(McpError::Timeout)` on elapse), keeping the existing
-  trust-gate-before-network ordering and the no-DB-lock-across-await property intact.
-- **OAuth token-exchange timeout (BL-91, spec D5):** the SSRF-guarded token-exchange HTTP client in
-  `connectors/accounts.rs` had no request timeout, so a never-answering token endpoint could hang
-  an OAuth exchange indefinitely. Added `.timeout(Duration::from_secs(30))` (matching
-  `GenericRestAdapter`), keeping `redirect::Policy::none()` + the SSRF guard.
-- **Import writes ruleset files only after commit (BL-90):** a whole-store `ImportBundle` that
-  failed partway (e.g. a later project colliding on id, rolling the DB transaction back) previously
-  left an orphan ruleset `.md` file on disk from an earlier project. The file writes are now
-  performed only after `tx.commit()` succeeds, so a rolled-back import leaves NO orphan file; the
-  `app_support`/path-traversal validation is unchanged.
-
-S-POLISH Phase P2 — English-only UI + docs (O-2, spec D1/D2). No behavior change: every webview
-string routed through `src/strings.ts` (English), Rust-side user-facing strings/templates
-translated in place, and the `scripts/check-english.sh` gate (Cyrillic-outside-allowlist → fail)
-wired into `scripts/final-suite.sh` + CI.
-
-S-POLISH Phase P3 — frontend reliability (React/TS; no wire version bump). Consumes P1's
-`orchd_storage_status`. See `docs/superpowers/plans/2026-07-16-s-polish.md` and the new
-"Frontend reliability (S-POLISH P3)" section in `docs/frontend-conventions.md`.
-
-### Added
+  Documented in `docs/runbook-orchd.md` ("Per-request tracing fields").
+- **English-only UI + docs + a CI-enforced no-Cyrillic gate (O-2, spec D1/D2):** every webview
+  string routed through `src/strings.ts` (English), Rust-side user-facing strings/templates
+  translated in place, and the living docs translated. A new gate `scripts/check-english.sh` fails
+  the build on any Cyrillic (`U+0400..U+04FF`) outside a CLOSED `scripts/english-allowlist.txt` of
+  frozen historical records (superseded specs/plans/qa/research), wired as stage 1 of
+  `scripts/final-suite.sh` and into CI. `CONTRIBUTING.md` gains the standing English-only rule; a
+  reset-DB runbook step is documented. The app is now English.
 - **Double-submit guard on every mutating submit (`useSubmitGuard`, BL-95/spec D6):** a shared hook
   (`src/hooks/useSubmitGuard.ts`) whose `guard(handler)` runs at most one invocation at a time (a
   synchronous `useRef` lock, not the batched `submitting` state) and whose `submitting` flag drives
@@ -64,11 +52,6 @@ S-POLISH Phase P3 — frontend reliability (React/TS; no wire version bump). Con
   Ideas/Tasks/Goals create-forms, the Servers/Connectors/Skills add-forms, the log's set-policy),
   killing the duplicate-row / duplicate-external-call / duplicate-spend double-fire (P-19,
   E-08/F-08/G-08/H-01/J-03..05).
-- **Honest storage-degradation banner (`StorageBanner`, BL-94 frontend/spec D3):** reads P1's
-  `orchd_storage_status` (pulled on connect + every reconnect) and shows a persistent red-accent
-  `role="alert"` for `in_memory_fallback` ("changes will NOT survive a restart") and
-  `recovered_from_corruption` (names the quarantined path); `persistent` shows nothing. Copy in
-  `strings.storage.*`.
 - **Toast FIFO queue with manual dismiss (BL-97/spec D8):** `showToast` now APPENDS to a capped-at-5
   queue instead of clobbering a single slot, so a burst of failures is shown in turn; the visible
   toast auto-advances after 4s and can be closed early via a new close button (`dismissToast`), with
@@ -83,8 +66,71 @@ S-POLISH Phase P3 — frontend reliability (React/TS; no wire version bump). Con
   shows an on-row error on failure (not just a toast, J-01); and a `Consent`-kind denial in
   `ToolsBrowser`/`ConnectorsTab` appends a recovery hint pointing to Extensions → Servers → Connect
   (P-20).
+- **Project un-archive (O-3, closes BL-53):** S3 shipped `ArchiveProject` with no inverse — an
+  archived project was a one-way trap. New append-only verb `UnarchiveProject { id } -> Project`
+  (`Db::unarchive_project`) flips `archived → active` and pushes `ProjectsChanged`; guards mirror
+  `ArchiveProject` (unknown `id` ⇒ `NotFound`; already-`active` ⇒ `Invariant`). Exposed as the
+  `orchd_unarchive_project` command. Frontend: a collapsed dimmed «Archived (N)» sidebar group + a
+  read-only archived-project banner with an «Un-archive» button.
+- **Graph editor — edge-kind editing + node form + inline rename (O-7):** new append-only verb
+  `GraphUpdateEdge { id, kind } -> GraphEdge` (`crates/orchd/src/graph.rs`) changes an existing
+  edge's `kind` (its rendered label IS its kind — no separate label column, **no v5 migration**),
+  pushing `GraphChanged` for BOTH endpoint projects; guards mirror `GraphAddEdge` (unknown ⇒
+  `NotFound`, archived endpoint ⇒ `Invariant`). Exposed as `orchd_graph_update_edge`. The
+  `GraphCanvas` toolbar gains an add-node title/body form and a double-click inline rename (both
+  reusing the shipped `GraphAddNode`/`GraphUpdateNode` verbs) plus an edge-kind dropdown; only LOCAL
+  nodes/edges are editable, ghosts stay read-only.
+- **Config-backed OAuth provider registry + provider dropdown (O-5):** before P4, `bpa-orchd` booted
+  with an empty OAuth provider registry, so every `ConnectorBeginOAuth` failed with
+  `UnknownProvider` and the BL-91 timeout sat on an unreachable path. At boot,
+  `connectors/registry_config.rs::load_oauth_providers` reads an OPTIONAL
+  `<app-support>/oauth_providers.json` and registers each provider into `ConnectorsState`'s
+  in-memory registry (activating the P1 timeout on a now-reachable path). Honest degradation: a
+  MISSING file is the normal default (empty registry, info log), a MALFORMED file (bad JSON, missing
+  required field, or a typo'd key — `deny_unknown_fields`) is error-logged and leaves the registry
+  empty — NEITHER blocks boot. New append-only read verb `ConnectorListProviders ->
+  ConnectorProviders` returns provider NAMES ONLY (a provider's `client_id`/`client_secret`/URLs
+  never cross the wire; `client_secret` lives only in memory, never in `orchd.db` or a log). Exposed
+  as `orchd_connector_list_providers`; `ConnectorsTab`'s OAuth flow gains a provider `<select>` + an
+  honest "No OAuth providers configured" empty-state (begin button disabled). Format + degradation
+  table in `docs/runbook-orchd.md` ("OAuth provider registry — `oauth_providers.json`").
+- **`metric_refs` owner chip editor on goals (O-4) — pure frontend, no new wire:** the
+  `Goal.metric_refs` field and the `UpdateGoal` verb that carries it both already shipped in S3; P4
+  adds the missing owner-facing editor — a chip list + add input on each `GoalTree` row, persisting
+  the row's full next array through the existing `orchd_update_goal` command (no schema change, no
+  new verb, no backend change).
+
+### Changed
+- **Gate: 9 stages → 10.** `scripts/final-suite.sh` adds the English-only gate
+  (`scripts/check-english.sh`) as stage 1, ahead of the Rust suite; `.github/workflows/ci.yml` runs
+  the same set. All other stages (clippy, fmt, TS, tsc, ts-rs parity, both-daemon coverage ≥80%,
+  e2e:survive, e2e:orchd) are unchanged.
+- **The app is English-only, as a standing rule (O-2).** Non-English copy in code/docs/UI is a build
+  failure outside the frozen-record allowlist; `CONTRIBUTING.md` records the rule.
+- Test totals re-measured this pass: Rust workspace 1023 → **1062 tests** (0 failed,
+  `RUST_TEST_THREADS=4`; the new un-archive / `GraphUpdateEdge` / OAuth-registry unit + dispatch
+  tests, the extended `no_secrets_in_logs_connectors`, and the P1 storage/tracing tests);
+  TypeScript 772 → **870 tests**, 47 → **51 files** (the `useSubmitGuard` hook + double-fire tests,
+  `StorageBanner`, the archive/un-archive + metric-chip + graph-editor + provider-dropdown component
+  suites, and the Tier-3 empty/loading/failed coverage) — see `README.md`/`docs/traceability.md`.
 
 ### Fixed
+- **McpConnect handshake timeout (BL-89, spec D5):** `mcp/lifecycle.rs::connect` previously awaited
+  `connect_fn(...)` and `session.list_tools()` unbounded — a peer that accepts the connection but
+  never completes the handshake hung the calling task forever, and because orchd's dispatch is
+  sequential over one shared connection it wedged the ENTIRE orchd pipeline. Both awaits are now
+  bounded by the per-server `timeout_ms` (`OrchdMcpError::Mcp(McpError::Timeout)` on elapse), keeping
+  the trust-gate-before-network ordering and the no-DB-lock-across-await property intact.
+- **OAuth token-exchange timeout (BL-91, spec D5):** the SSRF-guarded token-exchange HTTP client in
+  `connectors/accounts.rs` had no request timeout, so a never-answering token endpoint could hang
+  an OAuth exchange indefinitely (unreachable in v1 until O-5's registry ships a provider, then
+  live). Added `.timeout(Duration::from_secs(30))` (matching `GenericRestAdapter`), keeping
+  `redirect::Policy::none()` + the SSRF guard.
+- **Import writes ruleset files only after commit (BL-90):** a whole-store `ImportBundle` that
+  failed partway (e.g. a later project colliding on id, rolling the DB transaction back) previously
+  left an orphan ruleset `.md` file on disk from an earlier project. The file writes are now
+  performed only after `tx.commit()` succeeds, so a rolled-back import leaves NO orphan file; the
+  `app_support`/path-traversal validation is unchanged.
 - **No silent no-op / no zombie terminal tab on a mutation failure (BL-93):** a rejected
   new-terminal / close-terminal / add-workspace round-trip now surfaces an honest toast
   (`describeCommandError`) instead of failing silently; a close disposes the xterm instance AND
