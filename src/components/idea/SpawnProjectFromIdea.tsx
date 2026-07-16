@@ -3,6 +3,7 @@ import { useAppStore } from "../../store/store";
 import { orchdCreateProject, orchdSetIdeaProject, describeOrchdError } from "../../ipc/orchd";
 import { pickFolder, createWorkspace } from "../../ipc/commands";
 import type { Idea } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
 
@@ -61,58 +62,94 @@ export function SpawnProjectFromIdea(props: { idea: Idea }): JSX.Element {
   const upsertWorkspace = useAppStore((s) => s.upsertWorkspace);
   const refreshProjects = useAppStore((s) => s.refreshProjects);
   const refreshIdeas = useAppStore((s) => s.refreshIdeas);
+  const { submitting, guard } = useSubmitGuard();
 
   const [error, setError] = useState<string | null>(null);
+  // Resume-from-failed-step state (spec D6, BL-95/P-09): once a workspace / project has been
+  // created, its id is held here so a retry after a mid-chain failure never re-runs a completed
+  // step — no orphaned second project/workspace. Cleared on full success.
+  const [createdWorkspaceId, setCreatedWorkspaceId] = useState<string | null>(null);
+  const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
 
   async function handleSpawn(): Promise<void> {
     setError(null);
 
-    let dir: string | null;
-    try {
-      dir = await pickFolder();
-    } catch (e) {
-      const message = e instanceof Error ? e.message : strings.ideas.spawn.folderPickerFailed;
-      setError(message);
-      showToast(message);
-      return;
-    }
-    if (dir === null) return; // cancelled -> no-op, mirrors CreateProjectDialog/WorkspaceSidebar
+    // Step 1 — workspace. Skipped entirely on a resume (its id is already held), so neither the
+    // folder picker nor `createWorkspace` re-runs.
+    let workspaceId = createdWorkspaceId;
+    if (workspaceId === null) {
+      let dir: string | null;
+      try {
+        dir = await pickFolder();
+      } catch (e) {
+        const message = e instanceof Error ? e.message : strings.ideas.spawn.folderPickerFailed;
+        setError(message);
+        showToast(message);
+        return;
+      }
+      if (dir === null) return; // cancelled -> no-op, mirrors CreateProjectDialog/WorkspaceSidebar
 
-    let workspaceId: string;
-    try {
-      const ws = await createWorkspace(basename(dir), dir);
-      upsertWorkspace(ws);
-      workspaceId = ws.id;
-    } catch (e) {
-      const message = e instanceof Error ? e.message : strings.project.createWorkspaceFailed;
-      setError(message);
-      showToast(message);
-      return;
+      try {
+        const ws = await createWorkspace(basename(dir), dir);
+        upsertWorkspace(ws);
+        workspaceId = ws.id;
+        setCreatedWorkspaceId(ws.id);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : strings.project.createWorkspaceFailed;
+        setError(message);
+        showToast(message);
+        return;
+      }
     }
 
+    // Step 2 — project. Skipped on a resume once created (holds its id).
+    let projectId = createdProjectId;
+    if (projectId === null) {
+      try {
+        const project = await orchdCreateProject(idea.title, "", [workspaceId]);
+        projectId = project.id;
+        setCreatedProjectId(project.id);
+      } catch (e) {
+        const message = describeOrchdError(e);
+        setError(message);
+        showToast(message);
+        return;
+      }
+    }
+
+    // Step 3 — link the idea to the created project. If THIS fails, the project + workspace already
+    // exist (P-09): the honest error names exactly what was created, and the retry resumes here
+    // (steps 1+2 skipped) so it never creates a second project.
     try {
-      const project = await orchdCreateProject(idea.title, "", [workspaceId]);
-      await orchdSetIdeaProject(idea.id, project.id);
+      await orchdSetIdeaProject(idea.id, projectId);
       await refreshProjects();
       await refreshIdeas();
       showToast(strings.ideas.spawn.createdFromIdea);
+      setCreatedWorkspaceId(null);
+      setCreatedProjectId(null);
+      setError(null);
     } catch (e) {
-      const message = describeOrchdError(e);
+      const message = strings.ideas.spawn.linkFailed(idea.title, describeOrchdError(e));
       setError(message);
       showToast(message);
     }
   }
+
+  const spawn = guard(handleSpawn);
+  // A partial failure (project created, link pending) turns the primary action into a resume:
+  // clicking again finishes the link rather than starting a fresh spawn.
+  const resuming = createdProjectId !== null;
 
   return (
     <>
       <button
         type="button"
         data-testid={`spawn-project-${idea.id}`}
-        disabled={orchdDown}
-        onClick={() => void handleSpawn()}
+        disabled={orchdDown || submitting}
+        onClick={() => void spawn()}
         style={textButtonStyle}
       >
-        {strings.ideas.spawn.createProject}
+        {resuming ? strings.ideas.spawn.retry : strings.ideas.spawn.createProject}
       </button>
       {error !== null && (
         <span data-testid={`spawn-project-error-${idea.id}`} style={errorTextStyle}>

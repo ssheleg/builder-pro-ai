@@ -3,6 +3,7 @@ import { useAppStore } from "../../store/store";
 import { pickSkillFile } from "../../ipc/commands";
 import { skillAdd, skillDelete, describeOrchdError } from "../../ipc/orchd";
 import type { Skill, SkillFileState } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
 
@@ -154,6 +155,7 @@ export function SkillsTab(): JSX.Element {
   const orchdDown = useAppStore((s) => s.orchdDown);
   const refreshSkills = useAppStore((s) => s.refreshSkills);
   const showToast = useAppStore((s) => s.showToast);
+  const { submitting, guard } = useSubmitGuard();
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -194,6 +196,10 @@ export function SkillsTab(): JSX.Element {
       showToast(describeOrchdError(e));
     }
   }
+
+  // Double-submit guard (spec D6): a rapid second "+ skill" click must NOT register the same
+  // SKILL.md twice (cross-cutting P-19).
+  const submitAdd = guard(handleAdd);
 
   async function handleDelete(skill: Skill): Promise<void> {
     if (!window.confirm(strings.ext.skills.deleteConfirm(skill.name))) return;
@@ -256,9 +262,9 @@ export function SkillsTab(): JSX.Element {
         <button
           type="button"
           data-testid="skill-create-submit"
-          disabled={orchdDown || addBlocked}
-          onClick={() => void handleAdd()}
-          style={{ ...primaryButtonStyle, opacity: addBlocked ? 0.5 : 1 }}
+          disabled={orchdDown || addBlocked || submitting}
+          onClick={() => void submitAdd()}
+          style={{ ...primaryButtonStyle, opacity: addBlocked || submitting ? 0.5 : 1 }}
         >
           {strings.ext.skills.addSkill}
         </button>

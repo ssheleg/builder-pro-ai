@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
 const orchdCreateProjectMock = vi.fn();
 const orchdSetIdeaProjectMock = vi.fn();
@@ -20,6 +20,7 @@ vi.mock("../../ipc/commands", () => ({
 
 import { SpawnProjectFromIdea } from "./SpawnProjectFromIdea";
 import { useAppStore } from "../../store/store";
+import { strings } from "../../strings";
 import type { Idea } from "../../ipc/orchd-types";
 
 const idea: Idea = {
@@ -118,6 +119,64 @@ describe("SpawnProjectFromIdea", () => {
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalled());
     expect(orchdSetIdeaProjectMock).not.toHaveBeenCalled();
     expect(useAppStore.getState().toast).toBe("orchestrator: error");
+  });
+
+  it("setIdeaProject fails after createProject: names what was created, then retry RESUMES (no second project/workspace) — BL-95 / P-09", async () => {
+    pickFolderMock.mockResolvedValue("/p/x");
+    createWorkspaceMock.mockResolvedValue({ id: "w1", name: "x", rootPath: "/p/x", roots: ["/p/x"] });
+    orchdCreateProjectMock.mockResolvedValue({
+      id: "p1", name: idea.title, description: "", status: "active", workspaceIds: ["w1"], createdAt: 1, updatedAt: 1,
+    });
+    // First link attempt fails; the retry (resume) succeeds.
+    orchdSetIdeaProjectMock
+      .mockRejectedValueOnce({ kind: "daemon", code: "Io", message: "disk" })
+      .mockResolvedValueOnce({ ...idea, projectId: "p1" });
+
+    render(<SpawnProjectFromIdea idea={idea} />);
+    const button = screen.getByTestId(`spawn-project-${idea.id}`);
+    fireEvent.click(button);
+
+    // After the failed link: the inline error names exactly what WAS created.
+    await waitFor(() =>
+      expect(screen.getByTestId(`spawn-project-error-${idea.id}`).textContent).toBe(
+        strings.ideas.spawn.linkFailed(idea.title, "orchestrator: error"),
+      ),
+    );
+    expect(orchdSetIdeaProjectMock).toHaveBeenCalledTimes(1);
+
+    // Retry: same button (now labelled "Retry linking") resumes from the failed step.
+    await act(async () => {
+      fireEvent.click(button);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(useAppStore.getState().toast).toBe(strings.ideas.spawn.createdFromIdea));
+
+    // Completed steps were NOT re-run — no second project/workspace/picker.
+    expect(pickFolderMock).toHaveBeenCalledTimes(1);
+    expect(createWorkspaceMock).toHaveBeenCalledTimes(1);
+    expect(orchdCreateProjectMock).toHaveBeenCalledTimes(1);
+    // Only the failed step re-ran.
+    expect(orchdSetIdeaProjectMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("two rapid spawn clicks create ONE project/workspace (double-submit guard, spec D6 / E-08)", async () => {
+    pickFolderMock.mockResolvedValue("/p/x");
+    createWorkspaceMock.mockResolvedValue({ id: "w1", name: "x", rootPath: "/p/x", roots: ["/p/x"] });
+    orchdCreateProjectMock.mockResolvedValue({
+      id: "p1", name: idea.title, description: "", status: "active", workspaceIds: ["w1"], createdAt: 1, updatedAt: 1,
+    });
+    orchdSetIdeaProjectMock.mockResolvedValue({ ...idea, projectId: "p1" });
+
+    render(<SpawnProjectFromIdea idea={idea} />);
+    const button = screen.getByTestId(`spawn-project-${idea.id}`);
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(orchdSetIdeaProjectMock).toHaveBeenCalled());
+    expect(pickFolderMock).toHaveBeenCalledTimes(1);
+    expect(createWorkspaceMock).toHaveBeenCalledTimes(1);
+    expect(orchdCreateProjectMock).toHaveBeenCalledTimes(1);
   });
 
   it("while orchdDown: the button is disabled and clicking it never calls any wrapper", () => {

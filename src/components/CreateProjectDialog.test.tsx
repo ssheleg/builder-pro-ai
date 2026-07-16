@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 const orchdCreateProjectMock = vi.fn();
 const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
@@ -85,6 +85,23 @@ describe("CreateProjectDialog", () => {
     await waitFor(() => {
       expect(orchdCreateProjectMock).toHaveBeenCalledWith("New Proj", "desc", ["w2"]);
       expect(onClose).toHaveBeenCalled();
+    });
+  });
+
+  it("two rapid submit clicks create the project ONCE (double-submit guard, spec D6)", async () => {
+    let resolveCreate!: (v: unknown) => void;
+    orchdCreateProjectMock.mockImplementation(() => new Promise((res) => (resolveCreate = res)));
+    render(<CreateProjectDialog onClose={() => {}} />);
+    fireEvent.change(screen.getByTestId("create-project-name"), { target: { value: "Dup" } });
+    fireEvent.click(screen.getByTestId("create-project-ws-w2"));
+
+    const submit = screen.getByTestId("create-project-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(orchdCreateProjectMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveCreate(makeProject());
     });
   });
 

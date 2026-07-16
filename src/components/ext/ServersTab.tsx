@@ -9,6 +9,7 @@ import {
   describeOrchdError,
 } from "../../ipc/orchd";
 import type { McpAuthKind, McpScope, McpServer } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { ConnectDialog } from "./ConnectDialog";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
@@ -134,6 +135,7 @@ export function ServersTab(): JSX.Element {
   const orchdDown = useAppStore((s) => s.orchdDown);
   const refreshMcpServers = useAppStore((s) => s.refreshMcpServers);
   const showToast = useAppStore((s) => s.showToast);
+  const { submitting, guard } = useSubmitGuard();
 
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -169,6 +171,10 @@ export function ServersTab(): JSX.Element {
       showToast(describeOrchdError(e));
     }
   }
+
+  // Double-submit guard (spec D6): a rapid second "+ server" click must NOT create a duplicate
+  // server (cross-cutting P-19).
+  const submitAdd = guard(handleAdd);
 
   async function handleToggleEnabled(server: McpServer): Promise<void> {
     try {
@@ -269,9 +275,9 @@ export function ServersTab(): JSX.Element {
         <button
           type="button"
           data-testid="server-create-submit"
-          disabled={orchdDown || addBlocked}
-          onClick={() => void handleAdd()}
-          style={{ ...primaryButtonStyle, opacity: addBlocked ? 0.5 : 1 }}
+          disabled={orchdDown || addBlocked || submitting}
+          onClick={() => void submitAdd()}
+          style={{ ...primaryButtonStyle, opacity: addBlocked || submitting ? 0.5 : 1 }}
         >
           {strings.ext.servers.addServer}
         </button>

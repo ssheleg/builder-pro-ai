@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 const orchdCreateTaskMock = vi.fn();
 const orchdUpdateTaskMock = vi.fn();
@@ -231,6 +231,26 @@ describe("TasksList", () => {
       ),
     );
     await waitFor(() => expect(orchdListTasksMock).toHaveBeenCalledWith(projectId));
+  });
+
+  it("two rapid '+ task' clicks create ONCE (double-submit guard, spec D6 / H-01)", async () => {
+    useAppStore.setState({ tasksByProject: { [projectId]: [] } }, false);
+    orchdListTasksMock.mockResolvedValue([]);
+    let resolveCreate!: (v: unknown) => void;
+    orchdCreateTaskMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveCreate = res)),
+    );
+    render(<TasksList projectId={projectId} />);
+    fireEvent.change(screen.getByTestId("task-create-title"), { target: { value: "Dup task" } });
+
+    const submit = screen.getByTestId("task-create-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(orchdCreateTaskMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveCreate(makeTask({ id: "t9", title: "Dup task", status: "backlog", rank: 0 }));
+    });
   });
 
   it("the create submit button is disabled while title is blank", () => {

@@ -85,6 +85,10 @@ export const strings = {
       linkToProject: (name: string) => `Link ${name} to a project`,
       linkPlaceholder: "link…",
       addProject: "+ project",
+      addWorkspace: "+ Add workspace",
+      addWorkspaceAria: "Add workspace",
+      /** Honest toast for a rejected `pickFolder`/`createWorkspace` (BL-93 — no more silent no-op). */
+      addWorkspaceFailed: (msg: string) => `Failed to add workspace: ${msg}`,
     },
   },
 
@@ -153,6 +157,15 @@ export const strings = {
     loadHistoryFailed: "Failed to load command history",
     interrupted: "interrupted",
     interruptedTitle: "Interrupted — the session ended before the command finished",
+    /** Terminal-tab strip (new/close). `newTerminalFailed`/`closeTerminalFailed` are the honest
+     * toasts for a rejected `create_session`/`kill_session` (BL-93 — no more silent no-op). */
+    tabs: {
+      newTerminal: "+ New terminal",
+      newTerminalAria: "New terminal",
+      closeAria: (title: string) => `Close ${title}`,
+      newTerminalFailed: (msg: string) => `Failed to open a new terminal: ${msg}`,
+      closeTerminalFailed: (msg: string) => `Failed to close the terminal: ${msg}`,
+    },
   },
 
   // ── project panel + create-project dialog ────────────────────────────────────────────────────
@@ -271,6 +284,12 @@ export const strings = {
       folderPickerFailed: "failed to open the folder picker",
       createdFromIdea: "Project created from idea",
       createProject: "Create project",
+      /** Resume label after a partial failure — the retry resumes from the failed step (spec D6). */
+      retry: "Retry linking",
+      /** Partial-failure message (spec D6, BL-95/P-09): the project + workspace WERE created, but
+       * linking the idea failed. Names what was created + why + that retry won't duplicate. */
+      linkFailed: (title: string, reason: string) =>
+        `Project "${title}" and its workspace were created, but linking the idea to it failed: ${reason}. Retry to finish — it will not create a second project.`,
     },
   },
 
@@ -339,6 +358,10 @@ export const strings = {
       noGraphNode: "no graph node for this idea yet",
       noRelatedNodes: "no related nodes",
       toBacklog: "To backlog",
+      /** Partial-failure message (spec D6, BL-95/G-08): the task WAS created, but the idea
+       * lifecycle flip to "specced" failed. Names what was created + that retry won't duplicate. */
+      backlogResume: (reason: string) =>
+        `The task was created, but moving the idea to "specced" failed: ${reason}. Retry to finish — it will not create a duplicate task.`,
     },
   },
 

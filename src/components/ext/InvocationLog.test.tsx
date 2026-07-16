@@ -204,6 +204,24 @@ describe("InvocationLog", () => {
     });
   });
 
+  it("two rapid 'set limit' clicks apply the policy ONCE (double-submit guard, spec D6 / P-19)", async () => {
+    let resolveSet!: (v: unknown) => void;
+    trustSetPolicyMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveSet = res)),
+    );
+    render(<InvocationLog />);
+    fireEvent.change(screen.getByTestId("policy-spend-cap"), { target: { value: "5" } });
+
+    const submit = screen.getByTestId("policy-set-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(trustSetPolicyMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveSet(undefined);
+    });
+  });
+
   it("scope=project requires a ref-id before submit is enabled", async () => {
     render(<InvocationLog />);
     fireEvent.change(screen.getByTestId("policy-scope"), { target: { value: "project" } });

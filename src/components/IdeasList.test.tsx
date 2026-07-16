@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
 const orchdCreateIdeaMock = vi.fn();
 const orchdUpdateIdeaMock = vi.fn();
@@ -239,6 +239,24 @@ describe("IdeasList", () => {
       expect(orchdCreateIdeaMock).toHaveBeenCalledWith(projectId, "New idea", "Description"),
     );
     await waitFor(() => expect(orchdListIdeasMock).toHaveBeenCalledWith(null));
+  });
+
+  it("two rapid '+ idea' clicks create ONCE (double-submit guard, spec D6 / E-08)", async () => {
+    let resolveCreate!: (v: unknown) => void;
+    orchdCreateIdeaMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveCreate = res)),
+    );
+    render(<IdeasList projectId={projectId} />);
+    fireEvent.change(screen.getByTestId("idea-create-title"), { target: { value: "Dup idea" } });
+
+    const submit = screen.getByTestId("idea-create-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(orchdCreateIdeaMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveCreate({ id: "i9", projectId, title: "Dup idea", body: "", lifecycle: "captured", createdAt: 1, updatedAt: 1 });
+    });
   });
 
   it("the create form is a no-op with an empty title", () => {

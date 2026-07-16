@@ -8,6 +8,7 @@ import {
   describeOrchdError,
 } from "../ipc/orchd";
 import type { DomainTask, TaskSource, TaskStatus } from "../ipc/orchd-types";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { theme } from "../theme";
 import { strings } from "../strings";
 
@@ -320,6 +321,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
   }, [projectId]);
 
   const groups = useMemo(() => groupByStatus(tasks), [tasks]);
+  const { submitting, guard } = useSubmitGuard();
 
   const [createTitle, setCreateTitle] = useState("");
   const [createBody, setCreateBody] = useState("");
@@ -403,6 +405,10 @@ export function TasksList(props: { projectId: string }): JSX.Element {
     }
   }
 
+  // Double-submit guard (spec D6): a rapid second "+ task" click must NOT create a duplicate task
+  // (finding H-01 / P-19).
+  const submitCreate = guard(handleCreate);
+
   return (
     <div data-testid="tasks-list">
       <div style={createFormStyle}>
@@ -461,9 +467,9 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         <button
           type="button"
           data-testid="task-create-submit"
-          disabled={orchdDown || createTitle.trim() === ""}
-          onClick={() => void handleCreate()}
-          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
+          disabled={orchdDown || createTitle.trim() === "" || submitting}
+          onClick={() => void submitCreate()}
+          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" || submitting ? 0.5 : 1 }}
         >
           {strings.tasks.addTask}
         </button>

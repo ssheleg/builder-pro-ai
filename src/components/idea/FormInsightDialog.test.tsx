@@ -26,6 +26,7 @@ vi.mock("../../ipc/orchd", () => ({
 
 import { FormInsightDialog } from "./FormInsightDialog";
 import { useAppStore } from "../../store/store";
+import { strings } from "../../strings";
 import type { Goal, GraphNode, Insight, McpArtifact } from "../../ipc/orchd-types";
 
 const ideaWithProject = {
@@ -244,6 +245,29 @@ describe("FormInsightDialog", () => {
     ).toBeLessThan(orchdSetInsightFitVerdictMock.mock.invocationCallOrder[0]!);
   });
 
+  it("two rapid Create clicks form the insight ONCE (double-submit guard, spec D6 / G-08)", async () => {
+    let resolveCreate!: (v: unknown) => void;
+    orchdCreateInsightMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveCreate = res)),
+    );
+    render(
+      <FormInsightDialog
+        idea={ideaWithProject}
+        runId="r1"
+        artifact={makeArtifact()}
+        onClose={() => {}}
+      />,
+    );
+    const create = screen.getByTestId("form-insight-create");
+    fireEvent.click(create);
+    fireEvent.click(create);
+
+    expect(orchdCreateInsightMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveCreate(makeInsight());
+    });
+  });
+
   it('once created, "Accept" fires orchdSetInsightStatus(id, accepted, null)', async () => {
     render(
       <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={() => {}} />,
@@ -288,6 +312,43 @@ describe("FormInsightDialog", () => {
       orchdCreateTaskMock.mock.invocationCallOrder[0]!,
     ).toBeLessThan(orchdSetIdeaLifecycleMock.mock.invocationCallOrder[0]!);
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("backlog: setIdeaLifecycle fails after createTask — names the created task, retry re-runs ONLY the lifecycle flip (no duplicate task) — BL-95 / G-08", async () => {
+    const onClose = vi.fn();
+    orchdCreateTaskMock.mockReset().mockResolvedValue({ id: "task-9" });
+    orchdSetIdeaLifecycleMock
+      .mockReset()
+      .mockRejectedValueOnce({ kind: "daemon", code: "Io", message: "disk" })
+      .mockResolvedValueOnce({ ...ideaWithProject, lifecycle: "specced" });
+
+    render(
+      <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={onClose} />,
+    );
+    fireEvent.click(screen.getByTestId("form-insight-create"));
+    await waitFor(() => expect(screen.getByTestId("form-insight-accept")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("form-insight-accept"));
+    await waitFor(() => expect(screen.getByTestId("form-insight-backlog")).toBeTruthy());
+
+    // First "To backlog": createTask succeeds, lifecycle flip fails.
+    fireEvent.click(screen.getByTestId("form-insight-backlog"));
+    await waitFor(() =>
+      expect(screen.getByTestId("form-insight-error").textContent).toBe(
+        strings.insights.form.backlogResume("orchestrator: error"),
+      ),
+    );
+    expect(orchdCreateTaskMock).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Retry: resumes at the lifecycle flip only — no duplicate task.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("form-insight-backlog"));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+
+    expect(orchdCreateTaskMock).toHaveBeenCalledTimes(1); // NOT re-created
+    expect(orchdSetIdeaLifecycleMock).toHaveBeenCalledTimes(2); // only the failed step re-ran
   });
 
   it('"To backlog" is disabled for an orphan idea (no project to file the task under)', async () => {

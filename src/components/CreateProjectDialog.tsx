@@ -4,6 +4,7 @@ import { orchdCreateProject, describeOrchdError } from "../ipc/orchd";
 import { pickFolder, createWorkspace } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";
 import type { Project } from "../ipc/orchd-types";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { theme } from "../theme";
 import { strings } from "../strings";
 
@@ -183,6 +184,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
   const workspaces = useAppStore((s) => s.workspaces);
   const showToast = useAppStore((s) => s.showToast);
   const upsertWorkspace = useAppStore((s) => s.upsertWorkspace);
+  const { submitting, guard } = useSubmitGuard();
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -241,6 +243,10 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
       showToast(message);
     }
   }
+
+  // Double-submit guard (spec D6): a rapid second click before `orchdCreateProject` resolves must
+  // NOT create a second project (finding P-19).
+  const submit = guard(handleSubmit);
 
   return (
     <div style={overlayStyle}>
@@ -333,9 +339,9 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
           <button
             type="button"
             data-testid="create-project-submit"
-            disabled={blocked || name.trim() === ""}
-            onClick={() => void handleSubmit()}
-            style={{ ...primaryButtonStyle, opacity: blocked || name.trim() === "" ? 0.5 : 1 }}
+            disabled={blocked || name.trim() === "" || submitting}
+            onClick={() => void submit()}
+            style={{ ...primaryButtonStyle, opacity: blocked || name.trim() === "" || submitting ? 0.5 : 1 }}
           >
             {strings.common.create}
           </button>

@@ -25,6 +25,13 @@
 # and docs/qa. (research/ holds the superseded product-vision studies + audits that
 # fed the now-English overview; it is the same frozen-record category as specs/plans.)
 
+# --- the gate script itself: it MUST contain the Cyrillic range it scans for ---
+# scripts/check-english.sh embeds the U+0400..U+04FF character class as its match
+# pattern -- that is its whole job, not translatable UI copy -- so it necessarily
+# trips its own scan. A structural exception (the scanner cannot avoid containing the
+# pattern it looks for), distinct from the frozen-record exceptions below.
+scripts/check-english.sh
+
 # --- docs/qa: pre-program UX investigation records ---
 docs/qa/ux-first-session-scenarios.md
 docs/qa/ux-investigation-report.md

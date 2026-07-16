@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../../store/store";
 import { trustSetPolicy, describeOrchdError } from "../../ipc/orchd";
 import type { McpInvocation, Policy, PolicyScope } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
 
@@ -152,6 +153,7 @@ export function InvocationLog(): JSX.Element {
   const refreshAuditRows = useAppStore((s) => s.refreshAuditRows);
   const refreshPolicies = useAppStore((s) => s.refreshPolicies);
   const showToast = useAppStore((s) => s.showToast);
+  const { submitting, guard } = useSubmitGuard();
 
   const [scope, setScope] = useState<PolicyScope>("global");
   const [refId, setRefId] = useState("");
@@ -189,6 +191,10 @@ export function InvocationLog(): JSX.Element {
       showToast(describeOrchdError(e));
     }
   }
+
+  // Double-submit guard (spec D6): a rapid second "set limit" click must NOT double-apply the
+  // policy (cross-cutting P-19).
+  const submitSetPolicy = guard(handleSetPolicy);
 
   return (
     <div data-testid="invocation-log">
@@ -234,9 +240,9 @@ export function InvocationLog(): JSX.Element {
           <button
             type="button"
             data-testid="policy-set-submit"
-            disabled={orchdDown || setBlocked}
-            onClick={() => void handleSetPolicy()}
-            style={{ ...primaryButtonStyle, opacity: orchdDown || setBlocked ? 0.5 : 1 }}
+            disabled={orchdDown || setBlocked || submitting}
+            onClick={() => void submitSetPolicy()}
+            style={{ ...primaryButtonStyle, opacity: orchdDown || setBlocked || submitting ? 0.5 : 1 }}
           >
             {strings.ext.log.setLimit}
           </button>

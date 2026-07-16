@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react
 import { useAppStore } from "../../store/store";
 import { researchStartRun, describeOrchdError } from "../../ipc/orchd";
 import type { Idea, Policy } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
 
@@ -177,6 +178,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
   const orchdDown = useAppStore((s) => s.orchdDown);
   const showToast = useAppStore((s) => s.showToast);
   const refreshResearchRuns = useAppStore((s) => s.refreshResearchRuns);
+  const { submitting, guard } = useSubmitGuard();
 
   const [serverId, setServerId] = useState("");
   const [toolName, setToolName] = useState("");
@@ -233,8 +235,13 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
     }
   }
 
+  // Double-submit guard (spec D6): a rapid second "Run" click before `researchStartRun` resolves
+  // must NOT start a second run — the cost here is a real external call + double spend (finding
+  // F-08).
+  const submit = guard(handleSubmit);
+
   const policy = serverId === "" ? null : effectivePolicy(policies, serverId, idea.projectId);
-  const submitBlocked = orchdDown || serverId === "" || toolName === "";
+  const submitBlocked = orchdDown || serverId === "" || toolName === "" || submitting;
 
   return (
     <div style={overlayStyle}>
@@ -342,7 +349,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
             type="button"
             data-testid="research-run-submit"
             disabled={submitBlocked}
-            onClick={() => void handleSubmit()}
+            onClick={() => void submit()}
             style={{ ...primaryButtonStyle, opacity: submitBlocked ? 0.5 : 1 }}
           >
             {strings.research.run}

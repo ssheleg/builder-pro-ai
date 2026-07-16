@@ -111,6 +111,27 @@ describe("ServersTab", () => {
     });
   });
 
+  it("two rapid '+ server' clicks add ONCE (double-submit guard, spec D6 / P-19)", async () => {
+    let resolveAdd!: (v: unknown) => void;
+    mcpAddServerMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveAdd = res)),
+    );
+    render(<ServersTab />);
+    fireEvent.change(screen.getByTestId("server-create-name"), { target: { value: "Prowl" } });
+    fireEvent.change(screen.getByTestId("server-create-url"), {
+      target: { value: "https://prowl.chat/mcp" },
+    });
+
+    const submit = screen.getByTestId("server-create-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(mcpAddServerMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveAdd({ id: "srv9" });
+    });
+  });
+
   it("add-server submit stays disabled while the name or url field is empty", () => {
     render(<ServersTab />);
     expect(screen.getByTestId("server-create-submit")).toHaveProperty("disabled", true);

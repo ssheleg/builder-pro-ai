@@ -14,6 +14,33 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+/**
+ * Honest message for a rejected sessiond `CommandError` (`create_session`/`create_workspace` —
+ * `src-tauri/src/commands.rs::CommandError`). Deliberately duplicated per-surface, mirroring
+ * `FileTree.tsx`/`TerminalTabs.tsx` (the repo keeps one copy per component so each stays
+ * independently deployable — same rationale as `describeFsError`/`FilePreview`). Vocabulary is
+ * `strings.errors.command.*`.
+ */
+function describeCommandError(err: unknown): string {
+  const e = err as { kind?: string; message?: string; code?: string; reason?: string } | undefined;
+  switch (e?.kind) {
+    case "daemon":
+      return e.message ?? e.code ?? strings.errors.command.daemon;
+    case "disconnected":
+      return strings.errors.command.disconnected;
+    case "internal":
+      return e.message ?? strings.errors.command.internal;
+    case "incompatibleDaemon":
+      return strings.errors.command.incompatible;
+    case "upgradeFailed":
+      return e.reason ?? strings.errors.command.failed;
+    case "tooLarge":
+      return strings.errors.command.tooLarge;
+    default:
+      return err instanceof Error ? err.message : String(err);
+  }
+}
+
 /** Every workspace id linked to at least one project (spec §10) — mirrors `ProjectPanel.tsx`'s /
  * `CreateProjectDialog.tsx`'s identical helper so the three surfaces agree on what "unlinked"
  * means. The complement is the «No project» group below. */
@@ -67,10 +94,17 @@ export function WorkspaceSidebar(props: {
   }
 
   async function onAdd(): Promise<void> {
-    const dir = await pickFolder();
-    if (dir === null) return; // cancelled -> no-op
-    const ws = await createWorkspace(basename(dir), dir);
-    onSelectWorkspaceAndNavigate(ws.id);
+    // `pickFolder`/`createWorkspace` are sessiond round-trips — a rejection (daemon down, invalid
+    // root) must surface an honest toast, never a silent no-op (BL-93 / P-03). A cancelled picker
+    // (`null`) is NOT an error — it returns quietly before the catch.
+    try {
+      const dir = await pickFolder();
+      if (dir === null) return; // cancelled -> no-op
+      const ws = await createWorkspace(basename(dir), dir);
+      onSelectWorkspaceAndNavigate(ws.id);
+    } catch (e) {
+      showToast(strings.chrome.sidebar.addWorkspaceFailed(describeCommandError(e)));
+    }
   }
 
   async function handleAttach(wsId: WorkspaceId, projectId: string): Promise<void> {
@@ -275,7 +309,7 @@ export function WorkspaceSidebar(props: {
         </button>
         <button
           type="button"
-          aria-label="Add workspace"
+          aria-label={strings.chrome.sidebar.addWorkspaceAria}
           onClick={() => void onAdd()}
           style={{
             margin: 8,
@@ -288,7 +322,7 @@ export function WorkspaceSidebar(props: {
             borderRadius: 4,
           }}
         >
-          + Add workspace
+          {strings.chrome.sidebar.addWorkspace}
         </button>
       </aside>
       {showCreateDialog && <CreateProjectDialog onClose={() => setShowCreateDialog(false)} />}

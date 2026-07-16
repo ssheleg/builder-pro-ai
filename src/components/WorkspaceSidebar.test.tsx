@@ -21,6 +21,7 @@ vi.mock("../ipc/orchd", () => ({
 
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { Workspace } from "../ipc/types";
 import type { Project } from "../ipc/orchd-types";
 
@@ -57,6 +58,7 @@ beforeEach(() => {
       view: "home",
       projects: [],
       activeProjectId: null,
+      toast: null,
     },
     false,
   );
@@ -114,6 +116,20 @@ describe("WorkspaceSidebar", () => {
     });
     expect(pickFolderMock).toHaveBeenCalledTimes(1);
     expect(createWorkspaceMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().toast).toBeNull(); // cancel is not an error
+  });
+
+  it("a failed add-workspace surfaces an honest toast instead of a silent no-op (BL-93 / P-03)", async () => {
+    pickFolderMock.mockResolvedValue("/Users/me/projects/my-app");
+    createWorkspaceMock.mockReset().mockRejectedValueOnce({ kind: "disconnected" });
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+      await Promise.resolve();
+    });
+    expect(useAppStore.getState().toast).toBe(
+      strings.chrome.sidebar.addWorkspaceFailed(strings.errors.command.disconnected),
+    );
   });
 
   it("groups linked workspaces under their project header; the remainder lands in «No project»", () => {

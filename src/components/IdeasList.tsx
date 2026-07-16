@@ -9,6 +9,7 @@ import {
   describeOrchdError,
 } from "../ipc/orchd";
 import type { Idea, IdeaLifecycle, ResearchRun, ResearchStatus } from "../ipc/orchd-types";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { ResearchRunDialog } from "./idea/ResearchRunDialog";
 import { ResearchPane } from "./idea/ResearchPane";
 import { SpawnProjectFromIdea } from "./idea/SpawnProjectFromIdea";
@@ -370,6 +371,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
   // `ResearchPane`'s identical doc comment on this exact pitfall).
   const researchRunsByIdea = useAppStore((s) => s.researchRunsByIdea);
   const refreshResearchRuns = useAppStore((s) => s.refreshResearchRuns);
+  const { submitting, guard } = useSubmitGuard();
 
   const [createTitle, setCreateTitle] = useState("");
   const [createBody, setCreateBody] = useState("");
@@ -450,6 +452,10 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
     }
   }
 
+  // Double-submit guard (spec D6): a rapid second "+ idea" click must NOT create a duplicate idea
+  // (finding E-08).
+  const submitCreate = guard(handleCreate);
+
   return (
     <div data-testid="ideas-list" style={listStyle}>
       <div style={createFormStyle}>
@@ -473,9 +479,9 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
         <button
           type="button"
           data-testid="idea-create-submit"
-          disabled={orchdDown || createTitle.trim() === ""}
-          onClick={() => void handleCreate()}
-          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
+          disabled={orchdDown || createTitle.trim() === "" || submitting}
+          onClick={() => void submitCreate()}
+          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" || submitting ? 0.5 : 1 }}
         >
           {strings.ideas.addIdea}
         </button>

@@ -181,6 +181,23 @@ describe("SkillsTab", () => {
     expect(screen.queryByTestId("skill-picked-path")).toBeNull();
   });
 
+  it("two rapid '+ skill' clicks add ONCE (double-submit guard, spec D6 / P-19)", async () => {
+    let resolveAdd!: (v: unknown) => void;
+    skillAddMock.mockReset().mockImplementation(() => new Promise((res) => (resolveAdd = res)));
+    render(<SkillsTab />);
+    fireEvent.click(screen.getByTestId("skill-pick-path"));
+    await waitFor(() => screen.getByTestId("skill-picked-path"));
+
+    const submit = screen.getByTestId("skill-create-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(skillAddMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveAdd({ id: "sk9" });
+    });
+  });
+
   it("submit passes trimmed name/description when provided", async () => {
     render(<SkillsTab />);
     fireEvent.change(screen.getByTestId("skill-create-name"), {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../store/store";
 import { orchdCreateIdea, describeOrchdError } from "../ipc/orchd";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { theme } from "../theme";
 import { strings } from "../strings";
 
@@ -141,6 +142,7 @@ export function QuickCapture(): JSX.Element | null {
   const projects = useAppStore((s) => s.projects);
   const orchdDown = useAppStore((s) => s.orchdDown);
   const showToast = useAppStore((s) => s.showToast);
+  const { submitting, guard } = useSubmitGuard();
 
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -204,9 +206,13 @@ export function QuickCapture(): JSX.Element | null {
     }
   }
 
+  // Double-submit guard (spec D6): a rapid second Enter/click before the first `orchdCreateIdea`
+  // resolves must NOT create a second idea (finding E-08).
+  const submit = guard(handleSubmit);
+
   if (!open) return null;
 
-  const blocked = orchdDown || title.trim() === "";
+  const blocked = orchdDown || title.trim() === "" || submitting;
 
   return (
     <div style={overlayStyle} data-testid="quick-capture-overlay">
@@ -233,7 +239,7 @@ export function QuickCapture(): JSX.Element | null {
             // there must insert a newline, never submit.
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              void handleSubmit();
+              void submit();
             }
           }}
           style={inputStyle}
@@ -283,7 +289,7 @@ export function QuickCapture(): JSX.Element | null {
             type="button"
             data-testid="quick-capture-submit"
             disabled={blocked}
-            onClick={() => void handleSubmit()}
+            onClick={() => void submit()}
             style={{ ...primaryButtonStyle, opacity: blocked ? 0.5 : 1 }}
           >
             {strings.common.save}

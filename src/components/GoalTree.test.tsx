@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 const orchdCreateGoalMock = vi.fn();
 const orchdUpdateGoalMock = vi.fn();
@@ -115,6 +115,27 @@ describe("GoalTree", () => {
       ),
     );
     await waitFor(() => expect(orchdListGoalsMock).toHaveBeenCalledWith(projectId));
+  });
+
+  it("two rapid '+ subgoal' clicks add ONE subgoal (double-submit guard, spec D6 / P-19)", async () => {
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
+    useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
+    orchdListGoalsMock.mockResolvedValue([root, child]);
+    let resolveCreate!: (v: unknown) => void;
+    orchdCreateGoalMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveCreate = res)),
+    );
+
+    render(<GoalTree projectId={projectId} />);
+    const childRow = screen.getByTestId("goal-row-child");
+    const addButton = within(childRow).getByRole("button", { name: strings.goals.addSubgoal });
+    fireEvent.click(addButton);
+    fireEvent.click(addButton);
+
+    expect(orchdCreateGoalMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveCreate(makeGoal({ id: "new-goal" }));
+    });
   });
 
   it("delete asks for confirmation and only calls orchdDeleteGoal after it is accepted", async () => {

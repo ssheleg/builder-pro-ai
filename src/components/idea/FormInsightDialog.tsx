@@ -10,6 +10,7 @@ import {
   describeOrchdError,
 } from "../../ipc/orchd";
 import type { FitVerdict, GraphNeighborhood, Idea, Insight, McpArtifact } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
 
@@ -205,6 +206,7 @@ export function FormInsightDialog(props: {
   const refreshTasks = useAppStore((s) => s.refreshTasks);
   const orchdDown = useAppStore((s) => s.orchdDown);
   const showToast = useAppStore((s) => s.showToast);
+  const { submitting, guard } = useSubmitGuard();
 
   const [title, setTitle] = useState(idea.title);
   const [body, setBody] = useState(artifact !== null ? (artifact.contentText ?? artifact.contentJson) : "");
@@ -213,6 +215,10 @@ export function FormInsightDialog(props: {
   const [insight, setInsight] = useState<Insight | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [neighborhood, setNeighborhood] = useState<GraphNeighborhood | null>(null);
+  // Resume-from-failed-step state for the backlog chain (spec D6, BL-95/G-08): once the task is
+  // created, its id is held so a retry after a failed lifecycle flip re-runs ONLY the flip — never
+  // a duplicate `orchdCreateTask`.
+  const [createdTaskId, setCreatedTaskId] = useState<string | null>(null);
 
   const titleRef = useRef<HTMLInputElement>(null);
 
@@ -290,33 +296,58 @@ export function FormInsightDialog(props: {
   async function handleBacklog(): Promise<void> {
     if (insight === null || idea.projectId === null) return;
     setErrorMessage(null);
+    const projectId = idea.projectId;
+    // Skip re-creating the task on a resume (spec D6): once `createdTaskId` is set, only the
+    // lifecycle flip is retried.
+    let taskId = createdTaskId;
     try {
-      await orchdCreateTask(
-        idea.projectId,
-        null,
-        insight.title,
-        insight.body,
-        null,
-        "insight",
-        insight.id,
-        [],
-      );
+      if (taskId === null) {
+        const task = await orchdCreateTask(
+          projectId,
+          null,
+          insight.title,
+          insight.body,
+          null,
+          "insight",
+          insight.id,
+          [],
+        );
+        taskId = task.id;
+        setCreatedTaskId(task.id);
+      }
       await orchdSetIdeaLifecycle(idea.id, "specced");
-      await refreshTasks(idea.projectId);
+      await refreshTasks(projectId);
       await refreshIdeas();
       showToast(strings.insights.form.addedToBacklog);
       onClose();
     } catch (e) {
-      const message = describeOrchdError(e);
+      const reason = describeOrchdError(e);
+      // `taskId !== null` means the task was created (this attempt or a prior one) and it is the
+      // lifecycle flip that failed — name what was created and let the retry resume from the flip
+      // (no duplicate task). A createTask failure (`taskId` still null) surfaces the raw reason and
+      // leaves `createdTaskId` null, so a retry safely re-creates.
+      const message = taskId !== null ? strings.insights.form.backlogResume(reason) : reason;
       setErrorMessage(message);
       showToast(message);
     }
   }
 
-  const createBlocked = orchdDown || title.trim() === "" || insight !== null;
-  const acceptBlocked = orchdDown || insight === null || insight.status !== "new";
+  // Double-submit guards (spec D6): one shared guard for the dialog's three sequential stages —
+  // a rapid double click on Create/Accept/To-backlog must fire each mutation at most once (finding
+  // G-08 / P-19). The stages are mutually exclusive by insight status, so one shared `submitting`
+  // is sufficient and never blocks a legitimately-different next stage.
+  const submitCreate = guard(handleCreate);
+  const submitAccept = guard(handleAccept);
+  const submitBacklog = guard(handleBacklog);
+
+  const createBlocked = orchdDown || title.trim() === "" || insight !== null || submitting;
+  const acceptBlocked = orchdDown || insight === null || insight.status !== "new" || submitting;
   const backlogBlocked =
-    orchdDown || insight === null || insight.status !== "accepted" || idea.projectId === null;
+    orchdDown ||
+    insight === null ||
+    insight.status !== "accepted" ||
+    idea.projectId === null ||
+    submitting;
 
   return (
     <div style={overlayStyle}>
@@ -459,7 +490,7 @@ export function FormInsightDialog(props: {
             type="button"
             data-testid="form-insight-create"
             disabled={createBlocked}
-            onClick={() => void handleCreate()}
+            onClick={() => void submitCreate()}
             style={{ ...primaryButtonStyle, opacity: createBlocked ? 0.5 : 1 }}
           >
             {strings.common.create}
@@ -469,7 +500,7 @@ export function FormInsightDialog(props: {
               type="button"
               data-testid="form-insight-accept"
               disabled={acceptBlocked}
-              onClick={() => void handleAccept()}
+              onClick={() => void submitAccept()}
               style={{ ...primaryButtonStyle, opacity: acceptBlocked ? 0.5 : 1 }}
             >
               {strings.common.accept}
@@ -480,7 +511,7 @@ export function FormInsightDialog(props: {
               type="button"
               data-testid="form-insight-backlog"
               disabled={backlogBlocked}
-              onClick={() => void handleBacklog()}
+              onClick={() => void submitBacklog()}
               style={{ ...primaryButtonStyle, opacity: backlogBlocked ? 0.5 : 1 }}
             >
               {strings.insights.form.toBacklog}

@@ -11,6 +11,7 @@ import {
   describeOrchdError,
 } from "../../ipc/orchd";
 import type { Account, AccountAuthKind, ConnectorOp, OAuthChallenge } from "../../ipc/orchd-types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { theme } from "../../theme";
 import { strings } from "../../strings";
 
@@ -228,6 +229,12 @@ export function ConnectorsTab(): JSX.Element {
   const orchdDown = useAppStore((s) => s.orchdDown);
   const refreshAccounts = useAppStore((s) => s.refreshAccounts);
   const showToast = useAppStore((s) => s.showToast);
+  // Independent double-submit guards (spec D6) — each "add account" submit is its own form, so they
+  // must not cross-disable each other (cross-cutting P-19, findings J-03..J-05). OAuth begin/complete
+  // additionally protect a real external round-trip.
+  const apiKeyForm = useSubmitGuard();
+  const oauthBeginForm = useSubmitGuard();
+  const oauthCompleteForm = useSubmitGuard();
 
   // ---- add-api-key form ----
   const [apiKeyProvider, setApiKeyProvider] = useState("");
@@ -331,6 +338,10 @@ export function ConnectorsTab(): JSX.Element {
       showToast(describeOrchdError(e));
     }
   }
+
+  const submitAddApiKey = apiKeyForm.guard(handleAddApiKey);
+  const submitBeginOAuth = oauthBeginForm.guard(handleBeginOAuth);
+  const submitCompleteOAuth = oauthCompleteForm.guard(handleCompleteOAuth);
 
   async function handleDeleteAccount(account: Account): Promise<void> {
     if (!window.confirm(strings.ext.connectors.deleteConfirm(account.label))) return;
@@ -529,9 +540,9 @@ export function ConnectorsTab(): JSX.Element {
           <button
             type="button"
             data-testid="apikey-submit"
-            disabled={orchdDown || apiKeyBlocked}
-            onClick={() => void handleAddApiKey()}
-            style={{ ...primaryButtonStyle, opacity: apiKeyBlocked ? 0.5 : 1 }}
+            disabled={orchdDown || apiKeyBlocked || apiKeyForm.submitting}
+            onClick={() => void submitAddApiKey()}
+            style={{ ...primaryButtonStyle, opacity: apiKeyBlocked || apiKeyForm.submitting ? 0.5 : 1 }}
           >
             {strings.ext.connectors.addApiKey}
           </button>
@@ -568,9 +579,9 @@ export function ConnectorsTab(): JSX.Element {
           <button
             type="button"
             data-testid="oauth-begin-submit"
-            disabled={orchdDown || oauthBeginBlocked}
-            onClick={() => void handleBeginOAuth()}
-            style={{ ...primaryButtonStyle, opacity: oauthBeginBlocked ? 0.5 : 1 }}
+            disabled={orchdDown || oauthBeginBlocked || oauthBeginForm.submitting}
+            onClick={() => void submitBeginOAuth()}
+            style={{ ...primaryButtonStyle, opacity: oauthBeginBlocked || oauthBeginForm.submitting ? 0.5 : 1 }}
           >
             {strings.ext.connectors.startOAuth}
           </button>
@@ -598,9 +609,9 @@ export function ConnectorsTab(): JSX.Element {
                 <button
                   type="button"
                   data-testid="oauth-complete-submit"
-                  disabled={orchdDown || oauthCompleteBlocked}
-                  onClick={() => void handleCompleteOAuth()}
-                  style={{ ...primaryButtonStyle, opacity: oauthCompleteBlocked ? 0.5 : 1 }}
+                  disabled={orchdDown || oauthCompleteBlocked || oauthCompleteForm.submitting}
+                  onClick={() => void submitCompleteOAuth()}
+                  style={{ ...primaryButtonStyle, opacity: oauthCompleteBlocked || oauthCompleteForm.submitting ? 0.5 : 1 }}
                 >
                   {strings.ext.connectors.finish}
                 </button>

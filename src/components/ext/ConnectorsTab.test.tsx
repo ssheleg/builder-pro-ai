@@ -127,6 +127,26 @@ describe("ConnectorsTab", () => {
     });
   });
 
+  it("two rapid '+ API key' clicks add ONCE (double-submit guard, spec D6 / J-03)", async () => {
+    let resolveAdd!: (v: unknown) => void;
+    connectorAddApiKeyMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveAdd = res)),
+    );
+    render(<ConnectorsTab />);
+    fireEvent.change(screen.getByTestId("apikey-provider"), { target: { value: "generic-rest" } });
+    fireEvent.change(screen.getByTestId("apikey-label"), { target: { value: "My API" } });
+    fireEvent.change(screen.getByTestId("apikey-key"), { target: { value: "sekret-key" } });
+
+    const submit = screen.getByTestId("apikey-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(connectorAddApiKeyMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveAdd({ id: "acc9" });
+    });
+  });
+
   it("add-api-key submit stays disabled while any field is empty", () => {
     render(<ConnectorsTab />);
     expect(screen.getByTestId("apikey-submit")).toHaveProperty("disabled", true);

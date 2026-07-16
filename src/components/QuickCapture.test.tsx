@@ -200,6 +200,33 @@ describe("QuickCapture", () => {
     expect(orchdCreateIdeaMock).toHaveBeenCalledWith(null, "Enter idea", "");
   });
 
+  it("two rapid Enters call orchdCreateIdea ONCE (double-submit guard, spec D6 / E-08)", async () => {
+    // Hold the create in flight so the second Enter fires while the first is still pending.
+    let resolveCreate!: (v: unknown) => void;
+    orchdCreateIdeaMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveCreate = res)),
+    );
+    render(<QuickCapture />);
+    pressCmdK();
+    fireEvent.change(screen.getByTestId("quick-capture-title-input"), {
+      target: { value: "Dup idea" },
+    });
+
+    await act(async () => {
+      const input = screen.getByTestId("quick-capture-title-input");
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await Promise.resolve();
+    });
+
+    expect(orchdCreateIdeaMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveCreate({ id: "i1", projectId: null, title: "Dup idea", body: "", lifecycle: "captured", createdAt: 1, updatedAt: 1 });
+      await Promise.resolve();
+    });
+  });
+
   it("submit is a no-op with an empty (whitespace-only) title", () => {
     render(<QuickCapture />);
     pressCmdK();

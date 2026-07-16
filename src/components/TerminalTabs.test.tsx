@@ -11,6 +11,7 @@ vi.mock("../ipc/commands", () => ({
 
 import { TerminalTabs } from "./TerminalTabs";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { SessionMeta, Workspace } from "../ipc/types";
 
 const disposeMock = vi.fn();
@@ -58,6 +59,7 @@ beforeEach(() => {
       activeSessionId: "s1",
       daemonConnected: true,
       selectedFile: null,
+      toast: null,
     },
     false,
   );
@@ -146,5 +148,41 @@ describe("TerminalTabs", () => {
     });
     expect(killSessionMock).toHaveBeenCalledWith("s1");
     expect(disposeMock).toHaveBeenCalledWith("s1");
+  });
+
+  it("closing a tab (success) removes it from the store — no zombie tab (BL-93 / P-02)", async () => {
+    killSessionMock.mockResolvedValueOnce(undefined);
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /close zsh/i }));
+    });
+    expect(useAppStore.getState().sessions).not.toHaveProperty("s1");
+    expect(useAppStore.getState().sessions).toHaveProperty("s2");
+  });
+
+  it("a failed close still disposes the terminal AND removes the tab, and surfaces a toast (BL-93)", async () => {
+    killSessionMock.mockReset().mockRejectedValueOnce({ kind: "disconnected" });
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /close zsh/i }));
+      await Promise.resolve();
+    });
+    expect(disposeMock).toHaveBeenCalledWith("s1");
+    expect(useAppStore.getState().sessions).not.toHaveProperty("s1");
+    expect(useAppStore.getState().toast).toBe(
+      strings.terminal.tabs.closeTerminalFailed(strings.errors.command.disconnected),
+    );
+  });
+
+  it("a failed new-terminal surfaces an honest toast instead of a silent no-op (BL-93 / P-01)", async () => {
+    createSessionMock.mockReset().mockRejectedValueOnce({ kind: "disconnected" });
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /new terminal/i }));
+      await Promise.resolve();
+    });
+    expect(useAppStore.getState().toast).toBe(
+      strings.terminal.tabs.newTerminalFailed(strings.errors.command.disconnected),
+    );
   });
 });

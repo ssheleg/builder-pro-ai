@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
 const researchStartRunMock = vi.fn();
 const mcpListToolsMock = vi.fn();
@@ -210,6 +210,26 @@ describe("ResearchRunDialog", () => {
       ),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("two rapid Run clicks start the run ONCE (double-submit guard, spec D6 / F-08)", async () => {
+    let resolveRun!: (v: unknown) => void;
+    researchStartRunMock.mockReset().mockImplementation(
+      () => new Promise((res) => (resolveRun = res)),
+    );
+    render(<ResearchRunDialog idea={idea} onClose={() => {}} />);
+    fireEvent.change(screen.getByTestId("research-run-server-select"), { target: { value: "s1" } });
+    await waitFor(() => expect(mcpListToolsMock).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId("research-run-tool-select"), { target: { value: "search" } });
+
+    const submit = screen.getByTestId("research-run-submit");
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(researchStartRunMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveRun({ id: "run1", status: "pending" });
+    });
   });
 
   it("the submit button is disabled until BOTH a server and a tool are picked", async () => {

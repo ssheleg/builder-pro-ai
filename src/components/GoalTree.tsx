@@ -8,6 +8,7 @@ import {
   describeOrchdError,
 } from "../ipc/orchd";
 import type { Goal, GoalStatus } from "../ipc/orchd-types";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { theme } from "../theme";
 import { strings } from "../strings";
 
@@ -303,6 +304,7 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
   const refreshGoals = useAppStore((s) => s.refreshGoals);
   const showToast = useAppStore((s) => s.showToast);
   const orchdDown = useAppStore((s) => s.orchdDown);
+  const { submitting, guard } = useSubmitGuard();
 
   const goals = goalsByProject[projectId] ?? [];
 
@@ -342,6 +344,11 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
       showToast(describeOrchdError(e));
     }
   }
+
+  // Double-submit guard (spec D6): a rapid second "+ subgoal" click must NOT create two subgoals
+  // (finding P-19). Shared across every row's add button — while one add is in flight the row
+  // controls render disabled (below).
+  const addSubgoal = guard(handleAddSubgoal);
 
   async function handleDelete(id: string): Promise<void> {
     if (!window.confirm(DELETE_CONFIRM_TEXT)) return;
@@ -412,10 +419,10 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
             isStrategic={isStrategic}
             canMoveUp={!isStrategic && idx > 0}
             canMoveDown={!isStrategic && idx >= 0 && idx < siblings.length - 1}
-            disabled={orchdDown}
+            disabled={orchdDown || submitting}
             onTitleCommit={handleTitleCommit}
             onStatusChange={handleStatusChange}
-            onAddSubgoal={handleAddSubgoal}
+            onAddSubgoal={addSubgoal}
             onDelete={handleDelete}
             onMoveUp={handleMoveUp}
             onMoveDown={handleMoveDown}
