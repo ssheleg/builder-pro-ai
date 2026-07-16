@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { strings } from "../strings";
 import type { WorkspaceId } from "./commands";
 import type {
   Account,
@@ -434,7 +435,7 @@ export function orchdImportFromFile(path: string): Promise<ImportReport> {
 // ── lifecycle ────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Drops and re-establishes the orchd connection (spec §9, the [Повторить] retry action's
+ * Drops and re-establishes the orchd connection (spec §9, the [Retry] retry action's
  * target). Fire-and-forget — the outcome is observed via `orchd://down|up|incompatible`
  * (`./events.ts`), not this command's resolved `Promise`.
  */
@@ -734,7 +735,7 @@ export function trustListPolicies(): Promise<Policy[]> {
 }
 
 /** Newest-first, optionally capped at `limit` — every trust-choke-point decision, allow or
- * deny, for the Журнал/audit UI. */
+ * deny, for the Log/audit UI. */
 export function trustListAudit(limit: number | null): Promise<AuditRow[]> {
   return invoke<AuditRow[]>("trust_list_audit", { limit });
 }
@@ -742,7 +743,7 @@ export function trustListAudit(limit: number | null): Promise<AuditRow[]> {
 // ── error mapping ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Human-readable Russian message for a rejected `orchd_*` call (spec §9/§10 "honest error
+ * Human-readable English message for a rejected `orchd_*` call (spec §9/§10 "honest error
  * surface"). Mirrors the `CommandError` shape `src-tauri/src/commands.rs` serializes
  * (`#[serde(tag = "kind", rename_all = "camelCase")]`; there is no hand-written `CommandError` TS
  * type yet — same situation `commands.ts`'s `DaemonStatus` doc notes — so this reads the shape
@@ -767,26 +768,26 @@ export function describeOrchdError(e: unknown): string {
       const message = typeof err.message === "string" ? err.message : "";
       switch (code) {
         case "Invariant":
-          return `недопустимая операция: ${message}`;
+          return strings.errors.invariant(message);
         case "Conflict":
-          return `конфликт: ${message}`;
+          return strings.errors.conflict(message);
         case "NotFound":
-          return "не найдено";
+          return strings.errors.notFound;
         case "Validation":
-          return `неверные данные: ${message}`;
+          return strings.errors.validation(message);
         case "Io":
-          return `ошибка сервиса: ${message}`;
+          return strings.errors.io(message);
         case "Consent":
-          return `требуется согласие на подключение: ${message}`;
+          return strings.errors.consent(message);
         case "Policy":
-          return `запрещено политикой: ${message}`;
+          return strings.errors.policy(message);
         default:
-          return message || "ошибка оркестратора";
+          return message || strings.errors.orchdError;
       }
     }
     if (err.kind === "disconnected" || err.kind === "incompatibleOrchd") {
-      return "оркестратор недоступен";
+      return strings.errors.unavailable;
     }
   }
-  return "неизвестная ошибка оркестратора";
+  return strings.errors.unknown;
 }

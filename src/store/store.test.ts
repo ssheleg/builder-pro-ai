@@ -506,8 +506,8 @@ describe("useAppStore", () => {
   });
 
   it("showToast sets the current toast message", () => {
-    useAppStore.getState().showToast("Не удалось подключиться к демону");
-    expect(useAppStore.getState().toast).toBe("Не удалось подключиться к демону");
+    useAppStore.getState().showToast("Failed to connect to the daemon");
+    expect(useAppStore.getState().toast).toBe("Failed to connect to the daemon");
   });
 
   it("dismissToast clears the toast", () => {

@@ -91,7 +91,7 @@ export interface AppState {
    * Top-level navigation (spec §6.6/§6.2/§10, S-EXT §8): `"home"` is the attention-first Home
    * view over ALL terminals across workspaces; `"workspace"` is the existing per-workspace
    * terminal layout; `"project"` is the S3 project panel (`openProject`, T18); `"ext"` is the
-   * S-EXT «Расширения» panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management.
+   * S-EXT Extensions panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management.
    * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
    */
   view: "home" | "workspace" | "project" | "ext";
@@ -149,7 +149,7 @@ export interface AppState {
    * entry. */
   goalsByProject: Record<string, Goal[]>;
   /** Every idea, across every project (ideas are NOT split per project in this slice — the
-   * ⌘K quick-capture inbox and Идеи panel filter client-side). Replaced wholesale by
+   * ⌘K quick-capture inbox and Ideas panel filter client-side). Replaced wholesale by
    * `refreshIdeas`. */
   ideas: Idea[];
   /** Every insight, across every project. Mirrors `ideas` exactly. Replaced wholesale by
@@ -175,12 +175,12 @@ export interface AppState {
   rulesets: Record<string, RuleSetView>;
 
   /**
-   * MCP slice (S-EXT §8, T8: the «Расширения» view's Servers/Tools tabs). Mirrors the app-domain
+   * MCP slice (S-EXT §8, T8: the Extensions view's Servers/Tools tabs). Mirrors the app-domain
    * slice above exactly — invalidation-driven (D6: coarse `orchd://mcp-*-changed` pushes tell the
    * frontend WHAT changed; the matching `refresh*` action re-fetches wholesale/per-key from
    * `./orchd.ts`, replacing it — no client-side merge/patch).
    */
-  /** Every MCP server (global scope — `mcpListServers(null)`; Phase 1's «Расширения» view has no
+  /** Every MCP server (global scope — `mcpListServers(null)`; Phase 1's Extensions view has no
    * per-project server list yet). Replaced wholesale by `refreshMcpServers`, mirrors `projects`. */
   mcpServers: McpServer[];
   /** A server's cached tool list (from `mcp_tool`, refreshed on connect/`list_changed`), keyed by
@@ -189,31 +189,31 @@ export interface AppState {
    * {serverId}` push never touches any OTHER server's entry. */
   mcpToolsByServer: Record<string, McpTool[]>;
   /** Every durable MCP artifact, unfiltered (mirrors `ideas`/`insights`'s whole-store
-   * convention — the Артефакты tab filters client-side). Replaced wholesale by
+   * convention — the Artifacts tab filters client-side). Replaced wholesale by
    * `refreshMcpArtifacts`. */
   mcpArtifacts: McpArtifact[];
-  /** Every connector account (S-EXT §8, T13b: the «Расширения»/«Коннекторы» tab). Mirrors
+  /** Every connector account (S-EXT §8, T13b: the Extensions/Connectors tab). Mirrors
    * `mcpServers`'s whole-store, un-scoped convention exactly (`connectorListAccounts` has no
    * filter either) — replaced wholesale by `refreshAccounts`. */
   accounts: Account[];
-  /** Every skill (global scope — `skillList(null)`; S-EXT §8, D11, T17: the «Расширения»/
-   * «Навыки» tab. PLUMBING ONLY — no runtime consumer until S6b). Mirrors `mcpServers`'s
+  /** Every skill (global scope — `skillList(null)`; S-EXT §8, D11, T17: the Extensions/
+   * Skills tab. PLUMBING ONLY — no runtime consumer until S6b). Mirrors `mcpServers`'s
    * whole-store, un-scoped convention exactly — replaced wholesale by `refreshSkills`. */
   skills: Skill[];
-  /** Every MCP invocation, unfiltered (S-EXT §8, T18: the «Расширения»/«Журнал» tab). Mirrors
+  /** Every MCP invocation, unfiltered (S-EXT §8, T18: the Extensions/Log tab). Mirrors
    * `mcpArtifacts`'s whole-store, un-scoped convention exactly — replaced wholesale by
    * `refreshInvocations`. */
   invocations: McpInvocation[];
-  /** Every `audit_log` row, newest-first (S-EXT §4/§6/§8, BL-22, T18: the «Расширения»/
-   * «Журнал» tab's audit view). Replaced wholesale by `refreshAuditRows`. */
+  /** Every `audit_log` row, newest-first (S-EXT §4/§6/§8, BL-22, T18: the Extensions/
+   * Log tab's audit view). Replaced wholesale by `refreshAuditRows`. */
   auditRows: AuditRow[];
-  /** Every configured spend/rate policy (S-EXT §4/§6/§8, BL-22, T18: the «Расширения»/«Журнал»
+  /** Every configured spend/rate policy (S-EXT §4/§6/§8, BL-22, T18: the Extensions/Log
    * tab's policy editor). Replaced wholesale by `refreshPolicies`. */
   policies: Policy[];
 
   /** Honest orchd connectivity (spec §9/§11, mirrors sessiond's `daemonConnected` inverted):
    * `true` while the `orchd://down` event is the most recent connection-state signal seen, `false`
-   * once `orchd://up` fires. Every domain surface shows the shared "Оркестратор недоступен"
+   * once `orchd://up` fires. Every domain surface shows the shared "Orchestrator unavailable"
    * banner + disables mutating controls while this is `true` (T19). */
   orchdDown: boolean;
   /** Set by `orchd://incompatible` (FATAL, like `daemonIncompatible` — the orchd client's
@@ -488,7 +488,7 @@ export const useAppStore = create<AppState>((set, get) => {
     setDaemonConnected: (connected) => set({ daemonConnected: connected }),
     setDaemonIncompatible: (v) => set({ daemonIncompatible: v }),
     // Opening the dialog fresh (v=true) clears any stale upgradeError from a previous attempt
-    // (finding [13]): every reopen path (daemon://incompatible, DaemonBanner's "Обновить" action)
+    // (finding [13]): every reopen path (daemon://incompatible, DaemonBanner's "Update" action)
     // goes through this setter, so this is the single place that guarantees a fresh open never
     // shows a leftover error from an earlier session/attempt. Closing (v=false) leaves the error
     // untouched — Cancel doesn't need to erase it, only a fresh open does.

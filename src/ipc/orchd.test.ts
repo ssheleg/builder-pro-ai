@@ -89,6 +89,7 @@ import {
   trustListAudit,
   describeOrchdError,
 } from "./orchd";
+import { strings } from "../strings";
 
 describe("ipc/orchd", () => {
   beforeEach(() => {
@@ -817,63 +818,63 @@ describe("ipc/orchd", () => {
     it("maps daemon/Invariant", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "Invariant", message: "last workspace" }),
-      ).toBe("недопустимая операция: last workspace");
+      ).toBe(strings.errors.invariant("last workspace"));
     });
 
     it("maps daemon/Conflict", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "Conflict", message: "id already exists" }),
-      ).toBe("конфликт: id already exists");
+      ).toBe(strings.errors.conflict("id already exists"));
     });
 
     it("maps daemon/NotFound (ignores message)", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "NotFound", message: "whatever" }),
-      ).toBe("не найдено");
+      ).toBe(strings.errors.notFound);
     });
 
     it("maps daemon/Validation", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "Validation", message: "title required" }),
-      ).toBe("неверные данные: title required");
+      ).toBe(strings.errors.validation("title required"));
     });
 
     it("maps daemon/Io", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "Io", message: "disk full" }),
-      ).toBe("ошибка сервиса: disk full");
+      ).toBe(strings.errors.io("disk full"));
     });
 
     it("maps daemon/Consent (S-EXT §8)", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "Consent", message: "consent_required" }),
-      ).toBe("требуется согласие на подключение: consent_required");
+      ).toBe(strings.errors.consent("consent_required"));
     });
 
     it("maps daemon/Policy (S-EXT §8)", () => {
       expect(
         describeOrchdError({ kind: "daemon", code: "Policy", message: "tool_disabled" }),
-      ).toBe("запрещено политикой: tool_disabled");
+      ).toBe(strings.errors.policy("tool_disabled"));
     });
 
     it("maps disconnected", () => {
-      expect(describeOrchdError({ kind: "disconnected" })).toBe("оркестратор недоступен");
+      expect(describeOrchdError({ kind: "disconnected" })).toBe(strings.errors.unavailable);
     });
 
     it("maps incompatibleOrchd", () => {
       expect(
         describeOrchdError({ kind: "incompatibleOrchd", orchdMin: 2, orchdMax: 3 }),
-      ).toBe("оркестратор недоступен");
+      ).toBe(strings.errors.unavailable);
     });
 
     it("falls back honestly for an unrecognized kind", () => {
-      expect(describeOrchdError({ kind: "internal" })).toBe("неизвестная ошибка оркестратора");
+      expect(describeOrchdError({ kind: "internal" })).toBe(strings.errors.unknown);
     });
 
     it("falls back honestly for a non-CommandError rejection (e.g. a plain Error)", () => {
-      expect(describeOrchdError(new Error("boom"))).toBe("неизвестная ошибка оркестратора");
-      expect(describeOrchdError("boom")).toBe("неизвестная ошибка оркестратора");
-      expect(describeOrchdError(undefined)).toBe("неизвестная ошибка оркестратора");
+      expect(describeOrchdError(new Error("boom"))).toBe(strings.errors.unknown);
+      expect(describeOrchdError("boom")).toBe(strings.errors.unknown);
+      expect(describeOrchdError(undefined)).toBe(strings.errors.unknown);
     });
 
     it("falls back to a generic daemon message when an unmapped code still carries a message", () => {
