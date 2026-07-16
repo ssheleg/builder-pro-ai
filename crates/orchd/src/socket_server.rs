@@ -931,6 +931,13 @@ async fn dispatch_inner(
             };
             respond_project(result, broadcaster)
         }
+        OrchdRequest::UnarchiveProject { id } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.unarchive_project(&id)
+            };
+            respond_project(result, broadcaster)
+        }
         OrchdRequest::ListProjects => {
             let db = deps.db.lock().await;
             match db.list_projects() {

@@ -99,6 +99,10 @@ export function orchdArchiveProject(id: string): Promise<Project> {
   return invoke<Project>("orchd_archive_project", { id });
 }
 
+export function orchdUnarchiveProject(id: string): Promise<Project> {
+  return invoke<Project>("orchd_unarchive_project", { id });
+}
+
 export function orchdListProjects(): Promise<Project[]> {
   return invoke<Project[]>("orchd_list_projects");
 }

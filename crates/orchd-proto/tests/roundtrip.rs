@@ -685,6 +685,9 @@ fn all_requests() -> Vec<OrchdRequest> {
         },
         OrchdRequest::ResearchGetRun { id: "run-1".into() },
         OrchdRequest::GetStorageStatus,
+        OrchdRequest::UnarchiveProject {
+            id: "proj-1".into(),
+        },
     ]
 }
 

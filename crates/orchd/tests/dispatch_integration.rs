@@ -14,9 +14,9 @@ use bpa_orchd::protocol::{
     GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
     McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
     OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Policy,
-    PolicyScope, Project, ResearchRun, ResearchStatus, RuleFileState, RuleScope, RuleSetView,
-    Skill, SkillFileState, SkillScope, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION,
-    ORCHD_DAEMON_MAX_VERSION,
+    PolicyScope, Project, ProjectStatus, ResearchRun, ResearchStatus, RuleFileState, RuleScope,
+    RuleSetView, Skill, SkillFileState, SkillScope, ORCHD_CLIENT_MAX_VERSION,
+    ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -766,6 +766,87 @@ async fn remove_last_project_workspace_is_invariant_and_broadcasts_nothing() {
             .await
             .is_none(),
         "a failed RemoveProjectWorkspace must broadcast nothing"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn unarchive_project_returns_active_project_and_broadcasts_projects_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project = create_project(&mut c1, "Acme").await;
+    let archived = expect_project(
+        c1.request(OrchdRequest::ArchiveProject {
+            id: project.id.clone(),
+        })
+        .await,
+    );
+    assert_eq!(archived.status, ProjectStatus::Archived);
+
+    // c2 connects only AFTER the archive (and its ProjectsChanged push) already landed, so the
+    // only push it can see below is the un-archive's own.
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let restored = expect_project(
+        c1.request(OrchdRequest::UnarchiveProject {
+            id: project.id.clone(),
+        })
+        .await,
+    );
+    assert_eq!(restored.id, project.id);
+    assert_eq!(restored.status, ProjectStatus::Active);
+
+    match c2.recv_push().await {
+        OrchdPush::ProjectsChanged => {}
+        other => panic!("expected ProjectsChanged, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn unarchive_active_project_is_invariant_and_broadcasts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project = create_project(&mut c1, "Acme").await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // The project is still `active` — un-archiving it is the mirror `Invariant` of archiving an
+    // already-archived project (spec D7): nothing to reverse.
+    let res = c1
+        .request(OrchdRequest::UnarchiveProject {
+            id: project.id.clone(),
+        })
+        .await;
+    match res {
+        OrchdResponse::Error { code, message } => {
+            assert_eq!(code, OrchdErrorCode::Invariant);
+            assert_eq!(message, "invariant violated: project is not archived");
+        }
+        other => panic!("expected Error{{Invariant}}, got {other:?}"),
+    }
+
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(300))
+            .await
+            .is_none(),
+        "a failed UnarchiveProject must broadcast nothing"
     );
 
     c1.shutdown(boot).await;

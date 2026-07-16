@@ -32,6 +32,8 @@ const orchdListInsightsMock = vi.fn();
 const orchdListProjectsMock = vi.fn();
 const orchdAddProjectWorkspaceMock = vi.fn();
 const orchdRemoveProjectWorkspaceMock = vi.fn();
+const orchdArchiveProjectMock = vi.fn();
+const orchdUnarchiveProjectMock = vi.fn();
 const orchdExportProjectMock = vi.fn();
 const orchdExportToFileMock = vi.fn();
 const orchdImportFromFileMock = vi.fn();
@@ -44,6 +46,8 @@ vi.mock("../ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdAddProjectWorkspace: (...a: unknown[]) => orchdAddProjectWorkspaceMock(...a),
   orchdRemoveProjectWorkspace: (...a: unknown[]) => orchdRemoveProjectWorkspaceMock(...a),
+  orchdArchiveProject: (...a: unknown[]) => orchdArchiveProjectMock(...a),
+  orchdUnarchiveProject: (...a: unknown[]) => orchdUnarchiveProjectMock(...a),
   orchdExportProject: (...a: unknown[]) => orchdExportProjectMock(...a),
   orchdExportToFile: (...a: unknown[]) => orchdExportToFileMock(...a),
   orchdImportFromFile: (...a: unknown[]) => orchdImportFromFileMock(...a),
@@ -122,6 +126,8 @@ beforeEach(() => {
   orchdListProjectsMock.mockReset().mockResolvedValue([makeProject()]);
   orchdAddProjectWorkspaceMock.mockReset().mockResolvedValue(makeProject());
   orchdRemoveProjectWorkspaceMock.mockReset().mockResolvedValue(makeProject());
+  orchdArchiveProjectMock.mockReset().mockResolvedValue(makeProject({ status: "archived" }));
+  orchdUnarchiveProjectMock.mockReset().mockResolvedValue(makeProject({ status: "active" }));
   orchdExportProjectMock.mockReset().mockResolvedValue("{}");
   orchdExportToFileMock.mockReset().mockResolvedValue("/dest/p1-export.json");
   orchdImportFromFileMock.mockReset().mockResolvedValue({
@@ -339,5 +345,73 @@ describe("ProjectPanel", () => {
       expect(describeOrchdErrorMock).toHaveBeenCalled();
       expect(useAppStore.getState().toast).toBe("orchestrator: error");
     });
+  });
+
+  // ---- archive / un-archive (O-3, spec D7) ----
+
+  it('the "Archive project" button asks for confirmation; cancelling is a no-op', () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ProjectPanel projectId="p1" />);
+    const archiveBtn = screen.getByTestId("project-archive");
+    expect(archiveBtn.textContent).toBe(strings.project.archive);
+
+    fireEvent.click(archiveBtn);
+    expect(confirmSpy).toHaveBeenCalledWith(strings.project.archiveConfirm);
+    expect(orchdArchiveProjectMock).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it('an accepted confirm fires orchdArchiveProject with the project id', async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ProjectPanel projectId="p1" />);
+
+    fireEvent.click(screen.getByTestId("project-archive"));
+    await waitFor(() => expect(orchdArchiveProjectMock).toHaveBeenCalledWith("p1"));
+    confirmSpy.mockRestore();
+  });
+
+  it('the "Archive project" button is disabled while orchdDown', () => {
+    useAppStore.setState({ orchdDown: true }, false);
+    render(<ProjectPanel projectId="p1" />);
+    expect((screen.getByTestId("project-archive") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("a rapid double-click on Archive fires the round-trip only once (submit guard, spec D6)", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    // A never-settling promise keeps `submitting`/the ref lock engaged across both clicks.
+    orchdArchiveProjectMock.mockReset().mockReturnValue(new Promise<never>(() => {}));
+    render(<ProjectPanel projectId="p1" />);
+
+    const archiveBtn = screen.getByTestId("project-archive");
+    fireEvent.click(archiveBtn);
+    fireEvent.click(archiveBtn);
+
+    await waitFor(() => expect(orchdArchiveProjectMock).toHaveBeenCalledTimes(1));
+    confirmSpy.mockRestore();
+  });
+
+  it("an archived project renders a read-only banner and NO archive button", () => {
+    useAppStore.setState({ projects: [makeProject({ status: "archived" })] }, false);
+    render(<ProjectPanel projectId="p1" />);
+    expect(screen.getByTestId("project-archived-banner").textContent).toContain(
+      strings.project.archivedBanner,
+    );
+    expect(screen.queryByTestId("project-archive")).toBeNull();
+  });
+
+  it('the archived banner\'s "Un-archive" button fires orchdUnarchiveProject', async () => {
+    useAppStore.setState({ projects: [makeProject({ status: "archived" })] }, false);
+    render(<ProjectPanel projectId="p1" />);
+    const unarchiveBtn = screen.getByTestId("project-unarchive");
+    expect(unarchiveBtn.textContent).toBe(strings.project.unarchive);
+
+    fireEvent.click(unarchiveBtn);
+    await waitFor(() => expect(orchdUnarchiveProjectMock).toHaveBeenCalledWith("p1"));
+  });
+
+  it('the "Un-archive" button is disabled while orchdDown', () => {
+    useAppStore.setState({ projects: [makeProject({ status: "archived" })], orchdDown: true }, false);
+    render(<ProjectPanel projectId="p1" />);
+    expect((screen.getByTestId("project-unarchive") as HTMLButtonElement).disabled).toBe(true);
   });
 });

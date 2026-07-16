@@ -82,9 +82,17 @@ export function WorkspaceSidebar(props: {
 
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [attachSelection, setAttachSelection] = useState<Record<WorkspaceId, string>>({});
+  // Archived projects live in a collapsed, dimmed group (O-3, spec D7) — collapsed by default so
+  // the active-project navigation stays uncluttered.
+  const [showArchived, setShowArchived] = useState(false);
 
   const list = Object.values(workspaces).sort((a, b) => a.name.localeCompare(b.name));
   const sortedProjects = [...projects].sort((a, b) => a.name.localeCompare(b.name));
+  // Only ACTIVE projects get a first-class navigation group; archived ones are relegated to the
+  // dimmed «Archived» group below (spec D7). `linkedIds` still counts EVERY project (incl.
+  // archived), so an archived project's workspaces never leak into the «No project» group.
+  const activeProjects = sortedProjects.filter((p) => p.status === "active");
+  const archivedProjects = sortedProjects.filter((p) => p.status === "archived");
   const linkedIds = linkedWorkspaceIds(projects);
   const unlinkedWorkspaces = list.filter((w) => !linkedIds.has(w.id));
 
@@ -222,7 +230,7 @@ export function WorkspaceSidebar(props: {
               {strings.chrome.sidebar.emptyState}
             </div>
           )}
-          {sortedProjects.map((project) => {
+          {activeProjects.map((project) => {
             const projectWorkspaces = project.workspaceIds
               .map((id) => workspaces[id])
               .filter((w): w is Workspace => w !== undefined);
@@ -276,7 +284,7 @@ export function WorkspaceSidebar(props: {
               {unlinkedWorkspaces.map((w) => (
                 <li key={w.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>{renderWorkspaceButton(w)}</div>
-                  {sortedProjects.length > 0 && (
+                  {activeProjects.length > 0 && (
                     <select
                       data-testid={`attach-workspace-${w.id}`}
                       aria-label={strings.chrome.sidebar.linkToProject(w.name)}
@@ -289,7 +297,7 @@ export function WorkspaceSidebar(props: {
                       style={{ fontSize: 11, marginRight: 8, maxWidth: 90 }}
                     >
                       <option value="">{strings.chrome.sidebar.linkPlaceholder}</option>
-                      {sortedProjects.map((p) => (
+                      {activeProjects.map((p) => (
                         <option key={p.id} value={p.id}>
                           {p.name}
                         </option>
@@ -300,6 +308,67 @@ export function WorkspaceSidebar(props: {
               ))}
             </ul>
           </div>
+
+          {archivedProjects.length > 0 && (
+            <div data-testid="archived-projects-group" style={{ opacity: 0.6 }}>
+              <button
+                type="button"
+                data-testid="archived-projects-toggle"
+                aria-expanded={showArchived}
+                aria-label={strings.chrome.sidebar.archivedGroupToggleAria}
+                onClick={() => setShowArchived((v) => !v)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  border: "none",
+                  borderTop: `1px solid ${theme.colors.border}`,
+                  cursor: "pointer",
+                  color: theme.colors.textDim,
+                  background: "transparent",
+                }}
+              >
+                {showArchived ? "▾" : "▸"} {strings.chrome.sidebar.archivedGroup(archivedProjects.length)}
+              </button>
+              {showArchived && (
+                <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                  {archivedProjects.map((project) => {
+                    const projectActive = view === "project" && activeProjectId === project.id;
+                    return (
+                      <li key={project.id}>
+                        <button
+                          type="button"
+                          data-testid={`archived-project-${project.id}`}
+                          aria-current={projectActive ? "true" : undefined}
+                          onClick={() => openProject(project.id)}
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "6px 12px",
+                            fontSize: 13,
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            border: "none",
+                            cursor: "pointer",
+                            color: projectActive ? theme.colors.text : theme.colors.textDim,
+                            background: projectActive ? theme.colors.bg : "transparent",
+                          }}
+                        >
+                          {project.name}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
         <button

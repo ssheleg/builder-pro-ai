@@ -1204,6 +1204,13 @@ pub enum OrchdRequest {
     /// → `OrchdResponse::StorageStatus`. Reports the daemon's storage-degradation mode (spec D3,
     /// BL-94); fixed at boot, pulled on connect and reconnect.
     GetStorageStatus,
+    /// → `OrchdResponse::Project` + pushes `ProjectsChanged` (spec D7, O-3). Reverses
+    /// `ArchiveProject`: `archived` → `active`. Unknown `id` ⇒ `NotFound`; an already-`active`
+    /// project ⇒ `Invariant` (there is nothing to un-archive) — the mirror of `ArchiveProject`'s
+    /// already-archived `Invariant`. Appended at the enum TAIL (append-only wire rule).
+    UnarchiveProject {
+        id: String,
+    },
 }
 
 impl OrchdRequest {
@@ -1300,6 +1307,7 @@ impl OrchdRequest {
             Self::ResearchListRuns { .. } => "ResearchListRuns",
             Self::ResearchGetRun { .. } => "ResearchGetRun",
             Self::GetStorageStatus => "GetStorageStatus",
+            Self::UnarchiveProject { .. } => "UnarchiveProject",
         }
     }
 }

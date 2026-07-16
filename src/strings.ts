@@ -98,6 +98,9 @@ export const strings = {
        * the bare «No project» header is otherwise the only thing on screen. The CTAs below it
        * ("+ project" / "+ Add workspace") stay visible; this is onboarding copy, not a dead end. */
       emptyState: "No workspaces yet — add a workspace or create a project to begin.",
+      /** Header of the collapsed, dimmed group of archived projects (O-3, spec D7). */
+      archivedGroup: (count: number) => `Archived (${count})`,
+      archivedGroupToggleAria: "Toggle archived projects",
     },
   },
 
@@ -220,6 +223,14 @@ export const strings = {
     importLabel: "Import",
     importFromFile: "Import from file…",
     noJsonFiles: "No .json files in the selected folder",
+    // ── archive / un-archive (O-3, spec D7) ──
+    dangerLabel: "Danger zone",
+    archive: "Archive project",
+    archiveConfirm: "Archive this project? It becomes read-only until you un-archive it.",
+    archived: "Project archived",
+    /** Read-only banner shown at the top of an archived project's Overview (spec D7). */
+    archivedBanner: "This project is archived and read-only. Un-archive it to make changes.",
+    unarchive: "Un-archive",
   },
 
   // ── goal tree ────────────────────────────────────────────────────────────────────────────────

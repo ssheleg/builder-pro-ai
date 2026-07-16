@@ -1277,6 +1277,19 @@ pub async fn orchd_archive_project(
 }
 
 #[tauri::command]
+pub async fn orchd_unarchive_project(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Project, CommandError> {
+    expect_project(
+        state
+            .orchd()?
+            .request(OrchdRequest::UnarchiveProject { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
 pub async fn orchd_list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, CommandError> {
     expect_projects(state.orchd()?.request(OrchdRequest::ListProjects).await?)
 }
@@ -4509,6 +4522,63 @@ pub(crate) mod orchd_commands_over_stub_daemon {
         assert_eq!(project.id, "proj-1");
         assert_eq!(project.name, "Proj");
         assert_eq!(project.workspace_ids, vec!["ws-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn orchd_unarchive_project_round_trips_through_real_orchd_client() {
+        // The stub echoes an `active` project back for `UnarchiveProject { id }`, mirroring the
+        // daemon's `unarchive_project` (archived → active). Confirms the command's request shape
+        // and its `expect_project` unwrap (spec D7, O-3).
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::UnarchiveProject { id } => {
+                OrchdResponse::Project(bpa_orchd_proto::Project {
+                    id,
+                    name: "Proj".into(),
+                    description: "Desc".into(),
+                    status: bpa_orchd_proto::ProjectStatus::Active,
+                    workspace_ids: vec!["ws-1".into()],
+                    created_at: 0,
+                    updated_at: 1,
+                })
+            }
+            other => panic!("expected UnarchiveProject, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::UnarchiveProject {
+                id: "proj-1".into(),
+            })
+            .await
+            .unwrap();
+        let project = expect_project(res).unwrap();
+        assert_eq!(project.id, "proj-1");
+        assert_eq!(project.status, bpa_orchd_proto::ProjectStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn orchd_unarchive_project_invariant_error_becomes_command_error_daemon() {
+        // An already-active project rejected with `Invariant("project is not archived")` must
+        // reach the webview as the spec §9-locked `CommandError::Daemon { code: "Invariant", .. }`.
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Invariant,
+            message: "project is not archived".into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::UnarchiveProject {
+                id: "proj-1".into(),
+            })
+            .await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Invariant");
+                assert_eq!(message, "project is not archived");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
     }
 
     #[tokio::test]

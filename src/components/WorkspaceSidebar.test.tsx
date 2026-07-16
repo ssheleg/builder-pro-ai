@@ -202,6 +202,55 @@ describe("WorkspaceSidebar", () => {
     expect(screen.getByTestId("create-project-dialog")).toBeTruthy();
   });
 
+  // ---- archived projects group (O-3, spec D7) ----
+
+  it("no «Archived» group renders when every project is active", () => {
+    useAppStore.setState({ projects: [makeProject({ id: "p1", status: "active" })] }, false);
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(screen.queryByTestId("archived-projects-group")).toBeNull();
+  });
+
+  it("an archived project lands in a collapsed, dimmed «Archived» group — not in the main groups", () => {
+    useAppStore.setState(
+      {
+        projects: [
+          makeProject({ id: "p1", name: "Live", status: "active" }),
+          makeProject({ id: "p2", name: "Old", status: "archived" }),
+        ],
+      },
+      false,
+    );
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+
+    // Active project keeps its first-class group; the archived one does NOT.
+    expect(screen.getByTestId("project-group-p1")).toBeTruthy();
+    expect(screen.queryByTestId("project-group-p2")).toBeNull();
+
+    // The group exists and is dimmed; collapsed by default (archived row not yet rendered).
+    const group = screen.getByTestId("archived-projects-group");
+    expect(group.getAttribute("style")).toContain("opacity: 0.6");
+    expect(screen.getByTestId("archived-projects-toggle").textContent).toContain(
+      strings.chrome.sidebar.archivedGroup(1),
+    );
+    expect(screen.queryByTestId("archived-project-p2")).toBeNull();
+  });
+
+  it("expanding «Archived» reveals the archived project; clicking it opens the project", () => {
+    useAppStore.setState(
+      { projects: [makeProject({ id: "p2", name: "Old", status: "archived" })] },
+      false,
+    );
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+
+    fireEvent.click(screen.getByTestId("archived-projects-toggle"));
+    const row = screen.getByTestId("archived-project-p2");
+    expect(row.textContent).toBe("Old");
+
+    fireEvent.click(row);
+    expect(useAppStore.getState().view).toBe("project");
+    expect(useAppStore.getState().activeProjectId).toBe("p2");
+  });
+
   // ---- S-EXT §8, T8: «Extensions» nav button ----
 
   it("renders a «Extensions» nav item; clicking it sets view to \"ext\" and highlights it", () => {

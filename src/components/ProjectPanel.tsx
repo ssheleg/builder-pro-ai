@@ -3,6 +3,8 @@ import { useAppStore } from "../store/store";
 import {
   orchdAddProjectWorkspace,
   orchdRemoveProjectWorkspace,
+  orchdArchiveProject,
+  orchdUnarchiveProject,
   orchdExportProject,
   orchdExportToFile,
   orchdImportFromFile,
@@ -11,6 +13,7 @@ import {
 import { pickFolder } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";
 import { listDir, type FsEntry } from "../ipc/fs";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { GoalTree } from "./GoalTree";
 import { IdeasList } from "./IdeasList";
 import { TasksList } from "./TasksList";
@@ -165,6 +168,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
   const [addWorkspaceSelection, setAddWorkspaceSelection] = useState("");
   const [importDir, setImportDir] = useState<string | null>(null);
   const [importFiles, setImportFiles] = useState<FsEntry[]>([]);
+  const { submitting, guard } = useSubmitGuard();
 
   useEffect(() => {
     void refreshGoals(projectId);
@@ -269,6 +273,34 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
     }
   }
 
+  // Archive / un-archive (O-3, spec D7). Both are mutating round-trips wrapped in the shared
+  // double-submit `guard` (spec D6) and explicitly `refreshProjects()` afterward rather than
+  // waiting on the `orchd://projects-changed` push (same defensive-refresh discipline as the
+  // workspace mutations above). A cancelled confirm returns before the round-trip — not an error.
+  async function handleArchive(): Promise<void> {
+    if (!window.confirm(strings.project.archiveConfirm)) return;
+    try {
+      await orchdArchiveProject(projectId);
+      await refreshProjects();
+      showToast(strings.project.archived);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  async function handleUnarchive(): Promise<void> {
+    try {
+      await orchdUnarchiveProject(projectId);
+      await refreshProjects();
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  const archiveProject = guard(handleArchive);
+  const unarchiveProject = guard(handleUnarchive);
+  const isArchived = project.status === "archived";
+
   return (
     <div data-testid="project-panel" style={panelStyle}>
       <div style={headerStyle}>
@@ -307,6 +339,41 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
       <div style={contentStyle}>
         {activeTab === "overview" && (
           <div data-testid="project-overview" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {isArchived && (
+              <div
+                data-testid="project-archived-banner"
+                role="status"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  padding: "8px 12px",
+                  borderRadius: 4,
+                  border: `1px solid ${theme.colors.statusExited}`,
+                  color: theme.colors.statusExited,
+                  fontSize: 13,
+                }}
+              >
+                <span>{strings.project.archivedBanner}</span>
+                <button
+                  type="button"
+                  data-testid="project-unarchive"
+                  onClick={() => void unarchiveProject()}
+                  disabled={orchdDown || submitting}
+                  style={{
+                    ...textButtonStyle,
+                    borderColor: theme.colors.statusExited,
+                    color: theme.colors.statusExited,
+                    cursor: orchdDown || submitting ? "not-allowed" : "pointer",
+                    opacity: orchdDown || submitting ? 0.5 : 1,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {strings.project.unarchive}
+                </button>
+              </div>
+            )}
             <div
               data-testid="project-counters"
               style={{ display: "flex", gap: 16, fontSize: 13, color: theme.colors.textDim }}
@@ -415,6 +482,27 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                 </div>
               )}
             </div>
+
+            {!isArchived && (
+              <div>
+                <div style={sectionLabelStyle}>{strings.project.dangerLabel}</div>
+                <button
+                  type="button"
+                  data-testid="project-archive"
+                  onClick={() => void archiveProject()}
+                  disabled={orchdDown || submitting}
+                  style={{
+                    ...textButtonStyle,
+                    borderColor: theme.colors.statusExited,
+                    color: theme.colors.statusExited,
+                    cursor: orchdDown || submitting ? "not-allowed" : "pointer",
+                    opacity: orchdDown || submitting ? 0.5 : 1,
+                  }}
+                >
+                  {strings.project.archive}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

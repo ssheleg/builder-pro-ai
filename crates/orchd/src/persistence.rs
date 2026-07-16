@@ -1401,6 +1401,39 @@ impl Db {
         Ok(project)
     }
 
+    /// `UnarchiveProject` (spec D7, O-3): the exact reverse of [`Db::archive_project`], flipping
+    /// `status='archived'` back to `'active'`. Unknown `id` ⇒ `NotFound`; an already-`active`
+    /// project ⇒ `Invariant("project is not archived")` — the mirror of `archive_project`'s
+    /// already-archived `Invariant`, so neither verb ever silently no-ops. Cannot reuse
+    /// [`ensure_project_active`] (whose semantics are the opposite: it PASSES on `active` and
+    /// FAILS on `archived`), so the status is read and matched inline here.
+    pub fn unarchive_project(&self, id: &str) -> Result<Project, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM project WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match status.as_deref() {
+            None => return Err(OrchdPersistError::NotFound),
+            Some("archived") => {}
+            Some(_) => {
+                return Err(OrchdPersistError::Invariant(
+                    "project is not archived".to_string(),
+                ));
+            }
+        }
+        tx.execute(
+            "UPDATE project SET status = 'active', updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, now_ms()],
+        )?;
+        let project = load_project(&tx, id)?;
+        tx.commit()?;
+        Ok(project)
+    }
+
     /// `ListProjects` (spec §5.2): every project, each with `workspace_ids` joined by `ord`.
     pub fn list_projects(&self) -> Result<Vec<Project>, OrchdPersistError> {
         let mut stmt = self
@@ -3186,6 +3219,35 @@ mod domain_tests {
         db.archive_project(&project.id).unwrap();
         let err = db.archive_project(&project.id).unwrap_err();
         assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    #[test]
+    fn unarchive_project_sets_status_active() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        db.archive_project(&project.id).unwrap();
+        let restored = db.unarchive_project(&project.id).unwrap();
+        assert_eq!(restored.status, ProjectStatus::Active);
+        // Mutations work again once un-archived (proves the guard actually cleared).
+        db.update_project(&project.id, Some("A2"), None).unwrap();
+    }
+
+    #[test]
+    fn unarchive_project_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.unarchive_project("nope").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn unarchive_project_already_active_is_invariant() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let err = db.unarchive_project(&project.id).unwrap_err();
+        match err {
+            OrchdPersistError::Invariant(m) => assert_eq!(m, "project is not archived"),
+            other => panic!("expected Invariant(\"project is not archived\"), got {other:?}"),
+        }
     }
 
     #[test]

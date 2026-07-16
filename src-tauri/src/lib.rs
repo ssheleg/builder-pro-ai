@@ -667,6 +667,7 @@ pub fn run() {
             commands::orchd_create_project,
             commands::orchd_update_project,
             commands::orchd_archive_project,
+            commands::orchd_unarchive_project,
             commands::orchd_list_projects,
             commands::orchd_add_project_workspace,
             commands::orchd_remove_project_workspace,
