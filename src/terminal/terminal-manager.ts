@@ -15,6 +15,7 @@ import { writeStdin, resize, attachSession } from "../ipc/commands";
 import { newTerminalChannel } from "../ipc/channel";
 import { useAppStore } from "../store/store";
 import { findFileLinks, matchWorkspaceRoot } from "./link-provider";
+import { strings } from "../strings";
 
 /** Debounce window for the container `ResizeObserver` -> `fitAddon.fit()` (spec §12). */
 const RESIZE_DEBOUNCE_MS = 100;
@@ -258,7 +259,7 @@ export class TerminalManager {
           if (match) {
             openFileLink(match.root, match.rel);
           } else {
-            useAppStore.getState().showToast("файл вне workspace или не найден");
+            useAppStore.getState().showToast(strings.terminal.fileOutsideWorkspace);
           }
           return;
         }
@@ -283,9 +284,9 @@ export class TerminalManager {
   }
 
   /**
-   * Focus this session's Terminal (spec §6.2 "Пройти" — one-click jump into a waiting
+   * Focus this session's Terminal (spec §6.2 "Go" — one-click jump into a waiting
    * terminal, ready to type). No-op for an unknown session or one that has never been
-   * `open()`ed: xterm's own `focus()` needs a live DOM container, and a fresh Home "Пройти"
+   * `open()`ed: xterm's own `focus()` needs a live DOM container, and a fresh Home "Go"
    * jump is often called BEFORE the newly-active pane's mount effect has run `open()` (React
    * batches the store updates that drive that render). This is best-effort — the pane's own
    * mount + attach() is what guarantees a correct, freshly-replayed terminal either way (BL-14
@@ -440,7 +441,7 @@ export class TerminalManager {
    * open" naturally — the Replay's cols/rows size the terminal before its bytes are written.
    *
    * `term.reset()` FIRST (BL-14): every `attach()` — the initial mount AND any re-attach
-   * (reconnect's `resetAllAttachments()`, or the Home "Пройти" hide/re-show -> fresh
+   * (reconnect's `resetAllAttachments()`, or the Home "Go" hide/re-show -> fresh
    * `attach_session`) — receives a fresh FULL-scrollback Replay from the daemon, not a delta.
    * Without a reset, that fresh Replay lands on an xterm buffer that may already hold the
    * previous attach's content and is simply APPENDED, so the pane shows the scrollback twice

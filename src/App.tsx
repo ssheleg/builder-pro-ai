@@ -211,21 +211,21 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // was modeled on gate their refresh on view/activeProjectId, so this doesn't invent one either.
     track(onOrchdGraphChanged((p) => void useAppStore.getState().refreshGraph(p.projectId)));
     // MCP coarse-invalidation events (S-EXT §8, T8): same unconditional-refresh precedent as
-    // `orchd://graph-changed` above — no "Расширения view currently open" gating to mirror.
+    // `orchd://graph-changed` above — no "Extensions view currently open" gating to mirror.
     track(onOrchdMcpServersChanged(() => void useAppStore.getState().refreshMcpServers()));
     track(
       onOrchdMcpToolsChanged((p) => void useAppStore.getState().refreshMcpTools(p.serverId)),
     );
     track(onOrchdMcpArtifactsChanged(() => void useAppStore.getState().refreshMcpArtifacts()));
-    // `orchd://mcp-invocation-logged` (S-EXT §8, T18: the «Журнал» tab) — same unconditional-
+    // `orchd://mcp-invocation-logged` (S-EXT §8, T18: the «Log» tab) — same unconditional-
     // refresh precedent as the MCP trio above; the store's `invocations` slice is whole-store,
     // un-scoped, so any server's newly-logged invocation refetches the whole list.
     track(onOrchdMcpInvocationLogged(() => void useAppStore.getState().refreshInvocations()));
     // Connectors coarse-invalidation event (S-EXT §8, T13b): same unconditional-refresh
-    // precedent as the MCP trio above — no "Коннекторы tab currently open" gating to mirror.
+    // precedent as the MCP trio above — no "Connectors tab currently open" gating to mirror.
     track(onOrchdConnectorsChanged(() => void useAppStore.getState().refreshAccounts()));
     // Skills coarse-invalidation event (S-EXT §8, D11, Q14, T17): same unconditional-refresh
-    // precedent as the MCP/Connectors events above — no "Навыки tab currently open" gating to
+    // precedent as the MCP/Connectors events above — no "Skills tab currently open" gating to
     // mirror.
     track(onOrchdSkillsChanged(() => void useAppStore.getState().refreshSkills()));
     // Trust policy-cap coarse-invalidation event (S-EXT §4/§6/§8, BL-22, T18): same
@@ -268,8 +268,8 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           void s.refreshInsights();
           void s.refreshRuleset(`project:${projectId}`);
           // S4 §7 T7 (T6 review must-not-drop item (b)): the graph tab mirrors every sibling
-          // domain surface's reconnect-refresh exactly — an open project panel's Граф tab must
-          // not stay stale after an orchd reconnect any more than Цели/Задачи/Идеи/Инсайты do.
+          // domain surface's reconnect-refresh exactly — an open project panel's Graph tab must
+          // not stay stale after an orchd reconnect any more than Goals/Tasks/Ideas/Insights do.
           void s.refreshGraph(projectId);
         }
       }),
@@ -451,7 +451,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           onSelectWorkspace={setActiveWorkspaceId}
         />
         {view === "home" ? (
-          // Attention-first Home (spec §6.2): sessions across ALL workspaces, "Пройти" jumps
+          // Attention-first Home (spec §6.2): sessions across ALL workspaces, "Go" jumps
           // straight into a waiting terminal. `setActiveWorkspaceId` is threaded down so that
           // jump can select the target workspace the same way the sidebar does.
           <HomeView manager={manager} setActiveWorkspaceId={setActiveWorkspaceId} />
@@ -461,12 +461,12 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           // this stays defensive rather than assuming that invariant can never be violated.
           activeProjectId !== null && <ProjectPanel projectId={activeProjectId} />
         ) : view === "ext" ? (
-          // S-EXT «Расширения» panel (spec §8, T8): MCP servers/tools/connectors/skills.
+          // S-EXT «Extensions» panel (spec §8, T8): MCP servers/tools/connectors/skills.
           <ExtPanel />
         ) : (
           <>
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
-              {/* Stat chips row (spec §6.1/§6.3): "Workspace: чипы + terminal tabs + command
+              {/* Stat chips row (spec §6.1/§6.3): "Workspace: chips + terminal tabs + command
                   strip" — sits above the tab strip. Renders nothing while no workspace is
                   active (mirrors FilesRail's own `!workspace` guard). */}
               <WorkspaceStatsChips

@@ -15,6 +15,7 @@ vi.mock("../ipc/orchd", () => ({
 import { UpgradeDialog } from "./UpgradeDialog";
 import { useAppStore } from "../store/store";
 import type { SessionMeta } from "../ipc/types";
+import { strings } from "../strings";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: "s1",
@@ -88,16 +89,12 @@ describe("UpgradeDialog", () => {
     );
     render(<UpgradeDialog />);
     expect(
-      screen.getByText(
-        "Обновить фоновый сервис — 3 живых сессий завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.",
-      ),
+      screen.getByText(strings.chrome.upgrade.daemonDetail(3)),
     ).toBeTruthy();
   });
 
   describe("finding [14]: unknown-count consent copy when the store never hydrated", () => {
-    const COUNTED_PREFIX = "Обновить фоновый сервис — ";
-    const UNCOUNTED_COPY =
-      "Обновить фоновый сервис — все его живые сессии завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.";
+    const UNCOUNTED_COPY = strings.chrome.upgrade.daemonDetailAll;
 
     it("NOT hydrated + empty sessions -> uncounted honest copy (counted string absent)", () => {
       useAppStore.setState(
@@ -106,8 +103,8 @@ describe("UpgradeDialog", () => {
       );
       render(<UpgradeDialog />);
       expect(screen.getByText(UNCOUNTED_COPY)).toBeTruthy();
-      expect(screen.queryByText(/живых сессий завершатся\./)).toBeNull();
-      expect(screen.queryByText(new RegExp(`^${COUNTED_PREFIX}\\d`))).toBeNull();
+      expect(screen.queryByText(/live sessions will end\./)).toBeNull();
+      expect(screen.queryByText(new RegExp(`^Update the background service — \\d`))).toBeNull();
     });
 
     it("hydrated + 0 active sessions -> counted copy with 0 (genuinely honest, distinct from uncounted)", () => {
@@ -117,26 +114,24 @@ describe("UpgradeDialog", () => {
       );
       render(<UpgradeDialog />);
       expect(
-        screen.getByText(
-          "Обновить фоновый сервис — 0 живых сессий завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.",
-        ),
+        screen.getByText(strings.chrome.upgrade.daemonDetail(0)),
       ).toBeTruthy();
       expect(screen.queryByText(UNCOUNTED_COPY)).toBeNull();
     });
   });
 
-  it('"Обновить" calls upgradeDaemon once, fire-and-forget (not awaited)', () => {
+  it('"Update" calls upgradeDaemon once, fire-and-forget (not awaited)', () => {
     useAppStore.setState({ daemonIncompatible: true, upgradeDialogOpen: true }, false);
     render(<UpgradeDialog />);
-    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    fireEvent.click(screen.getByRole("button", { name: strings.common.update }));
     expect(upgradeDaemonMock).toHaveBeenCalledTimes(1);
     expect(upgradeDaemonMock).toHaveBeenCalledWith();
   });
 
-  it('"Отмена" closes the dialog but does NOT clear daemonIncompatible (honesty invariant)', () => {
+  it('"Cancel" closes the dialog but does NOT clear daemonIncompatible (honesty invariant)', () => {
     useAppStore.setState({ daemonIncompatible: true, upgradeDialogOpen: true }, false);
     render(<UpgradeDialog />);
-    fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+    fireEvent.click(screen.getByRole("button", { name: strings.common.cancel }));
     expect(useAppStore.getState().upgradeDialogOpen).toBe(false);
     expect(useAppStore.getState().daemonIncompatible).toBe(true);
   });
@@ -152,7 +147,7 @@ describe("UpgradeDialog", () => {
       render(<UpgradeDialog />);
 
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+        fireEvent.click(screen.getByRole("button", { name: strings.common.update }));
         // let the rejection's microtask settle
         await Promise.resolve();
         await Promise.resolve();
@@ -173,7 +168,7 @@ describe("UpgradeDialog", () => {
       useAppStore.setState({ daemonIncompatible: true, upgradeDialogOpen: true }, false);
       render(<UpgradeDialog />);
 
-      const btn = screen.getByRole("button", { name: "Обновить" });
+      const btn = screen.getByRole("button", { name: strings.common.update });
       await act(async () => {
         fireEvent.click(btn);
         await Promise.resolve();
@@ -196,7 +191,7 @@ describe("UpgradeDialog", () => {
       render(<UpgradeDialog />);
 
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+        fireEvent.click(screen.getByRole("button", { name: strings.common.update }));
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -235,14 +230,12 @@ describe("UpgradeDialog", () => {
 
       expect(screen.getByTestId("orchd-upgrade-dialog")).toBeTruthy();
       expect(
-        screen.getByText(
-          "Обновить фоновый сервис оркестратора — записи (проекты, цели, задачи) сохранены",
-        ),
+        screen.getByText(strings.chrome.upgrade.orchdBody),
       ).toBeTruthy();
       // no sessiond live-session copy leaks into the orchd variant
-      expect(screen.queryByText(/живых сессий/)).toBeNull();
+      expect(screen.queryByText(/live sessions/)).toBeNull();
 
-      fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+      fireEvent.click(screen.getByRole("button", { name: strings.common.update }));
       expect(orchdUpgradeMock).toHaveBeenCalledTimes(1);
       expect(orchdUpgradeMock).toHaveBeenCalledWith();
       expect(upgradeDaemonMock).not.toHaveBeenCalled();
@@ -263,22 +256,20 @@ describe("UpgradeDialog", () => {
 
       expect(screen.queryByTestId("orchd-upgrade-dialog")).toBeNull();
       expect(
-        screen.getByText(
-          "Обновить фоновый сервис — все его живые сессии завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.",
-        ),
+        screen.getByText(strings.chrome.upgrade.daemonDetailAll),
       ).toBeTruthy();
       // exactly ONE dialog rendered, not two
       expect(screen.getAllByRole("dialog")).toHaveLength(1);
 
-      fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+      fireEvent.click(screen.getByRole("button", { name: strings.common.update }));
       expect(upgradeDaemonMock).toHaveBeenCalledTimes(1);
       expect(orchdUpgradeMock).not.toHaveBeenCalled();
     });
 
-    it('"Отмена" on the orchd variant closes it but does NOT clear orchdIncompatible (honesty invariant)', () => {
+    it('"Cancel" on the orchd variant closes it but does NOT clear orchdIncompatible (honesty invariant)', () => {
       useAppStore.setState({ orchdIncompatible: true, orchdUpgradeDialogOpen: true }, false);
       render(<UpgradeDialog />);
-      fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+      fireEvent.click(screen.getByRole("button", { name: strings.common.cancel }));
       expect(useAppStore.getState().orchdUpgradeDialogOpen).toBe(false);
       expect(useAppStore.getState().orchdIncompatible).toBe(true);
     });
@@ -290,7 +281,7 @@ describe("UpgradeDialog", () => {
       render(<UpgradeDialog />);
 
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+        fireEvent.click(screen.getByRole("button", { name: strings.common.update }));
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -313,7 +304,7 @@ describe("UpgradeDialog", () => {
       render(<UpgradeDialog />);
       expect(screen.queryByTestId("orchd-upgrade-dialog")).toBeNull();
 
-      fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+      fireEvent.click(screen.getByRole("button", { name: strings.common.cancel }));
 
       expect(screen.getByTestId("orchd-upgrade-dialog")).toBeTruthy();
       // sessiond's own honesty invariant still holds — Cancel never clears daemonIncompatible

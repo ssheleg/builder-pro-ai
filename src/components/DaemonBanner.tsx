@@ -1,12 +1,13 @@
 import type { JSX } from "react";
 import { useAppStore } from "../store/store";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 /**
  * Two independent truths, two branches (Pv2 §6.2-6.3 — see `store.ts`'s doc comment for the
  * full honesty invariant):
  * - `daemonIncompatible` (FATAL, never auto-clears until app restart): an honest
- *   "outdated / update required" message + an inline «Обновить» action that re-opens
+ *   "outdated / update required" message + an inline «Update» action that re-opens
  *   `UpgradeDialog` (`setUpgradeDialogOpen(true)`) — the inbox-item pattern (amber left-edge +
  *   text + inline action).
  * - else `!daemonConnected` (the existing plain-disconnect case, which DOES auto-reconnect):
@@ -38,7 +39,7 @@ export function DaemonBanner(): JSX.Element | null {
           gap: 12,
         }}
       >
-        <span>Фоновый сервис устарел — требуется обновление</span>
+        <span>{strings.chrome.daemonOutdated}</span>
         <button
           type="button"
           onClick={() => setUpgradeDialogOpen(true)}
@@ -52,7 +53,7 @@ export function DaemonBanner(): JSX.Element | null {
             cursor: "pointer",
           }}
         >
-          Обновить
+          {strings.common.update}
         </button>
       </div>
     );

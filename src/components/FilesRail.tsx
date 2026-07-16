@@ -5,6 +5,7 @@ import type { Workspace } from "../ipc/types";
 import { FileTree } from "./FileTree";
 import { FilePreview } from "./FilePreview";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 /**
  * Right, collapsible files rail (spec §6.4): `FileTree` (lazy, virtualized) stacked over
@@ -47,7 +48,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
       >
         <button
           type="button"
-          aria-label="Открыть панель файлов"
+          aria-label={strings.files.openPanel}
           onClick={() => setFilesRailOpen(true)}
           style={{
             border: "none",
@@ -117,7 +118,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
       >
         <button
           type="button"
-          aria-label="Свернуть панель файлов"
+          aria-label={strings.files.collapsePanel}
           onClick={() => setFilesRailOpen(false)}
           style={{
             border: "none",
@@ -138,7 +139,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
             flex: 1,
           }}
         >
-          Файлы
+          {strings.files.title}
         </span>
         <label
           style={{
@@ -151,7 +152,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
           }}
         >
           <input type="checkbox" checked={showIgnored} onChange={onToggleShowIgnored} />
-          показывать игнорируемые
+          {strings.files.showIgnored}
         </label>
       </div>
       {watchPaused && (
@@ -172,7 +173,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
             cursor: "pointer",
           }}
         >
-          live-обновления на паузе — обновить
+          {strings.files.liveUpdatesPaused}
         </button>
       )}
       <div

@@ -10,6 +10,7 @@ vi.mock("../ipc/commands", () => ({
 import { CommandStrip } from "./CommandStrip";
 import { useAppStore } from "../store/store";
 import type { SessionMeta, CommandEvent } from "../ipc/types";
+import { strings } from "../strings";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: "s1",
@@ -106,7 +107,7 @@ describe("CommandStrip", () => {
     getCommandEventsMock.mockRejectedValue(new Error("boom"));
     const { container } = await act(async () => render(<CommandStrip sessionId="s1" />));
     expect(container.innerHTML).toBe("");
-    expect(useAppStore.getState().toast).toMatch(/истори/i);
+    expect(useAppStore.getState().toast).toBe(strings.terminal.loadHistoryFailed);
   });
 
   it("refetches when the active session's lifecycle changes (state-changed)", async () => {
@@ -186,7 +187,7 @@ describe("CommandStrip", () => {
     expect(screen.queryByRole("img", { name: /running/i })).toBeNull();
     // An honest terminal marker instead, with an accessible label.
     expect(screen.getByTestId("command-chip-interrupted")).toBeTruthy();
-    expect(screen.getByRole("listitem", { name: /прерв/i })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: strings.terminal.interrupted })).toBeTruthy();
   });
 
   it("a lone unmatched started on a LIVE session (isActive:true) is still a running dot (unchanged)", async () => {

@@ -6,12 +6,13 @@ import "@xyflow/react/dist/style.css";
 import { mockReactFlow } from "./mockReactFlow";
 import { EntityRefNode, DomainNode } from "./GraphCanvas";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 /**
  * S4 final-review render tests (D3/D10): `GraphCanvas.test.tsx` stubs `<ReactFlow>` wholesale
  * (its own doc comment explains why — jsdom can't drive real pointer/D3-drag physics), which
  * means `nodeTypes` is never actually exercised there and the D3 honesty signal
- * («источник удалён»), the match-highlight ring, and the external/ghost dimming were UNTESTED
+ * ("source removed"), the match-highlight ring, and the external/ghost dimming were UNTESTED
  * render output. This file closes that gap the other way: it mounts a REAL (unmocked)
  * `<ReactFlow nodeTypes={{...}}>` — `mockReactFlow()` (xyflow's own documented jsdom testing
  * recipe, see that module's doc comment) is enough to let a real `<ReactFlow>` mount under jsdom,
@@ -58,7 +59,7 @@ async function renderNode(
 }
 
 describe("graph node renderers (S4 final review — D3 honesty signal + match/ghost styling)", () => {
-  it("an orphaned entityRef node renders «источник удалён» instead of its stale stored label", async () => {
+  it("an orphaned entityRef node renders the sourceRemoved copy instead of its stale stored label", async () => {
     await renderNode({
       label: "Stale label from a deleted idea",
       kind: "entityRef",
@@ -68,7 +69,7 @@ describe("graph node renderers (S4 final review — D3 honesty signal + match/gh
       projectId: "p1",
     });
 
-    expect(screen.getByText("источник удалён")).toBeTruthy();
+    expect(screen.getByText(strings.graph.sourceRemoved)).toBeTruthy();
     expect(screen.queryByText("Stale label from a deleted idea")).toBeNull();
   });
 
@@ -83,7 +84,7 @@ describe("graph node renderers (S4 final review — D3 honesty signal + match/gh
     });
 
     expect(screen.getByText("A live idea")).toBeTruthy();
-    expect(screen.queryByText("источник удалён")).toBeNull();
+    expect(screen.queryByText(strings.graph.sourceRemoved)).toBeNull();
   });
 
   it("a node with data.isMatch:true gets the match-highlight ring (boxShadow accent ring)", async () => {

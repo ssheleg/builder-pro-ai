@@ -8,16 +8,17 @@ import { SkillsTab } from "./SkillsTab";
 import { InvocationLog } from "./InvocationLog";
 import { ArtifactsTab } from "./ArtifactsTab";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 type TabKey = "servers" | "tools" | "connectors" | "log" | "artifacts" | "skills";
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: "servers", label: "Серверы" },
-  { key: "tools", label: "Инструменты" },
-  { key: "connectors", label: "Коннекторы" },
-  { key: "log", label: "Журнал" },
-  { key: "artifacts", label: "Артефакты" },
-  { key: "skills", label: "Навыки" },
+  { key: "servers", label: strings.ext.tabs.servers },
+  { key: "tools", label: strings.ext.tabs.tools },
+  { key: "connectors", label: strings.ext.tabs.connectors },
+  { key: "log", label: strings.ext.tabs.log },
+  { key: "artifacts", label: strings.ext.tabs.artifacts },
+  { key: "skills", label: strings.ext.tabs.skills },
 ];
 
 const panelStyle: CSSProperties = {
@@ -49,15 +50,15 @@ const contentStyle: CSSProperties = {
 };
 
 /**
- * «Расширения» top-level view (S-EXT §8): the MCP servers/tools/connectors/skills/trust
+ * "Extensions" top-level view (S-EXT §8): the MCP servers/tools/connectors/skills/trust
  * management panel, mirrors `ProjectPanel`'s tab pattern (`TABS: {key,label}[]`, ONE tab mounted
  * at a time, `activeTab` local state) + its honest-degradation discipline (the shared
  * `<OrchdDownBanner/>` renders above the tab bar whenever `orchdDown`, matching `ProjectPanel`'s
  * placement exactly).
  *
- * All six tabs are built: «Серверы» (`ServersTab`), «Инструменты» (`ToolsBrowser`, T8),
- * «Коннекторы» (`ConnectorsTab`, T13b), «Журнал» (`InvocationLog` — invocations + audit log +
- * the spend/rate policy-cap editor, T18), «Артефакты» (`ArtifactsTab`, T18) and «Навыки»
+ * All six tabs are built: Servers (`ServersTab`), Tools (`ToolsBrowser`, T8),
+ * Connectors (`ConnectorsTab`, T13b), Log (`InvocationLog` — invocations + audit log +
+ * the spend/rate policy-cap editor, T18), Artifacts (`ArtifactsTab`, T18) and Skills
  * (`SkillsTab`, T17 — plumbing only, no runtime consumer until S6b, see that component's own doc
  * comment).
  *
@@ -79,7 +80,7 @@ export function ExtPanel(): JSX.Element {
   return (
     <div data-testid="ext-panel" style={panelStyle}>
       <div style={headerStyle}>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>Расширения</div>
+        <div style={{ fontSize: 16, fontWeight: 700 }}>{strings.ext.panelTitle}</div>
       </div>
 
       {orchdDown && <OrchdDownBanner />}

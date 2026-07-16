@@ -13,11 +13,9 @@ import { ResearchRunDialog } from "./idea/ResearchRunDialog";
 import { ResearchPane } from "./idea/ResearchPane";
 import { SpawnProjectFromIdea } from "./idea/SpawnProjectFromIdea";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
-
-/** Confirm copy for idea delete (mirrors GoalTree's `DELETE_CONFIRM_TEXT` honesty pattern). */
-const DELETE_CONFIRM_TEXT = "удалить идею?";
 
 /** Locked enum order (spec §4.2 `IdeaLifecycle`) — the lifecycle chip cycles exactly these six
  * values, never re-orders or filters them (design-system.md "Lifecycle chip" atom). */
@@ -31,22 +29,22 @@ const LIFECYCLE_VALUES: IdeaLifecycle[] = [
 ];
 
 const LIFECYCLE_LABEL: Record<IdeaLifecycle, string> = {
-  captured: "зафиксирована",
-  researching: "в исследовании",
-  specced: "специфицирована",
-  inDev: "в разработке",
-  shipped: "выпущена",
-  archived: "архив",
+  captured: strings.ideas.lifecycle.captured,
+  researching: strings.ideas.lifecycle.researching,
+  specced: strings.ideas.lifecycle.specced,
+  inDev: strings.ideas.lifecycle.inDev,
+  shipped: strings.ideas.lifecycle.shipped,
+  archived: strings.ideas.lifecycle.archived,
 };
 
 /** Mirrors `ResearchPane`'s identical label map (S-IDEA §7) — each component keeps its own copy,
  * matching this codebase's established per-component-label convention (no shared labels module,
  * see e.g. `LIFECYCLE_LABEL`/`FIT_VERDICT_LABEL` precedents). */
 const RESEARCH_STATUS_LABEL: Record<ResearchStatus, string> = {
-  pending: "ожидание",
-  running: "выполняется",
-  done: "готово",
-  failed: "ошибка",
+  pending: strings.research.runStatus.pending,
+  running: strings.research.runStatus.running,
+  done: strings.research.runStatus.done,
+  failed: strings.research.runStatus.failed,
 };
 
 const listStyle: CSSProperties = {
@@ -178,14 +176,15 @@ interface IdeaRowProps {
  * (in-flight, not-yet-committed) exactly like `GoalTree`'s `GoalRow` — a rejected mutation reverts
  * to the store's copy rather than lying about what was saved.
  *
- * S-IDEA §7 (T6) additions: «Исследовать» opens `ResearchRunDialog`; a toggle reveals/hides the
- * per-idea `ResearchPane`; a research-run status badge shows the LATEST (index 0 — the backend
- * returns runs newest-first) run's status, omitted entirely when there are no runs yet (absence,
- * not a placeholder dash, per this codebase's "absence means not yet meaningful" convention). An
- * orphan row (no project) additionally renders `SpawnProjectFromIdea`'s own self-contained
- * button. Honest degradation (T8 discipline): «Исследовать» is `disabled={disabled}` — mirrors
- * every other mutating control on this row; the pane-visibility toggle is a pure view toggle (no
- * wrapper call of its own), so it stays enabled even while the daemon is down.
+ * S-IDEA §7 (T6) additions: the "Research" button opens `ResearchRunDialog`; a toggle
+ * reveals/hides the per-idea `ResearchPane`; a research-run status badge shows the LATEST (index
+ * 0 — the backend returns runs newest-first) run's status, omitted entirely when there are no
+ * runs yet (absence, not a placeholder dash, per this codebase's "absence means not yet
+ * meaningful" convention). An orphan row (no project) additionally renders
+ * `SpawnProjectFromIdea`'s own self-contained button. Honest degradation (T8 discipline): the
+ * "Research" button is `disabled={disabled}` — mirrors every other mutating control on this row;
+ * the pane-visibility toggle is a pure view toggle (no wrapper call of its own), so it stays
+ * enabled even while the daemon is down.
  */
 function IdeaRow(props: IdeaRowProps): JSX.Element {
   const {
@@ -235,7 +234,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
     <div data-testid={`idea-row-${idea.id}`} style={rowStyle}>
       <input
         data-testid={`idea-title-input-${idea.id}`}
-        aria-label="Название идеи"
+        aria-label={strings.ideas.titleAria}
         value={title}
         disabled={disabled}
         onChange={(e) => setTitle(e.target.value)}
@@ -250,7 +249,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
       />
       <select
         data-testid={`idea-lifecycle-${idea.id}`}
-        aria-label="Стадия идеи"
+        aria-label={strings.ideas.stageAria}
         value={idea.lifecycle}
         disabled={disabled}
         onChange={(e) => onLifecycleChange(idea.id, e.target.value as IdeaLifecycle)}
@@ -269,7 +268,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         onClick={() => onDelete(idea.id)}
         style={deleteButtonStyle}
       >
-        Удалить
+        {strings.common.delete}
       </button>
       <button
         type="button"
@@ -278,7 +277,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         onClick={() => setResearchDialogOpen(true)}
         style={textButtonStyle}
       >
-        Исследовать
+        {strings.ideas.research}
       </button>
       {latestRun && (
         <span data-testid={`idea-research-badge-${idea.id}`} style={researchBadgeStyle}>
@@ -291,12 +290,12 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         onClick={() => setResearchExpanded((v) => !v)}
         style={textButtonStyle}
       >
-        {researchExpanded ? "скрыть исследования" : `исследования (${researchRuns.length})`}
+        {researchExpanded ? strings.ideas.hideResearch : strings.ideas.researchCount(researchRuns.length)}
       </button>
       {isOrphan && <SpawnProjectFromIdea idea={idea} />}
       <textarea
         data-testid={`idea-body-input-${idea.id}`}
-        aria-label="Описание идеи"
+        aria-label={strings.ideas.descriptionAria}
         value={body}
         disabled={disabled}
         onChange={(e) => setBody(e.target.value)}
@@ -308,12 +307,12 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
         <div style={orphanRowStyle}>
           <select
             data-testid={`idea-attach-select-${idea.id}`}
-            aria-label="Привязать к проекту"
+            aria-label={strings.ideas.linkToProjectAria}
             value={attachTo}
             onChange={(e) => setAttachTo(e.target.value)}
             style={selectStyle}
           >
-            <option value="">выбрать проект…</option>
+            <option value="">{strings.ideas.selectProject}</option>
             {projects.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -327,7 +326,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
             onClick={() => onAttach(idea.id, attachTo)}
             style={{ ...textButtonStyle, opacity: attachTo === "" ? 0.5 : 1 }}
           >
-            привязать к проекту
+            {strings.ideas.linkToProject}
           </button>
         </div>
       )}
@@ -342,7 +341,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
 
 /**
  * Ideas inbox (S3 spec §10). `projectId === null` addresses the orphan bucket (`Idea.projectId`
- * is nullable — D3/D11); every row shown in that view IS an orphan, so the «привязать к проекту»
+ * is nullable — D3/D11); every row shown in that view IS an orphan, so the "link to project"
  * affordance renders unconditionally there. A concrete `projectId` filters to that project's own
  * ideas, matching `ideas.filter(i => i.projectId === projectId)` for both cases uniformly.
  *
@@ -353,7 +352,7 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
  * try/catch → `showToast(describeOrchdError(e))` (spec §7 honest error surface).
  *
  * Honest degradation (spec §10): while the store's `orchdDown` is `true`, every per-row mutating
- * control (title/body input, lifecycle select, Удалить, «привязать к проекту») and the create
+ * control (title/body input, lifecycle select, Delete, "link to project") and the create
  * form's submit button are disabled — reads (the rows themselves) stay live. `ProjectPanel` owns
  * the shared banner; this component only owns disabling its own controls.
  */
@@ -420,7 +419,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
   }
 
   async function handleDelete(id: string): Promise<void> {
-    if (!window.confirm(DELETE_CONFIRM_TEXT)) return;
+    if (!window.confirm(strings.ideas.deleteConfirm)) return;
     try {
       await orchdDeleteIdea(id);
       await refreshIdeas();
@@ -456,16 +455,16 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
       <div style={createFormStyle}>
         <input
           data-testid="idea-create-title"
-          aria-label="Название новой идеи"
-          placeholder="название идеи"
+          aria-label={strings.ideas.newTitleAria}
+          placeholder={strings.ideas.newTitlePlaceholder}
           value={createTitle}
           onChange={(e) => setCreateTitle(e.target.value)}
           style={titleInputStyle}
         />
         <textarea
           data-testid="idea-create-body"
-          aria-label="Описание новой идеи"
-          placeholder="описание (необязательно)"
+          aria-label={strings.ideas.newDescriptionAria}
+          placeholder={strings.common.descriptionOptional}
           value={createBody}
           onChange={(e) => setCreateBody(e.target.value)}
           rows={2}
@@ -478,7 +477,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
           onClick={() => void handleCreate()}
           style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" ? 0.5 : 1 }}
         >
-          + идея
+          {strings.ideas.addIdea}
         </button>
       </div>
 
@@ -487,7 +486,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
           data-testid="ideas-list-empty"
           style={{ color: theme.colors.textDim, fontSize: 13 }}
         >
-          {isOrphanView ? "Нет идей без проекта." : "В этом проекте пока нет идей."}
+          {isOrphanView ? strings.ideas.emptyOrphan : strings.ideas.emptyProject}
         </div>
       ) : (
         rows.map((idea) => (

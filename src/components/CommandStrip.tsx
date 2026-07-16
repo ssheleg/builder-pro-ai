@@ -5,6 +5,7 @@ import type { SessionId } from "../ipc/commands";
 import type { CommandEvent } from "../ipc/types";
 import { StatusDot } from "./StatusDot";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -152,7 +153,7 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element | nul
       .catch(() => {
         if (requestRef.current !== token) return;
         setFailed(true);
-        showToast("Не удалось загрузить историю команд");
+        showToast(strings.terminal.loadHistoryFailed);
       });
   }, [sessionId, sessionMeta, showToast]);
 
@@ -168,14 +169,14 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element | nul
   const items = pairCommandEvents(events, isLive);
 
   if (items.length === 0) {
-    return <div data-testid="command-strip-empty" style={emptyStyle}>Пока нет команд</div>;
+    return <div data-testid="command-strip-empty" style={emptyStyle}>{strings.terminal.noCommands}</div>;
   }
 
   return (
     <div
       data-testid="command-strip"
       role="list"
-      aria-label="История команд"
+      aria-label={strings.terminal.commandHistory}
       style={stripContainerStyle}
     >
       {items.map((item) =>
@@ -193,20 +194,20 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element | nul
           // Honest terminal marker (not a live "running" dot) for a lone `started` on a session
           // that is no longer live — the OSC-133 `finished` mark for it will never arrive, so this
           // is rendered as a distinct, exited-styled outcome rather than a claim the command is
-          // still in flight. Accessible label carries the "прервано" (interrupted) semantics.
+          // still in flight. Accessible label carries the "interrupted" semantics.
           <span
             key={item.key}
             role="listitem"
-            aria-label="прервано"
+            aria-label={strings.terminal.interrupted}
             data-testid="command-chip-interrupted"
-            title="Прервано — сессия завершилась до конца команды"
+            title={strings.terminal.interruptedTitle}
             style={{ ...chipBaseStyle, color: theme.colors.statusExited }}
           >
             <StatusDot
               lifecycle={{ kind: "exited", code: null, signal: null }}
               waitingForInput={false}
             />
-            прервано
+            {strings.terminal.interrupted}
           </span>
         ) : (
           <span

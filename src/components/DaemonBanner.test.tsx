@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { render, screen, cleanup, act, fireEvent } from "@testing-library/react";
 import { DaemonBanner } from "./DaemonBanner";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -45,14 +46,14 @@ describe("DaemonBanner", () => {
     act(() => useAppStore.setState({ daemonIncompatible: true, daemonConnected: false }, false));
     render(<DaemonBanner />);
     const banner = screen.getByRole("alert");
-    expect(banner.textContent).toMatch(/устарел/);
+    expect(banner.textContent).toMatch(/outdated/i);
     expect(banner.textContent).not.toMatch(/reconnect/i);
   });
 
-  it('exposes an "Обновить" action that calls setUpgradeDialogOpen(true) when daemonIncompatible', () => {
+  it('exposes an "Update" action that calls setUpgradeDialogOpen(true) when daemonIncompatible', () => {
     act(() => useAppStore.setState({ daemonIncompatible: true, daemonConnected: false }, false));
     render(<DaemonBanner />);
-    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    fireEvent.click(screen.getByRole("button", { name: strings.common.update }));
     expect(useAppStore.getState().upgradeDialogOpen).toBe(true);
   });
 

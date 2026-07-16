@@ -8,6 +8,7 @@ vi.mock("../ipc/orchd", () => ({
 }));
 
 import { OrchdDownBanner } from "./OrchdDownBanner";
+import { strings } from "../strings";
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -15,16 +16,16 @@ beforeEach(() => {
 });
 
 describe("OrchdDownBanner", () => {
-  it('renders the «Оркестратор недоступен» copy + a [Повторить] button', () => {
+  it('renders the «Orchestrator unavailable» copy + a [Retry] button', () => {
     render(<OrchdDownBanner />);
-    expect(screen.getByText("Оркестратор недоступен")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Повторить" })).toBeTruthy();
+    expect(screen.getByText(strings.chrome.orchdUnavailable)).toBeTruthy();
+    expect(screen.getByRole("button", { name: strings.common.retry })).toBeTruthy();
     expect(screen.getByRole("alert")).toBeTruthy();
   });
 
-  it("clicking [Повторить] calls orchdReconnect()", () => {
+  it("clicking [Retry] calls orchdReconnect()", () => {
     render(<OrchdDownBanner />);
-    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+    fireEvent.click(screen.getByRole("button", { name: strings.common.retry }));
     expect(orchdReconnectMock).toHaveBeenCalledTimes(1);
     expect(orchdReconnectMock).toHaveBeenCalledWith();
   });

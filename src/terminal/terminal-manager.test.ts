@@ -142,6 +142,7 @@ vi.mock("@xterm/addon-webgl", () => ({
 import { TerminalManager } from "./terminal-manager";
 import type { TerminalEvent, SessionMeta, Workspace } from "../ipc/types";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 
 function makeContainer(): HTMLElement {
   const el = document.createElement("div");
@@ -870,7 +871,7 @@ describe("TerminalManager — file links (spec §6.5/D9)", () => {
 
     const s = useAppStore.getState();
     expect(s.selectedFile).toBeNull();
-    expect(s.toast).toBe("файл вне workspace или не найден");
+    expect(s.toast).toBe(strings.terminal.fileOutsideWorkspace);
   });
 
   it("OSC-8 linkHandler ignores a non-file, non-http(s) scheme", () => {

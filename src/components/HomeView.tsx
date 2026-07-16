@@ -6,6 +6,7 @@ import type { TerminalManager } from "../terminal/terminal-manager";
 import { StatusDot } from "./StatusDot";
 import { HomeGoals } from "./HomeGoals";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -43,18 +44,18 @@ function groupByWorkspace(
 
 /**
  * Plain-text "current action" for a non-waiting Agent row (design-system.md §5 Agent-row atom).
- * Waiting rows never call this — their text is always literally "ждёт ввода" by construction
- * (they only exist in the waiting section because `waitingForInput === true`).
+ * Waiting rows never call this — their text is always literally "waiting for input" by
+ * construction (they only exist in the waiting section because `waitingForInput === true`).
  */
 function lifecycleText(meta: SessionMeta): string {
   switch (meta.lifecycle.kind) {
     case "running":
-      return "выполняется";
+      return strings.home.running;
     case "atPrompt":
     case "typing":
-      return "на месте";
+      return strings.home.atPrompt;
     case "exited":
-      return meta.lifecycle.code === 0 ? "завершён" : "завершён с ошибкой";
+      return meta.lifecycle.code === 0 ? strings.home.exited : strings.home.exitedWithError;
   }
 }
 

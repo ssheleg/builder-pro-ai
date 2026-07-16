@@ -3,6 +3,7 @@ import { useAppStore } from "../store/store";
 import { upgradeDaemon } from "../ipc/commands";
 import { orchdUpgrade } from "../ipc/orchd";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 /** Extracts `CommandError::UpgradeFailed`'s `reason` field from a rejected upgrade promise (S3
  * T19: shared between `upgradeDaemon()`'s and `orchdUpgrade()`'s identical rejection shape —
@@ -23,8 +24,8 @@ function extractUpgradeFailureReason(err: unknown): string {
  * - `daemonIncompatible && upgradeDialogOpen` ⇒ the ORIGINAL sessiond dialog, byte-for-byte
  *   unchanged (copy, `upgradeDaemon()` call, live-session count, `upgradeError` store field).
  * - else `orchdIncompatible && orchdUpgradeDialogOpen` ⇒ the NEW orchd variant: locked copy
- *   «Обновить фоновый сервис оркестратора — записи (проекты, цели, задачи) сохранены» (no
- *   live-session warning — orchd has no PTYs, so there is nothing analogous to count), confirm
+ *   «Update the orchestrator background service — records (projects, goals, tasks) are saved»
+ *   (no live-session warning — orchd has no PTYs, so there is nothing analogous to count), confirm
  *   calls `orchdUpgrade()`.
  * - If BOTH are incompatible at once, SESSIOND TAKES PRECEDENCE (spec §11: "sequential dialogs,
  *   sessiond first — no combined flow"): the `sessiondOpen` branch is checked FIRST and, when
@@ -35,7 +36,7 @@ function extractUpgradeFailureReason(err: unknown): string {
  * ever touches `daemonIncompatible`/`orchdIncompatible` (the daemon really is incompatible until
  * the app restarts, and the corresponding banner must keep saying so).
  *
- * Each variant's "Обновить"/confirm is fire-and-forget with respect to the SUCCESS path (the
+ * Each variant's "Update"/confirm is fire-and-forget with respect to the SUCCESS path (the
  * kickstart ends in `app.restart()`, which kills this webview process, so the returned promise
  * never resolves when it works) but attaches a `.catch` (finding [13], mirrored for orchd): a
  * REJECTED promise is the one honest failure either flow can surface. The sessiond variant stores
@@ -106,13 +107,13 @@ export function UpgradeDialog(): JSX.Element | null {
   if (sessiondOpen) {
     // Finding [14]: `sessions` can only be populated by a successful hydrate. In the DOMINANT
     // boot-incompatible scenario the client slot is `None`, so hydrate can never succeed and
-    // `sessions` stays `{}` forever — reporting "0 живых сессий" there would materially understate
+    // `sessions` stays `{}` forever — reporting "0 live sessions" there would materially understate
     // the destruction (the OLD daemon may hold N live shells this store has never seen). Only claim
     // a count once `hydrated` proves the store reflects a real snapshot.
     const n = Object.values(sessions).filter((s) => s.isActive).length;
     const copy = hydrated
-      ? `Обновить фоновый сервис — ${n} живых сессий завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.`
-      : "Обновить фоновый сервис — все его живые сессии завершатся. Их записи и scrollback сохранены и появятся снова как неактивные.";
+      ? strings.chrome.upgrade.daemonDetail(n)
+      : strings.chrome.upgrade.daemonDetailAll;
 
     return (
       <div
@@ -151,7 +152,7 @@ export function UpgradeDialog(): JSX.Element | null {
               color: theme.colors.statusWaiting,
             }}
           >
-            Требуется обновление
+            {strings.chrome.upgrade.required}
           </div>
           <div style={{ fontSize: 13, lineHeight: 1.5, color: theme.colors.text }}>{copy}</div>
           {upgradeError !== null && (
@@ -168,7 +169,7 @@ export function UpgradeDialog(): JSX.Element | null {
                 paddingLeft: 8,
               }}
             >
-              {`Не удалось перезапустить фоновый сервис: ${upgradeError}. Проверьте разрешения (launchctl) и повторите.`}
+              {strings.chrome.upgrade.daemonRestartFailed(upgradeError)}
             </div>
           )}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
@@ -185,7 +186,7 @@ export function UpgradeDialog(): JSX.Element | null {
                 cursor: "pointer",
               }}
             >
-              Отмена
+              {strings.common.cancel}
             </button>
             <button
               ref={primaryRef}
@@ -202,7 +203,7 @@ export function UpgradeDialog(): JSX.Element | null {
                 cursor: "pointer",
               }}
             >
-              Обновить
+              {strings.common.update}
             </button>
           </div>
         </div>
@@ -212,7 +213,7 @@ export function UpgradeDialog(): JSX.Element | null {
 
   // orchd variant (S3 T19, spec §10): same dialog-atom shell as the sessiond branch above, but
   // orchd's locked copy has NO live-session warning — orchd has no PTYs, so there is no
-  // "N живых сессий" to count.
+  // "N live sessions" to count.
   return (
     <div
       style={{
@@ -251,10 +252,10 @@ export function UpgradeDialog(): JSX.Element | null {
             color: theme.colors.statusWaiting,
           }}
         >
-          Требуется обновление
+          {strings.chrome.upgrade.required}
         </div>
         <div style={{ fontSize: 13, lineHeight: 1.5, color: theme.colors.text }}>
-          Обновить фоновый сервис оркестратора — записи (проекты, цели, задачи) сохранены
+          {strings.chrome.upgrade.orchdBody}
         </div>
         {orchdUpgradeError !== null && (
           <div
@@ -267,7 +268,7 @@ export function UpgradeDialog(): JSX.Element | null {
               paddingLeft: 8,
             }}
           >
-            {`Не удалось перезапустить фоновый сервис оркестратора: ${orchdUpgradeError}. Проверьте разрешения (launchctl) и повторите.`}
+            {strings.chrome.upgrade.orchdRestartFailed(orchdUpgradeError)}
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
@@ -284,7 +285,7 @@ export function UpgradeDialog(): JSX.Element | null {
               cursor: "pointer",
             }}
           >
-            Отмена
+            {strings.common.cancel}
           </button>
           <button
             ref={primaryRef}
@@ -301,7 +302,7 @@ export function UpgradeDialog(): JSX.Element | null {
               cursor: "pointer",
             }}
           >
-            Обновить
+            {strings.common.update}
           </button>
         </div>
       </div>

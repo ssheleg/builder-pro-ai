@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vite
 import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { mockReactFlow } from "./mockReactFlow";
+import { strings } from "../../strings";
 
 /**
  * S4 §7 T7 interaction tests (D10, brief-corrected: GraphCanvas RENDERS under jsdom, not just
@@ -100,11 +101,11 @@ const orchdGraphDeleteEdgeMock = vi.fn();
 const orchdGraphSearchMock = vi.fn();
 // The store's real `refreshGraph` (which the component calls on mount) invokes this — mocking the
 // module WITHOUT it would make the store's mount refresh THROW (undefined is not a function),
-// catch, and set the exact "оркестратор: ошибка" toast BEFORE any test acts, silently
+// catch, and set the exact "orchestrator: error" toast BEFORE any test acts, silently
 // pre-populating the very toast the error-toast test asserts (T7 review #1). It's stubbed here for
 // defense-in-depth even though `beforeEach` also swaps the store's `refreshGraph` for a no-op.
 const orchdGraphListProjectMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 
 vi.mock("../../ipc/orchd", () => ({
   orchdGraphAddNode: (...a: unknown[]) => orchdGraphAddNodeMock(...a),
@@ -189,7 +190,7 @@ beforeEach(() => {
   orchdGraphDeleteEdgeMock.mockReset().mockResolvedValue(undefined);
   orchdGraphListProjectMock.mockReset().mockResolvedValue({ nodes: [], edges: [], externalNodes: [] });
   orchdGraphSearchMock.mockReset().mockResolvedValue([]);
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
 
   useAppStore.setState(
     {
@@ -294,7 +295,7 @@ describe("GraphCanvas", () => {
     }
   });
 
-  it('toolbar "Добавить" calls orchdGraphAddNode with the selected kind', async () => {
+  it('toolbar "Add" calls orchdGraphAddNode with the selected kind', async () => {
     render(<GraphCanvas projectId="p1" />);
 
     const select = screen.getByTestId("graph-add-kind-select") as HTMLSelectElement;
@@ -306,7 +307,7 @@ describe("GraphCanvas", () => {
       const call = orchdGraphAddNodeMock.mock.calls[0];
       expect(call[0]).toBe("p1");
       expect(call[1]).toBe("decision");
-      expect(call[2]).toBe("Новый узел");
+      expect(call[2]).toBe(strings.graph.newNodeLabel);
       expect(call[3]).toBe("");
       expect(typeof call[4]).toBe("number");
       expect(typeof call[5]).toBe("number");
@@ -362,7 +363,7 @@ describe("GraphCanvas", () => {
     expect(orchdGraphAddNodeMock).not.toHaveBeenCalled();
   });
 
-  it("Удалить выбранное asks for confirmation and only calls orchdGraphDeleteNode after it is accepted", async () => {
+  it("Delete selection asks for confirmation and only calls orchdGraphDeleteNode after it is accepted", async () => {
     const refreshGraphMock = vi.fn().mockResolvedValue(undefined);
     useAppStore.setState({ refreshGraph: refreshGraphMock }, false);
     render(<GraphCanvas projectId="p1" />);
@@ -370,7 +371,7 @@ describe("GraphCanvas", () => {
 
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     fireEvent.click(screen.getByTestId("graph-delete-selected-button"));
-    expect(confirmSpy).toHaveBeenCalledWith("удалить выбранное?");
+    expect(confirmSpy).toHaveBeenCalledWith(strings.graph.deleteConfirm);
     expect(orchdGraphDeleteNodeMock).not.toHaveBeenCalled();
 
     confirmSpy.mockReturnValue(true);
@@ -383,7 +384,7 @@ describe("GraphCanvas", () => {
     confirmSpy.mockRestore();
   });
 
-  it("Удалить выбранное with nothing selected is a no-op (no confirm dialog, no wrapper call)", () => {
+  it("Delete selection with nothing selected is a no-op (no confirm dialog, no wrapper call)", () => {
     const confirmSpy = vi.spyOn(window, "confirm");
     render(<GraphCanvas projectId="p1" />);
 
@@ -410,7 +411,7 @@ describe("GraphCanvas", () => {
     await waitFor(() => {
       expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n1"); // 1st delete happened
       expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n2"); // 2nd attempted (rejected)
-      expect(useAppStore.getState().toast).toBe("оркестратор: ошибка"); // failure toasted
+      expect(useAppStore.getState().toast).toBe("orchestrator: error"); // failure toasted
       expect(refreshGraphMock).toHaveBeenCalledWith("p1"); // canvas reconciled to server truth
     });
 
@@ -480,7 +481,7 @@ describe("GraphCanvas", () => {
 
     await waitFor(() => {
       expect(describeOrchdErrorMock).toHaveBeenCalled();
-      expect(useAppStore.getState().toast).toBe("оркестратор: ошибка");
+      expect(useAppStore.getState().toast).toBe("orchestrator: error");
     });
   });
 });

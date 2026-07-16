@@ -1,6 +1,7 @@
 import type { CSSProperties, JSX } from "react";
 import { orchdReconnect } from "../ipc/orchd";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const bannerStyle: CSSProperties = {
   display: "flex",
@@ -25,9 +26,9 @@ const buttonStyle: CSSProperties = {
 };
 
 /**
- * Shared «Оркестратор недоступен» banner (spec §10/§11 honest-degradation matrix: "orchd socket
+ * Shared «Orchestrator unavailable» banner (spec §10/§11 honest-degradation matrix: "orchd socket
  * down / connect refused ⇒ banner + retry; terminals unaffected"). A `statusExited` (red)
- * left-edge accent — NOT amber, which is reserved exclusively for "нужен ты"
+ * left-edge accent — NOT amber, which is reserved exclusively for "needs you"
  * (design-system.md §2) — this is a connectivity failure, not a request for the owner's
  * attention.
  *
@@ -36,21 +37,21 @@ const buttonStyle: CSSProperties = {
  * mounting it conditionally on the store's `orchdDown` flag — this component's only job is the
  * copy + the retry action, so it can be unit-tested in isolation without touching the store.
  *
- * [Повторить] fires `orchdReconnect()` fire-and-forget: the call's own doc comment says its
+ * [Retry] fires `orchdReconnect()` fire-and-forget: the call's own doc comment says its
  * outcome is observed via the `orchd://down`/`orchd://up` events (wired in App.tsx), never via
  * this promise resolving/rejecting, so there is nothing useful to `await` or `.catch` here.
  */
 export function OrchdDownBanner(): JSX.Element {
   return (
     <div role="alert" data-testid="orchd-down-banner" style={bannerStyle}>
-      <span>Оркестратор недоступен</span>
+      <span>{strings.chrome.orchdUnavailable}</span>
       <button
         type="button"
         data-testid="orchd-down-retry"
         onClick={() => void orchdReconnect()}
         style={buttonStyle}
       >
-        Повторить
+        {strings.common.retry}
       </button>
     </div>
   );

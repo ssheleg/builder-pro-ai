@@ -5,6 +5,7 @@ import { pickFolder, createWorkspace } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";
 import type { Project } from "../ipc/orchd-types";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 /** Mirrors `WorkspaceSidebar.tsx`'s identical helper (same tiny, self-contained pattern — see
  * that file's doc comment; not worth a shared module for four lines). */

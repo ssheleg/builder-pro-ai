@@ -44,7 +44,7 @@ describe("ExtPanel", () => {
     expect(mcpListServersMock).toHaveBeenCalledWith(null);
   });
 
-  it("renders the six tabs, defaulting to «Серверы»", () => {
+  it("renders the six tabs, defaulting to Servers", () => {
     render(<ExtPanel />);
     expect(screen.getByTestId("ext-tab-servers")).toBeTruthy();
     expect(screen.getByTestId("ext-tab-tools")).toBeTruthy();
@@ -56,35 +56,35 @@ describe("ExtPanel", () => {
     expect(screen.queryByTestId("marker-tools")).toBeNull();
   });
 
-  it("switching to «Инструменты» mounts ToolsBrowser, unmounting ServersTab", () => {
+  it("switching to Tools mounts ToolsBrowser, unmounting ServersTab", () => {
     render(<ExtPanel />);
     fireEvent.click(screen.getByTestId("ext-tab-tools"));
     expect(screen.getByTestId("marker-tools")).toBeTruthy();
     expect(screen.queryByTestId("marker-servers")).toBeNull();
   });
 
-  it("switching to «Коннекторы» mounts ConnectorsTab, unmounting ServersTab (S-EXT §8, T13b)", () => {
+  it("switching to Connectors mounts ConnectorsTab, unmounting ServersTab (S-EXT §8, T13b)", () => {
     render(<ExtPanel />);
     fireEvent.click(screen.getByTestId("ext-tab-connectors"));
     expect(screen.getByTestId("marker-connectors")).toBeTruthy();
     expect(screen.queryByTestId("marker-servers")).toBeNull();
   });
 
-  it("switching to «Навыки» mounts SkillsTab, unmounting ServersTab (S-EXT §8, D11, T17)", () => {
+  it("switching to Skills mounts SkillsTab, unmounting ServersTab (S-EXT §8, D11, T17)", () => {
     render(<ExtPanel />);
     fireEvent.click(screen.getByTestId("ext-tab-skills"));
     expect(screen.getByTestId("marker-skills")).toBeTruthy();
     expect(screen.queryByTestId("marker-servers")).toBeNull();
   });
 
-  it("switching to «Журнал» mounts InvocationLog, unmounting ServersTab (S-EXT §8, T18)", () => {
+  it("switching to Log mounts InvocationLog, unmounting ServersTab (S-EXT §8, T18)", () => {
     render(<ExtPanel />);
     fireEvent.click(screen.getByTestId("ext-tab-log"));
     expect(screen.getByTestId("marker-log")).toBeTruthy();
     expect(screen.queryByTestId("marker-servers")).toBeNull();
   });
 
-  it("switching to «Артефакты» mounts ArtifactsTab, unmounting ServersTab (S-EXT §8, T18)", () => {
+  it("switching to Artifacts mounts ArtifactsTab, unmounting ServersTab (S-EXT §8, T18)", () => {
     render(<ExtPanel />);
     fireEvent.click(screen.getByTestId("ext-tab-artifacts"));
     expect(screen.getByTestId("marker-artifacts")).toBeTruthy();

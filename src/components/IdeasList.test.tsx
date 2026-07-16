@@ -8,7 +8,7 @@ const orchdSetIdeaProjectMock = vi.fn();
 const orchdSetIdeaLifecycleMock = vi.fn();
 const orchdDeleteIdeaMock = vi.fn();
 const orchdListIdeasMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 // S-IDEA §7, T6: IdeasList now transitively mounts ResearchRunDialog/ResearchPane/
 // FormInsightDialog/SpawnProjectFromIdea (research button, badge/pane toggle, orphan spawn
 // button) — every ipc wrapper THOSE components import must resolve here too, even though most of
@@ -67,8 +67,8 @@ const projectId = "proj-1";
 function makeIdea(over: Partial<Idea> & { id: string }): Idea {
   return {
     projectId,
-    title: "идея",
-    body: "тело идеи",
+    title: "idea",
+    body: "idea body",
     lifecycle: "captured",
     createdAt: 1,
     updatedAt: 1,

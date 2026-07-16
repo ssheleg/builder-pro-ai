@@ -35,7 +35,7 @@ const orchdRemoveProjectWorkspaceMock = vi.fn();
 const orchdExportProjectMock = vi.fn();
 const orchdExportToFileMock = vi.fn();
 const orchdImportFromFileMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../ipc/orchd", () => ({
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
   orchdListTasks: (...a: unknown[]) => orchdListTasksMock(...a),
@@ -62,6 +62,7 @@ vi.mock("../ipc/fs", () => ({
 
 import { ProjectPanel } from "./ProjectPanel";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { Workspace } from "../ipc/types";
 import type { Project, Idea, Insight } from "../ipc/orchd-types";
 
@@ -131,7 +132,7 @@ beforeEach(() => {
     tasks: 0,
     rulesets: 1,
   });
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   pickFolderMock.mockReset();
   listDirMock.mockReset();
 
@@ -168,10 +169,10 @@ describe("ProjectPanel", () => {
     const banner = screen.getByTestId("orchd-down-banner");
     expect(banner).toBeTruthy();
     expect(banner.getAttribute("role")).toBe("alert");
-    expect(screen.getByText("Оркестратор недоступен")).toBeTruthy();
+    expect(screen.getByText(strings.chrome.orchdUnavailable)).toBeTruthy();
   });
 
-  it("renders the Обзор tab by default with honest entity counters", async () => {
+  it("renders the Overview tab by default with honest entity counters", async () => {
     orchdListGoalsMock.mockResolvedValue([
       { id: "g1", projectId: "p1", parentId: null, kind: "strategic", title: "t", body: "", ord: 0, status: "active", metricRefs: [], createdAt: 1, updatedAt: 1 },
       { id: "g2", projectId: "p1", parentId: "g1", kind: "additional", title: "t2", body: "", ord: 1, status: "active", metricRefs: [], createdAt: 1, updatedAt: 1 },
@@ -225,10 +226,10 @@ describe("ProjectPanel", () => {
     expect(screen.queryByTestId("marker-graph")).toBeNull();
   });
 
-  it('renders the «Граф» tab button and selecting it shows the GraphCanvas stub', () => {
+  it('renders the "Graph" tab button and selecting it shows the GraphCanvas stub', () => {
     render(<ProjectPanel projectId="p1" />);
     const tabButton = screen.getByTestId("project-tab-graph");
-    expect(tabButton.textContent).toBe("Граф");
+    expect(tabButton.textContent).toBe(strings.project.tabs.graph);
     expect(screen.queryByTestId("marker-graph")).toBeNull();
 
     fireEvent.click(tabButton);
@@ -236,11 +237,13 @@ describe("ProjectPanel", () => {
     expect(screen.getByTestId("marker-graph")).toBeTruthy();
   });
 
-  it("an unresolvable workspace id renders the «недоступен» chip; Отвязать calls orchdRemoveProjectWorkspace", async () => {
+  it("an unresolvable workspace id renders the \"unavailable\" chip; Unlink calls orchdRemoveProjectWorkspace", async () => {
     useAppStore.setState({ projects: [makeProject({ workspaceIds: ["w1", "ghost-ws"] })] }, false);
     render(<ProjectPanel projectId="p1" />);
 
-    expect(screen.getByTestId("project-workspace-unresolved-ghost-ws").textContent).toContain("недоступен");
+    expect(screen.getByTestId("project-workspace-unresolved-ghost-ws").textContent).toContain(
+      strings.project.workspaceUnavailable,
+    );
 
     fireEvent.click(screen.getByTestId("project-workspace-detach-ghost-ws"));
 
@@ -264,7 +267,7 @@ describe("ProjectPanel", () => {
     });
   });
 
-  it('"Скопировать JSON" writes the exported project to the clipboard and toasts', async () => {
+  it('"Copy JSON" writes the exported project to the clipboard and toasts', async () => {
     orchdExportProjectMock.mockResolvedValue('{"bundleFormat":1}');
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
@@ -275,11 +278,11 @@ describe("ProjectPanel", () => {
     await waitFor(() => {
       expect(orchdExportProjectMock).toHaveBeenCalledWith("p1");
       expect(writeText).toHaveBeenCalledWith('{"bundleFormat":1}');
-      expect(useAppStore.getState().toast).toBe("JSON скопирован");
+      expect(useAppStore.getState().toast).toBe(strings.project.jsonCopied);
     });
   });
 
-  it('"Сохранить в файл…" picks a folder then calls orchdExportToFile with the picked dir', async () => {
+  it('"Save to file…" picks a folder then calls orchdExportToFile with the picked dir', async () => {
     pickFolderMock.mockResolvedValue("/Users/me/exports");
     render(<ProjectPanel projectId="p1" />);
 
@@ -290,7 +293,7 @@ describe("ProjectPanel", () => {
     });
   });
 
-  it('"Сохранить в файл…" is a no-op when the folder picker is cancelled', async () => {
+  it('"Save to file…" is a no-op when the folder picker is cancelled', async () => {
     pickFolderMock.mockResolvedValue(null);
     render(<ProjectPanel projectId="p1" />);
 
@@ -326,7 +329,7 @@ describe("ProjectPanel", () => {
   });
 
   it("a failed mutation shows the mapped error via a toast", async () => {
-    orchdRemoveProjectWorkspaceMock.mockRejectedValue({ kind: "daemon", code: "Invariant", message: "у проекта должен остаться workspace" });
+    orchdRemoveProjectWorkspaceMock.mockRejectedValue({ kind: "daemon", code: "Invariant", message: "the project must keep at least one workspace" });
     useAppStore.setState({ projects: [makeProject({ workspaceIds: ["w1"] })] }, false);
     render(<ProjectPanel projectId="p1" />);
 
@@ -334,7 +337,7 @@ describe("ProjectPanel", () => {
 
     await waitFor(() => {
       expect(describeOrchdErrorMock).toHaveBeenCalled();
-      expect(useAppStore.getState().toast).toBe("оркестратор: ошибка");
+      expect(useAppStore.getState().toast).toBe("orchestrator: error");
     });
   });
 });

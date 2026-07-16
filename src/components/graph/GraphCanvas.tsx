@@ -36,6 +36,7 @@ import {
   type GraphNodeMove,
 } from "./graphMapping";
 import { theme } from "../../theme";
+import { strings } from "../../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
@@ -55,11 +56,11 @@ const SEARCH_DEBOUNCE_MS = 400;
  * entity refs"). */
 const ADDABLE_KINDS: GraphNodeKind[] = ["concept", "fact", "artifact", "decision", "note"];
 
-const NEW_NODE_LABEL = "Новый узел";
+const NEW_NODE_LABEL = strings.graph.newNodeLabel;
 
 /** Locked confirm copy (mirrors `GoalTree.tsx`/`TasksList.tsx`/`IdeasList.tsx`'s identical
  * `window.confirm` guard before a destructive delete — same terse-question register). */
-const DELETE_CONFIRM_TEXT = "удалить выбранное?";
+const DELETE_CONFIRM_TEXT = strings.graph.deleteConfirm;
 
 /** A simple deterministic grid default for a freshly added node's position — avoids every new
  * node landing exactly on top of the last one without resorting to non-deterministic randomness
@@ -226,7 +227,7 @@ export function DomainNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.El
 
 /** Renderer for `entityRef` nodes: a soft reference to a goal/idea/insight/task. An orphaned
  * reference (D3 — `data.isOrphan`, set by the server's read-time resolver) renders the locked
- * «источник удалён» copy instead of the (now meaningless) stale label.
+ * "source removed" copy instead of the (now meaningless) stale label.
  *
  * `export`ed — see [`DomainNode`]'s doc comment above for why. */
 export function EntityRefNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.Element {
@@ -234,7 +235,7 @@ export function EntityRefNode({ data, selected }: NodeProps<GraphFlowNode>): JSX
     <div style={nodeCardStyle(data, selected)}>
       <Handle type="target" position={Position.Top} />
       <div style={kindLabelStyle}>ref · {data.entityType ?? "?"}</div>
-      <div style={nodeLabelStyle}>{data.isOrphan ? "источник удалён" : data.label}</div>
+      <div style={nodeLabelStyle}>{data.isOrphan ? strings.graph.sourceRemoved : data.label}</div>
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
@@ -276,7 +277,7 @@ const nodeTypes: NodeTypes = {
  * FOREIGN project it lives in — `graphMapping.ts`'s `toFlowNodes`) navigates there concretely via
  * `openProject(data.projectId)`. A LOCAL `entityRef` node click is deliberately left as an honest
  * no-op for now: the project panel has no deep-link infra from the graph tab into a specific
- * goal/idea/insight/task row yet (Цели/Идеи/Задачи/Инсайты are separate tabs with no
+ * goal/idea/insight/task row yet (Goals/Ideas/Tasks/Insights are separate tabs with no
  * "scroll-to-and-highlight-this-row" seam) — faking a navigation that doesn't actually land on the
  * referenced entity would be a worse UX than doing nothing, so this stays a no-op until that
  * deep-link seam exists (tracked as follow-up work, not silently forgotten).
@@ -478,7 +479,7 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
       <div style={toolbarStyle}>
         <select
           data-testid="graph-add-kind-select"
-          aria-label="Тип нового узла"
+          aria-label={strings.graph.newNodeTypeAria}
           value={addKind}
           disabled={orchdDown}
           onChange={(e) => setAddKind(e.target.value as GraphNodeKind)}
@@ -497,7 +498,7 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
           onClick={() => void handleAddNode()}
           style={primaryButtonStyle}
         >
-          Добавить
+          {strings.common.add}
         </button>
         <button
           type="button"
@@ -506,12 +507,12 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
           onClick={() => void handleDeleteSelected()}
           style={deleteButtonStyle}
         >
-          Удалить выбранное
+          {strings.graph.deleteSelection}
         </button>
         <input
           data-testid="graph-search-input"
-          aria-label="Поиск по графу"
-          placeholder="поиск…"
+          aria-label={strings.graph.searchAria}
+          placeholder={strings.graph.searchPlaceholder}
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           style={searchInputStyle}
@@ -533,7 +534,7 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
         </ReactFlowProvider>
         {isEmpty && (
           <div data-testid="graph-empty-state" style={emptyStateStyle}>
-            пусто
+            {strings.graph.empty}
           </div>
         )}
       </div>

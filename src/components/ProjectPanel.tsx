@@ -19,19 +19,20 @@ import { RulesetPanel } from "./RulesetPanel";
 import { OrchdDownBanner } from "./OrchdDownBanner";
 import { GraphCanvas } from "./graph/GraphCanvas";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 type TabKey = "overview" | "goals" | "ideas" | "tasks" | "insights" | "rules" | "graph";
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: "overview", label: "Обзор" },
-  { key: "goals", label: "Цели" },
-  { key: "ideas", label: "Идеи" },
-  { key: "tasks", label: "Задачи" },
-  { key: "insights", label: "Инсайты" },
-  { key: "rules", label: "Правила" },
-  { key: "graph", label: "Граф" },
+  { key: "overview", label: strings.project.tabs.overview },
+  { key: "goals", label: strings.project.tabs.goals },
+  { key: "ideas", label: strings.project.tabs.ideas },
+  { key: "tasks", label: strings.project.tabs.tasks },
+  { key: "insights", label: strings.project.tabs.insights },
+  { key: "rules", label: strings.project.tabs.rules },
+  { key: "graph", label: strings.project.tabs.graph },
 ];
 
 const panelStyle: CSSProperties = {
@@ -112,12 +113,12 @@ function linkedWorkspaceIds(projects: { workspaceIds: string[] }[]): Set<string>
 }
 
 /**
- * Project workspace/detail panel (S3 spec §10, task-18; S4 §7 T7 added the 7th «Граф» tab). Seven
+ * Project workspace/detail panel (S3 spec §10, task-18; S4 §7 T7 added the 7th "Graph" tab). Seven
  * tabs; ONE is mounted at a time
  * (unmounting the others, not just hiding them — cheapest way to keep each T14-T17 component's own
  * mount-fetch effect honest about "did I already load this project's data").
  *
- * Обзор eagerly refreshes goals/tasks (project-scoped) and ideas/insights (whole-store, client-
+ * Overview eagerly refreshes goals/tasks (project-scoped) and ideas/insights (whole-store, client-
  * filtered by every consumer) on mount — mirrors EXACTLY the set `App.tsx`'s `onOrchdUp` handler
  * refreshes "if a project panel is currently open" (see that handler's doc comment). Without this,
  * the entity counters below would silently read `0`/stale for ideas/insights (`IdeasList`/
@@ -128,7 +129,7 @@ function linkedWorkspaceIds(projects: { workspaceIds: string[] }[]): Set<string>
  * Workspace management: `project.workspaceIds` entries are resolved to names via the sessiond
  * `workspaces` store slice (client-side soft-ref join, spec §10); an id that resolves to nothing
  * (the workspace was deleted/never existed — a soft ref, not a foreign key) renders the
- * «workspace недоступен» chip instead of silently dropping the row. The add-workspace `<select>`
+ * "workspace unavailable" chip instead of silently dropping the row. The add-workspace `<select>`
  * only ever lists workspaces linked to NO project (the `linkedWorkspaceIds` complement).
  *
  * Every mutation (detach/attach/export/import) is wrapped in try/catch -> `showToast
@@ -186,7 +187,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
   if (!project) {
     return (
       <div data-testid="project-panel-loading" style={{ ...panelStyle, padding: 16, color: theme.colors.textDim, fontSize: 13 }}>
-        Загрузка проекта…
+        {strings.project.loading}
       </div>
     );
   }
@@ -226,7 +227,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
     try {
       const json = await orchdExportProject(projectId);
       await navigator.clipboard.writeText(json);
-      showToast("JSON скопирован");
+      showToast(strings.project.jsonCopied);
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -237,7 +238,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
       const dir = await pickFolder();
       if (dir === null) return; // cancelled -> no-op
       await orchdExportToFile(projectId, dir);
-      showToast("Экспортировано в файл");
+      showToast(strings.project.exportedToFile);
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -259,10 +260,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
     if (importDir === null) return;
     try {
       const report = await orchdImportFromFile(`${importDir}/${entry.relPath}`);
-      showToast(
-        `Импортировано: проекты ${report.projects}, цели ${report.goals}, идеи ${report.ideas}, ` +
-          `инсайты ${report.insights}, задачи ${report.tasks}`,
-      );
+      showToast(strings.project.importSummary(report));
       setImportDir(null);
       setImportFiles([]);
       await refreshProjects();
@@ -313,10 +311,10 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
               data-testid="project-counters"
               style={{ display: "flex", gap: 16, fontSize: 13, color: theme.colors.textDim }}
             >
-              <span data-testid="project-counter-goals">Цели: {goalsCount}</span>
-              <span data-testid="project-counter-ideas">Идеи: {ideasCount}</span>
-              <span data-testid="project-counter-tasks">Задачи: {tasksCount}</span>
-              <span data-testid="project-counter-insights">Инсайты: {insightsCount}</span>
+              <span data-testid="project-counter-goals">{strings.project.tabs.goals}: {goalsCount}</span>
+              <span data-testid="project-counter-ideas">{strings.project.tabs.ideas}: {ideasCount}</span>
+              <span data-testid="project-counter-tasks">{strings.project.tabs.tasks}: {tasksCount}</span>
+              <span data-testid="project-counter-insights">{strings.project.tabs.insights}: {insightsCount}</span>
             </div>
 
             <div>
@@ -333,7 +331,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                         <span style={{ fontSize: 13 }}>{ws.name}</span>
                       ) : (
                         <span data-testid={`project-workspace-unresolved-${wsId}`} style={chipStyle}>
-                          workspace недоступен
+                          {strings.project.workspaceUnavailable}
                         </span>
                       )}
                       <button
@@ -342,7 +340,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                         onClick={() => void handleDetachWorkspace(wsId)}
                         style={textButtonStyle}
                       >
-                        Отвязать
+                        {strings.project.unlink}
                       </button>
                     </li>
                   );
@@ -351,7 +349,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
               {unlinkedWorkspaces.length > 0 && (
                 <select
                   data-testid="project-add-workspace-select"
-                  aria-label="Добавить workspace"
+                  aria-label={strings.project.addWorkspaceAria}
                   value={addWorkspaceSelection}
                   onChange={(e) => {
                     const wsId = e.target.value;
@@ -360,7 +358,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                   }}
                   style={{ ...selectStyle, marginTop: 8 }}
                 >
-                  <option value="">+ добавить workspace…</option>
+                  <option value="">{strings.project.addWorkspaceOption}</option>
                   {unlinkedWorkspaces.map((w) => (
                     <option key={w.id} value={w.id}>
                       {w.name}
@@ -371,10 +369,10 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
             </div>
 
             <div>
-              <div style={sectionLabelStyle}>Экспорт</div>
+              <div style={sectionLabelStyle}>{strings.project.exportLabel}</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button type="button" data-testid="project-export-copy" onClick={() => void handleCopyJson()} style={textButtonStyle}>
-                  Скопировать JSON
+                  {strings.project.copyJson}
                 </button>
                 <button
                   type="button"
@@ -382,25 +380,25 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                   onClick={() => void handleExportToFile()}
                   style={textButtonStyle}
                 >
-                  Сохранить в файл…
+                  {strings.project.saveToFile}
                 </button>
               </div>
             </div>
 
             <div>
-              <div style={sectionLabelStyle}>Импорт</div>
+              <div style={sectionLabelStyle}>{strings.project.importLabel}</div>
               <button
                 type="button"
                 data-testid="project-import-browse"
                 onClick={() => void handleBrowseImport()}
                 style={textButtonStyle}
               >
-                Импорт из файла…
+                {strings.project.importFromFile}
               </button>
               {importDir !== null && (
                 <div data-testid="project-import-files" style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
                   {importFiles.length === 0 ? (
-                    <span style={{ fontSize: 12, color: theme.colors.textDim }}>Нет .json файлов в выбранной папке</span>
+                    <span style={{ fontSize: 12, color: theme.colors.textDim }}>{strings.project.noJsonFiles}</span>
                   ) : (
                     importFiles.map((f) => (
                       <button

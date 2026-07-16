@@ -11,7 +11,7 @@ vi.mock("../ipc/commands", () => ({
 
 const orchdAddProjectWorkspaceMock = vi.fn();
 const orchdCreateProjectMock = vi.fn();
-const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "оркестратор: ошибка");
+const describeOrchdErrorMock = vi.fn((..._a: unknown[]) => "orchestrator: error");
 vi.mock("../ipc/orchd", () => ({
   orchdAddProjectWorkspace: (...a: unknown[]) => orchdAddProjectWorkspaceMock(...a),
   orchdCreateProject: (...a: unknown[]) => orchdCreateProjectMock(...a),
@@ -47,7 +47,7 @@ beforeEach(() => {
   createWorkspaceMock.mockResolvedValue({ id: "w3", name: "gamma", rootPath: "/p/gamma", roots: ["/p/gamma"] });
   orchdAddProjectWorkspaceMock.mockReset().mockResolvedValue(makeProject());
   orchdCreateProjectMock.mockReset().mockResolvedValue(makeProject());
-  describeOrchdErrorMock.mockReset().mockReturnValue("оркестратор: ошибка");
+  describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
   useAppStore.setState(
     {
       sessions: {},
@@ -116,7 +116,7 @@ describe("WorkspaceSidebar", () => {
     expect(createWorkspaceMock).not.toHaveBeenCalled();
   });
 
-  it("groups linked workspaces under their project header; the remainder lands in «Без проекта»", () => {
+  it("groups linked workspaces under their project header; the remainder lands in «No project»", () => {
     useAppStore.setState({ projects: [makeProject({ id: "p1", name: "Proj A", workspaceIds: ["w1"] })] }, false);
     render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
 
@@ -151,7 +151,7 @@ describe("WorkspaceSidebar", () => {
     expect(useAppStore.getState().view).toBe("workspace");
   });
 
-  it('an unlinked workspace\'s "привязать" select calls orchdAddProjectWorkspace with the chosen project', async () => {
+  it('an unlinked workspace\'s "link…" select calls orchdAddProjectWorkspace with the chosen project', async () => {
     useAppStore.setState({ projects: [makeProject({ id: "p1", name: "Proj A", workspaceIds: [] })] }, false);
     render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
 
@@ -163,7 +163,7 @@ describe("WorkspaceSidebar", () => {
     });
   });
 
-  it('"+ проект" opens CreateProjectDialog', () => {
+  it('"+ project" opens CreateProjectDialog', () => {
     render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
 
     fireEvent.click(screen.getByTestId("create-project-open"));
@@ -171,9 +171,9 @@ describe("WorkspaceSidebar", () => {
     expect(screen.getByTestId("create-project-dialog")).toBeTruthy();
   });
 
-  // ---- S-EXT §8, T8: «Расширения» nav button ----
+  // ---- S-EXT §8, T8: «Extensions» nav button ----
 
-  it("renders a «Расширения» nav item; clicking it sets view to \"ext\" and highlights it", () => {
+  it("renders a «Extensions» nav item; clicking it sets view to \"ext\" and highlights it", () => {
     useAppStore.setState({ view: "workspace" }, false);
     render(<WorkspaceSidebar activeWorkspaceId="w1" onSelectWorkspace={() => {}} />);
     const ext = screen.getByTestId("ext-nav-button");

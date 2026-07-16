@@ -7,6 +7,7 @@ import type { Project } from "../ipc/orchd-types";
 import type { Workspace } from "../ipc/types";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { theme } from "../theme";
+import { strings } from "../strings";
 
 function basename(path: string): string {
   const parts = path.replace(/\/+$/, "").split("/");
@@ -15,7 +16,7 @@ function basename(path: string): string {
 
 /** Every workspace id linked to at least one project (spec §10) — mirrors `ProjectPanel.tsx`'s /
  * `CreateProjectDialog.tsx`'s identical helper so the three surfaces agree on what "unlinked"
- * means. The complement is the «Без проекта» group below. */
+ * means. The complement is the «No project» group below. */
 function linkedWorkspaceIds(projects: Project[]): Set<string> {
   return new Set(projects.flatMap((p) => p.workspaceIds));
 }
@@ -24,8 +25,8 @@ function linkedWorkspaceIds(projects: Project[]): Set<string> {
  * Left rail: pure navigation (spec §6.1 "slimmed to pure navigation"). A `⌂ Home` item on top
  * (sets the top-level `view` to `"home"`, spec §6.2 attention-first Home), then GROUPED workspaces
  * (S3 spec §10, task-18): one section per project (bold header row that opens the project panel,
- * its linked workspaces nested underneath) followed by a «Без проекта» section for every workspace
- * linked to no project (each with an inline [привязать] project `<select>`), then a «+ проект»
+ * its linked workspaces nested underneath) followed by a «No project» section for every workspace
+ * linked to no project (each with an inline [link…] project `<select>`), then a «+ project»
  * button opening `CreateProjectDialog`. `pickFolder` is the CORE-ONLY native dialog (spec §6.1); on
  * a chosen dir we create a workspace named after its basename. The daemon validates the root
  * (spec §16) and pushes workspace://created, which App's subscription upserts into the store.
@@ -85,7 +86,7 @@ export function WorkspaceSidebar(props: {
   }
 
   /** The exact row button that used to be the whole of the flat `list.map` body — unchanged
-   * style/click behavior, just factored out so both the project groups and the «Без проекта»
+   * style/click behavior, just factored out so both the project groups and the «No project»
    * group can render it (task-18: "reuse the current row JSX, don't rewrite it"). */
   function renderWorkspaceButton(w: Workspace): JSX.Element {
     const selected = view === "workspace" && w.id === activeWorkspaceId;
@@ -153,7 +154,7 @@ export function WorkspaceSidebar(props: {
         <button
           type="button"
           data-testid="ext-nav-button"
-          aria-label="Расширения"
+          aria-label={strings.chrome.sidebar.extensions}
           aria-current={view === "ext" ? "true" : undefined}
           onClick={() => setView("ext")}
           style={{
@@ -170,7 +171,7 @@ export function WorkspaceSidebar(props: {
             background: view === "ext" ? theme.colors.bg : "transparent",
           }}
         >
-          ⚙ Расширения
+          {strings.chrome.sidebar.extensionsNav}
         </button>
 
         <div style={{ flex: 1, overflowY: "auto" }}>
@@ -222,7 +223,7 @@ export function WorkspaceSidebar(props: {
                 borderTop: `1px solid ${theme.colors.border}`,
               }}
             >
-              Без проекта
+              {strings.chrome.sidebar.noProject}
             </div>
             <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
               {unlinkedWorkspaces.map((w) => (
@@ -231,7 +232,7 @@ export function WorkspaceSidebar(props: {
                   {sortedProjects.length > 0 && (
                     <select
                       data-testid={`attach-workspace-${w.id}`}
-                      aria-label={`Привязать ${w.name} к проекту`}
+                      aria-label={strings.chrome.sidebar.linkToProject(w.name)}
                       value={attachSelection[w.id] ?? ""}
                       onChange={(e) => {
                         const projectId = e.target.value;
@@ -240,7 +241,7 @@ export function WorkspaceSidebar(props: {
                       }}
                       style={{ fontSize: 11, marginRight: 8, maxWidth: 90 }}
                     >
-                      <option value="">привязать…</option>
+                      <option value="">{strings.chrome.sidebar.linkPlaceholder}</option>
                       {sortedProjects.map((p) => (
                         <option key={p.id} value={p.id}>
                           {p.name}
@@ -270,7 +271,7 @@ export function WorkspaceSidebar(props: {
             borderRadius: 4,
           }}
         >
-          + проект
+          {strings.chrome.sidebar.addProject}
         </button>
         <button
           type="button"
