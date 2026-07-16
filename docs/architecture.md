@@ -681,6 +681,55 @@ drain-tracking so `OrchdShutdown{drain}` could best-effort await an in-flight ru
 — boot-reconcile is the correctness backstop regardless, so this is a latency polish item, not a
 correctness gap).
 
+## Storage-degradation mode + per-request tracing — SHIPPED in S-POLISH (P1)
+
+S-POLISH P1 (`docs/superpowers/plans/2026-07-16-s-polish.md`) is a backend-only reliability +
+observability slice — no frontend files, no wire version bump (orchd stays `[1,1]`, append-only).
+Two cross-cutting mechanisms land here.
+
+**Storage-degradation mode on the wire (BL-94, spec D3):** `bpa-orchd` already degraded honestly to
+an in-memory DB when its disk was unusable and quarantined a corrupt on-disk image aside — but the
+resulting mode was invisible to the GUI, which kept telling the owner their data was durable. P1
+plumbs that boot fact all the way to the frontend:
+
+- `persistence.rs` gains `Db::open_with_outcome(path) -> Result<(Db, DbOpenOutcome)>` where
+  `DbOpenOutcome` is `Clean` or `RecoveredFromCorruption { quarantined_to }`; the existing
+  `Db::open` delegates to it and discards the outcome (no behavior change for existing callers).
+- `boot::open_db_degrading` maps that outcome (plus the in-memory fallback path) to a
+  `StorageStatus { storage_mode, quarantined_path }` — `StorageMode` is `Persistent` /
+  `RecoveredFromCorruption` (with the quarantine path) / `InMemoryFallback` — stored in
+  `ServerDeps.storage_status` at boot.
+- A new append-only wire verb `GetStorageStatus -> OrchdResponse::StorageStatus(StorageStatus)`
+  (`crates/orchd-proto/src/lib.rs`; entity + enum are ts-rs-exported, the frame variants are plain
+  snake_case per the wire-layering rule) returns `deps.storage_status.clone()` verbatim from the
+  dispatch arm — a pure read that broadcasts nothing, since the mode is fixed at boot and only a
+  restart can change it.
+- The Tauri core exposes it as the `orchd_storage_status` command
+  (`src-tauri/src/commands.rs`, `Error → Daemon` mapped like its siblings, registered in
+  `lib.rs`'s `generate_handler!`); the GUI pulls it once on connect and on every reconnect (no push)
+  to drive an honest banner for the two non-persistent modes. The operational meaning of each mode
+  and where the quarantined corrupt DB lands are in `docs/runbook-orchd.md` ("Storage-degradation
+  modes"). The frontend banner itself is P3 work (BL-94 frontend); P1 ships only the backend + wire.
+
+**Per-request completion tracing — one choke-point per dispatch layer (O-6, spec D4):** structured
+observability without touching a single per-verb handler. Each dispatch layer wraps its dispatch
+call ONCE and emits a single completion line carrying a low-cardinality quartet —
+`verb` / `outcome` / `error_code` (present only on an error) / `elapsed_ms`:
+
+- `crates/orchd/src/socket_server.rs` — a `dispatch` wrapper around `dispatch_inner`, using an
+  exhaustive `OrchdRequest::verb_name()` (a wildcard-free match — a new wire verb fails to compile
+  until it is named, so the trace can never silently mislabel a verb).
+- `crates/sessiond/src/socket_server.rs` — the identical wrapper over `Request::verb_name()`.
+- `src-tauri/src/orchd_client.rs` — the core's own `request` method emits the same quartet (reusing
+  the daemon's `verb_name`), so a request can be followed end-to-end across Hop-B by the same field
+  names on both the core and the daemon side.
+
+The line NEVER carries args, bodies, tokens, tool output, ids, or PII — only the quartet — enforced
+by the extended `crates/orchd/tests/no_secrets_in_logs*.rs` secret-scan tests. Because it is one
+wrapper per layer rather than a per-arm edit, adding a verb needs no tracing change; the exhaustive
+`verb_name` match is the only place a new verb touches. Field-level operational detail is in
+`docs/runbook-orchd.md` ("Per-request tracing fields").
+
 ## Resource envelope (per session)
 
 Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live

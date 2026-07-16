@@ -101,6 +101,46 @@ attempt manual recovery, inspect the quarantined file with `sqlite3`; there is n
 re-import — use `ExportAll`/`ImportBundle` (a project or whole-store JSON export/import, see the
 S3 spec §8) as the supported recovery path once the daemon is back up on a fresh DB.
 
+## Storage-degradation modes (S-POLISH, BL-94)
+
+The daemon decides its **storage mode ONCE at boot** — in `boot::open_db_degrading`
+(`crates/orchd/src/boot.rs`, over `Db::open_with_outcome` in `persistence.rs`) — and never changes
+it again without a restart. There is no background re-check and no push; the mode is a boot fact. It
+is carried in `ServerDeps.storage_status` and returned verbatim by the `GetStorageStatus` dispatch
+arm; the GUI pulls it via the `orchd_storage_status` command on connect and on every reconnect. The
+three modes (`StorageMode` in `crates/orchd-proto/src/lib.rs`, snake_case on the wire):
+
+| Mode | What happened at boot | Durability | Banner? |
+|---|---|---|---|
+| `persistent` | `orchd.db` opened cleanly | **Full** — every row is on-disk SQLite as usual | No |
+| `recovered_from_corruption` | A corrupt / not-a-database image was quarantined aside and a fresh schema DB recreated | New writes are durable again; the **pre-corruption data survives only in the quarantined file** | Yes (with the path) |
+| `in_memory_fallback` | The disk was unusable (`create_dir_all`/on-disk open both failed), so the daemon fell back to a non-persistent in-memory DB | **None across restart** — everything works this session, nothing survives a daemon stop | Yes |
+
+**The frontend surfaces an honest banner for the two non-persistent modes**
+(`recovered_from_corruption` and `in_memory_fallback`) and nothing for `persistent` — so the owner
+is never silently told their data is durable when it isn't. `recovered_from_corruption` carries a
+`quarantinedPath`; `in_memory_fallback` carries none (`quarantined_path` is `None`).
+
+**Where the quarantined corrupt DB lands:** `…/ai.builderpro.desktop/orchd.db.corrupt-<unix-ts>`
+(same Application Support dir as `orchd.db`, seconds-resolution suffix — see the "DB quarantine"
+section above; the rename is done in place by `persistence.rs`). It is **left on disk untouched**
+for manual recovery — inspect it with `sqlite3`, then re-import via `ExportAll`/`ImportBundle`.
+
+**Confirm the current mode operationally:**
+
+```bash
+# recovered_from_corruption leaves a quarantine file behind:
+ls -la ~/Library/Application\ Support/ai.builderpro.desktop/orchd.db.corrupt-* 2>/dev/null
+
+# in_memory_fallback logs a degradation line at boot (persistent/recovered do not):
+grep -i "degraded (in-memory) mode" \
+  ~/Library/Application\ Support/ai.builderpro.desktop/logs/orchd.tracing.log
+```
+
+An `in_memory_fallback` almost always means the Application Support dir is unwritable (permissions,
+a full or read-only disk) — fix the underlying disk/permission problem and restart the daemon; the
+next boot re-opens `orchd.db` on-disk and returns to `persistent`.
+
 ## Dev mode vs installed
 
 - **Installed app:** launchd owns the daemon (plist above; same `KeepAlive={Crashed}` semantics as
@@ -126,6 +166,34 @@ S3 spec §8) as the supported recovery path once the daemon is back up on a fres
 **None today** — same as sessiond, the appender is `tracing_appender::rolling::never` (single
 `orchd.tracing.log`, unbounded growth, shared `bpa_daemon_core::logging::init_tracing`). Tracked
 as BL-21 in `docs/backlog.md` (now applies to both daemons).
+
+## Per-request tracing fields (S-POLISH, O-6)
+
+Every dispatched request emits exactly ONE structured completion line, from a single wrapper around
+the dispatch loop (`crates/orchd/src/socket_server.rs`) — no per-verb log edits. The line carries
+only this low-cardinality quartet:
+
+| Field | Meaning |
+|---|---|
+| `verb` | The request variant name (`OrchdRequest::verb_name`, an exhaustive compile-time-checked match — a new verb fails to build until it is named) |
+| `outcome` | `"ok"` or `"err"` (derived from whether the response is `OrchdResponse::Error`) |
+| `error_code` | The `OrchdErrorCode` name — present **only** on an error line |
+| `elapsed_ms` | Wall-clock dispatch time in milliseconds |
+
+The message text is `request completed`. Grep a session's request timeline (and spot slow or
+failing verbs) with:
+
+```bash
+grep "request completed" ~/Library/Application\ Support/ai.builderpro.desktop/logs/orchd.tracing.log
+```
+
+**No secrets, args, bodies, tokens, tool output, ids, or PII are ever in this line** — only the
+quartet above, enforced by `crates/orchd/tests/no_secrets_in_logs_tracing.rs`. The same single-line
+convention is applied at the two other choke-points: the Tauri core's `orchd_client::request`
+(`src-tauri/src/orchd_client.rs`, message `orchd request completed`) and `bpa-sessiond`'s own
+dispatch wrapper (`crates/sessiond/src/socket_server.rs`, see `docs/runbook-daemon.md`) — so a
+request can be followed end-to-end (core → daemon) by the same `verb`/`outcome`/`error_code`/
+`elapsed_ms` fields on both sides.
 
 ## Keychain / MCP / connector egress (S-EXT, `[0.6.0]`)
 

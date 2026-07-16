@@ -2,6 +2,50 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [Unreleased]
+
+S-POLISH Phase P1 — backend reliability + observability (Rust only; no frontend, no wire version
+bump — orchd stays `[1,1]`, append-only). See `docs/superpowers/plans/2026-07-16-s-polish.md`.
+
+### Added
+- **Storage-degradation mode on the wire (BL-94 backend, spec D3):** `bpa-orchd` already degraded
+  honestly to an in-memory DB on an unusable disk and quarantined a corrupt on-disk image aside,
+  but the resulting mode was invisible to the GUI (which kept implying data was durable). New:
+  `Db::open_with_outcome(path) -> Result<(Db, DbOpenOutcome)>` (`Clean` /
+  `RecoveredFromCorruption{quarantined_to}`; the existing `Db::open` delegates + discards);
+  `boot::open_db_degrading` maps the outcome to a `StorageStatus { storage_mode, quarantined_path }`
+  (`StorageMode` = `persistent` / `recovered_from_corruption` / `in_memory_fallback`) stored in
+  `ServerDeps` at boot; an append-only `GetStorageStatus -> StorageStatus` wire verb returns it
+  verbatim (a pure read, no push — the mode is a boot fact only a restart changes); and a
+  `orchd_storage_status` Tauri command exposes it, pulled on connect and every reconnect. The honest
+  degraded-storage banner that consumes it is P3 (BL-94 frontend); this ships the backend + wire.
+  Documented in `docs/runbook-orchd.md` ("Storage-degradation modes") and `docs/architecture.md`.
+- **Structured per-request completion tracing (O-6, spec D4):** each dispatch layer wraps its
+  dispatch call ONCE and emits a single completion line carrying only a low-cardinality quartet —
+  `verb` / `outcome` (`ok`/`err`) / `error_code` (error lines only) / `elapsed_ms` — with no
+  per-verb handler edits. Added in `bpa-orchd`'s `socket_server.rs` dispatch wrapper (over an
+  exhaustive, wildcard-free `OrchdRequest::verb_name()` — a new verb fails to compile until named),
+  the Tauri core's `orchd_client::request`, and `bpa-sessiond`'s dispatch wrapper, so a request is
+  followed end-to-end (core → daemon) by the same field names. NO args, bodies, tokens, tool
+  output, ids, or PII are ever logged — enforced by the extended `no_secrets_in_logs*` tests.
+  Documented in `docs/runbook-orchd.md` ("Per-request tracing fields") and `docs/architecture.md`.
+
+### Fixed
+- **McpConnect handshake timeout (BL-89, spec D5):** `mcp/lifecycle.rs::connect` previously awaited
+  `connect_fn(...)` and `session.list_tools()` unbounded — a peer that accepts the connection but
+  never completes the handshake hung the calling task forever. Both awaits are now bounded by the
+  per-server `timeout_ms` (`OrchdMcpError::Mcp(McpError::Timeout)` on elapse), keeping the existing
+  trust-gate-before-network ordering and the no-DB-lock-across-await property intact.
+- **OAuth token-exchange timeout (BL-91, spec D5):** the SSRF-guarded token-exchange HTTP client in
+  `connectors/accounts.rs` had no request timeout, so a never-answering token endpoint could hang
+  an OAuth exchange indefinitely. Added `.timeout(Duration::from_secs(30))` (matching
+  `GenericRestAdapter`), keeping `redirect::Policy::none()` + the SSRF guard.
+- **Import writes ruleset files only after commit (BL-90):** a whole-store `ImportBundle` that
+  failed partway (e.g. a later project colliding on id, rolling the DB transaction back) previously
+  left an orphan ruleset `.md` file on disk from an earlier project. The file writes are now
+  performed only after `tx.commit()` succeeds, so a rolled-back import leaves NO orphan file; the
+  `app_support`/path-traversal validation is unchanged.
+
 ## [0.7.0] — 2026-07-16
 
 ### Added
