@@ -243,6 +243,12 @@ export const strings = {
     addSubgoal: "+ subgoal",
     empty: "The goal tree is empty.",
     treeAria: "Goal tree",
+    /** metric_refs chip editor (O-4, spec D7): the row's success-metric references — added via the
+     * text input + Enter, each removable via its chip's ×. */
+    metricRefsAria: "Metric references",
+    addMetricAria: "Add metric reference",
+    addMetricPlaceholder: "+ metric",
+    removeMetricAria: (ref: string) => `Remove metric ${ref}`,
   },
 
   // ── quick capture (⌘K new idea) ──────────────────────────────────────────────────────────────

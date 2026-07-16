@@ -67,19 +67,74 @@ function siblingsOf(goals: Goal[], goal: Goal): Goal[] {
   return goals.filter((g) => g.parentId === goal.parentId).sort((a, b) => a.ord - b.ord);
 }
 
-function rowStyle(depth: number): CSSProperties {
+/** The outer treeitem: carries the depth indent (the paddingLeft the indent test asserts), the
+ * row's bottom border, and the shared mono font — a column so the metric-refs editor (P4b, D7)
+ * stacks under the main control line rather than overflowing the fixed-height line. */
+function rowContainerStyle(depth: number): CSSProperties {
   return {
-    display: "flex",
-    alignItems: "center",
-    gap: 6,
     paddingLeft: 8 + depth * 16,
-    paddingRight: 8,
-    height: 32,
     fontFamily: MONO_FONT,
     fontSize: 12,
     borderBottom: `1px solid ${theme.colors.border}`,
   };
 }
+
+/** The main control line (title input, status, moves, + subgoal, delete) — the original 32px flex
+ * row, now nested inside {@link rowContainerStyle}. */
+const mainLineStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  paddingRight: 8,
+  height: 32,
+};
+
+/** The metric_refs editor line (P4b, D7): the row's chips + the add input, wrapping under the main
+ * control line. */
+const metricLineStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 4,
+  paddingRight: 8,
+  paddingBottom: 6,
+};
+
+const chipStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 3,
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  color: theme.colors.text,
+  background: theme.colors.bgElevated,
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 10,
+  padding: "1px 3px 1px 7px",
+};
+
+const chipRemoveButtonStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: theme.colors.textDim,
+  cursor: "pointer",
+  fontSize: 12,
+  lineHeight: 1,
+  padding: "0 2px",
+  flexShrink: 0,
+};
+
+const metricInputStyle: CSSProperties = {
+  fontFamily: MONO_FONT,
+  fontSize: 11,
+  color: theme.colors.text,
+  background: "transparent",
+  border: `1px solid ${theme.colors.border}`,
+  borderRadius: 4,
+  padding: "2px 6px",
+  width: 100,
+  flexShrink: 0,
+};
 
 const titleInputStyle: CSSProperties = {
   flex: 1,
@@ -154,6 +209,9 @@ interface GoalRowProps {
   onDelete: (id: string) => void;
   onMoveUp: (goal: Goal) => void;
   onMoveDown: (goal: Goal) => void;
+  /** metric_refs chip editor (P4b, O-4, D7): persists the row's full next `metricRefs` array
+   * (add appends, remove filters) via the goal-update verb. Double-submit-guarded by the caller. */
+  onMetricRefsChange: (id: string, metricRefs: string[]) => void;
 }
 
 /**
@@ -177,9 +235,33 @@ function GoalRow(props: GoalRowProps): JSX.Element {
     onDelete,
     onMoveUp,
     onMoveDown,
+    onMetricRefsChange,
   } = props;
 
   const [title, setTitle] = useState(goal.title);
+  // The in-flight (not yet committed) new-metric text, same "input reflects intent, store reflects
+  // truth" model as `title` above — the chips render straight off `goal.metricRefs`, so a rejected
+  // add never leaves a phantom chip (the store simply never gained it).
+  const [metricInput, setMetricInput] = useState("");
+
+  /** Add the typed metric on Enter: trim, ignore blank, dedupe against the current refs, then
+   * persist the appended array. `disabled`-guarded up front so a keydown on the (disabled-while-
+   * `orchdDown`/submitting) input is a hard no-op, never a wire call. */
+  function commitMetric(): void {
+    if (disabled) return;
+    const trimmed = metricInput.trim();
+    if (trimmed === "") return; // blank -> ignore, keep whatever is typed
+    setMetricInput(""); // consumed either way (added or already-present)
+    if (goal.metricRefs.includes(trimmed)) return; // dedupe -> no redundant round-trip
+    onMetricRefsChange(goal.id, [...goal.metricRefs, trimmed]);
+  }
+
+  function removeMetric(ref: string): void {
+    onMetricRefsChange(
+      goal.id,
+      goal.metricRefs.filter((r) => r !== ref),
+    );
+  }
 
   // The store's copy of the title only changes once a refresh lands (e.g. the shared
   // `orchd://goals-changed` invalidation elsewhere) — sync local edit state to it whenever that
@@ -200,79 +282,122 @@ function GoalRow(props: GoalRowProps): JSX.Element {
   }
 
   return (
-    <div data-testid={`goal-row-${goal.id}`} role="treeitem" style={rowStyle(depth)}>
-      <input
-        data-testid={`goal-title-input-${goal.id}`}
-        aria-label={strings.goals.titleAria}
-        value={title}
-        disabled={disabled}
-        onChange={(e) => setTitle(e.target.value)}
-        onBlur={() => void commit()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            (e.target as HTMLInputElement).blur();
-          }
-        }}
-        style={titleInputStyle}
-      />
-      <select
-        data-testid={`goal-status-${goal.id}`}
-        aria-label={strings.goals.statusAria}
-        value={goal.status}
-        disabled={disabled}
-        onChange={(e) => onStatusChange(goal.id, e.target.value as GoalStatus)}
-        style={selectStyle}
-      >
-        {(Object.keys(STATUS_LABEL) as GoalStatus[]).map((s) => (
-          <option key={s} value={s}>
-            {STATUS_LABEL[s]}
-          </option>
-        ))}
-      </select>
-      {!isStrategic && (
-        <button
-          type="button"
-          data-testid={`goal-move-up-${goal.id}`}
-          aria-label={strings.common.moveUp}
-          disabled={disabled || !canMoveUp}
-          onClick={() => onMoveUp(goal)}
-          style={{ ...iconButtonStyle, opacity: canMoveUp ? 1 : 0.35 }}
-        >
-          ▲
-        </button>
-      )}
-      {!isStrategic && (
-        <button
-          type="button"
-          data-testid={`goal-move-down-${goal.id}`}
-          aria-label={strings.common.moveDown}
-          disabled={disabled || !canMoveDown}
-          onClick={() => onMoveDown(goal)}
-          style={{ ...iconButtonStyle, opacity: canMoveDown ? 1 : 0.35 }}
-        >
-          ▼
-        </button>
-      )}
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => onAddSubgoal(goal.id)}
-        style={textButtonStyle}
-      >
-        {strings.goals.addSubgoal}
-      </button>
-      {!isStrategic && (
-        <button
-          type="button"
-          data-testid={`goal-delete-${goal.id}`}
+    <div data-testid={`goal-row-${goal.id}`} role="treeitem" style={rowContainerStyle(depth)}>
+      <div style={mainLineStyle}>
+        <input
+          data-testid={`goal-title-input-${goal.id}`}
+          aria-label={strings.goals.titleAria}
+          value={title}
           disabled={disabled}
-          onClick={() => onDelete(goal.id)}
-          style={deleteButtonStyle}
+          onChange={(e) => setTitle(e.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          style={titleInputStyle}
+        />
+        <select
+          data-testid={`goal-status-${goal.id}`}
+          aria-label={strings.goals.statusAria}
+          value={goal.status}
+          disabled={disabled}
+          onChange={(e) => onStatusChange(goal.id, e.target.value as GoalStatus)}
+          style={selectStyle}
         >
-          {strings.common.delete}
+          {(Object.keys(STATUS_LABEL) as GoalStatus[]).map((s) => (
+            <option key={s} value={s}>
+              {STATUS_LABEL[s]}
+            </option>
+          ))}
+        </select>
+        {!isStrategic && (
+          <button
+            type="button"
+            data-testid={`goal-move-up-${goal.id}`}
+            aria-label={strings.common.moveUp}
+            disabled={disabled || !canMoveUp}
+            onClick={() => onMoveUp(goal)}
+            style={{ ...iconButtonStyle, opacity: canMoveUp ? 1 : 0.35 }}
+          >
+            ▲
+          </button>
+        )}
+        {!isStrategic && (
+          <button
+            type="button"
+            data-testid={`goal-move-down-${goal.id}`}
+            aria-label={strings.common.moveDown}
+            disabled={disabled || !canMoveDown}
+            onClick={() => onMoveDown(goal)}
+            style={{ ...iconButtonStyle, opacity: canMoveDown ? 1 : 0.35 }}
+          >
+            ▼
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onAddSubgoal(goal.id)}
+          style={textButtonStyle}
+        >
+          {strings.goals.addSubgoal}
         </button>
-      )}
+        {!isStrategic && (
+          <button
+            type="button"
+            data-testid={`goal-delete-${goal.id}`}
+            disabled={disabled}
+            onClick={() => onDelete(goal.id)}
+            style={deleteButtonStyle}
+          >
+            {strings.common.delete}
+          </button>
+        )}
+      </div>
+      <div
+        data-testid={`goal-metrics-${goal.id}`}
+        role="group"
+        aria-label={strings.goals.metricRefsAria}
+        style={metricLineStyle}
+      >
+        {goal.metricRefs.map((ref) => (
+          <span
+            key={ref}
+            data-testid={`goal-metric-chip-${goal.id}-${ref}`}
+            style={chipStyle}
+          >
+            {ref}
+            <button
+              type="button"
+              data-testid={`goal-metric-remove-${goal.id}-${ref}`}
+              aria-label={strings.goals.removeMetricAria(ref)}
+              disabled={disabled}
+              onClick={() => removeMetric(ref)}
+              style={chipRemoveButtonStyle}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          data-testid={`goal-metric-input-${goal.id}`}
+          aria-label={strings.goals.addMetricAria}
+          placeholder={strings.goals.addMetricPlaceholder}
+          value={metricInput}
+          disabled={disabled}
+          onChange={(e) => setMetricInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitMetric();
+            }
+          }}
+          style={metricInputStyle}
+        />
+      </div>
     </div>
   );
 }
@@ -350,6 +475,26 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
   // controls render disabled (below).
   const addSubgoal = guard(handleAddSubgoal);
 
+  /**
+   * Persist a row's next `metricRefs` array (P4b, O-4, D7). Uses the pre-existing goal-update verb
+   * with `title`/`body`/`status` left `null` (D11 "null = unchanged"), same partial-update shape as
+   * `handleTitleCommit`/`handleStatusChange` above — the store's own `orchd://goals-changed`
+   * invalidation pipe re-renders the chips once the round-trip lands, so there is no explicit
+   * `refreshGoals` here (a field edit, not a structural mutation). One try/catch → one honest toast.
+   */
+  async function handleMetricRefsChange(id: string, metricRefs: string[]): Promise<void> {
+    try {
+      await orchdUpdateGoal(id, null, null, null, metricRefs);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  // Double-submit-guarded exactly like `addSubgoal` (spec D6): a double Enter on the add-metric
+  // input, or a double-click on a chip ×, fires the update verb at most once. Shares the same
+  // in-flight lock, so `submitting` disables every mutating control on every row while one is live.
+  const changeMetricRefs = guard(handleMetricRefsChange);
+
   async function handleDelete(id: string): Promise<void> {
     if (!window.confirm(DELETE_CONFIRM_TEXT)) return;
     try {
@@ -426,6 +571,7 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
             onDelete={handleDelete}
             onMoveUp={handleMoveUp}
             onMoveDown={handleMoveDown}
+            onMetricRefsChange={changeMetricRefs}
           />
         );
       })}

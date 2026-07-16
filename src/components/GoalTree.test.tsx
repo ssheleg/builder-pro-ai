@@ -269,4 +269,147 @@ describe("GoalTree", () => {
     expect(orchdCreateGoalMock).not.toHaveBeenCalled();
     expect(orchdMoveGoalMock).not.toHaveBeenCalled();
   });
+
+  // ── metric_refs chip editor (O-4, spec D7) ───────────────────────────────────────────────────
+
+  it("renders a goal's existing metricRefs as chips", () => {
+    const child = makeGoal({
+      id: "child",
+      parentId: "root",
+      title: "Subgoal",
+      ord: 0,
+      metricRefs: ["dau", "retention_d7"],
+    });
+    useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
+
+    render(<GoalTree projectId={projectId} />);
+
+    const childRow = screen.getByTestId("goal-row-child");
+    expect(within(childRow).getByTestId("goal-metric-chip-child-dau").textContent).toContain("dau");
+    expect(
+      within(childRow).getByTestId("goal-metric-chip-child-retention_d7").textContent,
+    ).toContain("retention_d7");
+    // a goal with no refs renders no chips
+    const rootRow = screen.getByTestId("goal-row-root");
+    expect(rootRow.querySelectorAll('[data-testid^="goal-metric-chip-"]').length).toBe(0);
+  });
+
+  it("adding a metric via the input + Enter calls orchdUpdateGoal with the metricRefs array including the new entry", async () => {
+    const child = makeGoal({
+      id: "child",
+      parentId: "root",
+      title: "Subgoal",
+      ord: 0,
+      metricRefs: ["dau"],
+    });
+    useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
+
+    render(<GoalTree projectId={projectId} />);
+    const input = screen.getByTestId("goal-metric-input-child") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "retention_d7" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(orchdUpdateGoalMock).toHaveBeenCalledWith("child", null, null, null, [
+        "dau",
+        "retention_d7",
+      ]),
+    );
+    // the input is cleared after a submit
+    expect(input.value).toBe("");
+  });
+
+  it("a blank / whitespace-only metric entry is ignored and never calls orchdUpdateGoal", () => {
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
+    useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
+
+    render(<GoalTree projectId={projectId} />);
+    const input = screen.getByTestId("goal-metric-input-child") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "   " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(orchdUpdateGoalMock).not.toHaveBeenCalled();
+  });
+
+  it("adding a metric that already exists is a no-op (dedupe) — never calls orchdUpdateGoal", () => {
+    const child = makeGoal({
+      id: "child",
+      parentId: "root",
+      title: "Subgoal",
+      ord: 0,
+      metricRefs: ["dau"],
+    });
+    useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
+
+    render(<GoalTree projectId={projectId} />);
+    const input = screen.getByTestId("goal-metric-input-child") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "dau" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(orchdUpdateGoalMock).not.toHaveBeenCalled();
+    expect(input.value).toBe(""); // still cleared
+  });
+
+  it("removing a metric via its chip × calls orchdUpdateGoal with the array WITHOUT that entry", async () => {
+    const child = makeGoal({
+      id: "child",
+      parentId: "root",
+      title: "Subgoal",
+      ord: 0,
+      metricRefs: ["dau", "retention_d7"],
+    });
+    useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
+
+    render(<GoalTree projectId={projectId} />);
+    fireEvent.click(screen.getByTestId("goal-metric-remove-child-dau"));
+
+    await waitFor(() =>
+      expect(orchdUpdateGoalMock).toHaveBeenCalledWith("child", null, null, null, ["retention_d7"]),
+    );
+  });
+
+  it("two rapid Enters on the metric input add the metric only ONCE (double-submit guard)", async () => {
+    const child = makeGoal({ id: "child", parentId: "root", title: "Subgoal", ord: 0 });
+    useAppStore.setState({ goalsByProject: { [projectId]: [root, child] } }, false);
+    let resolveUpdate!: (v: unknown) => void;
+    orchdUpdateGoalMock
+      .mockReset()
+      .mockImplementation(() => new Promise((res) => (resolveUpdate = res)));
+
+    render(<GoalTree projectId={projectId} />);
+    const input = screen.getByTestId("goal-metric-input-child") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "dau" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(orchdUpdateGoalMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveUpdate(makeGoal({ id: "child", metricRefs: ["dau"] }));
+    });
+  });
+
+  it("while orchdDown: the metric input and every chip × are disabled and never call orchdUpdateGoal", () => {
+    const child = makeGoal({
+      id: "child",
+      parentId: "root",
+      title: "Subgoal",
+      ord: 0,
+      metricRefs: ["dau"],
+    });
+    useAppStore.setState(
+      { goalsByProject: { [projectId]: [root, child] }, orchdDown: true },
+      false,
+    );
+
+    render(<GoalTree projectId={projectId} />);
+    const input = screen.getByTestId("goal-metric-input-child") as HTMLInputElement;
+    const removeButton = screen.getByTestId("goal-metric-remove-child-dau") as HTMLButtonElement;
+
+    expect(input.disabled).toBe(true);
+    expect(removeButton.disabled).toBe(true);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(removeButton);
+    expect(orchdUpdateGoalMock).not.toHaveBeenCalled();
+  });
 });
