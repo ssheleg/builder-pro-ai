@@ -11,18 +11,18 @@
 
 | Эпик | Сценарии | Статус |
 |---|---|---|
-| A — запуск/демоны | A-01 ⬜ · A-02 ⬜ · A-03 ⬜ · A-04 ⬜ · A-05 ⬜ · A-06 ⬜ · A-07 ⬜ · A-08 ⬜ · A-09 ⬜ · A-10 ⬜ | 0/10 |
+| A — запуск/демоны | A-01 🟡 · A-02 🟡 · A-03 🟡 · A-04 🟡 · A-05 ✅ · A-06 ✅ · A-07 ✅ · A-08 🟡 · A-09 🟡 · A-10 🟡 | 10/10 |
 | B — workspace/файлы/терминал | B-01 ⬜ · B-02 ⬜ · B-03 ⬜ · B-04 ⬜ · B-05 ⬜ · B-06 ⬜ · B-07 ⬜ · B-08 ⬜ · B-09 ⬜ · B-10 ⬜ · B-11 ⬜ · B-12 ⬜ · B-13 ⬜ · B-14 ⬜ | 0/14 |
-| C — проект | C-01 ⬜ · C-02 ⬜ · C-03 ⬜ · C-04 ⬜ · C-05 ⬜ · C-06 ⬜ · C-07 ⬜ · C-08 ⬜ · C-09 ⬜ | 0/9 |
+| C — проект | C-01 ✅ · C-02 🟡 · C-03 🟡 · C-04 ✅ · C-05 🟡 · C-06 🟡 · C-07 🔴 · C-08 📄 · C-09 ✅ | 9/9 |
 | D — цели/метрики | D-01 ⬜ · D-02 ⬜ · D-03 ⬜ · D-04 ⬜ · D-05 ⬜ · D-06 ⬜ · D-07 ⬜ | 0/7 |
 | E — идеи (гипотезы) | E-01 ✅ · E-02 ✅ · E-03 ✅ · E-04 ✅ · E-05 🟡 · E-06 ✅ · E-07 🟡 · E-08 🟡 | 8/8 |
 | F — research | F-01 ✅ · F-02 ✅ · F-03 🔴 · F-04 🟡 · F-05 🟡 · F-06 🟡 · F-07 ✅ · F-08 🟡 · F-09 🟡 · F-10 🟡 · F-11 🟡 · F-12 ✅ · F-13 ✅ · F-14 ✅ | 14/14 |
 | G — инсайты | G-01 ✅ · G-02 🟡 · G-03 ✅ · G-04 ✅ · G-05 🟡 · G-06 🟡 · G-07 ✅ · G-08 🟡 | 8/8 |
-| H — задачи (фичи) | H-01 ⬜ · H-02 ⬜ · H-03 ⬜ · H-04 ⬜ · H-05 ⬜ · H-06 ⬜ · H-07 ⬜ | 0/7 |
+| H — задачи (фичи) | H-01 🟡 · H-02 🟡 · H-03 ✅ · H-04 🟡 · H-05 ✅ · H-06 ✅ · H-07 ✅ | 7/7 |
 | I — граф | I-01 ⬜ · I-02 ⬜ · I-03 ⬜ · I-04 ⬜ · I-05 ⬜ · I-06 ⬜ · I-07 ⬜ · I-08 ⬜ · I-09 ⬜ | 0/9 |
 | J — расширения | J-01 ⬜ · J-02 ⬜ · J-03 ⬜ · J-04 ⬜ · J-05 ⬜ · J-06 ⬜ · J-07 ⬜ · J-08 ⬜ | 0/8 |
 | K — кросс-каттинг | K-01 ⬜ · K-02 ⬜ · K-03 ⬜ · K-04 ⬜ · K-05 ⬜ · K-06 ⬜ · K-07 ⬜ | 0/7 |
-| **Итого** | | **30/101** — 16 ✅ · 13 🟡 · 1 🔴 (F-03/B-01 Critical → BL-89) |
+| **Итого** | | **56/101** — 26 ✅ · 27 🟡 · 2 🔴 (F-03→BL-89 Critical, C-07→BL-90 Minor) · 1 📄 (C-08 архив UI-недостижим) |
 
 ## Реестр вердиктов по подозрениям
 
@@ -1051,3 +1051,476 @@ src/components/InsightsList.test.tsx src/components/idea/ResearchPane.test.tsx` 
 6. **H-06 — ✅ полностью.** confirm с точным рекурсивным счётом потомков; каскад через FK + `foreign_keys=ON` (оба пути); всё покрыто зелёными тестами.
 
 **Не удалось проверить рантаймом:** реальную гонку двух физических кликов ▲/▼ в живом webview (нет запущенного стенда Tauri) — вердикт H-04 построен статически на коде `handleMoveUp/Down` + `applyRank` (push-only, без оптимистика) + анализе midpoint-математики для stale-`group`; коллизия/jumble опровергнуты рассуждением (идемпотентность same-row, distinct-соседи different-row), не рантайм-стресс-тестом. Двойной сабмит «+ задача» (H-01/P-19) также подтверждён статически (нет busy-гварда; `createTitle` очищается после `await`), не физическим дабл-кликом.
+
+## Волна 3 — эпики J, B, I (2026-07-16)
+
+# Эпик J — Расширения (прочее): инвестигейт J-01..J-08
+
+> READ-ONLY инвестигейт по каталогу `docs/qa/ux-first-session-scenarios.md` §2 Эпик J.
+> Модель: opus. Пути прослежены UI-контрол → ipc → command → wire → dispatch → модуль.
+> Тесты прогнаны: `cargo test -p bpa-orchd --lib begin_oauth` → **2 passed**;
+> `npx vitest run src/components/ext/{ToolsBrowser,ConnectorsTab,SkillsTab,InvocationLog}.test.tsx`
+> → **52 passed**.
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть одной строкой |
+|---|---|---|---|
+| J-01 | 🟡 UX-GAP | Minor | Отказ тоггла тула → только toast, нет on-row сигнала; НО чекбокс контролируемый (`checked={tool.enabled}`, без оптимистичного флипа) → на отказе остаётся на серверном значении, НЕ застревает/не стухает — бага нет |
+| J-02 | 🟡 UX-GAP | Minor | Policy/Consent-отказ вызова тула честен (inline `role=alert` + toast, `ToolDisabled→Policy`, `ConsentRequired→Consent`), НО P-20: ноль пути к ConnectDialog (он смонтирован РОВНО в ServersTab) — восстановление недискаверабельно |
+| J-03 | ✅ OK | — | Add API-ключ: маскирование честное (`type=password`, поле очищается на успехе, ряд ключ не рендерит), Keychain-fail → `Io` toast, ключ сохранён для ретрая; orchdDown гейтит submit |
+| **J-04** | **🟡 UX-GAP** | **Minor** (спорно Important) | **Реестр провайдеров ПУСТ на буте** (`boot.rs:205` `ConnectorsState::new()`, ноль `register_oauth_provider` вне тестов) → «начать OAuth» с любым провайдером = toast **«ошибка сервиса: unknown OAuth provider: <X>»**; кнопка полностью активна, БЕЗ «скоро» (в отличие от ServersTab/SkillsTab) — гарантированный тупик с вводящей в заблуждение копией |
+| J-05 (+B-02) | 🟡 UX-GAP | Minor сценарий / **B-02 = latent Critical** | `ssrf_guarded_http_client` (accounts.rs:491-496) БЕЗ `.timeout()` (контраст adapter.rs:111 `.timeout(30s)`) — `complete_oauth`/`refresh` могут висеть вечно и клинить весь orchd (как F-03/B-01); НО **в v1 недостижимо** (пустой реестр → нет challenge → «завершить» не рендерится); P-06: `oauth-code-input` не гейтится orchdDown (косметика) |
+| J-06 | 🟡 UX-GAP | Minor | P-15: отказ `connectorListOps` → `opsByAccount[id]` не заполняется → селект пуст навсегда, нет retry, неотличимо от «нет операций»; смягчение: для единственного адаптера (generic-rest) `list_ops` статичен и почти неотказуем |
+| J-07 | ✅ OK + 🟡/📄 | Minor | Add/delete навыка честны (валидация типизирована и показана, orchdDown-гейт); P-16: ошибка нативного пикера (`CommandError::Internal`) через `describeOrchdError` → generic «неизвестная ошибка оркестратора» (message теряется, blast-radius ничтожный); **F-1: frontend-conventions.md ПРАВ (точный матч), architecture.md:530 ВРЁТ (парафраз)** |
+| J-08 | 🟡 UX-GAP | Minor | Не-число → toast «предел должен быть числом», без inline; BL-78 подтверждён: delete/reset-политики нет НИ в UI, НИ как верб (grep: `NONE FOUND`); P-23 подтверждён: пуша `audit-changed` НЕ существует во всём OrchdPush-enum → «Аудит» живёт только ремоунтом таба |
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где |
+|---|---|---|
+| **B-02** (OAuth token-exchange без timeout) | **🔴 Critical — ПОДТВЕРЖДЁН статически, но DORMANT в v1** | J-05 |
+| P-15 (listOps-fail → пустой селект навсегда) | 🟡 подтверждён | J-06 |
+| P-16 (picker-error через describeOrchdError → generic) | 🟡 подтверждён (негативно) | J-07 |
+| P-20 (Policy/Consent-отказ без пути к ConnectDialog) | 🟡 подтверждён | J-02 |
+| P-23 (аудит без live-пуша) | 🟡 подтверждён (пуша нет в proto вообще) | J-08 |
+| P-06 (OAuth code-input не гейтится orchdDown) | 🟡 подтверждён (косметика) | J-05 |
+| P-19 (двойной сабмит — connector-мутации без busy-гварда) | 🟡 подтверждён (кросс-каттинг) | J-03/J-04/J-05 |
+| BL-78 (delete/reset политики нет) | ✅ подтверждён (нет верба) | J-08 |
+| F-1 (копия баннера «Навыки») | 📄 DOC-GAP — architecture.md:530 неверна | J-07 |
+
+---
+
+## J-01 — «Инструменты»: чекбокс «включён» (тоггл через push)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** `ToolsBrowser.tsx:145-152 handleToggle` → `mcpSetToolEnabled(tool.id,!tool.enabled)` → `refreshMcpTools(tool.serverId)`. Wire: `socket_server.rs:1574-1588` — на успехе push `McpToolsChanged{server_id}`, на отказе `map_err(e)` (без пуша). Чекбокс: `ToolsBrowser.tsx:204-211` `checked={tool.enabled}`, `disabled={orchdDown}`, `onChange={handleToggle}`. Тест `ToolsBrowser.test.tsx:92` (toggle зовёт `mcpSetToolEnabled` с флипнутым флагом) — зелёный.
+- **Обработка ошибок:** есть, честная. `handleToggle` catch → `showToast(describeOrchdError(e))`. **Оптимистичного локального флипа НЕТ** — компонент не держит собственный `enabled`-стейт; чекбокс полностью контролируется `tool.enabled` из стора. На отказе `await mcpSetToolEnabled` бросает ДО `refreshMcpTools` → стор не мутируется → ре-рендер из `checked={tool.enabled}` возвращает чекбокс к серверному значению. То есть чекбокс НЕ застревает в неверном визуальном состоянии и НЕ стухает — бага нет.
+- **Логи:** UI-слой — toast. Демон `set_mcp_tool_enabled` — обычный update (B-04-класс, вне эпика).
+- **Что видит пользователь:** при отказе — чекбокс мгновенно возвращается к прежнему значению + 4-секундный toast с описанием ошибки. **НЕТ per-row inline-сигнала отказа** — в отличие от «вызвать» (`tool-call-error`, `role=alert`, стойкий) в ТОМ ЖЕ файле. Toast — единственный след (один слот, автозакрытие 4с, P-21).
+- **Дельта от ожидания:** каталог «чекбокс визуально не меняется?» → да, не меняется (остаётся на серверном значении). «Ряд без сигнала отказа» → подтверждено: только toast, ноль on-row.
+- **Действие:** ничего критичного (поведение корректно). Опциональный UI (Minor): per-row inline-ошибка тоггла зеркально `tool-call-error`.
+
+## J-02 — Тул enabled: args JSON → «вызвать» (Policy/Consent-отказ)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-20 подтверждён.)
+- **Проверено:** `ToolsBrowser.tsx:154-175 handleCall`: `JSON.parse` в try/catch → inline `tool-call-error` (bad JSON, вызова нет); успех/отказ `mcpCallTool` → на отказе `setCallError(...)` (inline, стойкий) + `showToast(...)`. Wire: `socket_server.rs:1596-1626 McpCallTool` → `map_mcp_err` (`socket_server.rs:401`): `ToolDisabled|PolicyCapExceeded → Error{Policy}`, `ConsentRequired → Error{Consent}`. `describeOrchdError` (orchd.ts:781/779): Policy → «запрещено политикой: …», Consent → «требуется согласие на подключение: …».
+- **Обработка ошибок:** есть, честная — сообщение показано И inline (`role="alert"`, переживает clobber toast-очереди) И toast. Это лучше J-01.
+- **Что видит пользователь:** красная строка + toast с человекочитаемым (для Policy/Consent) префиксом. **НО** (P-20): ноль навигационного пути к ConnectDialog. Грепом подтверждено: `ConnectDialog` смонтирован РОВНО в одном месте — `ServersTab.tsx:367`. При Consent-отказе (устаревший grant / смена URL) юзер должен сам догадаться пойти в таб «Серверы» → «подключить» → заново consent. Путь восстановления существует, но недискаверабелен из точки отказа.
+- **Дельта от ожидания:** каталог «нет пути к ConnectDialog из отказа» → подтверждено; качество recovery-пути низкое.
+- **Действие:** UI (Minor): при коде Consent показывать в inline-ошибке ссылку/кнопку «перейти к подключению сервера». Не блокер.
+
+## J-03 — «Коннекторы»: «+ API-ключ» (маскирование + Keychain-fail)
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `ConnectorsTab.tsx:274-290 handleAddApiKey`: `apiKeyBlocked` (провайдер/метка/ключ пустые) → submit disabled (531). На успехе — `setApiKeyProvider("")`/`setApiKeyLabel("")`/`setApiKeyValue("")` (282-285) + `refreshAccounts`. Поле ключа `type="password"` (520). Wire `socket_server.rs:1728-1746` → `add_apikey` (accounts.rs:334-357: Keychain `set` ПЕРЕД insert). Тест `ConnectorsTab.test.tsx:107` («ключ маскируется и очищается после submit») — зелёный.
+- **Обработка ошибок:** есть, честная. Keychain-fail → `ConnectorError::Secret` → `map_connector_err` (socket_server.rs:443, arm `other`) → `Error{Io}` → describeOrchdError → «ошибка сервиса: …» toast. На ОТКАЗЕ поле ключа НЕ очищается (очистка только в success-ветке) → ключ сохранён в маскированном инпуте для ретрая.
+- **Логи:** секрет не логируется (`bpa_secrets` контракт; `AccountToken`/`OAuthProviderConfig` Debug редактируют — тесты `*_debug_redacts_*` зелёные).
+- **Что видит пользователь:** новый ряд аккаунта (provider/label/authKind/scopes/expiry — БЕЗ ключа), форма сброшена. Ключ никогда не переотображается.
+- **Дельта от ожидания:** нет. Маскирование честное.
+- **Действие:** ничего. (Кросс-каттинг P-19: нет in-flight-гварда — двойной клик = два аккаунта; общая проблема всех диалогов.)
+
+## J-04 — «Коннекторы»: «начать OAuth» (реестр провайдеров ПУСТ в v1)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor** (защитимо Important — фича 100% неработоспособна, но подана как доступная). Прямо соответствует открытому вопросу **O-5**.
+- **Проверено (весь путь):**
+  1. **Реестр пуст на буте:** `boot.rs:199-205` — комментарий «v1 boots with an EMPTY OAuth provider registry», `let connectors = Arc::new(ConnectorsState::new())`, БЕЗ `register_oauth_provider`. Греп по `crates/`+`src-tauri/`: `register_oauth_provider` вызывается ТОЛЬКО в `#[cfg(test)]` (accounts.rs:1038/1157/1201/1357) — ноль продакшн-сидинга. D14 (config-file registry) отложен.
+  2. **Path клика:** `ConnectorsTab.tsx:294-313 handleBeginOAuth` → `connectorBeginOAuth({provider,label,scopes})` → wire `socket_server.rs:1693-1711` → `deps.connectors.begin_oauth(...)` → `provider_config` (accounts.rs:438-445) → `providers.lock().get(provider)` = None → `Err(ConnectorError::UnknownProvider(provider))`.
+  3. **Маппинг:** `map_connector_err` (socket_server.rs:443-452), arm `other` → `Error{code: Io, message: "unknown OAuth provider: <X>"}` (Display из accounts.rs:122).
+  4. **Фронт:** `describeOrchdError` (orchd.ts:777-778) code `Io` → **`ошибка сервиса: unknown OAuth provider: <X>`** → `showToast(...)`.
+  - Тест `begin_oauth_unknown_provider_is_an_error` → **ok** (подтверждает UnknownProvider на незарегистрированном провайдере).
+- **Обработка ошибок:** есть, честная в узком смысле — типизированная ошибка, не проглочена, не наврано. НО affordance — тупик.
+- **Что видит пользователь:** после клика «начать OAuth» (с любой непустой строкой провайдера+метки) — 4-секундный toast **«ошибка сервиса: unknown OAuth provider: <то-что-набрал>»** (смешанный ru/en, эхо сырой строки). Challenge НЕ появляется, поля НЕ очищаются, кнопка снова активна. Кнопка «начать OAuth» отгейчена ТОЛЬКО `orchdDown || oauthBeginBlocked` (провайдер/метка пустые) — полностью активна в норме, БЕЗ пометки «скоро».
+- **Дельта от ожидания / судейство:** каталог «Io „unknown provider"?» → подтверждено дословно. **Судейство (compare с precedent):** приложение уже использует паттерн «скоро» для неготового: ServersTab транспорт-пикер `stdio (скоро)`/`OAuth (скоро)` (disabled-опции), SkillsTab scope `проект (скоро)` (disabled). Секция «Подключить OAuth» НЕ применяет этот паттерн — рендерит полностью активную форму, которая в v1 не может дать успех, а копия «ошибка сервиса» читается как поломка сервиса, а не «ещё не подключено». Правильное решение (O-5): скрыть/пометить «скоро» всю секцию ЛИБО показать честный empty-registry стейт («нет настроенных OAuth-провайдеров»).
+- **Действие:** UI-правка (Minor) + ответ владельца на O-5. Заодно `describeOrchdError` могла бы спец-кейсить UnknownProvider в человекочитаемое «OAuth-провайдер не настроен».
+
+## J-05 — Challenge получен: вставить код → «завершить» (B-02: обмен без таймаута)
+
+- **Вердикт:** 🟡 UX-GAP на уровне сценария (в v1 недостижимо). **B-02 = 🔴 Critical-класс латентный дефект, ПОДТВЕРЖДЁН статически, DORMANT в v1.**
+- **Проверено (B-02 статически):** `accounts.rs:491-496 ssrf_guarded_http_client` ставит ТОЛЬКО `.redirect(Policy::none())` — НЕТ `.timeout()`/`.connect_timeout()`. Контраст: `GenericRestAdapter::new` (adapter.rs:109-114) `.timeout(GENERIC_REST_TIMEOUT=30s)`. Клиент используется в `complete_oauth` (accounts.rs:290-295 `request_async(&http).await`) И `refresh_oauth_token` (accounts.rs:408-412). ⇒ IdP token-эндпоинт, который принимает соединение, но не отвечает, вешает эти await бесконечно.
+- **Усиление (то же, что F-03/B-01):** серверная диспетчеризация последовательна на соединение (`socket_server.rs` reader-loop, инлайн-await без per-request spawn) + один общий orchd-клиент → зависший `complete_oauth`-dispatch клинит ВЕСЬ orchd-конвейер. Клиентский `REQUEST_TIMEOUT=30s` (orchd_client.rs:61,387) лишь возвращает `Disconnected` (вводящая в заблуждение «оркестратор недоступен»), НЕ реконнектит; серверный клин держится до рестарта orchd.
+- **НО в v1 НЕДОСТИЖИМО:** вся сетевая OAuth-поверхность мертва из-за пустого реестра (J-04): `begin_oauth` падает первым (UnknownProvider) → challenge не возвращается → блок с «завершить» (ConnectorsTab.tsx:577-608) не рендерится → `complete_oauth` не зовётся. Oauth-аккаунт создать нельзя → `refresh_oauth_token` (через expired-oauth в `token_for`) тоже недостижим. Дефект оживает В ТОТ ЖЕ МОМЕНТ, как зарегистрируют любой провайдер (D14 phase 3 / владелец).
+- **«завершить» busy-стейт:** `handleCompleteOAuth` (ConnectorsTab.tsx:317-332) БЕЗ in-flight-гварда; кнопка `disabled={orchdDown || oauthCompleteBlocked}` — ни спиннера, ни «Завершение…». (Если бы путь был достижим: зависание → 30с → toast «оркестратор недоступен», challenge/код сохранены для ретрая — accounts.rs comment 329, но клиент врёт про причину, а сервер заклинен.)
+- **P-06:** `oauth-code-input` (ConnectorsTab.tsx:589-596) НЕ имеет `disabled={orchdDown}` — только кнопка гейтится. Косметика: набрать в поле можно при down, но сабмит заблокирован (мутация не проходит). Честно на уровне мутации.
+- **Дельта от ожидания:** каталог ждал «повесить IdP-стаб → диалог висит». Реально: в v1 недостижимо; но код-дефект реален и станет Critical при регистрации провайдера.
+- **Действие:** BL-строка (🔴 Critical, но dormant): обернуть `complete_oauth`/`refresh_oauth_token` сетевой await в timeout ЛИБО задать `.timeout()` на `ssrf_guarded_http_client` (перенести D12-паттерн). Плюс busy-гвард на «завершить» и `disabled={orchdDown}` на code-input. Общий корень с F-03/B-01 (клиентский REQUEST_TIMEOUT должен помечать соединение мёртвым/реконнектить).
+
+## J-06 — Аккаунт есть: ops runner (P-15: отказ listOps = пустой селект навсегда)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-15 подтверждён.)
+- **Проверено:** `ConnectorsTab.tsx:260-269` useEffect: `connectorListOps({accountId}).then(ops => setOpsByAccount(...)).catch(e => showToast(describeOrchdError(e)))`. Гейт `if (account.id in opsByAccount) continue`. Рендер: `ops = opsByAccount[account.id] ?? []` (381); селект (422-438) — дефолт «— операция —» + опции по `ops`. Wire `socket_server.rs:1767-1779` → `connectors::adapter::list_ops(&account.provider)`.
+- **Обработка ошибок:** отказ проглатывается в toast; `opsByAccount[id]` никогда не заполняется → селект пуст. **Retry нет:** deps useEffect — `[genericRestAccountIds]`, ре-ран только при смене набора id generic-rest-аккаунтов; в стабильном наборе повторного `connectorListOps` не будет. Неотличимо от «нет операций».
+- **Что видит пользователь:** селект с единственной опцией «— операция —», args/«вызвать» disabled (`selected===""`), навсегда — до смены набора аккаунтов или рестарта. Нет ручного refresh, нет индикации «не загрузилось».
+- **Смягчение (честно):** для ЕДИНСТВЕННОГО отгруженного адаптера (`generic-rest`) `list_ops` возвращает статичную пару get/post и почти неотказуема (падает лишь на отказе `get_account`/`NoAdapter`) — практический blast-radius в первой сессии мал. Но паттерн no-retry/empty==fail подтверждён.
+- **Дельта от ожидания:** каталог/P-15 — «пустой селект навсегда, нет retry, нет отличия от нет-операций». Подтверждено.
+- **Действие:** UI (Minor): при отказе `connectorListOps` держать per-account error-стейт + кнопку «повторить» (зеркально тому, чего не хватает research-пейну, F-11).
+
+## J-07 — «Навыки»: выбрать SKILL.md → «+ навык» (P-16 + F-1)
+
+- **Вердикт:** ✅ OK (поведение) + 🟡 Minor (P-16) + 📄 DOC-GAP (F-1).
+- **Проверено:** `SkillsTab.tsx:178-205 handleAdd/handleDelete`: `skillAdd(name?, description?, mdPath, "global", null)` → на успехе reset + `refreshSkills`; на отказе `showToast(describeOrchdError(e))`. Wire `socket_server.rs:1818-1875` → `add_skill`/`delete_skill` → `map_err`. Валидация `skills/registry.rs`: `validate_md_path` (61-88) — относительный/несуществующий/симлинк-эскейп/директория → `Validation`; `add_skill` (196+) — если имя недоступно ни из аргумента, ни из frontmatter → `Validation("skill: name required (pass it explicitly or via the SKILL.md frontmatter)")`. orchdDown гейтит submit (258) и delete (305). Файлы-как-истина: `compute_file_state` → `Present`(no badge)/`Modified`(«изменён»)/`Missing`(«файл отсутствует»). Тесты `SkillsTab.test.tsx` — 16 зелёных.
+- **Обработка ошибок:** есть, честная — валидация типизирована и её message показан («неверные данные: skill: name required …»). md_path через нативный пикер (`pickSkillFile`) — всегда существующий файл, так что относительный/missing нормально не возникают.
+- **P-16 (подтверждён, негативно):** `pickSkillFile` (commands.rs:1144-1159) имеет ЕДИНСТВЕННЫЙ error-путь — `CommandError::Internal` («dialog channel closed», практически невозможно; cancel = `Ok(None)` → no-op). `handlePickFile` (SkillsTab.tsx:173-175) гонит его через `describeOrchdError`, который понимает лишь `kind:"daemon"/"disconnected"/"incompatibleOrchd"` (orchd.ts:762-792) → `internal` проваливается в финальный `return "неизвестная ошибка оркестратора"` (message `CommandError::Internal` теряется). Дефект маппинга реален, blast-radius ничтожный.
+- **F-1 (адъюдикация):** отгруженный баннер `SkillsTab.tsx:209-211` = **«Навыки — это реестр; они исполняются, когда появится агент-оркестр (S6b).»**. `frontend-conventions.md:86-88` цитирует ЭТУ ЖЕ строку ДОСЛОВНО → **ПРАВ**. `architecture.md:530-531` цитирует **«Навыки исполняются, когда появится агент-оркестр (S6b) — сейчас это реестр»** — парафраз с другим порядком, которого в коде НЕТ → **ВРЁТ**. Правка: привести architecture.md к отгруженной строке (= frontend-conventions.md). (Смежно F-2: architecture.md:528 заявляет зеркало ruleset `Present/Modified/Missing`; skill-enum реально `Present/Modified/Missing` — registry.rs:136-145 — но по каталогу сам ruleset-enum `Ok/Missing/ExternallyModified`; отдельная находка, вне J-07.)
+- **Что видит пользователь:** баннер «реестр/S6b» сверху (честно plumbing-only), новый ряд с именем из frontmatter (если не задано), бейдж «изменён»/«файл отсутствует».
+- **Действие:** 📄 F-1: правка architecture.md:530. 🟡 P-16 (Minor): либо `pickSkillFile` возвращать понятную ошибку, либо в `handlePickFile` не гнать через `describeOrchdError`. Поведение add/delete — ничего.
+
+## J-08 — «Журнал»: «задать лимит» (BL-78 + P-23)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** `InvocationLog.tsx:173-190 handleSetPolicy`: `Number(spendCapUsd)`/`Number(ratePerMin)`; если `Number.isNaN` → `showToast("предел должен быть числом")` + `return` (177-180) — **toast-only, без inline**. На успехе reset + `refreshPolicies`; на отказе `showToast(describeOrchdError)`. Wire `socket_server.rs:1884-1906` → `upsert_policy` → на успехе push `PoliciesChanged`.
+- **BL-78 (подтверждён):** таблица политик (244-269) — БЕЗ per-row delete-кнопки. Грепом по `crates/`+`src/`+`src-tauri/`: `DeletePolicy|RemovePolicy|delete_policy|TrustDeletePolicy|ResetPolicy` → **NONE FOUND**. Верба удаления/сброса политики НЕТ вообще. Оба лимита пустыми → upsert строки null/null (не удаление). Убрать политику из UI нельзя.
+- **P-23 (подтверждён жёстко):** во всём `OrchdPush`-enum (orchd-proto/lib.rs, 16 вариантов: `*Changed`, `McpInvocationLogged`, `PoliciesChanged`, `ResearchRunsChanged`, …) НЕТ `AuditChanged`/`audit-changed`. Грепом по `crates/`+`src/`+`src-tauri/`: `AuditChanged|audit-changed|AuditRowsChanged` → **ничего**. Таблица «Аудит» рефетчится ТОЛЬКО на mount (`refreshAuditRows` в useEffect, 160-165). Инвокации живут по `orchd://mcp-invocation-logged`, политики — по `orchd://policies-changed`, но аудит — ни по чему. ⇒ после записи `policy_deny`/`connect allow` в `audit_log` таблица «Аудит» обновится лишь ремоунтом таба «Журнал».
+- **Обработка ошибок:** есть, честная (non-число не долетает до вербы; серверная валидация scope/ref_id → `Validation`).
+- **Что видит пользователь:** при не-числе — toast «предел должен быть числом», поля не сброшены; политика применяется через push (таблица политик — живая). Аудит — не живой.
+- **Дельта от ожидания:** каталог — «не-число → toast без inline» (подтверждено), «BL-78 delete/reset нельзя» (подтверждено), «P-23 аудит не живой» (подтверждено).
+- **Действие:** UI (Minor): inline-ошибка на не-число (зеркально `tool-call-error`); BL-78 — добавить верб+кнопку delete-policy; P-23 — добавить `AuditChanged`-пуш ИЛИ рефетчить аудит на `mcp-invocation-logged`/`policies-changed` (аудит-строки пишутся ровно этими путями).
+
+---
+
+## Сводка ключевого
+
+1. **J-04 (OAuth пустой реестр) — 🟡 UX-GAP, главная находка эпика.** Реестр провайдеров ПУСТ на буте (`boot.rs:205`, ноль `register_oauth_provider` вне тестов; D14 отложен). Любая попытка «начать OAuth» → typed `UnknownProvider` → toast **«ошибка сервиса: unknown OAuth provider: <X>»**. Кнопка активна, БЕЗ «скоро» — гарантированный тупик с копией, читающейся как поломка сервиса. Precedent «скоро» уже есть в ServersTab/SkillsTab, но не применён. Это O-5: секцию OAuth стоит скрыть/пометить «скоро» / показать честный empty-registry.
+2. **F-1 (баннер «Навыки») — 📄 DOC-GAP.** Отгруженная строка = `frontend-conventions.md:86-88` ДОСЛОВНО → этот док ПРАВ. `architecture.md:530` — парафраз, которого в коде нет → неверен, править architecture.md.
+3. **B-02 (OAuth-обмен без таймаута) — 🔴 Critical-класс, но DORMANT.** `ssrf_guarded_http_client` без `.timeout()` (контраст adapter.rs:111 30s); `complete_oauth`/`refresh` могут вечно клинить весь orchd (как F-03/B-01). В v1 недостижимо (пустой реестр → нет challenge). Оживёт при первой регистрации провайдера.
+4. **Кросс-каттинг подтверждён:** P-15 (J-06 listOps → пустой селект без retry), P-20 (J-02 нет пути к ConnectDialog — он в ServersTab единственном месте), P-23 (пуша аудита нет в proto вообще), P-16 (picker-error → generic message), BL-78 (нет delete/reset политики — нет верба), P-06 (code-input не гейтится, косметика).
+5. **Хорошо (✅):** J-03 (add API-ключ — маскирование честное, Keychain-fail→Io, ключ для ретрая), J-07 поведение (валидация типизирована/показана, files-as-truth, orchdDown-гейт). J-01 — не баг (контролируемый чекбокс возвращается к серверному значению), лишь нет on-row сигнала.
+
+**Не удалось проверить рантаймом:** реальный зависон живого IdP-token-эндпоинта для B-02 (нет стенда «принимает-но-не-отвечает») — вердикт статический (accounts.rs:491-496 без timeout + контраст adapter.rs:111 + архитектура клина из F-03). J-04/J-05 сетевые OAuth-пути в v1 недостижимы в принципе (пустой реестр), поэтому «что видит юзер при живом провайдере» смоделировано по коду, не прогнано. FE-компонентные тесты мокают `connectorBeginOAuth` на успех, так что empty-registry-путь доказан бэкендом (`begin_oauth_unknown_provider_is_an_error` ok + boot.rs), не FE-тестом.
+
+# Эпик B — Workspace, файлы, терминал (B-01…B-14). Результаты инвестигейта
+
+Репо: `/Users/sshlg/DATA/builder-pro-ai` (main, v0.7.0). READ-ONLY.
+Тесты прогнаны:
+`npx vitest run TerminalTabs FileTree FilePreview CommandStrip WorkspaceSidebar FilesRail HomeView`
+→ **85 passed**;
+`cargo test -p bpa-sessiond --lib remove_workspace_root` → **4 passed** (в т.ч.
+`remove_workspace_root_last_one_is_rejected_with_last_root_code`);
+`cargo test -p bpa-sessiond rehydrate` → **1 passed**
+(`cold_rehydrate_then_attach_replays_persisted_marker_as_inactive`).
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть одной строкой |
+|---|---|---|---|
+| B-01 | 🟡 UX-GAP | Important | **P-03 подтверждён**: `WorkspaceSidebar.onAdd` (68-73) без try/catch — отказ `createWorkspace` = `void onAdd()` глотает reject → молчаливый no-op, ноль toast/навигации (контраст с `handleAttach`, у которого try/catch есть) |
+| B-02 | ✅ OK | — | Отмена пикера: `pickFolder()===null → return` — чистый преднамеренный no-op, приемлемо |
+| B-03 | ✅ OK | — | «+ Add root»: `FileTree.onAddRoot` (390-399) в try/catch → `showToast(describeCommandError)`; демон ре-валидирует путь (canonicalize/dup/escape); повторный тот же путь — идемпотентный no-op + broadcast `WorkspaceUpdated` |
+| B-04 | 📄 DOC-GAP | Minor | **UI удаления root НЕ существует** (grep: `removeWorkspaceRoot` только в App/commands/events, ни одной кнопки). Verb+wrapper+бэкенд-guard `LastRoot` есть и тестируются, но сценарий UI-недостижим; будь он подключён — `describeCommandError` показал бы **сырой английский** `"cannot remove the last workspace root"` |
+| B-05 | 🟡 UX-GAP | Important | **P-01 подтверждён**: `TerminalTabs.onNewTerminal` (28-47) без try/catch — `void onNewTerminal()` глотает reject `createSession` → молчаливый no-op; кнопка гейчена только на `!activeWorkspaceId`, НЕ на sessiond-down |
+| B-06 | 🟡 UX-GAP | Important | **P-02 подтверждён**: `onClose` (49-52) без try/catch — reject `killSession` ПРОПУСКАЕТ `manager.dispose` (зомби-таб + течёт xterm) + reject проглочен. Плюс дельта: даже на успехе таб НЕ исчезает (`markExited` флипает в exited и висит; `removeSession` — мёртвый код) |
+| B-07 | 🟡 UX-GAP | Important | Replay-only регидрат работает (тест зелёный). НО: (1) визуально живая/неактивная НЕ различимы — `StatusDot` игнорирует `isActive`; (2) ввод в неактивную сессию → `write_stdin`→`NoSuchSession`, а `term.onData(d=>void writeStdin())` (terminal-manager:147) без `.catch` → нажатия молча исчезают, ноль фидбека |
+| B-08 | 🟡 UX-GAP | Minor | **P-12 частично**: пустая (treeCache=[]) и провал листинга различимы, НО обе кривые — пустая без явной «пусто»-метки; провал → `cacheDir` не зовётся → вечная строка «Загрузка…» (врёт про загрузку) + транзиентный toast + БЕЗ retry |
+| B-09 | ✅ OK | — | Честные карточки: `Бинарный файл · size` / `Файл слишком большой… · size`; `PREVIEW_CAP=1 MiB` (fs_explorer:37); бинарь = NUL/invalid-UTF-8 в первых 8 KiB; TOCTOU-grow→TooLarge; отказ→карточка+toast+token-guard |
+| B-10 | ✅ OK | — | `fs://watch-error`→`setWatchPaused(true)`→баннер; клик→`onRefreshWatch` fire-and-forget (**P-04** нет `.catch`, но `startWorkspaceWatch` по контракту не реджектит — ошибки идут через event); повторный отказ → баннер возвращается + toast листинга |
+| B-11 | ✅ OK | — | `create_new`/guard перед `fs::rename` → `AlreadyExists` → «файл с таким именем уже существует»; пустое имя → тихая отмена (427); delete→Trash+confirm; всё в try/catch→toast |
+| B-12 | 🟡 UX-GAP | Minor | **P-13 подтверждён (обе половины)**: загрузка и пустота одинаковы — «Пока нет команд»; отказ→`setFailed`→`return null` (рендер НИЧЕГО) навсегда, без retry-кнопки, только транзиентный toast; рефетч лишь на смену `sessionId`/`sessionMeta` |
+| B-13 | 🟡 UX-GAP | Minor | «Пройти →» активирует workspace+сессию, вью=workspace, пейн монтируется→attach→replay (работает), порядок буккетов верный. НО клавиатурный ФОКУС в PTY не гарантирован на первом прыжке: `manager.focus` — no-op до `open()` (295-297), а `open()` не зовёт `term.focus()` (осознанно, док-коммент 288-292) |
+| B-14 | ✅ OK | — | Клик по строке running/exited → `goTo(workspaceId, sessionId)` → навигация+активация сессии; тот же минорный focus-нюанс, что B-13, но фокус здесь не требуется |
+
+**Итог по эпику:** 6×✅ OK · 7×🟡 UX-GAP (4 Important + 3 Minor) · 1×📄 DOC-GAP · 0×🔴 BUG.
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где |
+|---|---|---|
+| **P-01** («+ New terminal» silent no-op на reject) | 🟡 **ПОДТВЕРЖДЁН** (Important) | B-05 |
+| **P-02** (close «×» reject → зомби-таб, пропущен `dispose`) | 🟡 **ПОДТВЕРЖДЁН** (Important) | B-06 |
+| **P-03** («+ Add workspace» без try/catch) | 🟡 **ПОДТВЕРЖДЁН** (Important) | B-01 |
+| **P-04** (watch-resume fire-and-forget без `.catch`) | ✅ **НЕ БАГ** (безвредно) | B-10 |
+| **P-12** (пустая папка неотличима от провала) | 🟡 частично (различимы, но провал=вечная «Загрузка…») | B-08 |
+| **P-13** (CommandStrip loading==empty + null навсегда) | 🟡 **ПОДТВЕРЖДЁН** (обе половины) | B-12 |
+
+---
+
+## Результаты
+
+### B-01 — Sidebar: «+ Add workspace» → выбрать папку
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.** (P-03 подтверждён.)
+- **Проверено:** `WorkspaceSidebar.tsx:68-73 onAdd` → `pickFolder()` (ipc/commands) → `createWorkspace(basename(dir), dir)` → `onSelectWorkspaceAndNavigate(ws.id)`. Кнопка `aria-label="Add workspace"` (275-291) вызывает `void onAdd()` (278). Бэкенд: `commands.rs::create_workspace` → `Request::CreateWorkspace` → sessiond валидирует root (spec §16) + push `workspace://created`.
+- **Обработка ошибок:** **ОТСУТСТВУЕТ**, проглочена. `onAdd` НЕ обёрнут в try/catch. `pickFolder()===null` → `return` (чистая отмена, ок). Но если `createWorkspace` реджектит (`CommandError::Daemon`/`Disconnected` — невалидный/недоступный root, sessiond down), reject уходит в `void onAdd()` → **unhandled rejection, ноль фидбека**. Контраст в ТОМ ЖЕ файле: `handleAttach` (75-85) обёрнут в try/catch → `showToast(describeOrchdError)`; `onAdd` — нет.
+- **Логи:** UI-слой ничего не эмитит. Демон — insert (класс B-04, пер-верб tracing нет).
+- **Что видит пользователь:** при отказе — **ничего**: диалог папки закрылся, ни toast, ни новый workspace, ни навигация. Неотличимо от «передумал».
+- **Дельта от ожидания:** каталог просил «воспроизвести ноль фидбека при отказе» — воспроизведено статически (нет catch → нет toast).
+- **Действие:** BL/фикс (Important): обернуть `createWorkspace` в try/catch → `showToast(describeCommandError(e))`, зеркально `FileTree.onAddRoot` и `handleAttach`.
+
+### B-02 — Пикер открыт: отменить пикер
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `WorkspaceSidebar.tsx:70` (`if (dir === null) return;`), аналогично `FileTree.tsx:393`. `pickFolder` (commands.ts:117) резолвит `string | null`; отмена → `null`.
+- **Обработка ошибок:** н/д (отмена — не ошибка).
+- **Что видит пользователь:** ничего не происходит — молчаливый no-op. Приемлемо (нет побочных эффектов, нет мутации).
+- **Действие:** ничего.
+
+### B-03 — Workspace открыт: FileTree «+ Add root» → папка
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `FileTree.tsx:390-399 onAddRoot` → `pickFolder()` → `addWorkspaceRoot(workspace.id, dir)` → `upsertWorkspace(ws)`. Кнопка `aria-label="Add root"` (671-688) → `void onAddRoot()`. Бэкенд `commands.rs:1048 add_workspace_root` → `Request::AddWorkspaceRoot` → sessiond ре-валидирует (canonicalize, отвергает дубли/escapes) + broadcast `WorkspaceUpdated`.
+- **Обработка ошибок:** есть, честная. try/catch → `showToast('Не удалось добавить корень: ' + describeCommandError(err))` (397). `describeCommandError` (70-88) маппит `daemon/disconnected/internal/incompatibleDaemon/tooLarge`.
+- **Логи:** UI toast; демон — insert.
+- **Что видит пользователь:** второй root появляется в дереве (upsertWorkspace + push). Симлинки/сетевые тома/невалидный путь → `validate_dir` на демоне → `outsideRoot`/`io` → toast. **Повторное добавление того же пути:** демон идемпотентен (не пишет второй идентичный root, см. commands.rs:1041), возвращает тот же `Workspace` + harmless-resync broadcast — не ошибка.
+- **Действие:** ничего.
+
+### B-04 — Workspace с 2 roots: удалить root → LastRoot
+
+- **Вердикт:** 📄 DOC-GAP. **Severity: Minor.**
+- **Проверено:** grep `removeWorkspaceRoot`/`remove_workspace_root` по `src/` → совпадения ТОЛЬКО в `App.tsx`/`ipc/commands.ts`/`ipc/events.ts` (обёртка+тип), **ни одной кнопки/контрола** ни в `FileTree`, ни в `WorkspaceSidebar`, ни в `ProjectPanel`. FileTree предлагает только «+ Add root», удаления нет. Бэкенд-цепочка полностью существует и тестируется: `commands.rs:1065 remove_workspace_root` → `Request::RemoveWorkspaceRoot` → `persistence.rs:465 Err(PersistError::LastRoot)` (msg «cannot remove the last workspace root», код `"LastRoot"`) → `socket_server.rs:889` → `Response::Error{code,message}` → `err_from_response` (commands.rs:499) → `CommandError::Daemon{code:"LastRoot", message}`. Тест `remove_workspace_root_last_one_is_rejected_with_last_root_code` — зелёный.
+- **Обработка ошибок:** на бэкенде честная (guard от 0 roots). На фронте — недостижима.
+- **Что видит пользователь (гипотетически, будь UI):** `describeCommandError` для `kind:"daemon"` → `e.message` → **сырой английский** «cannot remove the last workspace root» (см. O-2 ru/en). Локализации нет.
+- **Дельта от ожидания:** каталог ждал сценарий «удалить root → root исчез; последний → LastRoot; текст локализован/понятен». **Реально: UI удаления root в v1 отсутствует** (параллель с C-08 «архив UI-недостижим»); плюс латентная англ.-строка.
+- **Действие:** DOC/BL: (a) зафиксировать в доках «удаление root в UI не реализовано (verb есть)»; (b) при добавлении UI — локализовать LastRoot-текст.
+
+### B-05 — Workspace открыт: «+ New terminal»
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.** (P-01 подтверждён.)
+- **Проверено:** `TerminalTabs.tsx:28-47 onNewTerminal` → root-aware cwd (39-43) → `createSession(activeWorkspaceId, opts)` (46). Кнопка (110-125): `disabled={!activeWorkspaceId}`, `onClick={() => void onNewTerminal()}`. Успех: `create_session` push `session://created` → App upsert+activate.
+- **Обработка ошибок:** **ОТСУТСТВУЕТ**. `onNewTerminal` без try/catch, `await createSession` может реджектнуть (`Disconnected`, если sessiond отвалился; `Daemon`, если spawn упал) → reject уходит в `void onNewTerminal()` → **проглочен молча**. Гейт только `!activeWorkspaceId`, НЕ на sessiond-connection — при мёртвом sessiond кнопка активна, клик = тихий провал.
+- **Логи:** ничего на UI; на успехе push, на провале — тишина.
+- **Что видит пользователь:** при отказе — ничего: ни таба, ни toast. Молчаливый no-op на ключевом «time-to-first-terminal».
+- **Дельта от ожидания:** каталог «Отказ → ?»; P-01 «молчаливый no-op» — подтверждено.
+- **Действие:** BL/фикс (Important): try/catch → `showToast(describeCommandError(e))`.
+
+### B-06 — Живая сессия: закрыть «×»
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.** (P-02 подтверждён + дельта.)
+- **Проверено:** `TerminalTabs.tsx:49-52 onClose`: `await killSession(sessionId)` → `manager.dispose(sessionId)`. Кнопка «×» (88-105): `onClick` → `e.stopPropagation(); void onClose(s.id)`. Бэкенд `socket_server.rs:1031 KillSession` → SIGKILL (live) → wait-thread → push `session://exited` → store `markExited`; для INACTIVE — D3-путь (1033-1044): drop attach + remove map + delete rows.
+- **Обработка ошибок:** **ОТСУТСТВУЕТ**. Нет try/catch. При reject `killSession` (напр. `Disconnected`): (1) `await` throw → **`manager.dispose` НИКОГДА не вызывается** (пропущен) → xterm-инстанс течёт; (2) throw уходит в `void onClose` → **проглочен** (нет toast); (3) `session://exited` не приходит (kill не прошёл) → таб остаётся ЖИВЫМ. Итог — **зомби-таб + утечка xterm + ноль фидбека**. Тест `closing a tab kills the session and disposes its terminal` покрывает только happy-путь (asserts killSession+dispose), reject-путь не покрыт.
+- **Дельта от ожидания:** каталог «Сессия убита, таб исчез». **Реально даже на успехе таб НЕ исчезает:** `markExited` (store.ts:467-486) флипает `isActive=false`+`lifecycle=exited`, но НЕ удаляет из store; `removeSession` (440-448) — **мёртвый код** (ноль вызовов, нет push `session://removed`); `TerminalTabs` рендерит `Object.values(sessions)` без фильтра → убитая сессия висит как exited-таб, недемонтируемый из UI.
+- **Логи:** ничего на UI-слое.
+- **Что видит пользователь:** happy — таб становится exited-табом (не исчезает); reject — таб остаётся живым, xterm течёт, тишина.
+- **Действие:** BL/фикс (Important): (a) `try { await killSession } finally { manager.dispose }` + catch→toast (чтобы dispose всегда шёл, а ошибка была видна); (b) решить судьбу exited-табов (prune через `removeSession` по push или ручное закрытие).
+
+### B-07 — Живые сессии: перезапуск sessiond → attach (cold-rehydrate)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.**
+- **Проверено:** boot `boot.rs:115 cold_rehydrate_sessions` → `supervisor.rehydrate_inactive(meta, sb)` (pty_supervisor.rs:770): `is_active=false`, `pty=None`, ринг предзаполнен scrollback, `lifecycle` СОХРАНЯЕТСЯ как персистнутый (798). Attach INACTIVE-путь (attach.rs:171) → replay-only (`Push::Replay`), без live-reader. Тест `cold_rehydrate_then_attach_replays_persisted_marker_as_inactive` — зелёный. Реконнект: App list_sessions → upsertSession.
+- **Обработка ошибок:** replay честный. Но два UX-провала:
+  1. **Визуальная неразличимость live/inactive.** `StatusDot` (dotStateOf, StatusDot.tsx:13-26) смотрит ТОЛЬКО `lifecycle`+`waitingForInput`, **игнорирует `isActive`**. Сессия, персистнутая как `Running`/`AtPrompt`, после регидрата показывает зелёный «running»/idle-точку, хотя PTY мёртв. `TerminalTabs` не рендерит никакой inactive-метки. На Home такие (`!isActive` && lifecycle≠exited) выпадают из ВСЕХ трёх буккетов (`running` требует `isActive`; `exited` требует `lifecycle.exited`) → невидимы на Home, но висят «живым» табом в workspace.
+  2. **Ввод в неактивную сессию — молча теряется.** `write_stdin`→`require_pty` (pty_supervisor.rs:555-559) для PTY-less entry → `SupervisorError::NoSuchSession` → `socket_server.rs:1018 err(...)`. Фронт: `term.onData((d) => void writeStdin(sessionId, d))` (terminal-manager.ts:147-148) — **fire-and-forget без `.catch`** → reject проглочен; локального эха нет (нет live-PTY) → **нажатия исчезают в никуда, ноль обратной связи**.
+- **Что видит пользователь:** scrollback реплеится корректно (это ✅), НО не может отличить мёртвую сессию от живой и, набирая в неё, не получает ни символа, ни ошибки.
+- **Дельта от ожидания:** каталог «Отличие живой/неактивной визуально понятно?» → нет; «Ввод в неактивную — что происходит?» → молчаливая потеря.
+- **Действие:** BL/фикс (Important): (a) прокинуть `isActive` в `StatusDot`/таб (dim/бейдж «неактивна»); (b) `term.onData` → `writeStdin(...).catch(() => showToast('Сессия неактивна — перезапустите'))` или блокировать ввод для `!isActive`.
+
+### B-08 — FileTree: раскрыть пустую папку
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-12 частично.)
+- **Проверено:** `FileTree.tsx:117-181 computeFlatten` / эффект `273-288`. Раскрытая-но-некэшированная папка → синтетическая строка `loading` (129-142) + push в `pending`. Эффект: `listDir(...).then(cacheDir).catch(showToast).finally(delete key)` (278-285).
+- **Обработка ошибок:** на провале `cacheDir` НЕ зовётся → `treeCache[key]` остаётся `undefined` → `computeFlatten` бесконечно эмитит `loading`-строку. Эффект НЕ ре-ранится (deps `[pending, showIgnored]`; `pending` — `useMemo` от `treeCache`, который не менялся) → **retry нет**, «Загрузка…» **навсегда**. Toast транзиентный (4с). Пустая папка: `listDir`→`[]`→`cacheDir(root,rel,[])`→`treeCache[key]=[]`→ ноль дочерних строк.
+- **Что видит пользователь:** пустая = раскрытый узел ▾ **без единой строки и без явной «пусто»-метки** (каталог ждал «пусто»-индикацию — её нет); провал = **вечная «Загрузка…»** (врёт про загрузку) + мелькнувший toast, без retry. Во время in-flight обе одинаковы (корректно); терминально — различимы, но обе кривые.
+- **Дельта от ожидания:** P-12 «неотличима» — буквально частично опровергнуто (различимы), НО провал маскируется под загрузку, а пусто без метки.
+- **Действие:** BL/фикс (Minor): (a) явная строка «(пусто)» для `cached.length===0`; (b) при провале — сохранить honest error-строку + кнопку «повторить» вместо вечной «Загрузка…».
+
+### B-09 — FileTree: открыть файл 2 МБ / бинарник
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `FilePreview.tsx:86-99` → `readFilePreview(root, rel)`; карточки: `binary` → «Бинарный файл · formatBytes» (122-124), `tooLarge` → «Файл слишком большой для предпросмотра · formatBytes» (126-132), error → error-карточка (110-116) + `showToast` (95). Бэкенд `fs_explorer.rs`: `PREVIEW_CAP = 1024*1024` (1 MiB, :37); stat>cap → `TooLarge` без чтения (350-351); read cap `.take(PREVIEW_CAP+1)` (355); бинарь = NUL/invalid-UTF-8 в первых `BINARY_PROBE_LEN`=8 KiB (:39, 295); TOCTOU-grow (`bytes.len()>CAP`) → `TooLarge` (326-327).
+- **Обработка ошибок:** честная. Token-guard (`requestRef`, 72,81,88,92,98) от гонок re-select. `FilePreview`-тип различает `text|binary|tooLarge` на уровне типа → нельзя случайно отрендерить бинарь/обрезку как целый файл.
+- **Логи:** UI toast; секретов нет.
+- **Что видит пользователь:** честные placeholder-карточки с реальным размером; truncated-текст → баннер «Содержимое могло измениться…» (136-140).
+- **Дельта:** нет. Границы капа — ровно 1 MiB, `size==CAP` → text, `CAP+1` → TooLarge (тесты `exact`/`oversized`).
+- **Действие:** ничего.
+
+### B-10 — Активный watch: удалить root на диске → «обновить»
+
+- **Вердикт:** ✅ OK. (P-04 — не баг.)
+- **Проверено:** `App.tsx:158 onFsWatchError(() => setWatchPaused(true))`; `FilesRail.tsx:157-177` рендерит баннер «live-обновления на паузе — обновить» при `watchPaused`; клик → `onRefreshWatch` (87-93): `void startWorkspaceWatch(roots, showIgnored)` + `invalidateDirs(root, ["*"])` + `setWatchPaused(false)`.
+- **Обработка ошибок:** **P-04** — `startWorkspaceWatch` fire-and-forget без `.catch`, НО по контракту (`fs.ts:98-106`) он **никогда не реджектит**: любой сбой watch приходит как event `fs://watch-error`, не как reject промиса. ⇒ отсутствие `.catch` **безвредно**. При повторном отказе: оптимистичный `setWatchPaused(false)` на миг прячет баннер → `invalidateDirs` → FileTree ре-пуллит → `listDir` root'а падает → toast «Не удалось прочитать/обновить папку»; параллельно re-fired `fs://watch-error` → `setWatchPaused(true)` → баннер возвращается.
+- **Что видит пользователь:** после повторного отказа — баннер снова + toast листинга (честная деградация). Мелкий флик баннера (off→on) — косметика.
+- **Дельта:** нет.
+- **Действие:** ничего (опц. косметика: не гасить баннер до успешного re-listing).
+
+### B-11 — FileTree: создать/переименовать/удалить файл
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `FileTree.tsx`: `doCreate` (335-343)/`doRename` (345-357)/`doDelete` (359-372) — все в try/catch → `showToast('Не удалось …: ' + describeFsError)`. `submitForm` (422-431): `value.trim()===""` → тихая отмена (427). Бэкенд `fs_explorer.rs`: `create_file_inner` `.create_new(true)` (370), `rename_entry_inner`/`move` — guard `AlreadyExists` ДО `fs::rename` (395, 418). `describeFsError` (48-66): `alreadyExists`→«файл с таким именем уже существует», `notFound`/`permissionDenied`/`outsideRoot`/`tooLarge`/`io`. Delete → Trash (доверенный `deleteEntry`) + `window.confirm` (361). Тесты (по именам): `create_file_does_not_overwrite_existing`, `rename_entry_onto_existing_target_is_rejected_without_overwriting`, `rename_entry_onto_a_free_name_still_succeeds`.
+- **Обработка ошибок:** честная; конфликт имён — код `create_new`/pre-rename-guard, текст «…уже существует».
+- **Что видит пользователь:** ряд появился/переименован/уехал в корзину; существующее имя → toast «…уже существует»; пустое имя → тихая отмена.
+- **Действие:** ничего.
+
+### B-12 — Открыта сессия: прогнать команды (OSC-133) → CommandStrip
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-13 подтверждён.)
+- **Проверено:** `CommandStrip.tsx:141-157` — `getCommandEvents(sessionId, 10)`; `pairCommandEvents` (45-72) → чипы `outcome`(✓/`✗ code`)/`running`/`interrupted` (honest-state: lone `started` на `!isLive` → «прервано», 192-210). Рефетч на `[sessionId, sessionMeta, showToast]`.
+- **Обработка ошибок:** **P-13 (обе половины)**: (1) **loading==empty** — при in-flight `events=[]` → `items.length===0` → «Пока нет команд» (170-171), идентично истинной пустоте; (2) **провал → null навсегда**: `.catch`→`setFailed(true)`+toast (152-156), затем `if (failed) return null` (160) → рендерит **НИЧЕГО**, без retry-кнопки; повторный фетч только при смене `sessionId`/`sessionMeta` (lifecycle-push), при стабильной сессии — полоса пропадает молча.
+- **Логи:** UI toast «Не удалось загрузить историю команд».
+- **Что видит пользователь:** чипы корректны; но «Пока нет команд» неотличимо от загрузки; при сбое — пустое место + один транзиентный toast.
+- **Дельта:** каталог/P-13 подтверждён.
+- **Действие:** BL/фикс (Minor): отдельный loading-стейт (не «Пока нет команд»); при `failed` — inline «не удалось загрузить · повторить» вместо `null`.
+
+### B-13 — Home, ≥1 «нужен ты»: «Пройти →»
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.**
+- **Проверено:** `HomeView.tsx:172-179 goTo(workspaceId, sessionId)`: `setActiveWorkspaceId` → `setView("workspace")` → `setActiveSession(sessionId)` → `manager.focus(sessionId)`. Порядок буккетов: `waiting`(«Нужен ты», 250) → `running`(«Работают», 289) → `exited`(«Завершились недавно», 321) — совпадает с каталогом. Пейн монтируется → `TerminalPane` effect → `ensure/attach/open` → replay.
+- **Обработка ошибок:** н/д (навигация локальная).
+- **Что видит пользователь:** прыжок в workspace, сессия активна, scrollback на месте. НО **клавиатурный фокус в PTY НЕ гарантирован** на первом прыжке: `manager.focus` (terminal-manager.ts:295-297) — no-op, если `entry.opened===false`; `open()` (497-523) НЕ зовёт `term.focus()`. Т.е. на свежую (ни разу не открытую) сессию фокус НЕ ставится — юзеру надо кликнуть в терминал. Ограничение осознано (док-коммент 288-292: «focus() merely saves a click for a session whose pane was already opened»).
+- **Дельта от ожидания:** каталог «фокус в PTY» — выполняется только для ранее открытых пейнов; на первом прыжке — нет.
+- **Действие:** BL/фикс (Minor): фокусировать `term` в `open()` (или в mount-effect `TerminalPane`), когда сессия только что стала активной.
+
+### B-14 — Home: клик по строке running/exited
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `HomeView.tsx`: running-строка `onClick={() => goTo(meta.workspaceId, meta.id)}` (307), exited-строка (342) — тот же `goTo`. Навигация: `setActiveWorkspaceId`+`setView("workspace")`+`setActiveSession`. Групповой заголовок → `goTo(group.workspaceId)` (без сессии) → переход в workspace без выбора сессии.
+- **Обработка ошибок:** н/д.
+- **Что видит пользователь:** переход в workspace, сессия активна (для exited — открывается её exited-пейн со scrollback). Тот же минорный focus-нюанс, что B-13, но клик по running/exited не подразумевает немедленного набора.
+- **Действие:** ничего (focus-улучшение общее с B-13).
+
+---
+
+## Сводка ключевого
+
+1. **Триада «молчаливого no-op» (P-01/P-02/P-03) подтверждена** — три параллельных места без try/catch на fire-and-forget-мутациях: создание workspace (B-01), новый терминал (B-05), закрытие сессии (B-06). Все три глотают reject через `void handler()`, ноль toast. B-06 хуже прочих: reject ещё и пропускает `manager.dispose` (утечка xterm + зомби-таб). Все — Important, тривиальный фикс (обернуть в try/catch → `describeCommandError`/finally-dispose).
+2. **B-07 cold-rehydrate — Important UX-провал** на двух фронтах: `StatusDot` игнорирует `isActive` (мёртвая сессия выглядит живой), а ввод в неактивную сессию (`write_stdin`→`NoSuchSession`) молча теряется из-за `void writeStdin` без `.catch`. Сам replay-only регидрат корректен (тест зелёный).
+3. **B-04 — UI удаления root отсутствует** (verb+бэкенд+тесты есть, кнопки нет) — прямая параллель C-08; плюс латентная сырая англ.-строка LastRoot (O-2).
+4. **Мелочи (Minor):** B-08 (провал листинга = вечная «Загрузка…» без retry, пусто без метки), B-12/P-13 (loading==empty; сбой→null навсегда), B-13 (фокус в PTY не гарантирован на первом прыжке).
+5. **Хорошо (✅):** B-02 (отмена пикера), B-03 (add root — try/catch+ре-валидация), B-09 (честные карточки binary/tooLarge, cap 1 MiB, token-guard), B-10 (watch-error→баннер, P-04 безвреден), B-11 (CRUD-конфликты честны), B-14 (навигация).
+6. **P-04 — НЕ баг:** `startWorkspaceWatch` по контракту не реджектит (сбои идут через `fs://watch-error`), поэтому отсутствие `.catch` в `onRefreshWatch` безвредно.
+
+**Не удалось проверить рантаймом:** тесты crate `builder-pro-ai` (Tauri-core: `fs_explorer.rs`/`commands.rs`) **не компилируются в этом checkout** — build.rs требует sidecar-бинарь `binaries/bpa-orchd-aarch64-apple-darwin`, которого нет (`resource path … doesn't exist`). Вердикты B-09/B-11/B-04-mapping построены на исходниках + именах существующих `#[cfg(test)]`-тестов (греп), не на их прогоне. Реальный ввод в живую inactive-сессию и визуальная неразличимость (B-07) проверены статически (нет запущенного демона/GUI-стенда — по ограничению READ-ONLY, без касания launchd/демонов).
+
+# Эпик I — Граф (I-01…I-09). Результаты инвестигейта
+
+Репо: `/Users/sshlg/DATA/builder-pro-ai` (main, v0.7.0). Read-only.
+Модель: opus. Пути прослежены: UI-контрол → ipc-wrapper → Tauri command → wire verb → dispatch → `graph.rs`.
+Тесты прогнаны:
+`npx vitest run src/components/graph/GraphCanvas.test.tsx src/components/graph/graphMapping.test.ts src/components/graph/nodeRenderers.test.tsx` → **37 passed**;
+`cargo test -p bpa-orchd --lib graph` → **56 passed** (вкл. `research::graph_ingest_tests::*`).
+
+## Сводная таблица вердиктов
+
+| ID | Вердикт | Severity | Суть одной строкой |
+|---|---|---|---|
+| **I-01** | **🟡 UX-GAP** | **Important** | **P-22 подтверждён: узел создаётся hardcoded «Новый узел» + body="" , формы title/body НЕТ, rename НЕТ, edge-label/edge-kind edit НЕТ. `orchdGraphUpdateNode` (+Tauri command +wire verb +`update_node`) существуют end-to-end, но НИ ОДНОГО call-site в `src/`. Человеко-facing редактор знаний — фактически стаб: можно расставить безымянные типизированные коробки и соединить их «relates», но выразить знание нельзя. Код соответствует §7 (форма никогда не специлась) → DOC-GAP vs собственная цель спека «editable graph». O-7.** |
+| I-02 | 🟡 UX-GAP | Minor | P-08: optimistic edge add без rollback; при отказе — toast, но фантомное ребро (client-id) висит до следующего `refreshGraph` (ремоунт таба / чужой push / reconnect); нет polling. Плюс: drag-ребра при `orchdDown` → `onConnect` early-return БЕЗ per-action фидбека (только глобальный OrchdDownBanner). |
+| I-03 | 🟡 UX-GAP | Minor | P-07: flush move при `orchdDown` молча дропается (`return` без toast/revert). Узел визуально остаётся на несохранённой позиции (выглядит «сохранено») до следующего `refreshGraph`, затем СНАП назад к серверной позиции (на ремоунте таба / `onOrchdUp`-reconnect). Худший вариант из двух: сначала «как сохранилось», потом тихий откат. |
+| I-04 | ✅ OK | — (Minor) | Частичный отказ delete-цикла: `finally refreshGraph` доводит канву до серверной истины (удалённые до отказа id не висят). Состояние консистентно. Minor-оговорка: toast generic (не перечисляет что/сколько упало); co-select узла + его инцидентного ребра → cascade удаляет ребро, `deleteEdge` ловит `NotFound` → ложный toast «не найдено» при фактическом успехе. |
+| I-05 | ✅ OK | — (Minor) | Stale-response guard (`searchRequestIdRef` монотонный, bump на dispatch И на clear) присутствует + покрыт тестом. Input живой (read, не гейтится). Minor-оговорка: сам вызов `orchdGraphSearch` при `orchdDown` падает (IPC-read нужен orchd) → toast-ошибка, подсветка офлайн не работает. |
+| I-06 | ✅ OK | — | Ghost (external) клик → `openProject(data.projectId)` (FOREIGN project из `graphMapping`). Покрыт тестом. |
+| I-07 | 🟡 UX-GAP | Minor | Локальный (не-external) клик = осознанный no-op с ZERO фидбеком. При этом `nodeCardStyle` ставит `cursor:"pointer"` ВСЕМ узлам → pointer-курсор обещает кликабельность, а клик ничего не делает → нечестный affordance. Спека §7 сама говорила «entityRef click → navigate to the entity»; код отложил (документированный follow-up, «no deep-link seam»). Spec-deviation. |
+| I-08 | ✅ OK | — | Orphan «источник удалён»: `is_orphan` вычисляется server-side в `resolve_node_label` НА READ-TIME (`list_project_graph`), когда `resolve_entity_label`→`None`. `EntityRefNode` рендерит `data.isOrphan ? "источник удалён" : data.label`. Покрыт тестом `nodeRenderers`. |
+| I-09 | 🟡 UX-GAP | Minor | Self-loop → `Invariant`, дубль → `Conflict`, оба → toast. Тексты честны, но mixed ru/en с сырым английским + UUID: self-loop = «недопустимая операция: graph edge source and target must differ (no self-loops)»; дубль = «конфликт: edge {uuid}->{uuid} (relates) already exists». Достижимо из UI (drag handle→handle). Плюс: отклонённое ребро остаётся фантомом на канве (см. I-02). O-2 ru/en. |
+
+**Итог по эпику:** 4×✅ OK · 5×🟡 UX-GAP (1 Important + 4 Minor) · 0×🔴 BUG.
+Главная находка — **I-01/P-22**: редактор графа как инструмент авторинга знаний — стаб (нет ни имени узла, ни тела, ни rename, ни label ребра), при том что весь backend-путь `update_node` готов и не подключён.
+
+## Реестр подозрений (вердикты)
+
+| Подозрение | Вердикт | Где подтверждено |
+|---|---|---|
+| **P-22** (узел hardcoded «Новый узел», нет формы/rename/edge-label; `orchdGraphUpdateNode` обёртка есть) | **🟡 Important — ПОДТВЕРЖДЁН** | I-01 |
+| P-08 (optimistic edge add без rollback; фантом до push) | 🟡 Minor — подтверждён | I-02 |
+| P-07 (move-flush при orchdDown молча теряется) | 🟡 Minor — подтверждён | I-03 |
+| B-09 (`GraphAddEdge` post-insert lookup-fail → push молча пропущен) | ✅ приемлемо (путь недостижим на практике) | I-02 (прим.) |
+
+---
+
+## Результаты
+
+### I-01 — Таб «Граф»: выбрать kind → «Добавить» (P-22 — is the editor usable?)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Important.** (P-22 подтверждён; DOC-GAP vs DoD «editable graph»; O-7.)
+- **Проверено:** код-путь `GraphCanvas.tsx:436-444` (`handleAddNode`) → `orchdGraphAddNode(projectId, addKind, NEW_NODE_LABEL, "", posX, posY)` (`GraphCanvas.tsx:439`; `NEW_NODE_LABEL = "Новый узел"` — `GraphCanvas.tsx:58`; body — литерал `""`) → `orchd.ts:344-353` → Tauri `orchd_graph_add_node` → `socket_server.rs:1261-1280 GraphAddNode` → `graph.rs:343-380 add_node`. После успеха — `refreshGraph(projectId)` (`:440`). Тест `'toolbar "Добавить" calls orchdGraphAddNode with the selected kind'` (GraphCanvas.test.tsx:297) — зелёный.
+- **Обработка ошибок:** есть, честная. `try/catch` → `showToast(describeOrchdError(e))` (`:441-443`). Add-node select+кнопка `disabled={orchdDown}` (`:483, 496`). Kind-select исключает `entityRef` (`ADDABLE_KINDS`, `GraphCanvas.tsx:56`; тест :316).
+- **Отсутствие формы/rename (ядро P-22):**
+  - `handleAddNode` НЕ открывает форму/prompt — сразу `orchdGraphAddNode` с константой «Новый узел» и пустым телом. Позицию считает `nextNewNodePosition` (grid).
+  - **Rename после создания:** ни `onNodeDoubleClick`, ни inline-`<input>` в `DomainNode`/`EntityRefNode` (оба рендерят статичные `<div>`, `GraphCanvas.tsx:216-241`). Единственный node-handler — `onNodeClick` (клик = навигация/no-op, I-06/I-07).
+  - **`orchdGraphUpdateNode` существует, но не подключён:** обёртка `orchd.ts:355-361` + Tauri `commands.rs:2002` + wire `GraphUpdateNode` + `graph.rs:442-464 update_node` — весь путь готов. Grep call-site в `src/` (минус `.test.`) → **ноль**. Т.е. переименование узла (title) И правка body из UI невозможны.
+  - **Edge-label / edge-kind:** `onConnect` жёстко `orchdGraphAddEdge(source, target, "relates", "")` (`GraphCanvas.tsx:417`) — все рёбра «relates» с пустым label; UI сменить kind/label ребра не даёт (`update_edge` вообще нет ни в верб-списке §3, ни в `graph.rs`).
+- **S4 spec §7 — специлась ли форма title?** НЕТ. §7 (`spec:192`): «a small toolbar (add node of a chosen kind, delete selected node/edge, a search box → orchdGraphSearch …); entityRef nodes click → navigate…». Ни title/body-формы, ни rename-контрола, ни edge-label-редактора в контракте UI нет. То есть **код соответствует §7** — но §7 внутренне недоспецифицирован против собственной цели спека («typed nodes … editable», §0, и DoD «the graph is editable in the UI», §строка 9). DOC-vs-CODE: DoD обещает «editable», §7 не даёт способа задать/сменить смысл узла.
+- **Логи:** FE — toast. Демон `add_node` — insert без per-verb tracing (системное B-04). No-secrets покрыт `no_secrets_in_logs_graph.rs`.
+- **Что видит пользователь первой сессии:** открывает «Граф», видит авто-seeded strategic-goal entityRef (server-side, D6). Жмёт «Добавить» → появляется коробка «Новый узел» с типом-плашкой. Ещё раз → вторая «Новый узел». Ни одну переименовать/описать нельзя; все они визуально идентичны. Соединить их можно только ребром «relates» без подписи. **Осмысленный граф знаний собрать нельзя.**
+- **Адъюдикация «рабочий ли редактор»:** как ВЬЮЕР server-populated ref-узлов (strategic goal, insight-accept D9) — да, работает (I-08 orphan, I-06 ghost-nav). Как человеко-facing РЕДАКТОР авторинга знаний — **нет, это скелет/стаб**: примитивы add/move/delete/connect есть, но выразить контент (имя, тело, тип/подпись связи) невозможно, и backend `update_node` готов, но не проведён в UI.
+- **Дельта от ожидания:** каталог спрашивал «рабочий ли вообще граф-редактор» → как редактор знаний — нет.
+- **Действие:** BL (Important) + **эскалировать O-7** (заготовка под S6 или дефект v1?): подключить `orchdGraphUpdateNode` к inline-rename (double-click на узле) + форму title/body в add-node; добавить edge-label/kind edit (нужен `GraphUpdateEdge` — сейчас его нет). Минимум для «editable» DoD — переименование узла.
+
+### I-02 — Два узла: протянуть ребро (optimistic add, P-08)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-08 подтверждён.)
+- **Проверено:** `GraphCanvas.tsx:413-422 onConnect`: `if (useAppStore.getState().orchdDown) return;` (`:415`, fresh-read) → `setEdges((eds) => addEdge(connection, eds))` (`:416`, optimistic, client-id) → `orchdGraphAddEdge(source, target, "relates", "").catch(showToast(describeOrchdError))` (`:417-419`). **НЕТ** rollback в `.catch`, **НЕТ** явного `refreshGraph` (осознанно — doc-comment `:267-273`: полагается на `orchd://graph-changed` push). Backend: `socket_server.rs:1307-1337 GraphAddEdge` → на успехе push `GraphChanged` обоим эндпоинт-проектам; **на отказе → `map_err`, push НЕТ** (spec §6: «Failed verb → no push»). Тест `'a failed orchdGraphAddEdge call shows the mapped error via a toast'` (GraphCanvas.test.tsx:475) — зелёный.
+- **Обработка ошибок:** отказ → toast (честно), но локальное ребро НЕ откатывается.
+- **Сколько живёт фантом:** до следующей замены store-`view` (→ `useEffect [view]` пере-деривит local `edges`, `GraphCanvas.tsx:324-332`), т.е. до следующего `refreshGraph`. На пути ОТКАЗА push не приходит → фантом висит до: (a) ремоунта таба «Граф» (уход и возврат → mount-effect `refreshGraph`, `:316-319`; ProjectPanel рендерит таб условно — `ProjectPanel.tsx:428` — так что смена таба реально анмоунтит), (b) любой ДРУГОЙ успешной граф-мутации в этом проекте (её push → `refreshGraph`), (c) reconnect `onOrchdUp` (`App.tsx:273`). Polling НЕТ. Если юзер остаётся на табе и ничего не делает — фантом висит бессрочно (с client-id, выглядит как реальное ребро; toast к тому времени истёк, P-21 4с).
+- **orchdDown-гейт (P-08 «early-return без фидбека»):** handles не гейтятся (`nodesConnectable` не выставлен → default true), drag-коннект физически возможен при `orchdDown`; `onConnect` `return` на `:415` БЕЗ добавления ребра и БЕЗ toast → per-action ноль фидбека. Смягчение: `ProjectPanel.tsx:283` рендерит `<OrchdDownBanner/>` при `orchdDown` (глобальный контекст «оркестратор недоступен» виден). Тест `'onConnect does nothing while orchdDown'` (GraphCanvas.test.tsx:238) — зелёный.
+- **Логи:** FE — toast. `lifecycle`/insert — B-04.
+- **B-09 (смежно):** `socket_server.rs:1322-1331` — если `edge_endpoint_projects` упадёт СРАЗУ после успешного insert, push пропускается молча (только `tracing::error!`, ответ успешен). Путь помечен «Unreachable in practice» (ребро только что вставлено под тем же сериализующим `db`-guard). Приемлемо — недостижим.
+- **Что видит пользователь:** happy — ребро появляется, push реконсилит серверный id. Fail (self-loop/dup — I-09) — toast + ребро визуально ОСТАЛОСЬ (как и предсказывал каталог «ребро осталось визуально»).
+- **Дельта от ожидания:** совпадает с P-08. Каталог «Отказ → toast, ребро осталось визуально» — подтверждено; уточнение: живёт до ремоунта/чужого push/reconnect.
+- **Действие:** BL (Minor): в `.catch` откатывать локальное ребро (убрать client-id edge) ИЛИ явный `refreshGraph` на отказе; для orchdDown-drag — короткий toast «оркестратор недоступен».
+
+### I-03 — Узел: drag (debounce 400ms; orchdDown в момент flush, P-07)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (P-07 подтверждён.)
+- **Проверено:** `GraphCanvas.tsx:393-407 onNodesChange` — `applyNodeChanges` локально сразу (drag живой) + буфер moves, debounce `MOVE_DEBOUNCE_MS=400` (`:45`). `flushMoves` (`:378-391`): `dedupeMovesById` (последняя позиция на id) → **`if (useAppStore.getState().orchdDown) return;`** (`:385`, fresh-read) → иначе `orchdGraphMoveNode(...).catch(toast)`. Ранний `return` — БЕЗ toast, БЕЗ revert, БЕЗ ре-flush. Тест `'the move-flush does NOT call orchdGraphMoveNode while orchdDown'` (GraphCanvas.test.tsx:267) — зелёный.
+- **Обработка ошибок:** при orchdDown — тихий дроп (нет честной деградации на per-action уровне; глобальный OrchdDownBanner присутствует). Node draggable при down (`nodesDraggable` не выставлен → default true; drag НЕ гейтится, гейтится только flush).
+- **Снап назад или зависание — трейс:** local `nodes` уже несёт новую позицию (applyNodeChanges). Store-`view` не менялся (move не ушёл → сервер не менялся → push нет). Local пере-деривится из `view` только при смене `view` (`useEffect [view]`, `:324-332`). Значит узел ВИЗУАЛЬНО остаётся на несохранённой позиции (выглядит «сохранено»), пока `view` не заменится следующим `refreshGraph`: ремоунт таба (`ProjectPanel.tsx:428` + mount-effect) ИЛИ `onOrchdUp`-reconnect (`App.tsx:273` — граф рефетчится, в отличие от research runs F-10). Тогда `view` заменяется → узел **СНАП назад к серверной (старой) позиции**. То есть: сначала «как будто сохранилось», затем тихий откат при следующем refresh.
+- **Что хуже:** именно этот вариант (тихо «сохранилось» → потом молча откатилось) хуже немедленного снапа: юзер уверен, что позиция записана, и теряет её без единого сигнала. Позиция «permanently lost» — да (move так и не отправлен), но канва самолечится к серверной истине на reconnect (честно к БД, неожиданно для юзера).
+- **Логи:** нет (ранний `return`).
+- **Дельта от ожидания:** каталог «orchdDown в момент flush → потеряно молча» — подтверждено; уточнение: не снап сразу, а «висит несохранённым → снап назад на следующем refresh».
+- **Действие:** BL (Minor): при `orchdDown` в `flushMoves` — toast «позиция не сохранена: оркестратор недоступен» (или отложенный ре-flush после `onOrchdUp`). Сейчас — тихая потеря.
+
+### I-04 — Выбраны узлы/рёбра: «Удалить выбранное» (частичный отказ)
+
+- **Вердикт:** ✅ OK. (Minor-оговорки ниже.)
+- **Проверено:** `GraphCanvas.tsx:446-463 handleDeleteSelected`: собрать `selectedNodeIds`/`selectedEdgeIds`; пусто → no-op (`:449`); `window.confirm(DELETE_CONFIRM_TEXT="удалить выбранное?")` (`:450, :62`); `try { for id of nodes await deleteNode; for id of edges await deleteEdge } catch { toast } finally { await refreshGraph }` (`:451-462`). Тесты: confirm-гейт (:365), пусто→no-op (:386), **`'a partial multi-delete (2nd id rejects) still deletes the 1st, toasts, AND reconciles via refreshGraph'`** (:397) — все зелёные.
+- **Состояние после частичного отказа — консистентно?** ДА. При отказе на i-м id цикл бросает → `catch` toast → `finally refreshGraph(projectId)` доводит канву до серверной истины (id, удалённые до отказа, не висят; неудалённые остаются). Это фикс T7 review #3 (doc-comment `:456-461`); `refreshGraph` глотает свои ошибки в toast, так что `await` в `finally` не пробрасывает.
+- **Обработка ошибок:** есть, честная (toast + реконсиляция). Minor: toast generic — не сообщает, ЧТО/сколько упало (частичность невидима сверх «была ошибка»).
+- **Minor-оговорка (co-select node+его ребро):** выбрать узел A и инцидентное ребро A-B, удалить: `deleteNode(A)` каскадит ребро A-B (FK ON DELETE CASCADE, `graph.rs:490-500`), затем `deleteEdge(edgeAB)` → `edge_endpoint_projects` → `NotFound` → цикл бросает → ложный toast «не найдено» ПРИ фактическом полном успехе. Канва при этом консистентна (оба ушли). Сбивающий, но безопасный.
+- **Логи:** FE toast; delete — B-04.
+- **Что видит пользователь:** confirm → удаление; при серверном отказе части — «не найдено»/иная ошибка + канва сведена к правде.
+- **Дельта от ожидания:** каталог «Состояние после частичного отказа консистентно?» → ДА. Оговорки — Minor.
+- **Действие:** ничего блокирующего. Опц. Minor-BL: не бросать на `NotFound` в delete-цикле (idempotent-delete) — убрать ложный co-select toast; агрегировать ошибки цикла в один осмысленный итог.
+
+### I-05 — Граф: поиск (живо при orchdDown; stale-response guard)
+
+- **Вердикт:** ✅ OK. (Minor-оговорка.)
+- **Проверено:** `GraphCanvas.tsx:337-366` debounce-search: пустой query → bump `searchRequestIdRef` + `setMatchIds(new Set())` (инвалидирует in-flight, `:345-347`); иначе `setTimeout(SEARCH_DEBOUNCE_MS=400)` → `requestId = ++searchRequestIdRef` → `orchdGraphSearch(q, projectId).then(if requestId===current setMatchIds).catch(if current showToast)` (`:349-361`). Монотонный `searchRequestIdRef` (`:312`) bump на КАЖДОМ dispatch И на clear → старая резолюция не перезатрёт свежую. Тест **`'ignores a STALE search response: fire A then B, resolve B then A -> matches reflect B'`** (GraphCanvas.test.tsx:439) — зелёный; `'a search query debounces then calls orchdGraphSearch(query, projectId)'` (:420) — зелёный. Backend `graph.rs:812-852 search_nodes` (LIKE label/body, cap 200).
+- **Обработка ошибок:** есть, честная. Stale-drop и в `.then`, и в `.catch`. Input НЕ гейтится `orchdDown` (read-дисциплина, как RulesetPanel).
+- **Minor-оговорка «живо при orchdDown»:** input живой (можно печатать), НО сам `orchdGraphSearch` — IPC-read, требует orchd; при `orchdDown` промис отклоняется → `.catch` → toast-ошибка, подсветки нет. То есть «живо» = input не disabled; фактическая подсветка офлайн невозможна (round-trip к серверу).
+- **Логи:** FE — toast на ошибке. `search_nodes` — B-04.
+- **Что видит пользователь:** ввод → через 400мс подсветка совпадений (`boxShadow` на match, `nodeCardStyle` `:198`); очистка мгновенно снимает подсветку.
+- **Действие:** ничего.
+
+### I-06 — Ghost-узел (другой проект): клик → переход в тот проект
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `GraphCanvas.tsx:424-434 onNodeClick`: `if (data.isExternal) { openProject(data.projectId); return; }` (`:427-430`). `data.projectId` для external — FOREIGN project (`graphMapping.ts:38-43, 90-108` — `toFlowNodes` мапит `externalNodes` с `isExternal:true` и их СОБСТВЕННЫМ `projectId`). Backend наполняет `external_nodes` в `list_project_graph` (`graph.rs:683-699`). Тест `'ghost (external) node click navigates via openProject(ghostProjectId)'` (GraphCanvas.test.tsx:324) — зелёный.
+- **Обработка ошибок:** н/д (навигация — синхронный `openProject`).
+- **Что видит пользователь:** клик по dimmed/dashed ghost-узлу (`opacity:0.6, borderStyle:dashed`, `nodeCardStyle:199-200`) → переключение на его проект.
+- **Действие:** ничего.
+
+### I-07 — Локальный entity_ref: клик → честный no-op (ноль фидбека — приемлемо?)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (Spec-deviation §7.)
+- **Проверено:** `GraphCanvas.tsx:424-434 onNodeClick`: ветка `isExternal` навигирует; иначе — падение сквозь функцию, комментарий `:431` «Local entityRef click: honest no-op MVP». Тест `'local entityRef node click does NOT call any mutating wrapper or crash (honest no-op MVP)'` (GraphCanvas.test.tsx:334) — зелёный.
+- **Ноль фидбека — честно ли?** Нет, частично нечестно: `nodeCardStyle` (`GraphCanvas.tsx:190-204`) ставит **`cursor:"pointer"` ВСЕМ узлам** (`:203`) — pointer-курсор обещает кликабельность, а клик по локальному узлу (entityRef ИЛИ обычному concept/fact/…) не делает ничего и ничего не сообщает. Affordance вводит в заблуждение.
+- **Spec vs code:** §7 (`spec:192`) специл «entityRef nodes click → navigate to the entity (switch ProjectPanel tab / openProject)». Код это НЕ реализовал — отложил в no-op (doc-comment `GraphCanvas.tsx:275-282`: нет deep-link-seam в конкретную строку Цели/Идеи/Задачи/Инсайты; «faking a navigation … worse UX than nothing»; трекается как follow-up). То есть no-op — не «спека так велела», а осознанное отступление от §7 (документированное).
+- **Обработка ошибок:** н/д.
+- **Что видит пользователь:** кликает узел с pointer-курсором → ничего. Для entityRef (ссылка на реальные goal/idea/insight/task этого проекта) ожидал бы перехода.
+- **Дельта от ожидания:** каталог/§7 ждали навигацию; реально — молчаливый no-op с обещающим курсором.
+- **Действие:** BL (Minor): либо реализовать deep-link (§7), либо честный affordance — `cursor:default` для не-навигируемых узлов + опц. tooltip; не оставлять pointer на неинтерактивном.
+
+### I-08 — Удалить исходную сущность узла: открыть граф (isOrphan)
+
+- **Вердикт:** ✅ OK.
+- **Проверено:** `is_orphan` вычисляется server-side НА READ-TIME. `graph.rs:308-328 resolve_node_label`: для `kind==EntityRef` зовёт `resolve_entity_label` (`graph.rs:290-300`, `SELECT title FROM {goal|idea|insight|task} WHERE id=?`); `Some(live)` → обновить label, `is_orphan=false`; `None` (строка-источник удалена) → сохранить STORED label + `is_orphan=true`. Применяется в `list_project_graph` и к `nodes`, и к `external_nodes` (`graph.rs:670, 698`). Свежечитанная строка стартует `is_orphan=false` (`graph.rs:156-159`). Рендер: `EntityRefNode` (`GraphCanvas.tsx:232-241`) → `data.isOrphan ? "источник удалён" : data.label` (`:237`). Тест `'an orphaned entityRef node renders «источник удалён» instead of its stale stored label'` (nodeRenderers.test.tsx:61) — зелёный. Soft-ref survival (D3) покрыт Rust-тестами (delete источника не рушит узел).
+- **Обработка ошибок:** н/д (чистое чтение; резолвер тотальный — `None` = orphan-сигнал, не ошибка).
+- **Что видит пользователь:** после удаления исходной сущности, при открытии/refresh графа узел показывает «источник удалён» + красную рамку (`nodeCardStyle` `data.isOrphan → statusExited` border, `:196`).
+- **Когда именно считается:** каждый `GraphListProject` (mount, push, reconnect). Не кэшируется — всегда re-resolve.
+- **Действие:** ничего.
+
+### I-09 — Self-loop / дубль ребра: протянуть (Invariant / Conflict → toast)
+
+- **Вердикт:** 🟡 UX-GAP. **Severity: Minor.** (Тексты честны, но сырые en+uuid.)
+- **Проверено:** `onConnect` → `orchdGraphAddEdge` → `socket_server.rs:1307-1337` → `graph.rs:508-543 add_edge`:
+  - Self-loop: `source==target` → `Invariant("graph edge source and target must differ (no self-loops)")` (`graph.rs:515-519`).
+  - Дубль `(source,target,kind)`: unique index `graph_edge_uniq` → `map_edge_conflict` → `Conflict("edge {source}->{target} ({kind}) already exists")` (`graph.rs:256-270`).
+  Rust-тесты в `graph::tests` (self-loop→Invariant, dup→Conflict) — зелёные.
+- **Точные user-visible тексты (toast):** через `describeOrchdError` (`orchd.ts:769-772`):
+  - self-loop → **«недопустимая операция: graph edge source and target must differ (no self-loops)»**
+  - дубль → **«конфликт: edge {source-uuid}->{target-uuid} (relates) already exists»**
+  Русский префикс + сырой английский backend-message с голыми UUID и `relates`. Читаемо для инженера, не для владельца (O-2 ru/en mixing; те же корни, что F-5/BL-61).
+- **Достижимо из UI:** да — drag из source-handle (низ, `Position.Bottom`) в target-handle (верх) того же узла даёт `source==target` → self-loop; повтор существующего ребра → dup. xyflow handles не запрещают.
+- **Обработка ошибок:** честная (toast), НО отклонённое ребро остаётся фантомом на канве (optimistic add из I-02 не откатывается) — двойной минус: невнятный текст + висящее ребро.
+- **Логи:** FE toast; add_edge — B-04.
+- **Что видит пользователь:** тянет self-loop/дубль → toast с англ.-мессиджем + (визуально) ребро осталось до ремоунта/refresh.
+- **Дельта от ожидания:** каталог «`Invariant`/`Conflict` → toast; Тексты» — тексты присутствуют, но mixed ru/en с UUID; + фантом (I-02).
+- **Действие:** BL (Minor): локализовать/причесать backend-message (или маппить в describeOrchdError по коду в человекочитаемый ru — «нельзя связать узел с самим собой» / «такая связь уже есть»); + откат фантома (I-02).
