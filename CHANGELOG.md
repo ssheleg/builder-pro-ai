@@ -2,6 +2,93 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.7.0] — 2026-07-16
+
+### Added
+- **Research pipeline — the idea→research→insight→task loop, entirely inside `bpa-orchd`,
+  shipped WITHOUT the S6 agent org:** `orchd.db` schema v4 (additive, `SCHEMA_VERSION` 3→4) adds
+  exactly ONE net-new table, `research_run` (idea↔MCP-invocation↔artifact provenance +
+  `pending|running|done|failed` status). The "ResearchArtifact" the roadmap named is NOT a
+  separate entity or blob store — it's the REUSED S-EXT `mcp_artifact` a run's tool call produces
+  (no blob duplication, one source of truth, spec D2).
+- **The async run driver — orchd's FIRST long-lived `tokio::spawn`:** `ResearchStartRun` inserts
+  the run `pending` (in the same transaction as an idea's `captured→researching` lifecycle flip),
+  spawns a detached background task, and returns immediately; the task calls the shipped
+  `mcp::invoke::call_tool` (never holds the DB lock across the network await), then a SINGLE
+  `UPDATE` moves the row to `done{artifact_id,invocation_id}` or `failed{error_kind}`. Every
+  transition pushes `ResearchRunsChanged` — the frontend's "research pane" is the push, not a
+  poll. `error_kind` is a typed classification only (`policy_cap_exceeded`/`timeout`/`tool_error`/
+  `transport`/`interrupted`) — never args, a secret, or tool output.
+- **Boot-reconcile of interrupted runs (D11) — the crash/restart safety net a detached background
+  task otherwise lacks:** the spawned run task is NOT tracked by `OrchdShutdown{drain}`'s
+  connection-task JoinSet, so a restart/crash mid-run would leave a row stuck `pending`/`running`
+  forever without this fix. A new boot step (same "ensured at every boot" shape as
+  `boot::ensure_global_ruleset`, right after `open_db`) flips every non-terminal run to
+  `failed{interrupted}` on daemon start — the owner re-runs. Proven by a new e2e phase (below) that
+  deliberately shuts the daemon down mid-run and asserts the reconcile fires on restart.
+- **Connect-handshake timeout (D12) — a hang-forever fix in the shipped S-EXT MCP path:**
+  `mcp::invoke::call_tool` previously wrapped only the `tools/call` RPC in
+  `timeout(server.timeout_ms)`, not the preceding `connect_fn`/`initialize` handshake — a research
+  (or any MCP) peer that accepts the connection but never completes `initialize` hung the caller
+  forever. Now the connect handshake is bounded by the same per-server timeout too
+  (`McpError::Timeout` on elapse) — benefits every MCP call, not just research.
+- **Three wire verbs, append-only:** `ResearchStartRun`/`ResearchListRuns`/`ResearchGetRun` +
+  entity `ResearchRun`/enum `ResearchStatus` + push `ResearchRunsChanged` — appended at the end of
+  `bpa-orchd-proto`'s frozen enums; the orchd wire version space stays `[1,1]` (additive). Every
+  other verb the flow needs (spawn-project, insight formation/fit-verdict, task formation,
+  spend-preflight) reuses SHIPPED S3/S4/S-EXT verbs — `ResearchStartRun`/`ResearchListRuns`/
+  `ResearchGetRun` are the ONLY net-new wire this slice adds. Tauri core gains matching
+  `research_start_run`/`research_list_runs`/`research_get_run` commands and a
+  `orchd://research-runs-changed` broker event.
+- **Idea research flow (frontend):** per idea, «Исследовать» opens `ResearchRunDialog` (pick a
+  connected MCP server → `McpListTools` → pick a tool → owner-supplied args JSON → a
+  spend-approval preflight reusing `TrustListPolicies`, with an honest "cost usually unknown until
+  after the call" note — the trust layer's existing hard caps are unchanged, a breach surfaces as
+  `failed{policy_cap_exceeded}`); `ResearchPane` lists runs by status and, on `done`, reuses the
+  S-EXT artifact viewer + «непроверенные данные» untrusted banner (NOT token-streaming — MCP
+  `tools/call` is request/response in the connect-per-call model, an honest scope line, not a
+  partial build); a failed run offers «сформировать insight без ресёрча» (Q8 honest degradation,
+  the owner path never dead-ends). `FormInsightDialog` prefills title/body from the artifact,
+  shows a fit-context panel (the project's goals+`metric_refs` + a `GraphNeighborhood` read)
+  beside owner-set `fit_verdict`/`fit_reasoning` (reusing `CreateInsight`/`SetInsightFitVerdict`);
+  accepting graph-ingests the insight as an `entity_ref` node (D9, reusing `add_entity_ref_node`)
+  and forming a task flips the idea `researching→specced`. `SpawnProjectFromIdea` closes BL-56 (the
+  spawn-project-from-idea UI flow S3 deferred) — pure frontend orchestration over the existing
+  `CreateWorkspace`/`CreateProject`/`SetIdeaProject` verbs, no new orchd verb. Every mutating
+  control is `disabled` while `orchdDown`.
+- **E2E (`npm run e2e:orchd`, extended with two phases):** phase 8 registers a local stub MCP
+  research server, runs the whole idea→research→insight→task loop, restarts the daemon, and
+  asserts the idea/run/insight/task all survive (the roadmap DoD proof). Phase 9 registers a
+  BLOCKING stub, starts a run, shuts the daemon down while the run is still `running` (not
+  `done`), relaunches, and asserts boot-reconcile flipped it to `failed{interrupted}` (D11 proof —
+  the in-flight-at-restart race phase 8 deliberately avoids).
+- **Rust:** unit coverage for the run state machine (`start_run`'s one-transaction insert+lifecycle
+  flip; each transition a single `UPDATE`, never a two-step write that could violate the
+  `(status='done')=(artifact_id IS NOT NULL)` CHECK; every typed failure family mapped to its
+  `error_kind`; graph-ingest-on-accept is idempotent, a re-accept-after-archive `Conflict` is a
+  benign no-op); `reconcile_interrupted_research_runs` (D11, empty-DB no-op + flips exactly
+  `pending`/`running`, leaves `done`/`failed` untouched); the D12 connect-timeout regression
+  (`call_tool_connect_that_never_resolves_times_out_not_hangs`); socket-dispatch tests for all
+  three verbs + the `ResearchRunsChanged` push.
+
+### Changed
+- Gate: still 9 stages (`scripts/final-suite.sh`) — no new stage; `bpa-orchd`'s coverage gate now
+  also exercises `research/mod.rs` and `boot.rs`'s reconcile step; `npm run e2e:orchd` grew phases
+  8/9 above.
+- Test totals grew with the new `research` module: Rust workspace 975 → **1023 tests** (0 failed,
+  `RUST_TEST_THREADS=4`) — mostly inside `bpa-orchd` (`research/mod.rs`'s unit tests +
+  `boot.rs`'s reconcile tests + the widened `dispatch_integration`) and `bpa-orchd-proto` (the
+  three new verbs' CBOR round-trip + ts-rs parity); TypeScript 717 → **772 tests**, 43 → **47
+  files** (the `components/idea/` flow: `ResearchRunDialog`/`ResearchPane`/`FormInsightDialog`/
+  `SpawnProjectFromIdea`, plus `IdeasList`/store/ipc growth) — re-measured this pass, see
+  `README.md`/`docs/traceability.md`.
+
+### Fixed
+- (carried into this slice from the post-S-EXT hardening pass, not previously changelogged)
+  `McpDeleteServer` now deletes the server's bearer Keychain entry too (no orphaned credential on
+  server delete); the project-cascade residual (deleting a project whose MCP servers still hold
+  bearer entries) is filed as BL-81, not silently left undocumented.
+
 ## [0.6.0] — 2026-07-15
 
 ### Added

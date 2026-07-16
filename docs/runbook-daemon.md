@@ -103,3 +103,11 @@ helper `bpa-orchd`'s stdio MCP-server spawn path uses (S-EXT, `docs/runbook-orch
 shared denylist, two spawn call sites, no daemon-specific copy to drift. `bpa-sessiond` itself
 does not perform any outbound network I/O or Keychain access — that surface is new to `bpa-orchd`
 only; see `docs/runbook-orchd.md`'s "Keychain / MCP / connector egress" section.
+
+## Research runs (S-IDEA, `[0.7.0]`) — not this daemon
+
+The S-IDEA research pipeline (idea→research→insight→task, `research_run` schema v4, the async run
+driver + boot-reconcile) is entirely a `bpa-orchd` feature — `bpa-sessiond` has no involvement,
+same as it had none in S-EXT's MCP/connector surface above. Operational notes (inspecting
+`research_run` rows, what boot-reconcile does on a restart, connecting a real research server) live
+in `docs/runbook-orchd.md`'s "Research runs" section, not here.

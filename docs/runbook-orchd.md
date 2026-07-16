@@ -178,9 +178,55 @@ there is no config-file-backed registry yet, D14 Phase 3 follow-up) — or «д�
 simpler static key. None of this is on the automated test path; it's a one-time, owner-performed
 setup step.
 
+## Research runs (S-IDEA, `[0.7.0]`)
+
+Research is a domain feature INSIDE `bpa-orchd` — `ResearchStartRun` calls the identical
+`mcp::invoke::call_tool` path the section above documents, so everything about connect consent,
+Keychain-held bearers, and egress boundaries above applies unchanged. This section covers the
+research-specific operational surface: the `research_run` table and the async run driver.
+
+**Where the data lives:** `research_run` rows are ordinary rows in `orchd.db` (schema v4,
+`SCHEMA_VERSION` 3→4) — no separate store. Inspect them directly:
+
+```bash
+sqlite3 ~/Library/Application\ Support/ai.builderpro.desktop/orchd.db \
+  "SELECT id, idea_id, status, error_kind, artifact_id, created_at FROM research_run ORDER BY created_at DESC LIMIT 20;"
+```
+
+A `done` row's `artifact_id` points at an `mcp_artifact` row (the SAME table `McpCallTool`/
+`ConnectorInvoke` write to — there is no separate research-artifact table, S-IDEA spec D2); join
+against `mcp_artifact` to see the actual research content.
+
+**The async run driver is orchd's FIRST long-lived background task** — `ResearchStartRun` spawns a
+detached `tokio::spawn`, distinct from every other request handler (which complete and return
+within one dispatch call). This has one operational consequence worth knowing: **a `research_run`
+can be `running` at the exact moment the daemon stops** (restart, upgrade, or crash) — unlike every
+other row in `orchd.db`, which is always in a fully-committed, terminal state between requests.
+`kickstart -k` (the Restart section above) or any daemon stop while a run is `running` interrupts
+it; **the boot-reconcile step handles this automatically, no manual intervention needed**: right
+after `open_db` on every boot, `Db::reconcile_interrupted_research_runs` flips any row still
+`pending`/`running` to `failed{interrupted}` (D11) — the owner just re-runs it from «Исследовать».
+You can confirm this happened by tailing the boot log around a restart:
+
+```bash
+tail -f ~/Library/Application\ Support/ai.builderpro.desktop/logs/orchd.tracing.log | grep -i reconcile
+```
+
+There is no owner action required here — this is the daemon healing itself, documented so a
+`failed{interrupted}` row in the query above isn't mistaken for a code bug when you see one after a
+restart during an in-progress research run.
+
+**Connecting a real research server** is the SAME "Human step" as above — `ResearchRunDialog`'s
+server picker only lists servers already registered in «Расширения» → Серверы, so connecting
+prowl.chat (or any other MCP research tool) as a real server is a one-time prerequisite before
+`ResearchStartRun` can target it; the autonomous/e2e path (phases 8/9, `tests/e2e/orchd-survive.mjs`)
+proves the identical mechanism against a local stub, never a real credential.
+
 ## Related docs
 
 - `docs/runbook-daemon.md` — the `bpa-sessiond` runbook this one mirrors.
 - `docs/architecture.md` — two-daemon topology, module map, the D4 rules-md file exception.
 - `docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md` — the locked S3 spec
   this daemon is derived from (§2.1 names table, §5 boot/schema, §9 core integration).
+- `docs/superpowers/specs/2026-07-15-s-idea-research-pipeline-design.md` — the locked S-IDEA spec
+  the "Research runs" section above summarizes (§4 schema, §6 the run driver, D11 boot-reconcile).

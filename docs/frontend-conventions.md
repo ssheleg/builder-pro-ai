@@ -89,6 +89,50 @@ attach guards in component refs (a pane instance is reused across tab switches �
   actually ships a runtime consumer; don't let a future edit quietly drop the banner while the
   registry is still non-executable.
 
+## Idea research flow — `components/idea/*`, untrusted-banner reuse (S-IDEA)
+
+- **No new top-level view:** the research flow hangs entirely off the shipped «Идеи» surface
+  (`IdeasList` in the `ProjectPanel` «Идеи» tab AND the project-less idea inbox) — unlike S-EXT's
+  `"ext"` view, S-IDEA does not widen the `view` union. Four new components live under
+  `src/components/idea/`: `ResearchRunDialog`, `ResearchPane`, `FormInsightDialog`,
+  `SpawnProjectFromIdea` — each a focused modal/panel `IdeasList` opens per idea, not a
+  tab-selection pattern like `ProjectPanel`/`ExtPanel`.
+- **`ResearchRunDialog`:** picks a connected+enabled MCP server (`McpListTools` populates the tool
+  picker once a server is chosen) → an owner-supplied args JSON field → a spend-approval preflight
+  panel (`TrustListPolicies` for the effective scope + a fixed "cost usually unknown until after
+  the call" note) → «Запустить» fires `researchStartRun`. The trust layer's hard caps are
+  unchanged — a cap breach at invoke time surfaces as the run reaching `failed{policy_cap_exceeded}`
+  in `ResearchPane`, not a dialog-time rejection (the preflight is advisory, not enforcing).
+- **`ResearchPane` reuses the S-EXT untrusted-artifact banner verbatim, does NOT reinvent it:** a
+  `done` run's artifact view calls the exact same artifact-rendering path `ArtifactsTab`/
+  `ToolsBrowser` use (fetch via `mcpGetArtifact`, render content + the fixed «непроверенные
+  данные» banner unconditionally — every `mcp_artifact` is `is_untrusted=1` by construction, same
+  contract as the Extensions-view convention above). **Never build a second untrusted-banner
+  component** — if a research-specific artifact treatment is ever needed, extend the shared one,
+  don't fork it.
+- **The research pane is a STATUS list, not a stream — say so, don't fake it:** `ResearchPane`
+  renders `pending|running|done|failed` badges per run (driven by the `ResearchRunsChanged` push,
+  never polling) — there is no token-by-token rendering, because `mcp::invoke::call_tool` is
+  request/response in the shipped connect-per-call model (BL-70 tracks the persistent-session
+  architecture a real streaming pane would need). A `failed` run's card always offers «сформировать
+  insight без ресёрча» so the owner path never dead-ends on a research failure (Q8 honest
+  degradation, same discipline as every other orchd-down/failure surface).
+- **`FormInsightDialog`'s fit-context panel is read-only display, not a new editor:** it renders
+  the project's goals (with `metric_refs` as owner-declared strings, no real metric timeseries —
+  that's S8) plus a `GraphNeighborhood` read rooted at the idea/insight, reusing the S4 graph
+  components' rendering, not a bespoke graph widget. The owner sets `fit_verdict`/`fit_reasoning`
+  beside it — there is no agent-computed suggestion anywhere in this dialog (S6a is not built;
+  don't add a "suggested verdict" placeholder that implies one exists).
+- **`SpawnProjectFromIdea` is pure orchestration, no new IPC wrapper of its own:** it calls the
+  three EXISTING wrappers in order (`pickFolder` → `createWorkspace` (sessiond) →
+  `orchdCreateProject` → `orchdSetIdeaProject`) — resist the temptation to add a combined
+  "spawn project" command; the multi-step UI IS the abstraction (S-IDEA spec D6, no new orchd
+  verb).
+- **Honest degradation, unchanged discipline:** every mutating control across the idea research
+  flow (start-run, form-insight, accept/archive, form-task, spawn-project) is `disabled={orchdDown}`
+  — same test pattern as the Extensions view: populate the form first, flip `orchdDown`, assert
+  `disabled` AND assert the wrapper is never called on a click (userEvent, not `fireEvent`).
+
 ## Testing contract (per frontend slice)
 
 Three layers, all required:

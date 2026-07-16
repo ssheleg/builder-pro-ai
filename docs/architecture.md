@@ -11,7 +11,9 @@ independently `launchd`-supervised daemons — `bpa-sessiond` (terminal domain: 
 `command_events`) and `bpa-orchd` (app domain: projects/goals/ideas/insights/tasks/rulesets,
 shipped S3, `[0.4.0]`; plus a knowledge graph — nodes/edges + a workspace-wide retrieval API,
 shipped S4, `[0.5.0]`; plus an MCP client + OAuth/api-key connectors + a skills registry — the
-app's first outbound network egress and macOS Keychain surface, shipped S-EXT, `[0.6.0]`). Closing
+app's first outbound network egress and macOS Keychain surface, shipped S-EXT, `[0.6.0]`; plus a
+research pipeline — the idea→research→insight→task loop, `research_run` schema v4, and orchd's
+first long-lived background run driver, shipped S-IDEA, `[0.7.0]`). Closing
 (or crashing) the GUI never kills a running shell or loses domain
 data — each daemon owns its own durable state and survives independently of the app AND of the
 other daemon, supervised by `launchd`, not by the app. The core holds one socket connection to
@@ -223,7 +225,10 @@ crates/orchd-proto/src/lib.rs     # NEW (S3, bpa-orchd-proto): orchd's own wire 
                                   # entity structs, version consts (ORCHD_{CLIENT,DAEMON}_
                                   # {MIN,MAX}_VERSION = 1), ts-rs export (spec §4.2); S-EXT appends
                                   # Mcp*/Connector*/Skill*/Trust* entities+verbs+pushes at the END
-                                  # of every enum (append-only — the version space stays [1,1])
+                                  # of every enum (append-only — the version space stays [1,1]);
+                                  # S-IDEA appends ResearchStartRun/ResearchListRuns/ResearchGetRun
+                                  # + entity ResearchRun/enum ResearchStatus + push
+                                  # ResearchRunsChanged at the END too — still [1,1]
 crates/secrets/src/lib.rs         # NEW (S-EXT, bpa-secrets): the ONLY Keychain caller in the app —
                                   # a thin `security-framework::passwords` wrapper (set/get/delete
                                   # generic password), fixed service prefix "ai.builderpro.desktop";
@@ -244,15 +249,18 @@ crates/orchd/src/                 # NEW (S3, bpa-orchd): the app-domain daemon b
 ├─ main.rs                        # arg parse, tracing init, flock, socket bind, SIGTERM drain —
 │                                  # mirrors sessiond's main.rs shape exactly, on daemon-core
 ├─ boot.rs                        # testable boot core: bind → wire deps → serve → drain; ensures
-│                                  # the global ruleset row + rules/global.md at every boot
+│                                  # the global ruleset row + rules/global.md at every boot; S-IDEA
+│                                  # adds a boot-reconcile step right after open_db that flips any
+│                                  # research_run stuck pending/running to failed{interrupted} (D11)
 ├─ persistence.rs                 # rusqlite (WAL), orchd.db schema v1 (S4: v2; S-EXT: v3,
 │                                  # additive) — CRUD × 6 entity families + the S-EXT MCP/connector/
 │                                  # skill/trust tables, every invariant/cascade, migration runner
 │                                  # (daemon-core)
 ├─ socket_server.rs               # tokio UnixListener; dispatch every OrchdRequest verb (S4: the 9
 │                                  # graph verbs; S-EXT: every Mcp*/Connector*/Skill*/Trust* verb
-│                                  # too); peer-cred; bounded outq; Broadcaster<OrchdFrame> push
-│                                  # fan-out (S4: GraphChanged to every affected project, deduped)
+│                                  # too; S-IDEA: the 3 Research* verbs); peer-cred; bounded outq;
+│                                  # Broadcaster<OrchdFrame> push fan-out (S4: GraphChanged to every
+│                                  # affected project, deduped; S-IDEA: ResearchRunsChanged)
 ├─ ruleset_files.rs                # the ONE file family orchd touches via THIS module (D4, narrow
 │                                  # exception) — atomic-write (tmp+rename) + sha256 hash +
 │                                  # fresh-read-on-Get (S-EXT's skills/registry.rs is a second,
@@ -260,6 +268,11 @@ crates/orchd/src/                 # NEW (S3, bpa-orchd): the app-domain daemon b
 ├─ graph.rs                       # NEW (S4): graph_node/graph_edge CRUD + the workspace-wide
 │                                  # retrieval API (list_project_graph/neighborhood/search_nodes) —
 │                                  # see "Knowledge graph" below
+├─ research/mod.rs                 # NEW (S-IDEA): research_run CRUD + the async run-driver
+│                                  # (start_run spawns a tokio task that calls the SHIPPED
+│                                  # mcp::invoke::call_tool, 3-phase-locked) + the boot-reconcile
+│                                  # query (reconcile_interrupted_research_runs, D11) — see
+│                                  # "Research pipeline" below
 ├─ export.rs                      # per-project + whole-store JSON export/import, bundleFormat: 1,
 │                                  # field-verbatim preservation, 16 MiB frame-cap guard (spec §8)
 ├─ mcp/                            # NEW (S-EXT): registry.rs (mcp_server/mcp_tool CRUD, global +
@@ -548,6 +561,126 @@ owner's own account/API key — the autonomous path (above) proves the identical
 a local stub; wiring a real provider is a documented, non-blocking Human step (owner adds the
 server / pastes a key in the «Расширения» UI).
 
+## Research pipeline — SHIPPED in S-IDEA (`[0.7.0]`)
+
+S-IDEA (`docs/superpowers/specs/2026-07-15-s-idea-research-pipeline-design.md`) stitches the
+already-shipped primitives — Idea/Insight/Task (S3), the knowledge graph (S4), and the MCP client
+(S-EXT) — into ONE owner-driven loop: **idea → research → evaluated insight → task in the
+backlog**, entirely inside `bpa-orchd`, **without the S6 agent org**. This is the first slice to
+give `bpa-orchd` live runtime state that ISN'T just a durable SQLite row — a background research
+run — so it's also the first slice to need a boot-reconcile step (below).
+
+**`orchd.db` schema v4 (additive, `SCHEMA_VERSION` 3→4):** exactly ONE net-new table,
+`research_run(id, idea_id, server_id, tool_name, args_json, status, invocation_id?, artifact_id?,
+error_kind?, created_at, updated_at)` — `status` is `pending|running|done|failed`, CHECK-enforced
+`(status='done') = (artifact_id IS NOT NULL)`. **The "ResearchArtifact" the roadmap named is NOT a
+separate table or blob store** (a correction the S-IDEA docs-truth pass makes explicit, per the S3
+overview's entity-map row): it is the REUSED S-EXT `mcp_artifact` row the run's tool call produces
+— `research_run` is purely a provenance link (idea ↔ MCP invocation ↔ artifact) + a status machine,
+no blob duplication, one source of truth for durable research output (spec D2).
+
+**The async run driver — `bpa-orchd`'s FIRST long-lived `tokio::spawn`:**
+`research::start_run` (`crates/orchd/src/research/mod.rs`) does the insert (`research_run{pending}`
++ the idea's `captured→researching` lifecycle flip, ONE `unchecked_transaction()`) and returns
+immediately after spawning a detached background task. That task follows the SAME 3-phase-locking
+discipline the S-EXT `mcp::invoke` path already proved out (never holds the DB mutex across a
+network `.await`): lock → mark `running` → push `ResearchRunsChanged` → unlock → call the SHIPPED
+`mcp::invoke::call_tool` (unlocked) → lock → a SINGLE `UPDATE` to `done{artifact_id,invocation_id}`
+or `failed{error_kind}` → push `ResearchRunsChanged` → unlock. Each transition is one `UPDATE`
+statement, never two separate writes, so the schema's `CHECK` invariant can never observe a
+half-completed transition. `error_kind` is a typed classification only (`policy_cap_exceeded` |
+`timeout` | `tool_error` | `transport` | `interrupted`) — never the tool's args, a secret, or its
+output. The frontend's "research pane" is driven entirely by the `ResearchRunsChanged` push, not
+polling.
+
+**Boot-reconcile (D11) — the crash/restart safety net a detached background task otherwise
+lacks:** the spawned run task is NOT tracked by `socket_server`'s shutdown-drain `JoinSet` (the
+same one `OrchdShutdown{drain}` awaits for in-flight connections), so a daemon restart, upgrade, or
+crash while a run is `pending`/`running` would leave that row stuck non-terminal forever with no
+one left to finish it. The fix is a boot step, `Db::reconcile_interrupted_research_runs`, run right
+after `open_db` in `boot::run` — the same "ensured at every boot" shape `ensure_global_ruleset`
+already established: `UPDATE research_run SET status='failed', error_kind='interrupted', … WHERE
+status IN ('pending','running')`. Any run not `done`/`failed` at boot is stale by construction (the
+process that was running it is gone) — the owner re-runs. This is the AUTHORITATIVE guarantee, not
+a nice-to-have: proven by a dedicated e2e phase (below) that starts a run against a server whose
+tool call deliberately never returns, shuts the daemon down while the run is still `running`, and
+asserts the reconcile fires on the next boot.
+
+**Connect-handshake timeout (D12) — a hang-forever fix in the shipped S-EXT invoke path, not
+research-specific:** `mcp::invoke::call_tool` previously wrapped only the `tools/call` RPC itself
+in `timeout(server.timeout_ms)`, not the preceding `connect_fn(...).await` (the MCP `initialize`
+round-trip). A peer that accepts the TCP/stdio connection but never completes `initialize` (a dead
+peer, a silent firewall drop, an overloaded stdio child) hung the calling task forever — invisible
+to any research-specific code, because the bug lived one layer down in the shared S-EXT path. Now
+the connect handshake is bounded by the same per-server `timeout_ms` as the call
+(`McpError::Timeout` on elapse) — every MCP call benefits, not just research; proven by
+`mcp::invoke::tests::call_tool_connect_that_never_resolves_times_out_not_hangs`.
+
+**Wire protocol — three verbs, append-only:** `ResearchStartRun{idea_id, server_id, tool_name,
+args_json} -> ResearchRun` (creates `pending`, spawns the task, replies immediately — the terminal
+state arrives via the push); `ResearchListRuns{idea_id} -> Vec<ResearchRun>`; `ResearchGetRun{id}
+-> ResearchRun` — appended at the END of `bpa-orchd-proto`'s frozen `OrchdRequest`/`OrchdResponse`
+enums, plus `OrchdPush::ResearchRunsChanged{idea_id: Option<String>}` → frontend event
+`orchd://research-runs-changed`. The orchd wire version space stays `[1,1]` (additive, same
+discipline S-EXT's Mcp*/Connector*/Skill*/Trust* append used). Everything else the flow needs —
+spawn-project (`CreateWorkspace`+`CreateProject`+`SetIdeaProject`), insight formation
+(`CreateInsight`+`SetInsightFitVerdict`+`SetInsightStatus`), task formation
+(`CreateTask{source:Insight}`), spend-preflight (`TrustListPolicies`) — reuses SHIPPED S3/S4/S-EXT
+verbs untouched; the three `Research*` verbs are the ONLY net-new wire this slice adds.
+
+**Graph-ingest on insight-accept (D9):** accepting a research-formed insight
+(`SetInsightStatus{accepted}`) now additionally seeds one `entity_ref` graph node for that insight
+via the existing `add_entity_ref_node` (S4) — new wiring inside the shipped `set_insight_status`
+handler, not a new verb. A re-accept after archive hits the graph's own partial-unique-index
+`Conflict`, handled as a benign no-op (still exactly one node per insight).
+
+**Owner-driven fit-verdict — deliberately NOT agent-computed (D4, overrides the roadmap's Q10
+default):** S6a (the native LLM provider layer) is not built, and the S-IDEA DoD itself requires
+the loop to work "WITHOUT the S6 agent org" — S6a is a member of that org. `Insight.fit_verdict`/
+`fit_reasoning`/`status`/`resolution_reasoning` (all S3 fields, unchanged shape) are set by the
+OWNER, shown beside a fit-context panel — the project's goals (with `metric_refs`) plus a
+`GraphNeighborhood` read rooted at the idea/insight. LLM-computed auto-scoring is filed to backlog
+for S6a (`docs/backlog.md`), never silently claimed as shipped.
+
+**Frontend — the idea→research→insight→task flow** (`src/components/idea/`): `ResearchRunDialog`
+(pick a connected MCP server → `McpListTools` → pick a tool → owner-supplied args JSON → a
+spend-approval preflight reusing `TrustListPolicies`, with an honest "cost usually unknown until
+after the call" note — the trust layer's existing hard caps are UNCHANGED, a breach at invoke time
+surfaces as `failed{policy_cap_exceeded}`, Q8 honest degradation) → `ResearchPane` (per-idea run
+list by status; a `done` run reuses the S-EXT artifact viewer + «непроверенные данные» untrusted
+banner; **not token-streaming** — MCP `tools/call` is request/response in the shipped
+connect-per-call model, so v1 shows run status, not streamed tokens, an honest scope line stated in
+the pane itself, not a partial build; a `failed` run offers «сформировать insight без ресёрча» so
+the owner path never dead-ends) → `FormInsightDialog` (title/body prefilled from the artifact, the
+fit-context panel above, owner sets fit-verdict, creates the insight) → «Принять»/«В backlog» forms
+the task and flips the idea `researching→specced`. `SpawnProjectFromIdea` closes BL-56 (the
+spawn-project-from-idea UI flow S3 shipped only the data enabler for, `Idea.project_id`) — pure
+frontend orchestration over the three existing verbs above, no new orchd verb. Every mutating
+control is `disabled` while `orchd://down`, the same discipline every prior slice's UI holds to.
+
+**e2e (`npm run e2e:orchd`):** phase 8 registers a local stub MCP research server, drives
+`CreateIdea → ResearchStartRun → poll ResearchGetRun until done → CreateInsight +
+SetInsightFitVerdict{fit} → SetInsightStatus{accepted} → CreateTask{source:insight}`, restarts the
+daemon, and asserts the idea (`specced`), the run (`done`+artifact), the insight (`fit`+accepted),
+and the task all survive — the roadmap DoD proof. Phase 9 registers a BLOCKING stub (a tool call
+that never returns), starts a run, polls until it's `running` (deliberately not `done`), shuts the
+daemon down mid-flight, relaunches, and asserts the run reconciled to `failed{interrupted}` — the
+D11 boot-reconcile proof, exercising exactly the in-flight-at-restart race phase 8 avoids by
+design.
+
+**Deferred / explicitly out of scope this slice** (see `docs/backlog.md` for the filed rows):
+LLM-computed fit-verdict (S6a, D4 above); a token-streaming research pane (needs a persistent MCP
+session, aligns with the S-EXT `list_changed` item BL-70); automated agent task-decomposition
+(S6b — v1 decomposition is owner-created subtasks via `CreateTask{parent_id}`); a first-class
+ResearchArtifact provenance viewer beyond the reused `mcp_artifact` viewer; research-run
+cancel/retry controls; real metric timeseries for fit-context (S8 — today `metric_refs` renders as
+owner-declared strings only); a prowl-aware convenience adapter that auto-seeds a `session_id` into
+a run's `args_json` (Q5 v1-override, D13 — v1 does not hardcode a prowl-specific schema, the owner
+supplies `session_id` like any other arg if the picked tool's schema wants one); `JoinHandle`
+drain-tracking so `OrchdShutdown{drain}` could best-effort await an in-flight run (D11 nice-to-have
+— boot-reconcile is the correctness backstop regardless, so this is a latency polish item, not a
+correctness gap).
+
 ## Resource envelope (per session)
 
 Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live
@@ -576,5 +709,8 @@ sessions; a configurable cap + typed `SessionLimitReached` error is planned (BL-
   graph + workspace-wide retrieval API) the "Knowledge graph" section above summarizes.
 - `docs/superpowers/specs/2026-07-15-s-ext-mcp-connectors-design.md` — the locked S-EXT spec (MCP
   client, connectors, skills, trust layer) the "Extensions" section above summarizes.
+- `docs/superpowers/specs/2026-07-15-s-idea-research-pipeline-design.md` — the locked S-IDEA spec
+  (research pipeline, async run driver, boot-reconcile) the "Research pipeline" section above
+  summarizes.
 - `tests/e2e/README.md` — the three ways to exercise the survive-restart property (socket harness,
   launchd-managed variant, full-GUI manual/CI confirmation).

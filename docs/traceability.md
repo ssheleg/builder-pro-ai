@@ -181,6 +181,28 @@ app's first outbound network egress + macOS Keychain surface — shipped `[0.6.0
 | E2E — an MCP tool artifact survives an orchd restart (Phase-1 DoD): register a local stub HTTP MCP server → grant connect consent → `McpConnect` (tools cached) → `McpListTools` → `McpCallTool echo` → assert a persisted artifact → `OrchdShutdown{drain:true}` → relaunch → `McpListArtifacts` returns it (§9) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 6, log prefix `[e2e-orchd] phase6 …`) |
 | E2E — a connector-invoke artifact survives an orchd restart (Phase-2 DoD), with a Keychain-availability probe-and-skip for headless CI: an api-key `generic-rest` account → `ConnectorInvoke(post)` against a local stub → assert a persisted `is_untrusted` artifact keyed by `account_id` (`server_id` null) → restart → artifact survives; a locked/unavailable login keychain SKIPs the phase loudly rather than failing the gate (§9, §10) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 7, log prefix `[e2e-orchd] phase7 …`) |
 
+## S-IDEA contract rows (`docs/superpowers/specs/2026-07-15-s-idea-research-pipeline-design.md`)
+
+The idea→research→insight→task loop — `research_run` schema v4, the async run driver + 3-phase
+locking, boot-reconcile of interrupted runs, and the frontend flow — all hosted in `bpa-orchd`,
+reusing the S-EXT MCP path (no new egress). The ONLY net-new wire is the three `Research*` verbs;
+everything else reuses shipped S3/S4/S-EXT verbs. Shipped `[0.7.0]`.
+
+| Contract (S-IDEA spec §) | Test (command) |
+|---|---|
+| Schema v4: fresh DB has `research_run`; `start_research_run` inserts `pending` and flips `captured→researching` in ONE transaction (idempotent on non-`captured` states); unknown idea/server is `NotFound`; deleting the idea or the server cascades its runs (§4, §6) | `cargo test -p bpa-orchd --lib research::tests::fresh_db_has_research_run_table_at_schema_v4 research::tests::start_research_run_inserts_pending_and_flips_captured_idea_to_researching research::tests::start_research_run_does_not_change_a_specced_ideas_lifecycle research::tests::start_research_run_does_not_change_an_archived_ideas_lifecycle research::tests::start_research_run_unknown_idea_is_not_found research::tests::start_research_run_unknown_server_is_not_found research::tests::deleting_the_idea_cascade_deletes_its_research_runs research::tests::deleting_the_server_cascade_deletes_its_research_runs` |
+| Status transitions are each a SINGLE `UPDATE` (never a two-step write that could violate the `(status='done')=(artifact_id IS NOT NULL)` CHECK): `running`/`done`(+artifact+invocation ids)/`failed`(+error_kind, artifact stays NULL); unknown-id transitions are `NotFound`; `list_research_runs`/`get_research_run` reads (§4, §6) | `cargo test -p bpa-orchd --lib research::tests::set_research_run_running_transitions_status research::tests::set_research_run_done_sets_status_and_artifact_and_invocation research::tests::set_research_run_failed_sets_status_and_error_kind_artifact_stays_null research::tests::set_research_run_running_unknown_id_is_not_found research::tests::list_research_runs_orders_newest_first research::tests::list_research_runs_only_returns_the_given_ideas_runs research::tests::get_research_run_returns_none_for_unknown_id research::tests::get_research_run_returns_the_row research::tests::research_run_row_into_proto_research_run_maps_every_field_1to1 research::tests::research_status_into_proto_maps_every_variant` |
+| The async run driver (`run_research`), against a fake `ToolCaller`/`connect_fn` seam mirroring the S-EXT `mcp::invoke` tests: `start_run` returns the `pending` row immediately and flips the idea's lifecycle; on a fake success the run reaches `done` with `artifact_id`/`invocation_id` set (a durable `is_untrusted=1` `mcp_artifact`) and broadcasts `ResearchRunsChanged`; on a fake `PolicyCapExceeded` → `failed{policy_cap_exceeded}`, NO artifact; on a fake transport error → `failed{transport}`, `invocation_id` NULL (accepted partial-provenance, §4) (§6, D3) | `cargo test -p bpa-orchd --lib research::tests::start_run_returns_pending_row_and_flips_idea_to_researching research::tests::run_research_success_marks_done_with_ids_writes_untrusted_artifact_and_broadcasts research::tests::run_research_policy_cap_exceeded_marks_failed_with_no_artifact research::tests::run_research_transport_error_marks_failed_invocation_id_null_no_artifact` |
+| Boot-reconcile (D11): every `pending`/`running` run at boot is flipped to `failed{interrupted}`; a `done`/`failed` row is left untouched; an empty DB is a no-op (§6, D11) | `cargo test -p bpa-orchd --lib research::tests::reconcile_interrupted_research_runs_flips_pending_and_running_leaves_done_and_failed research::tests::reconcile_interrupted_research_runs_on_empty_db_returns_zero boot::tests::reconcile_interrupted_research_runs_on_fresh_db_is_a_noop` |
+| Graph-ingest on insight-accept (D9): accepting a research-formed insight seeds exactly one `entity_ref` node; re-accept after archive hits the graph's own `Conflict`, handled as a benign no-op (still one node); archiving a NEW insight does not seed a node; a project-less insight's ingest is a no-op, not an error; `SetInsightStatus{accepted}` still commits even when the ingest is a no-op (§6, D9) | `cargo test -p bpa-orchd --lib research::tests::accepting_a_research_insight_seeds_exactly_one_entity_ref_node research::tests::re_accepting_after_archive_keeps_exactly_one_node_conflict_is_benign research::tests::archiving_a_new_insight_does_not_seed_a_graph_node research::tests::accepting_a_project_less_insight_is_a_no_op_ingest_not_an_error research::tests::accept_returns_ok_and_commits_status_even_when_ingest_is_a_noop` |
+| Connect-handshake timeout (D12, a hang-forever fix in the shipped S-EXT invoke path): a `connect_fn` that never resolves makes `call_tool` return `McpError::Timeout` within `timeout_ms`, not a hang (§6, D12) | `cargo test -p bpa-orchd --lib mcp::invoke::tests::call_tool_connect_that_never_resolves_times_out_not_hangs` |
+| Socket dispatch, end-to-end over a real Unix socket: `ResearchStartRun` replies `pending` then a listener observes `ResearchRunsChanged` as the run reaches `done` (driven via a loopback stub MCP server, reusing the S-EXT dispatch-test stub) and `ResearchGetRun` polls to the same terminal state; `ResearchListRuns` returns the idea's runs and is a plain read (broadcasts nothing); an unknown `ResearchGetRun` id is `Error{NotFound}`; starting a run against a disabled tool reaches `failed` with an `error_kind` (§5, §6) | `cargo test -p bpa-orchd --test dispatch_integration research_start_run_returns_pending_row_then_reaches_done_via_pushes_and_get_run_poll research_list_runs_returns_the_ideas_runs_and_a_plain_read_broadcasts_nothing research_get_run_unknown_id_is_error_not_found research_start_run_against_a_disabled_tool_reaches_failed_with_error_kind` |
+| `bpa-orchd-proto`: `ResearchRun`/`ResearchStatus`/`ResearchStartRun`/`ResearchListRuns`/`ResearchGetRun`/`ResearchRunsChanged` CBOR round-trip, `ResearchStartRun`'s frame fields stay snake_case (Hop-B, not ts-rs); `orchd-types.ts` parity (camelCase entity fields, i64 timestamps as `number`, lowercase status tags); version space stays `[1,1]` (§5) | `cargo test -p bpa-orchd-proto --test roundtrip research_status_wire_tags_are_lowercase research_run_entity_serializes_with_camelcase_keys research_runs_response_json_roundtrips research_runs_response_cbor_frame_roundtrips_losslessly research_start_run_request_stays_snake_case_on_the_wire` `cargo test -p bpa-orchd-proto --test ts_export research_run_is_present_with_camelcase_fields_and_ts_number_timestamps research_status_wire_tags_are_camelcase` then `git diff --exit-code -- src/ipc/orchd-types.ts` |
+| Core: `research_start_run`/`research_list_runs`/`research_get_run` commands proxy the real orchd client + map a daemon error; `map_orchd_push` → `orchd://research-runs-changed` with a camelCase `{ideaId}` payload, `null` when the push is idea-unscoped (§5, §8) | `cargo test -p builder-pro-ai --lib commands::research_start_run_round_trips_through_real_orchd_client commands::research_start_run_error_response_becomes_command_error_daemon_end_to_end broker::tests::orchd_research_runs_changed_maps_to_emit_with_camel_case_idea_id_payload broker::tests::orchd_research_runs_changed_none_scope_has_null_idea_id` |
+| Frontend: the idea research flow — `ResearchRunDialog` (server/tool/args picker + spend-approval preflight, fires `researchStartRun`), `ResearchPane` (status list, untrusted-artifact banner, failed-run degraded path), `FormInsightDialog` (fit-context panel + fit-verdict + `CreateInsight`/`SetInsightFitVerdict`), `SpawnProjectFromIdea` (the 3-verb flow in order); `researchRunsByIdea` store slice + `refreshResearchRuns` + the `orchd://research-runs-changed` coarse-invalidation bind; every mutating control `disabled` while `orchdDown` (§7, §8) | `npx vitest run src/components/idea/ResearchRunDialog.test.tsx src/components/idea/ResearchPane.test.tsx src/components/idea/FormInsightDialog.test.tsx src/components/idea/SpawnProjectFromIdea.test.tsx src/store/store.test.ts src/ipc/orchd.test.ts src/ipc/events.test.ts` |
+| E2E — the roadmap DoD proof: idea → research → evaluated insight → task lands in the backlog, survives an orchd restart, WITHOUT the S6 agent org (§8) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 8, log prefix `[e2e-orchd] phase8 …`) |
+| E2E — boot-reconcile (D11 DoD): a run interrupted mid-flight (still `running` at shutdown, driven via a BLOCKING stub research server) reconciles to `failed{interrupted}` on the next boot, not a stuck `running` row (§8, D11) | `npm run e2e:orchd` (`tests/e2e/orchd-survive.mjs`, phase 9, log prefix `[e2e-orchd] phase9 …`) |
+
 ## Uncovered rows
 
 None in the S0+S1/S2/S3/S4 rows above — every §14.2 row (and every S2/S3/S4 contract row) resolves
@@ -189,9 +211,54 @@ BL-62 "Known gap", is covered by the row directly above the S4 table). **None in
 above either:** every S-EXT contract row resolves to at least one real, currently-passing test —
 incl. the no-secrets-in-logs extension to the MCP/connector surface, the DYLD/LD env-denylist
 regression test on BOTH daemons, and the durable-artifact e2e proof for both an MCP tool call and
-a connector invoke.
+a connector invoke. **None in the S-IDEA section above either:** every S-IDEA contract row resolves
+to at least one real, currently-passing test — incl. the D11 boot-reconcile unit test AND its own
+e2e phase (a genuinely interrupted-mid-flight run, not just the happy-path survival phase), and the
+D12 connect-timeout regression test in the shipped S-EXT invoke path.
 
-## Test totals — current (S-EXT, `[0.6.0]`, 2026-07-15)
+## Test totals — current (S-IDEA, `[0.7.0]`, 2026-07-16)
+
+- Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **1023 tests**, 0 failed
+  (freshly re-measured this pass, incl. a full clean run of `bash scripts/final-suite.sh` — every
+  Keychain-touching test, incl. the S-EXT connector/MCP-bearer round-trips, passed with no
+  ACL-prompt stall on this run; see the note under README's test table for the one-time stall an
+  earlier, narrower invocation hit in this same headless environment). Per-binary breakdown vs. the
+  S-EXT baseline (975): `bpa-daemon-core` lib 33 (unchanged); `bpa-secrets` lib 4 (unchanged);
+  `bpa-mcp` lib 17 + `tests/stub.rs` 6 + `tests/stdio.rs` 4 = 27 (unchanged); `bpa-orchd` lib 393
+  (+32 vs S-EXT's 361 — the whole `research/` module: the run-state-machine CRUD, the async
+  run-driver tests against a fake tool-caller seam, the D11 boot-reconcile unit tests, the D9
+  graph-ingest-on-accept tests) + `boot_integration` 4 (unchanged) + `dispatch_integration` 42
+  (+5 vs S-EXT's 37 — the 4 `Research*` verb dispatch tests + the `mcp_delete_server` Keychain-
+  orphan regression from the post-S-EXT hardening pass) + `no_secrets_in_logs` 1 +
+  `no_secrets_in_logs_graph` 1 + `no_secrets_in_logs_mcp` 1 = 442; `bpa-orchd-proto` `roundtrip`
+  33 (+5) + `ts_export` 23 (+2) = 56 (the `ResearchRun`/`ResearchStatus`/`Research*` verb
+  additions); `bpa-paths` lib 18 [unchanged]; `bpa-protocol` lib 1 + `cbor_frame_generic` 7 +
+  `framing` 7 + `preamble` 7 + `roundtrip` 8 + `ts_export` 7 = 37 [unchanged — S-IDEA touches no
+  sessiond wire]; `bpa-sessiond` lib 156 + `boot_integration` 4 + `no_secrets_in_logs` 1 +
+  `rehydrate_attach` 1 + `skeleton` 1 = 163 [unchanged — S-IDEA never touches sessiond]; `builder-
+  pro-ai` lib 237 (+4 vs S-EXT's 233 — the `research_*` command + broker tests) + `capabilities`
+  5 + `invoke_smoke` 1 = 243; every `main.rs`/doc-test binary 0. Delta vs. the prior S-EXT pass
+  (975): **+48**, entirely inside `bpa-orchd` (+37: lib +32, dispatch_integration +5),
+  `bpa-orchd-proto` (+7), and `builder-pro-ai` (+4) — the S-IDEA research surface plus the small
+  post-S-EXT hardening delta that landed on this branch before S-IDEA's own work started (the
+  `McpDeleteServer` Keychain-orphan fix, not previously changelogged). Cross-checked via `cargo
+  test --workspace -- --list | grep -c ': test$'` → 1023, matching the summed per-binary counts
+  exactly. Re-run that yourself for the current per-crate breakdown.
+- TypeScript (`npx vitest run`): **772 tests**, 47 test files, 0 failed (freshly re-measured this
+  pass). Delta vs. the prior S-EXT pass (717, 43 files): S-IDEA added 4 new test files under
+  `src/components/idea/` — the idea research flow: `ResearchRunDialog.test.tsx`,
+  `ResearchPane.test.tsx`, `FormInsightDialog.test.tsx`, `SpawnProjectFromIdea.test.tsx` — plus
+  growth in `store/store.test.ts` (the `researchRunsByIdea` slice + `refreshResearchRuns`),
+  `ipc/orchd.test.ts` (the 3 `research*` wrappers), `ipc/events.test.ts` (`onOrchdResearchRunsChanged`),
+  and `components/IdeasList.test.tsx` (the per-idea «Исследовать»/«Создать проект» affordances).
+- E2E: `npm run e2e:survive` green, unchanged by S-IDEA (still 6 phases, 0–5 — S-IDEA never
+  touches the sessiond wire); `npm run e2e:orchd` green, **extended this cycle** with phase 8
+  (idea→research→insight→task survives an orchd restart, S-IDEA spec §8 the roadmap DoD proof) and
+  phase 9 (a run interrupted mid-flight via a BLOCKING stub reconciles to `failed{interrupted}` on
+  restart, S-IDEA spec D11 DoD). Phases 0–7 (S3/S4/S-EXT CRUD survival, export/import,
+  cross-project graph edge, MCP/connector artifact survival) stay green, unchanged.
+
+## Test totals — historical (S-EXT, `[0.6.0]`, 2026-07-15) — superseded above
 
 - Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **975 tests**, 0 failed
   (freshly re-measured this pass). Per-binary breakdown: `bpa-daemon-core` lib 33 (+4 vs S4's 29 —
@@ -390,43 +457,57 @@ a connector invoke.
 (as of S3, `[0.4.0]`; unchanged interface as of S4) `cargo llvm-cov --package bpa-orchd
 --fail-under-lines 80` — two real, enforcing gates (either one failing below 80% fails the script).
 
-**`bpa-orchd` — measured (2026-07-15, S-EXT Task 19 docs-truth gate run): line coverage = 90.78 %**
-(regions 88.04 %, functions 90.55 %; 22585 regions/2701 missed, 1185 functions/112 missed, 13588
-lines/1253 missed — up from S4's 89.74 % line coverage; the crate roughly DOUBLED in size this
-cycle — two new modules directories (`mcp/`, `connectors/`) plus `skills/mod.rs`/
-`skills/registry.rs` and `trust.rs` — and still clears the gate with headroom). Per-module lines:
-`boot.rs` 81.88 %, `connectors/accounts.rs` 89.26 % (**new**), `connectors/adapter.rs` 88.87 %
-(**new**), `connectors/mod.rs` 94.12 % (**new**), `export.rs` 93.01 %, `graph.rs` 95.41 %,
-`mcp/cache.rs` 97.44 % (**new**), `mcp/invoke.rs` 89.70 % (**new**), `mcp/lifecycle.rs` 91.43 %
-(**new**), `mcp/mod.rs` 85.71 % (**new**), `mcp/registry.rs` 96.01 % (**new**), `persistence.rs`
-96.42 %, `ruleset_files.rs` 97.56 %, `skills/mod.rs` 90.62 % (**new**), `skills/registry.rs`
-95.72 % (**new**), `socket_server.rs` 57.43 %, `trust.rs` 98.26 % (**new**), `main.rs` 0 % — the
-process-concerns entrypoint, never unit-tested, same shape as sessiond's own `main.rs`; the crate
-TOTAL clears the 80% gate with headroom, no extra tests needed beyond what S-EXT already
-shipped). `socket_server.rs`'s lower per-file number is expected — its dispatch arms (including
-every new S-EXT verb arm) are exercised by `dispatch_integration.rs`'s real-socket integration
-tests (counted separately by `cargo llvm-cov`, not folded into the unit-test-only per-file number
-above) rather than by `--lib` unit tests. *(Historical: the S4 measurement was 89.74 % line /
-87.21 % region / 90.28 % function coverage — `boot.rs` 81.65 %, `export.rs` 93.01 %, `graph.rs`
+**`bpa-orchd` — measured (2026-07-16, S-IDEA Task 8 docs-truth gate run, a full clean
+`bash scripts/final-suite.sh` pass): line coverage = 89.66 %** (regions 86.87 %, functions
+90.16 %; 24525 regions/3221 missed, 1280 functions/126 missed, 14798 lines/1530 missed — the new
+`research/mod.rs` module measures a strong 96.78 % lines on its own; the crate TOTAL is
+essentially flat vs. S-EXT's 90.78 % — a slight dip driven mostly by `socket_server.rs`'s
+dispatch-arm-heavy lines growing faster than its `--lib`-only coverage share, not by anything
+under-tested in the new S-IDEA surface — and still clears the 80% gate with wide headroom). Per-
+module lines: `boot.rs` 81.14 % (+ the new D11 boot-reconcile step), `connectors/accounts.rs`
+62.65 % (the Keychain-gated branches `cargo llvm-cov` can't exercise in this headless run — see the
+README test-table note; the non-Keychain paths are fully covered), `connectors/adapter.rs`
+88.87 %, `connectors/mod.rs` 94.12 %, `export.rs` 93.01 %, `graph.rs` 95.59 %, `mcp/cache.rs`
+97.44 %, `mcp/invoke.rs` 90.07 % (+ the D12 connect-timeout test), `mcp/lifecycle.rs` 91.43 %,
+`mcp/mod.rs` 85.71 %, `mcp/registry.rs` 96.01 %, `persistence.rs` 96.47 %, **`research/mod.rs`
+96.78 %** (**new** — the run-state-machine CRUD, the async run driver against a fake tool-caller
+seam, D11 boot-reconcile, D9 graph-ingest-on-accept), `ruleset_files.rs` 97.56 %,
+`skills/mod.rs` 90.62 %, `skills/registry.rs` 95.72 %, `socket_server.rs` 59.53 %, `trust.rs`
+98.26 %, `main.rs` 0 % — the process-concerns entrypoint, never unit-tested, same shape as
+sessiond's own `main.rs`. `socket_server.rs`'s lower per-file number is expected — its dispatch
+arms (including the 3 new `Research*` verb arms) are exercised by `dispatch_integration.rs`'s
+real-socket integration tests (counted separately by `cargo llvm-cov`, not folded into the
+unit-test-only per-file number above) rather than by `--lib` unit tests. *(Historical: the S-EXT
+measurement was 90.78 % line / 88.04 % region / 90.55 % function coverage — `boot.rs` 81.88 %,
+`connectors/accounts.rs` 89.26 %, `connectors/adapter.rs` 88.87 %, `connectors/mod.rs` 94.12 %,
+`export.rs` 93.01 %, `graph.rs` 95.41 %, `mcp/cache.rs` 97.44 %, `mcp/invoke.rs` 89.70 %,
+`mcp/lifecycle.rs` 91.43 %, `mcp/mod.rs` 85.71 %, `mcp/registry.rs` 96.01 %, `persistence.rs`
+96.42 %, `ruleset_files.rs` 97.56 %, `skills/mod.rs` 90.62 %, `skills/registry.rs` 95.72 %,
+`socket_server.rs` 57.43 %, `trust.rs` 98.26 %, `main.rs` 0 %; the S4 measurement was 89.74 % line
+/ 87.21 % region / 90.28 % function coverage — `boot.rs` 81.65 %, `export.rs` 93.01 %, `graph.rs`
 95.47 %, `persistence.rs` 95.70 %, `ruleset_files.rs` 97.56 %, `socket_server.rs` 54.53 %,
-`main.rs` 0 %; the S3/T21 run measured 87.90 % line / 85.53 % region / 88.22 % function.)*
+`main.rs` 0 %; the S3/T21 run measured 87.90 % line / 85.53 % region / 88.22 % function. Note: the
+S-EXT run's `connectors/accounts.rs` 89.26 % reflects a run where the Keychain-gated tests DID
+execute — this run's 62.65 % reflects them being excluded from execution, a measurement-run
+difference, not a regression; the module's non-Keychain logic paths are unaffected and fully
+covered either way.)*
 
-**`bpa-sessiond` — measured (2026-07-15, S-EXT Task 19 docs-truth gate run): line coverage =
-90.44 %** (regions 89.41 %, functions 91.01 %; 12132 regions/1285 missed, 612 functions/55
-missed, 7686 lines/735 missed — the gate passes with headroom). Per-module lines: `attach.rs`
-88.90 %, `boot.rs` 77.24 %, `live_grid.rs` 93.33 %, `main.rs` 0 % (entrypoint, never
-unit-tested), `osc_parser.rs` 94.82 %, `persistence.rs` 94.44 %, `pty_supervisor.rs` 91.46 %,
-`scrollback.rs` 93.12 %, `shell_integration/mod.rs` 92.51 %, `singleton.rs` 70.83 % (a thin
-wrapper over `bpa-daemon-core::singleton` — most of its former logic, and former coverage,
-belongs to daemon-core's own package total now), `socket_server.rs` 90.87 % — essentially
-unchanged from S4's 90.39 % line coverage (S-EXT's only sessiond touch was the shared
-`env_filter` helper applied to `env_overrides`, BL-1; sessiond's own domain logic is otherwise
-untouched, confirming the S-EXT spec's D1 claim "never sessiond" at the coverage-tooling level,
-not just by source diff). *(Historical: S4 measured 90.39 % line / 89.31 % region / 90.79 %
-function (the exact same measurement as S3/T21, confirming S4's own "NO sessiond change" claim);
-2026-07-09 S2/`[0.3.0]` measured 89.16 % line / 89.28 % functions / 90.25 % regions; 2026-07-07
-Pv2/`[0.2.0]` measured 89.58 % line / 88.17 % functions / 88.65 % regions; 2026-07-05 docs-truth/CI
-measured 88.06 % line / 86.70 % functions / 89.20 % regions.)*
+**`bpa-sessiond` — measured (2026-07-16, S-IDEA Task 8 docs-truth gate run): line coverage =
+90.41 %** (regions 89.36 %, functions 91.01 %; 12132 regions/1291 missed, 612 functions/55
+missed, 7686 lines/737 missed — the gate passes with headroom, essentially unchanged from
+S-EXT's 90.44 %). Per-module lines: `attach.rs` 88.70 %, `boot.rs` 77.24 %, `live_grid.rs`
+93.33 %, `main.rs` 0 % (entrypoint, never unit-tested), `osc_parser.rs` 94.82 %, `persistence.rs`
+94.44 %, `pty_supervisor.rs` 91.46 %, `scrollback.rs` 93.12 %, `shell_integration/mod.rs`
+92.51 %, `singleton.rs` 70.83 % (a thin wrapper over `bpa-daemon-core::singleton` — most of its
+former logic, and former coverage, belongs to daemon-core's own package total now),
+`socket_server.rs` 90.87 % — confirming S-IDEA's own claim "never touches sessiond" at the
+coverage-tooling level, not just by source diff (S-IDEA is entirely inside `bpa-orchd`, unlike
+S-EXT which touched sessiond's `env_overrides` filter once). *(Historical: S-EXT measured
+90.44 % line / 89.41 % region / 91.01 % function; S4 measured 90.39 % line / 89.31 % region /
+90.79 % function (the exact same measurement as S3/T21, confirming S4's own "NO sessiond change"
+claim); 2026-07-09 S2/`[0.3.0]` measured 89.16 % line / 89.28 % functions / 90.25 % regions;
+2026-07-07 Pv2/`[0.2.0]` measured 89.58 % line / 88.17 % functions / 88.65 % regions; 2026-07-05
+docs-truth/CI measured 88.06 % line / 86.70 % functions / 89.20 % regions.)*
 
 The gate runs in two enforced places:
 
@@ -448,11 +529,16 @@ unchanged since); as of S-EXT it is 156 lib tests (+1: `env_overrides` DYLD/LD r
 plus the same 4 integration-test-binary structure. The evidence base behind `bpa-orchd`'s number:
 211 `--lib` unit tests at S4 measurement time (covering `boot`, `export`, `graph` [S4],
 `persistence`, `ruleset_files`, `socket_server`) plus 4 `boot_integration` + 17
-`dispatch_integration` + 1 `no_secrets_in_logs` integration tests; as of S-EXT it is 361 `--lib`
+`dispatch_integration` + 1 `no_secrets_in_logs` integration tests; as of S-EXT it was 361 `--lib`
 unit tests (+150: the whole `mcp/`, `connectors/`, `skills/`, and `trust.rs` surface) plus 4
 `boot_integration` + 37 `dispatch_integration` (+20: every new S-EXT verb) + 1 `no_secrets_in_logs`
-+ 1 `no_secrets_in_logs_graph` + 1 `no_secrets_in_logs_mcp` (**new**) integration tests exercising
-dispatch over a real Unix socket end-to-end.
++ 1 `no_secrets_in_logs_graph` + 1 `no_secrets_in_logs_mcp` integration tests exercising dispatch
+over a real Unix socket end-to-end; as of S-IDEA it is 393 `--lib` unit tests (+32: the whole
+`research/` module — run CRUD, the async driver against a fake tool-caller seam, D11 boot-reconcile,
+D9 graph-ingest-on-accept) plus the same 4 `boot_integration` + 42 `dispatch_integration` (+5: the
+4 new `Research*` verb dispatch tests + the post-S-EXT `mcp_delete_server` Keychain-orphan
+regression) + 1 `no_secrets_in_logs` + 1 `no_secrets_in_logs_graph` + 1 `no_secrets_in_logs_mcp`
+(**new**) integration tests.
 
 *(History: at S0+S1 completion this gate was documented but not executed — the authoring
 environment lacked the ~3–5 GB the instrumented build needs. That gap was closed by the
