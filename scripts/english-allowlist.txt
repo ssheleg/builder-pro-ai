@@ -1,0 +1,57 @@
+# scripts/english-allowlist.txt — the CLOSED list of pre-existing files that the
+# English-only gate (scripts/check-english.sh, spec D2 / O-2) is permitted to skip.
+#
+# WHY these exist: every path below is a FROZEN historical decision / investigation
+# record written BEFORE the S-POLISH English-only program. They are the archived
+# specs, plans, QA investigations, and product-vision research that the current
+# codebase and living docs were derived from. Retroactively translating them would
+# falsify the historical record (e.g. quoted original founder statements) and buys
+# no product value — D2's explicit rationale for allowlisting them.
+#
+# WHAT IS NOT HERE (enforced, must stay English):
+#   - The LIVING platform overview docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md
+#     is the active roadmap — it is translated and NOT allowlisted.
+#   - Every NEW file anywhere (including any new spec/plan/qa/research). This is a
+#     CLOSED list of exact paths, so anything new is enforced automatically the
+#     moment it is added.
+#   - All code, comments, UI copy, and other docs (README, CHANGELOG, architecture,
+#     runbooks, design-system, backlog, build-macos, CONTRIBUTING, …).
+#
+# Format: one repo-relative path per line; '#' starts a comment; blank lines ignored.
+# Keep sorted. To add a deliberate non-ASCII test payload, append its path with a
+# one-line reason — default is NO new exceptions.
+#
+# These four sibling trees are the entire frozen archive: docs/superpowers/{specs,plans,research}
+# and docs/qa. (research/ holds the superseded product-vision studies + audits that
+# fed the now-English overview; it is the same frozen-record category as specs/plans.)
+
+# --- docs/qa: pre-program UX investigation records ---
+docs/qa/ux-first-session-scenarios.md
+docs/qa/ux-investigation-report.md
+
+# --- docs/superpowers/plans: frozen per-slice implementation plans ---
+docs/superpowers/plans/2026-07-07-protocol-v2.md
+docs/superpowers/plans/2026-07-08-s2-workspace-explorer-home.md
+docs/superpowers/plans/2026-07-13-s3-orchd-domain-foundation.md
+docs/superpowers/plans/2026-07-14-s4-knowledge-graph.md
+docs/superpowers/plans/2026-07-15-s-ext-mcp-connectors.md
+docs/superpowers/plans/2026-07-15-s-idea-research-pipeline.md
+docs/superpowers/plans/2026-07-16-s-polish-program.md
+docs/superpowers/plans/2026-07-16-s-polish.md
+
+# --- docs/superpowers/research: superseded product-vision studies + audits ---
+docs/superpowers/research/2026-07-01-product-vision.md
+docs/superpowers/research/2026-07-03-docs-spec-audit.json
+docs/superpowers/research/2026-07-06-product-vision-v2.md
+docs/superpowers/research/2026-07-06-vision-v2-audit.json
+docs/superpowers/research/2026-07-06-vision-v2-correction-plan.md
+
+# --- docs/superpowers/specs: frozen per-slice design specs (NOT the living overview) ---
+docs/superpowers/specs/2026-07-04-docs-truth-ci-fix-pass-design.md
+docs/superpowers/specs/2026-07-06-vision-alignment-docs-pass-design.md
+docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md
+docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md
+docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md
+docs/superpowers/specs/2026-07-15-s-ext-mcp-connectors-design.md
+docs/superpowers/specs/2026-07-15-s-idea-research-pipeline-design.md
+docs/superpowers/specs/2026-07-16-s-polish-program-design.md

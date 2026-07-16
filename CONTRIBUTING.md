@@ -1,5 +1,17 @@
 # Contributing to Builder Pro AI
 
+## Language: English only
+
+All code, comments, identifiers, UI copy, commit messages, and docs are written in **English** —
+no other natural language anywhere in the tree. The `scripts/check-english.sh` gate machine-enforces
+this (it runs first in `scripts/final-suite.sh` and in CI): it fails on any Cyrillic (`[Ѐ-ӿ]`)
+outside a single closed allowlist. The **only** exception is the pre-existing frozen historical
+records — the superseded per-slice specs, plans, QA investigations, and product-vision research
+under `docs/superpowers/{specs,plans,research}` and `docs/qa/` (listed exactly in
+[`scripts/english-allowlist.txt`](scripts/english-allowlist.txt)) — which stay verbatim because
+retroactively rewriting them would falsify history. Every **new** file, anywhere, must be English:
+the allowlist is a closed list of exact paths, so anything new is enforced automatically.
+
 ## Dev setup
 
 - **Rust:** the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml) (stable 1.92 +
@@ -22,11 +34,11 @@ One command gates the whole Definition of Done:
 bash scripts/final-suite.sh
 ```
 
-Its 9 stages, in order: Rust workspace tests · clippy `-D warnings` · `cargo fmt --check` ·
-TypeScript tests (vitest) · `tsc --noEmit` · ts-rs type parity (regenerate + diff
-`src/ipc/types.ts` and `src/ipc/orchd-types.ts`) · daemon coverage gate (≥ 80 % line coverage on
-`bpa-sessiond` and `bpa-orchd`) · e2e survive-restart · e2e orchd survive-restart +
-export/import round-trip.
+Its 10 stages, in order: English-only gate (`scripts/check-english.sh`) · Rust workspace tests ·
+clippy `-D warnings` · `cargo fmt --check` · TypeScript tests (vitest) · `tsc --noEmit` · ts-rs
+type parity (regenerate + diff `src/ipc/types.ts` and `src/ipc/orchd-types.ts`) · daemon coverage
+gate (≥ 80 % line coverage on `bpa-sessiond` and `bpa-orchd`) · e2e survive-restart · e2e orchd
+survive-restart + export/import round-trip.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same set on every push/PR.
 **Local and CI gates must never diverge** — if you change one, change both in the same commit.

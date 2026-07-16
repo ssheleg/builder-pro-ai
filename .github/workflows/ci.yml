@@ -35,6 +35,10 @@ jobs:
           security set-keychain-settings -lut 21600 ci.keychain-db
       - uses: dtolnay/rust-toolchain@stable # rustup honors rust-toolchain.toml (1.92)
       - uses: Swatinem/rust-cache@v2
+      - name: english-only gate (no Cyrillic outside allowlist — spec D2 / O-2)
+        # Cheap textual lint, run before the expensive Rust/e2e steps so it fails fast. Mirrors
+        # the first stage of scripts/final-suite.sh — keep the two in lockstep (CONTRIBUTING.md).
+        run: bash scripts/check-english.sh
       - name: stage sidecars (tauri build.rs requires BOTH daemons in a fresh checkout)
         run: |
           cargo build -p bpa-sessiond -p bpa-orchd

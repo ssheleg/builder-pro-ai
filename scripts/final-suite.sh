@@ -3,18 +3,20 @@
 # (spec §14.3 [S1], S3 spec §12, Task 25 / Task 20). Runs, IN ORDER, and stops at the first
 # failure with a specific message:
 #
-#   1. Full Rust workspace test suite (`cargo test --workspace`).
-#   2. Clippy across the whole workspace with warnings denied (`-D warnings`).
-#   3. rustfmt check (`cargo fmt --check` — formatting is normative).
-#   4. Full TypeScript test suite (`npx vitest run`).
-#   5. TypeScript typecheck (`npx tsc --noEmit`).
-#   6. ts-rs type parity: regenerate `src/ipc/types.ts` from `crates/protocol` AND
+#   1. English-only gate (`scripts/check-english.sh` — no Cyrillic outside the frozen-record
+#      allowlist; spec D2 / O-2). Cheap textual lint, run FIRST so it fails in ~1s.
+#   2. Full Rust workspace test suite (`cargo test --workspace`).
+#   3. Clippy across the whole workspace with warnings denied (`-D warnings`).
+#   4. rustfmt check (`cargo fmt --check` — formatting is normative).
+#   5. Full TypeScript test suite (`npx vitest run`).
+#   6. TypeScript typecheck (`npx tsc --noEmit`).
+#   7. ts-rs type parity: regenerate `src/ipc/types.ts` from `crates/protocol` AND
 #      `src/ipc/orchd-types.ts` from `crates/orchd-proto`, diff both against what's committed —
 #      a diff means the generated bindings are stale (spec §5, §14.2 row 1; S3 spec §4.2).
-#   7. Daemon-crate coverage gate (bpa-sessiond AND bpa-orchd line coverage >= 80%, spec §14.3,
+#   8. Daemon-crate coverage gate (bpa-sessiond AND bpa-orchd line coverage >= 80%, spec §14.3,
 #      S3 spec §12).
-#   8. E2E survive-restart (spec §14.1/§13's core promise).
-#   9. E2E orchd survive-restart + export/import round-trip (S3 spec §12 — the roadmap DoD proof:
+#   9. E2E survive-restart (spec §14.1/§13's core promise).
+#  10. E2E orchd survive-restart + export/import round-trip (S3 spec §12 — the roadmap DoD proof:
 #      goals+ideas+tasks CRUD survive restart; export/import round-trips).
 #
 # CI (.github/workflows/ci.yml) runs the same set — keep them in lockstep (CONTRIBUTING.md).
@@ -23,32 +25,36 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-echo "== 1/9 Rust workspace tests =="
+echo "== 1/10 English-only gate (no Cyrillic outside allowlist) =="
+bash "$REPO/scripts/check-english.sh"
+
+echo
+echo "== 2/10 Rust workspace tests =="
 cargo test --workspace
 echo "OK: cargo test --workspace"
 
 echo
-echo "== 2/9 clippy (deny warnings) =="
+echo "== 3/10 clippy (deny warnings) =="
 cargo clippy --workspace --all-targets -- -D warnings
 echo "OK: clippy -D warnings"
 
 echo
-echo "== 3/9 rustfmt (formatting is normative) =="
+echo "== 4/10 rustfmt (formatting is normative) =="
 cargo fmt --check
 echo "OK: cargo fmt --check"
 
 echo
-echo "== 4/9 TypeScript tests =="
+echo "== 5/10 TypeScript tests =="
 npx vitest run
 echo "OK: npx vitest run"
 
 echo
-echo "== 5/9 TypeScript typecheck =="
+echo "== 6/10 TypeScript typecheck =="
 npx tsc --noEmit
 echo "OK: npx tsc --noEmit"
 
 echo
-echo "== 6/9 ts-rs type parity (generated types in sync) =="
+echo "== 7/10 ts-rs type parity (generated types in sync) =="
 # The `crates/protocol/tests/ts_export.rs` and `crates/orchd-proto/tests/ts_export.rs` tests
 # regenerate src/ipc/types.ts and src/ipc/orchd-types.ts (respectively) as a side effect of
 # running (each test calls `export_all_to` before asserting on the content) — running them here
@@ -71,18 +77,18 @@ git diff --exit-code -- src/ipc/orchd-types.ts || {
 echo "OK: src/ipc/orchd-types.ts matches crates/orchd-proto"
 
 echo
-echo "== 7/9 daemon coverage gate (bpa-sessiond + bpa-orchd, >= 80%) =="
+echo "== 8/10 daemon coverage gate (bpa-sessiond + bpa-orchd, >= 80%) =="
 bash "$REPO/scripts/coverage-gate.sh"
 
 echo
-echo "== 8/9 e2e survive-restart =="
+echo "== 9/10 e2e survive-restart =="
 cargo build -p bpa-sessiond
 cargo build -p bpa-orchd
 npm run e2e:survive
 echo "OK: npm run e2e:survive"
 
 echo
-echo "== 9/9 e2e orchd survive+roundtrip =="
+echo "== 10/10 e2e orchd survive+roundtrip =="
 npm run e2e:orchd
 echo "OK: npm run e2e:orchd"
 
