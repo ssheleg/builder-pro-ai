@@ -32,7 +32,7 @@ use bpa_orchd_proto::{
     Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
     McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdRequest,
     OrchdResponse, Policy, PolicyRules, PolicyScope, Project, ResearchRun, RuleScope, RuleSetView,
-    Skill, SkillScope, TaskSource, TaskStatus,
+    Skill, SkillScope, StorageStatus, TaskSource, TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -886,6 +886,13 @@ fn expect_research_run(res: OrchdResponse) -> Result<ResearchRun, CommandError> 
 fn expect_research_runs(res: OrchdResponse) -> Result<Vec<ResearchRun>, CommandError> {
     match res {
         OrchdResponse::ResearchRuns(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_storage_status(res: OrchdResponse) -> Result<StorageStatus, CommandError> {
+    match res {
+        OrchdResponse::StorageStatus(s) => Ok(s),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -2692,6 +2699,21 @@ pub async fn research_get_run(
         state
             .orchd()?
             .request(OrchdRequest::ResearchGetRun { id })
+            .await?,
+    )
+}
+
+/// The daemon's storage-degradation mode (spec D3, BL-94). Plain read — broadcasts nothing; the
+/// mode is fixed at boot, so the frontend pulls it once on connect and on every reconnect to drive
+/// the honest "running in memory / recovered from a corrupt database" banner.
+#[tauri::command]
+pub async fn orchd_storage_status(
+    state: State<'_, AppState>,
+) -> Result<StorageStatus, CommandError> {
+    expect_storage_status(
+        state
+            .orchd()?
+            .request(OrchdRequest::GetStorageStatus)
             .await?,
     )
 }
@@ -5117,6 +5139,56 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             CommandError::Daemon { code, message } => {
                 assert_eq!(code, "NotFound");
                 assert_eq!(message, "not found");
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    // ── Storage-degradation mode (spec D3, BL-94) — same round-trip + error-mapping pair as the
+    // research commands above, over `GetStorageStatus`. ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn orchd_storage_status_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::GetStorageStatus => {
+                OrchdResponse::StorageStatus(bpa_orchd_proto::StorageStatus {
+                    storage_mode: bpa_orchd_proto::StorageMode::RecoveredFromCorruption,
+                    quarantined_path: Some("/x/orchd.db.corrupt-1".into()),
+                })
+            }
+            other => panic!("expected GetStorageStatus, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::GetStorageStatus)
+            .await
+            .unwrap();
+        let status = expect_storage_status(res).unwrap();
+        assert_eq!(
+            status.storage_mode,
+            bpa_orchd_proto::StorageMode::RecoveredFromCorruption
+        );
+        assert_eq!(
+            status.quarantined_path.as_deref(),
+            Some("/x/orchd.db.corrupt-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn orchd_storage_status_error_response_becomes_command_error_daemon_end_to_end() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Io,
+            message: "io".into(),
+        })
+        .await;
+
+        let res = client.request(OrchdRequest::GetStorageStatus).await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Io");
+                assert_eq!(message, "io");
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }

@@ -745,6 +745,7 @@ pub fn run() {
             commands::research_start_run,
             commands::research_list_runs,
             commands::research_get_run,
+            commands::orchd_storage_status,
             fs_explorer::list_dir,
             fs_explorer::read_file_preview,
             fs_explorer::create_file,

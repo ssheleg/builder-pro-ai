@@ -746,6 +746,29 @@ pub enum ResearchStatus {
     Failed,
 }
 
+/// Storage-degradation mode surfaced to the frontend (spec D3, BL-94). Fixed at boot: the daemon
+/// either opened its on-disk DB normally (`Persistent`), fell back to a non-persistent in-memory
+/// DB because the disk was unavailable (`InMemoryFallback`), or recovered from a corrupt on-disk
+/// image that was quarantined aside (`RecoveredFromCorruption`, with `quarantinedPath` naming the
+/// saved copy). Pulled once on connect and on every reconnect — there is no push, since the mode
+/// never changes without a daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct StorageStatus {
+    pub storage_mode: StorageMode,
+    pub quarantined_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum StorageMode {
+    Persistent,
+    InMemoryFallback,
+    RecoveredFromCorruption,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -1178,6 +1201,9 @@ pub enum OrchdRequest {
     ResearchGetRun {
         id: String,
     },
+    /// → `OrchdResponse::StorageStatus`. Reports the daemon's storage-degradation mode (spec D3,
+    /// BL-94); fixed at boot, pulled on connect and reconnect.
+    GetStorageStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1240,6 +1266,8 @@ pub enum OrchdResponse {
     // S-IDEA research (spec §5, task T3, appended — order FROZEN append-only)
     ResearchRun(ResearchRun),
     ResearchRuns(Vec<ResearchRun>),
+    // Storage-degradation mode (spec D3, BL-94, appended — order FROZEN append-only)
+    StorageStatus(StorageStatus),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

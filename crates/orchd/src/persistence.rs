@@ -115,14 +115,32 @@ fn quarantine(path: &Path) -> PathBuf {
     PathBuf::from(q)
 }
 
+/// The outcome of opening the on-disk database (spec D3, BL-94): a clean open vs. a recovery after
+/// a corrupt image was quarantined aside and a fresh database recreated. `boot::open_db_degrading`
+/// maps this (plus the in-memory-fallback case it handles itself) onto the storage-degradation
+/// mode the frontend surfaces as an honest banner.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DbOpenOutcome {
+    Clean,
+    RecoveredFromCorruption { quarantined_to: PathBuf },
+}
+
 impl Db {
     /// Open (or create) the database at `path`. Sets WAL + busy_timeout + foreign_keys, runs
     /// migrations in a transaction. On a corrupt image, quarantines the file
     /// (`orchd.db.corrupt-<ts>`) and recreates a fresh database rather than crashing (mirrors
-    /// `bpa_sessiond::persistence::Db::open`).
+    /// `bpa_sessiond::persistence::Db::open`). Discards the recovery outcome — use
+    /// [`Db::open_with_outcome`] when the caller needs to know whether a recovery happened.
     pub fn open(path: &Path) -> Result<Db, PersistError> {
+        Self::open_with_outcome(path).map(|(db, _outcome)| db)
+    }
+
+    /// Like [`Db::open`] but reports whether a corrupt on-disk image had to be quarantined and a
+    /// fresh database recreated (spec D3, BL-94). `boot::open_db_degrading` uses the outcome to set
+    /// the storage-degradation mode the frontend surfaces.
+    pub fn open_with_outcome(path: &Path) -> Result<(Db, DbOpenOutcome), PersistError> {
         match Self::open_inner(path) {
-            Ok(db) => Ok(db),
+            Ok(db) => Ok((db, DbOpenOutcome::Clean)),
             Err(PersistError::Corrupt(msg)) => {
                 let dst = quarantine(path);
                 warn!(
@@ -138,7 +156,13 @@ impl Db {
                     side.push(suffix);
                     let _ = std::fs::remove_file(PathBuf::from(side));
                 }
-                Self::open_inner(path)
+                let db = Self::open_inner(path)?;
+                Ok((
+                    db,
+                    DbOpenOutcome::RecoveredFromCorruption {
+                        quarantined_to: dst,
+                    },
+                ))
             }
             Err(other) => Err(other),
         }
@@ -2969,6 +2993,40 @@ mod tests {
                 .starts_with("orchd.db.corrupt-")
         });
         assert!(found, "expected an orchd.db.corrupt-<ts> quarantine file");
+    }
+
+    #[test]
+    fn open_with_outcome_reports_recovery_on_a_corrupt_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchd.db");
+        std::fs::write(&path, b"not a sqlite database").unwrap();
+
+        let (db, outcome) =
+            Db::open_with_outcome(&path).expect("open must quarantine and recreate, not error");
+        assert_eq!(user_version(db.conn()), 4);
+        match outcome {
+            DbOpenOutcome::RecoveredFromCorruption { quarantined_to } => {
+                assert!(
+                    quarantined_to.exists(),
+                    "the quarantined corrupt image must remain on disk at {}",
+                    quarantined_to.display()
+                );
+                assert!(quarantined_to
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("orchd.db.corrupt-"));
+            }
+            other => panic!("expected RecoveredFromCorruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_with_outcome_reports_clean_on_a_fresh_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchd.db");
+        let (_db, outcome) = Db::open_with_outcome(&path).unwrap();
+        assert_eq!(outcome, DbOpenOutcome::Clean);
     }
 
     #[test]

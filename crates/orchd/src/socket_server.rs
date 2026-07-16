@@ -123,6 +123,10 @@ pub struct ServerDeps {
     /// that fires this: flipping it to `true` is exactly the SIGTERM path (`main.rs`'s signal
     /// watcher flips the same channel).
     pub shutdown_tx: watch::Sender<bool>,
+    /// The storage-degradation mode this daemon booted into (spec D3, BL-94), fixed at boot by
+    /// `boot::open_db_degrading` and returned verbatim by the `GetStorageStatus` dispatch arm so
+    /// the frontend can surface an honest "running in memory / recovered from corruption" banner.
+    pub storage_status: bpa_orchd_proto::StorageStatus,
 }
 
 impl ServerDeps {
@@ -131,12 +135,14 @@ impl ServerDeps {
         connectors: Arc<ConnectorsState>,
         daemon_build: String,
         shutdown_tx: watch::Sender<bool>,
+        storage_status: bpa_orchd_proto::StorageStatus,
     ) -> Self {
         ServerDeps {
             db,
             connectors,
             daemon_build,
             shutdown_tx,
+            storage_status,
         }
     }
 }
@@ -1977,5 +1983,8 @@ async fn dispatch(
                 Err(e) => map_err(e),
             }
         }
+        // Storage-degradation mode (spec D3, BL-94): fixed at boot, returned verbatim — no DB
+        // access, so the frontend can read it even in the in-memory-fallback / recovered modes.
+        OrchdRequest::GetStorageStatus => OrchdResponse::StorageStatus(deps.storage_status.clone()),
     }
 }

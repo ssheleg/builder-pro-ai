@@ -3054,3 +3054,30 @@ async fn research_start_run_against_a_disabled_tool_reaches_failed_with_error_ki
 
     c1.shutdown(boot).await;
 }
+
+#[tokio::test]
+async fn get_storage_status_reports_persistent_for_a_fresh_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+    let mut c1 = Client::connect(&socket).await;
+
+    match c1.request(OrchdRequest::GetStorageStatus).await {
+        OrchdResponse::StorageStatus(status) => {
+            assert_eq!(
+                status.storage_mode,
+                bpa_orchd_proto::StorageMode::Persistent
+            );
+            assert!(
+                status.quarantined_path.is_none(),
+                "a fresh daemon has no quarantined path"
+            );
+        }
+        other => panic!("expected StorageStatus, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}

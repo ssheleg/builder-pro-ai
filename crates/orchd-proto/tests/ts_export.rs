@@ -67,6 +67,8 @@ fn export_and_read() -> String {
     AuditRow::export_all_to(types_ts_dir()).expect("export AuditRow");
     ResearchRun::export_all_to(types_ts_dir()).expect("export ResearchRun");
     ResearchStatus::export_all_to(types_ts_dir()).expect("export ResearchStatus");
+    StorageStatus::export_all_to(types_ts_dir()).expect("export StorageStatus");
+    StorageMode::export_all_to(types_ts_dir()).expect("export StorageMode");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -265,10 +267,41 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "rate_per_min",
         "idea_id",
         "args_json",
+        "storage_mode",
+        "quarantined_path",
     ] {
         assert!(
             !ts.contains(snake),
             "generated orchd-types.ts must not contain snake_case `{snake}`; got:\n{ts}"
+        );
+    }
+}
+
+#[test]
+fn storage_status_types_are_exported() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "export type StorageStatus"),
+        "expected \"export type StorageStatus\" in generated orchd-types.ts; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "storageMode: StorageMode"),
+        "StorageStatus.storage_mode must serialize as camelCase `storageMode`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "quarantinedPath: string | null"),
+        "StorageStatus.quarantined_path (Option<String>) must be TS `string | null`; got:\n{ts}"
+    );
+    // StorageMode is snake_case ON THE WIRE by design (spec D3): these string-literal values are
+    // the intended tags, distinct from the forbidden snake_case FIELD names above.
+    for tag in [
+        "persistent",
+        "in_memory_fallback",
+        "recovered_from_corruption",
+    ] {
+        assert!(
+            ts.contains(tag),
+            "StorageMode must include the wire tag `{tag}`; got:\n{ts}"
         );
     }
 }

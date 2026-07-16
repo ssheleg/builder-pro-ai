@@ -13,8 +13,10 @@ use tokio::sync::{watch, Mutex};
 
 use bpa_daemon_core::singleton::{assert_socket_path_len, set_socket_mode};
 
+use bpa_orchd_proto::{StorageMode, StorageStatus};
+
 use crate::connectors::accounts::ConnectorsState;
-use crate::persistence::Db;
+use crate::persistence::{Db, DbOpenOutcome};
 use crate::socket_server::{serve, ServerDeps};
 
 /// On-disk file name of the daemon's SQLite database, under `{app-support}/`.
@@ -86,12 +88,28 @@ async fn bind_fresh(socket: &Path) -> std::io::Result<UnixListener> {
 
 /// Open the daemon's durable SQLite DB, degrading honestly to an in-memory DB on failure (spec
 /// §5: mirrors `bpa_sessiond::boot::open_db_degrading` byte-for-byte, just a different on-disk
-/// file name). Only a failure of the in-memory fallback itself is unrecoverable.
-fn open_db_degrading(app_support: &Path) -> Db {
+/// file name). Only a failure of the in-memory fallback itself is unrecoverable. Also reports the
+/// resulting storage-degradation mode (spec D3, BL-94) the frontend surfaces as an honest banner:
+/// `Persistent` on a clean open, `RecoveredFromCorruption` (with the quarantine path) when a
+/// corrupt on-disk image was set aside, or `InMemoryFallback` when the disk was unusable.
+fn open_db_degrading(app_support: &Path) -> (Db, StorageStatus) {
     let _ = std::fs::create_dir_all(app_support);
     let db_path = app_support.join(DB_FILE_NAME);
-    match Db::open(&db_path) {
-        Ok(db) => db,
+    match Db::open_with_outcome(&db_path) {
+        Ok((db, DbOpenOutcome::Clean)) => (
+            db,
+            StorageStatus {
+                storage_mode: StorageMode::Persistent,
+                quarantined_path: None,
+            },
+        ),
+        Ok((db, DbOpenOutcome::RecoveredFromCorruption { quarantined_to })) => (
+            db,
+            StorageStatus {
+                storage_mode: StorageMode::RecoveredFromCorruption,
+                quarantined_path: Some(quarantined_to.to_string_lossy().into_owned()),
+            },
+        ),
         Err(e) => {
             tracing::error!(
                 error = %e,
@@ -99,7 +117,13 @@ fn open_db_degrading(app_support: &Path) -> Db {
                 "DB open failed; continuing in degraded (in-memory) mode"
             );
             match Db::open_in_memory() {
-                Ok(db) => db,
+                Ok(db) => (
+                    db,
+                    StorageStatus {
+                        storage_mode: StorageMode::InMemoryFallback,
+                        quarantined_path: None,
+                    },
+                ),
                 Err(e2) => {
                     tracing::error!(error = %e2, "in-memory DB fallback also failed");
                     panic!("no usable database backend: {e2}");
@@ -189,7 +213,7 @@ pub async fn run(
     let listener = bind_fresh(&socket).await?;
 
     let app_support = app_support_dir();
-    let db = open_db_degrading(&app_support);
+    let (db, storage_status) = open_db_degrading(&app_support);
     ensure_global_ruleset(&db, &app_support);
     reconcile_interrupted(&db);
     let db = Arc::new(Mutex::new(db));
@@ -209,6 +233,7 @@ pub async fn run(
         connectors,
         env!("CARGO_PKG_VERSION").to_string(),
         shutdown_tx,
+        storage_status,
     ));
 
     tracing::info!(socket = %socket.display(), "orchd serving");

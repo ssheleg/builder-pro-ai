@@ -216,6 +216,18 @@ export type SkillFileState = "present" | "modified" | "missing";
 
 export type SkillScope = "global" | "project";
 
+export type StorageMode = "persistent" | "in_memory_fallback" | "recovered_from_corruption";
+
+/**
+ * Storage-degradation mode surfaced to the frontend (spec D3, BL-94). Fixed at boot: the daemon
+ * either opened its on-disk DB normally (`Persistent`), fell back to a non-persistent in-memory
+ * DB because the disk was unavailable (`InMemoryFallback`), or recovered from a corrupt on-disk
+ * image that was quarantined aside (`RecoveredFromCorruption`, with `quarantinedPath` naming the
+ * saved copy). Pulled once on connect and on every reconnect — there is no push, since the mode
+ * never changes without a daemon restart.
+ */
+export type StorageStatus = { storageMode: StorageMode, quarantinedPath: string | null, };
+
 export type TaskSource = "idea" | "insight" | "bug" | "plan";
 
 export type TaskStatus = "backlog" | "todo" | "waiting" | "progress" | "testing" | "done";

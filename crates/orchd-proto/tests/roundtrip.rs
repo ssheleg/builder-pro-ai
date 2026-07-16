@@ -684,6 +684,7 @@ fn all_requests() -> Vec<OrchdRequest> {
             idea_id: "idea-1".into(),
         },
         OrchdRequest::ResearchGetRun { id: "run-1".into() },
+        OrchdRequest::GetStorageStatus,
     ]
 }
 
@@ -760,6 +761,14 @@ fn all_responses() -> Vec<OrchdResponse> {
         },
         OrchdResponse::ResearchRun(sample_research_run()),
         OrchdResponse::ResearchRuns(vec![sample_research_run()]),
+        OrchdResponse::StorageStatus(StorageStatus {
+            storage_mode: StorageMode::RecoveredFromCorruption,
+            quarantined_path: Some("/x/orchd.db.corrupt-1".into()),
+        }),
+        OrchdResponse::StorageStatus(StorageStatus {
+            storage_mode: StorageMode::Persistent,
+            quarantined_path: None,
+        }),
     ]
 }
 
