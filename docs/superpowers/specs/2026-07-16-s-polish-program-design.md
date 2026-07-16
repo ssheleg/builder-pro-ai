@@ -63,31 +63,53 @@ the **cross-cutting** contracts below (§4), which multiple slices depend on.
   existing `const`/inline literals, just English.
 
 ### D2 — CI no-cyrillic gate (P2 adds; every later slice must keep it green)
-- New `final-suite.sh` stage (and mirrored `ci.yml` step): a grep for Cyrillic
-  (`[А-Яа-яЁё]`) across `src/`, `crates/`, `src-tauri/src/`, `docs/`, `README.md`, `CHANGELOG.md`
-  must return **zero matches**; any match fails the gate. This is the machine-enforcement of O-2.
-- Allowed exceptions (if any prove unavoidable — e.g. a test that deliberately round-trips a
-  non-ASCII payload) live in an explicit, commented allowlist file the gate reads; the default is
-  no exceptions.
+- New `final-suite.sh` stage (and mirrored `ci.yml` step): `scripts/check-english.sh` greps for
+  Cyrillic (`[А-Яа-яЁё]`) across `src/`, `crates/`, `src-tauri/src/`, `tests/`, `scripts/`,
+  `docs/`, `README.md`, `CHANGELOG.md` and must return **zero matches** outside the allowlist;
+  any other match fails the gate. This is the machine-enforcement of O-2.
+- **Allowlist (explicit file list, committed as `scripts/english-allowlist.txt`, one path per
+  line, commented):** the pre-existing files under `docs/superpowers/specs/`,
+  `docs/superpowers/plans/`, and `docs/qa/` written before this program — they are frozen
+  historical decision/investigation records; retroactively rewriting them would falsify history
+  and buys no product value. EXCEPTION to the exception: the living platform overview
+  (`docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md`) is NOT allowlisted — it is
+  the active roadmap and IS translated. All NEW files anywhere (including new specs/plans) must be
+  English — the allowlist is a closed list of exact pre-existing paths, so any new file is
+  enforced automatically. A deliberate non-ASCII test payload may be added to the allowlist with a
+  one-line reason; default is no exceptions.
+- Standing rule recorded in `CONTRIBUTING.md`: all code, comments, UI copy, commits, and docs are
+  English.
 
-### D3 — DB-degraded mode on the wire (P1 backend, P3 frontend banner)
-- orchd's `open_db_degrading` / corruption-quarantine paths (`boot.rs`, `persistence.rs`) currently
-  signal only in the log. P1 adds a `storage_mode` to orchd's status/Hello surface:
-  `enum StorageMode { Persistent, InMemoryFallback, RecoveredFromCorruption }` (append-only, frozen;
-  wire snake_case at the frame layer, camelCase `storageMode` on the entity if carried on one).
-  Exact wire placement (Hello preamble field vs a `GetStatus` response field) is locked in the P1
-  spec; it MUST be readable by the broker → store the moment the client connects.
+### D3 — DB-degraded mode on the wire (P1 backend, P3 frontend banner) — LOCKED
+- Wire (append-only at every enum tail): request `GetStorageStatus` (unit variant) → response
+  `StorageStatus(StorageStatus)`. Entity (camelCase + ts-rs, mirrors `McpArtifact` derives):
+  `StorageStatus { storage_mode: StorageMode, quarantined_path: Option<String> }`. Enum
+  `StorageMode { Persistent, InMemoryFallback, RecoveredFromCorruption }` (plain snake_case wire
+  tags via `#[serde(rename_all = "snake_case")]`, exported to ts). No preamble change (the
+  handshake stays frozen); the mode is fixed at boot, so pull-on-connect suffices — no push.
+- Producer: `persistence::Db::open_with_outcome(path) -> Result<(Db, DbOpenOutcome)>` where
+  `DbOpenOutcome { Clean, RecoveredFromCorruption { quarantined_to: PathBuf } }`; the existing
+  `Db::open` delegates and discards the outcome (call-site compat). `boot::open_db_degrading`
+  maps: fallback-to-memory → `InMemoryFallback`, quarantine outcome → `RecoveredFromCorruption`,
+  else `Persistent`, and stores the resolved `StorageMode` (+ optional path) in `ServerDeps`.
+- Consumer: a `research_get_run`-style Tauri command `orchd_storage_status`; the frontend fetches
+  it on initial connect and on every `orchd://up`, stores it in a `storageStatus` slice.
 - P3 renders a persistent honest banner for the two non-`Persistent` modes:
-  `RecoveredFromCorruption` → "Your data was recovered from a backup copy (…path…)."; 
-  `InMemoryFallback` → "Working in memory — changes are NOT saved (disk unavailable)." No cyrillic.
+  `RecoveredFromCorruption` → "Database was corrupted and has been reset. The damaged copy was
+  saved to <path>."; `InMemoryFallback` → "Storage unavailable — running in memory. Changes will
+  NOT survive a restart."
 
-### D4 — per-verb tracing convention (P1)
-- A single helper (e.g. `dispatch_trace(verb: &str, outcome: Result-ish, project_id: Option<&str>)`)
-  invoked by every mutating orchd verb arm and every `#[tauri::command]` mutating handler.
-  Structured fields: `verb`, `outcome` (`ok`/`err`), `error_code` (the wire `OrchdErrorCode` debug
-  name on failure), and a scope id (`project_id`/`server_id`/entity id) — **never** args, bodies,
-  tokens, tool output, or PII. Read verbs may stay untraced (or `debug!`). The P1 spec enumerates
-  the exact verb list + fields and adds a `no_secrets_in_logs`-style test extension.
+### D4 — per-verb tracing convention (P1) — LOCKED (single choke-point, not 77 arm edits)
+- orchd: ONE completion trace in `socket_server::dispatch` — an exhaustive
+  `fn verb_name(&OrchdRequest) -> &'static str` match (compile-time exhaustive, so a new verb
+  cannot ship untraced) + after dispatch:
+  `info!(verb, outcome = "ok"|"err", error_code = ?, elapsed_ms)` where `error_code` is the wire
+  `OrchdErrorCode` debug name when the response is `Error{..}`. Fields NEVER include args, bodies,
+  tokens, tool output, or PII (extends the existing `no_secrets_in_logs` tests).
+- core: ONE trace each in `orchd_client::request` and `socket_client`'s request path
+  (request variant name + ok/err + error code + elapsed) — covers all 117 command handlers at the
+  layer they share instead of editing each.
+- sessiond dispatch gets the same single choke-point trace.
 
 ### D5 — timeout wraps (P1)
 - `mcp/lifecycle.rs` `McpConnect`: wrap `connect_fn(…)` and `list_tools()` in
@@ -97,11 +119,60 @@ the **cross-cutting** contracts below (§4), which multiple slices depend on.
 - OAuth token-exchange/refresh client (`connectors/accounts.rs` `ssrf_guarded_http_client`): add
   `.timeout(Duration::from_secs(30))` (mirror `GenericRestAdapter`) + a test.
 
-### D6 — double-submit + partial-failure discipline (P3, referenced by P4's new dialogs)
-- Every mutating submit (existing + any new dialog in P4) carries a `submitting` in-flight guard
-  (disabled during `await`). Multi-step client chains (spawn-project, form-insight-backlog, and any
-  P4 equivalent) are made idempotent or compensating so a mid-chain failure leaves no orphan and a
-  retry does not duplicate. P3 locks the exact guard hook; P4 reuses it.
+### D6 — double-submit + partial-failure discipline (P3, referenced by P4's new dialogs) — LOCKED
+- Hook `useSubmitGuard()` (new `src/hooks/useSubmitGuard.ts`): returns
+  `{ submitting, guard }` where `guard(fn)` returns a wrapped handler that no-ops while an
+  invocation is in flight and flips `submitting` around the `await`. EVERY mutating submit
+  (existing dialogs + list create-forms + any new P4 dialog) uses it and adds
+  `disabled={… || submitting}`; each gets a double-fire test (two rapid clicks → wrapper called
+  once).
+- Multi-step chains resume-from-failed-step: the component keeps the ids of already-completed
+  steps in state; on failure the error text names exactly what WAS created, and the retry button
+  resumes from the failed step (never re-runs completed steps). Applies to SpawnProjectFromIdea
+  (workspace/project ids) and FormInsightDialog's backlog step (task id → retry only the
+  lifecycle flip).
+
+### D7 — P4 feature contracts — LOCKED
+- **Un-archive:** new wire verb `UnarchiveProject { id }` → `OrchdResponse::Project` + push
+  `ProjectsChanged` (appended at enum tails). `persistence::unarchive_project`: `archived` →
+  `active`; unknown id → `NotFound`; already-active → `Invariant("project is not archived")`.
+  UI: ProjectPanel Overview gets an "Archive project" button (confirm dialog); the sidebar gains a
+  collapsed dimmed "Archived" group listing archived projects; opening one shows a read-only
+  banner with an "Un-archive" button. Archived projects stay read-only (existing guards).
+- **metric_refs editor:** a chip editor on each goal row in `GoalTree` (add via text input +
+  Enter, remove via chip ×) calling the existing `orchdUpdateGoal(…, metricRefs)`;
+  `orchdCreateGoal` stays without metric_refs (goals are born empty; edit after). Fit-context
+  consumes them unchanged.
+- **Graph editor:** (a) add-node form (title input required, body textarea optional, kind select)
+  replacing the hardcoded placeholder title; (b) inline rename — double-click a LOCAL
+  (non-entityRef) node → input → `orchdGraphUpdateNode`; (c) edge editing — selecting an edge
+  shows a kind select firing a NEW verb `GraphUpdateEdge { id, kind }` →
+  `OrchdResponse::GraphEdge` + `GraphChanged` push (appended at tails; guards mirror
+  `GraphAddEdge`: NotFound, archived-endpoint `Invariant`). The edge "label" IS its rendered
+  `kind` — no new schema column (no v5 migration needed for this).
+- **OAuth provider registry:** config file `<app-support>/oauth_providers.json`
+  (`{ "<provider>": { "client_id", "auth_url", "token_url", "default_scopes"?: [..],
+  "client_secret"? } }`), loaded at boot into `ConnectorsState` (missing file → empty registry,
+  info-logged, NOT an error; malformed file → error-logged + empty registry, daemon still boots).
+  New verb `ConnectorListProviders` → `OrchdResponse::ConnectorProviders(Vec<String>)` (names
+  only — no secrets on the wire). UI: the free-text provider input becomes a dropdown fed by it;
+  empty registry → honest empty-state "No OAuth providers configured — add one in
+  oauth_providers.json (see runbook)" with the OAuth begin button disabled. `client_secret` is
+  covered by the existing redacting-Debug pattern and never logged/returned.
+
+### D8 — P3 reconnect/self-refresh contracts — LOCKED
+- `onOrchdUp` refetches EVERY live slice: projects; the open project's goals/ideas/insights/
+  tasks/ruleset/graph; mcp servers + artifacts + accounts + skills + policies + invocations;
+  research runs for every idea currently holding runs in the store; the global ruleset when the
+  rules surface is open; and `orchd_storage_status` (D3).
+- Research runs additionally self-heal without pushes: while a `ResearchPane` is mounted and shows
+  a non-terminal run (`pending`/`running`), it polls `researchListRuns(ideaId)` every 2 s and
+  stops on terminal state — covers the lost-push and boot-reconcile cases with no new wire.
+- BL-96: a persistent banner keyed on `orchdIncompatible && !orchdUpgradeDialogOpen` ("Orchestrator
+  service is outdated — update required" + an "Update" button reopening the dialog), mirroring the
+  sessiond `DaemonBanner` pattern.
+- BL-97 toast: `showToast` appends to a FIFO queue (cap 5, drop-oldest); the visible toast renders
+  a manual close (wires the existing `dismissToast`) and auto-advances every 4 s.
 
 ## 5. Per-slice Definition of Done
 
