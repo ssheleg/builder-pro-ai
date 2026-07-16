@@ -1472,12 +1472,10 @@ mod tests {
         let url = format!("http://{addr}/token");
 
         // Outer guard: a regression that drops the timeout would hang HERE, not the whole suite.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.get(&url).send(),
-        )
-        .await
-        .expect("the request must return within the client timeout, not hang");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.get(&url).send())
+                .await
+                .expect("the request must return within the client timeout, not hang");
 
         assert!(
             result.is_err(),
