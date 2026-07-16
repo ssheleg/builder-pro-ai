@@ -489,8 +489,23 @@ fn build_client(
 /// Cargo resolves two separate crate instances and `AsyncHttpClient` is only implemented for
 /// oauth2's own copy.
 fn ssrf_guarded_http_client() -> Result<oauth2::reqwest::Client, ConnectorError> {
+    ssrf_guarded_http_client_with_timeout(OAUTH_HTTP_TIMEOUT)
+}
+
+/// The token-exchange/refresh HTTP client's request timeout (BL-91, spec D5). Without it a
+/// `ConnectorCompleteOAuth`/token-refresh against an unresponsive IdP hangs the connection's
+/// dispatch task indefinitely (the `GenericRestAdapter` already sets its own 30s timeout, for
+/// comparison). 30s matches that adapter.
+const OAUTH_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Split from [`ssrf_guarded_http_client`] with an explicit `timeout` so the timeout behavior is
+/// unit-testable with a short bound against a silent peer, without waiting the production 30s.
+fn ssrf_guarded_http_client_with_timeout(
+    timeout: std::time::Duration,
+) -> Result<oauth2::reqwest::Client, ConnectorError> {
     oauth2::reqwest::ClientBuilder::new()
         .redirect(oauth2::reqwest::redirect::Policy::none())
+        .timeout(timeout)
         .build()
         .map_err(|e| ConnectorError::Http(e.to_string()))
 }
@@ -1441,5 +1456,32 @@ mod tests {
         let db_arc = StdArc::new(TokioMutex::new(db));
         let token = state.token_for(&db_arc, &id).await.unwrap();
         assert_eq!(token.bearer, access_token);
+    }
+
+    /// BL-91 (spec D5): the token-exchange/refresh HTTP client must NOT hang on a peer that
+    /// accepts the TCP connection but never sends an HTTP response. A bound-but-unaccepting
+    /// listener completes the TCP handshake (OS backlog) yet returns no bytes, so only the request
+    /// timeout can end the call.
+    #[tokio::test]
+    async fn oauth_http_client_times_out_on_a_silent_peer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The listener stays bound (so connect succeeds) but is never `accept()`ed / answered.
+        let client =
+            ssrf_guarded_http_client_with_timeout(std::time::Duration::from_millis(200)).unwrap();
+        let url = format!("http://{addr}/token");
+
+        // Outer guard: a regression that drops the timeout would hang HERE, not the whole suite.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.get(&url).send(),
+        )
+        .await
+        .expect("the request must return within the client timeout, not hang");
+
+        assert!(
+            result.is_err(),
+            "a silent peer must produce a client error (timeout), got {result:?}"
+        );
     }
 }
