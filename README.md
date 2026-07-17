@@ -1,315 +1,310 @@
 # Builder Pro AI
 
-![ci](https://github.com/sshlg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)
+[![ci](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml)
+[![version](https://img.shields.io/badge/version-0.8.0-blue)](CHANGELOG.md)
+[![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](docs/build-macos.md)
+[![built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
 
-A lightweight macOS desktop workspace for **orchestrating AI coding agents** (claude-code,
-hermes, opencode, kilo, …) that do their work through terminals — plus app-native meta-agents
-(a CEO strategist, a TDD/DDD project manager, and engineering specialists) that decide *what*
-to build, run the plan, drive the terminals, and escalate only what they can't resolve.
+**A macOS control panel that takes an idea to a working project and keeps the whole vibecoding
+process organized — so you steer, and agents do the rest.**
 
-Built with **Tauri 2** (Rust core + React/TypeScript UI). Ships as a universal macOS binary.
+Builder Pro AI runs off-the-shelf AI coding agents (claude-code, hermes, opencode, kilo, …) in
+real terminals, wraps them in a workspace of repos, a live file explorer, a cross-project
+knowledge graph, an idea→research→insight→task pipeline, and (on the roadmap) an app-native agent
+org that decides *what* to build. The enemy it exists to kill is the **attention tax**: with 5–6
+projects in flight, opening the app should answer *where is each one, what moved, and what needs
+me* — in under 30 seconds, without you becoming a poller and button-presser.
 
-## Status
+Built with **Tauri 2** (Rust core + React 19 / TypeScript UI). Ships as a universal macOS binary.
 
-**S0+S1+Pv2+S2+S3+S4+S-EXT+S-IDEA+S-POLISH implemented.** The foundation slice, the terminal core
-(daemon-owned PTYs, OSC-driven status, sanitized scrollback replay, SQLite persistence,
-launchd-supervised survival), Protocol v2 (CBOR wire, version negotiation, multi-subscriber
-attach), S2 (multi-root workspaces, a core-owned file explorer + read-only preview + live watch,
-an attention-first Home, an OSC-133 command strip, terminal file links), S3 (a SECOND launchd
-daemon `bpa-orchd` hosting the app-domain store — projects, goals, ideas, insights, tasks,
-rulesets — with full CRUD, export/import, and an owner-facing UI), S4 (a knowledge graph in that
-same `bpa-orchd` store — typed nodes/edges, cross-project links, a workspace-wide agent retrieval
-API, and an editable `@xyflow/react` graph canvas), S-EXT (an MCP client, OAuth/api-key
-connectors, and a skills registry, in that same `bpa-orchd` daemon — the app's first outbound
-network egress + macOS Keychain surface, gated by a trust layer of consent/allowlist/spend-caps/
-audit), and S-IDEA (a research pipeline in that same `bpa-orchd` daemon — the idea→research→
-insight→task loop: `research_run` schema v4, orchd's first long-lived background run driver with
-boot-reconcile of interrupted runs, and the frontend flow that stitches ideas, MCP research, the
-knowledge graph, and the task backlog into one loop, WITHOUT the S6 agent org), and S-POLISH (a
-reliability + honesty + Tier-2-completeness consolidation slice, `[0.8.0]`: connect/OAuth
-hang-forever timeouts, storage-degradation honestly surfaced on the wire + a banner, per-verb
-structured tracing, a full **English-only** sweep enforced by a CI no-Cyrillic gate, frontend
-reliability across every mutating/read surface, and four closed feature gaps — project un-archive,
-a `metric_refs` editor, a fully editable graph, and a config-backed OAuth provider registry) are
-done, tested, and documented. **The app UI is English.** See
-[`docs/superpowers/specs/`](docs/superpowers/specs/) for the specs this implementation is derived
-from and [`docs/traceability.md`](docs/traceability.md) for the contract → test matrix.
+<p align="center">
+  <img src="docs/media/screenshot-home.svg" alt="Builder Pro AI — home screen (placeholder)" width="820">
+  <br>
+  <em>Placeholder — a real screenshot lands here before the first public release.</em>
+</p>
 
-- **Platform overview & roadmap:** [`2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md)
-- **S0+S1 spec:** [`2026-07-01-builderpro-s0s1-foundation-terminal-design.md`](docs/superpowers/specs/2026-07-01-builderpro-s0s1-foundation-terminal-design.md)
-- **S2 spec (workspace multi-root + file explorer + attention-first Home):** [`2026-07-08-s2-workspace-explorer-home-design.md`](docs/superpowers/specs/2026-07-08-s2-workspace-explorer-home-design.md)
-- **S3 spec (`bpa-orchd` + app-domain foundation):** [`2026-07-13-s3-orchd-domain-foundation-design.md`](docs/superpowers/specs/2026-07-13-s3-orchd-domain-foundation-design.md)
-- **S4 spec (knowledge graph + workspace-wide retrieval API):** [`2026-07-14-s4-knowledge-graph-design.md`](docs/superpowers/specs/2026-07-14-s4-knowledge-graph-design.md)
-- **S-EXT spec (MCP client + connectors + skills + trust layer):** [`2026-07-15-s-ext-mcp-connectors-design.md`](docs/superpowers/specs/2026-07-15-s-ext-mcp-connectors-design.md)
-- **S-IDEA spec (ideas + research pipeline):** [`2026-07-15-s-idea-research-pipeline-design.md`](docs/superpowers/specs/2026-07-15-s-idea-research-pipeline-design.md)
-- **Architecture summary:** [`docs/architecture.md`](docs/architecture.md)
-- **Contract → test traceability:** [`docs/traceability.md`](docs/traceability.md)
-- **Release build/sign/notarize runbook:** [`docs/build-macos.md`](docs/build-macos.md)
-- **Daemon ops runbooks:** [`docs/runbook-daemon.md`](docs/runbook-daemon.md) (`bpa-sessiond`) ·
-  [`docs/runbook-orchd.md`](docs/runbook-orchd.md) (`bpa-orchd`)
+> **Status: `0.8.0`, pre-1.0, macOS-only, source-available and heading open-source.** Everything
+> below the "Shipped" line is implemented, tested, and documented; everything under "Planned" is
+> not built yet and is labelled as such. No pre-built binary is published yet — you build from
+> source (see [Getting started](#getting-started)). The app UI is **English**.
 
-### Features shipped so far
+---
 
-- **Terminal engine (S1):** real PTYs, multi-terminal per workspace, OSC-133/OSC-7 shell
-  integration, sanitized scrollback replay, launchd-supervised daemon survives GUI close/crash.
-- **Protocol v2:** CBOR wire codec, `[min,max]` version negotiation, multi-subscriber attach,
-  real drain-on-upgrade with owner consent, cold-rehydrate of past sessions as inactive.
-- **Multi-root workspaces (S2):** a workspace is an ordered list of equal repo roots
-  (`Workspace.roots: Vec<String>`; `root_path` stays a compat mirror of `roots[0]`); add/remove a
-  root without recreating the workspace.
-- **File explorer + read-only preview (S2):** gitignore-aware lazy tree (`ignore` crate, `.git`
-  always hidden), a 1 MiB-capped read-only preview (binary/too-large/error render honest
-  placeholders, never a silent truncation), create/rename/move/delete (always to Trash), reveal in
-  Finder / open externally — all core-local (`src-tauri/src/fs_explorer.rs`), path-validated
-  against the active workspace's roots before any disk access.
-- **Live file watch (S2):** debounced FSEvents watch (`notify`/`notify-debouncer-full`) per active
-  root, gitignore-filtered, point-refreshing only the affected expanded tree nodes.
-- **Attention-first Home (S2):** on open, sessions waiting for input are pinned first (amber) with
-  a one-click «Go →» that jumps to and focuses that terminal, then running, then recently
-  exited (✓/✗ by exit code) — across every workspace, no polling.
-- **OSC-133 command strip (S2):** per-session recent-command chips (✓/✗ by exit code) sourced from
-  `command_events` — the first real UI consumer of that table (persisted since Pv2).
-- **Terminal file links (S2):** click a path printed in terminal output to open it in the
-  right-rail preview (regex detection + OSC-8 hyperlinks; validated against the workspace's roots
-  on click, never a silent no-op on a miss).
-- **`bpa-orchd`, the second daemon (S3):** a launchd-supervised app-domain daemon, independent of
-  `bpa-sessiond`, with its own SQLite store (`orchd.db`), its own Hop-B socket + version space
-  (`[1,1]`), and the same fail-closed migrations / drain-and-consent upgrade patterns sessiond
-  proved out (`docs/runbook-orchd.md`).
-- **Six domain entity families (S3):** Project (⇄ Workspace links), Goal (full tree — one
-  strategic root per project + arbitrary-depth additional subgoals), Idea (lifecycle
-  captured→…→shipped/archived, nullable project — quick-capture inbox), Insight (fit-verdict vs
-  goals), Task/Subtask (unified model, kanban is a future view), RuleSet (global + per-project;
-  markdown is the source of truth, DB stores `md_path`+`md_hash`) — full CRUD, invariants, and
-  cascades, plus per-project/whole-store JSON export/import with field-verbatim round-trips.
-- **Project management UI (S3):** left-rail project groups, a tabbed `ProjectPanel` (Overview · Goals
-  · Ideas · Tasks · Insights · Rules), ⌘K quick-capture for ideas, and a `HomeGoals` panel (below
-  the S2 attention queue) showing each active project's strategic goal + children.
-- **Knowledge graph (S4):** `orchd.db` schema v2 adds `graph_node`/`graph_edge` — typed nodes
-  (concept/fact/artifact/decision/note + `entityRef` soft-refs onto a goal/idea/insight/task, no
-  FK — a deleted domain entity leaves its node behind flagged `isOrphan`, rendered «source
-  deleted») and typed edges that may link nodes across DIFFERENT projects (a cross-project edge
-  survives BOTH projects' daemon restarts). A strategic-goal `entityRef` node is auto-seeded for
-  every project.
-- **Workspace-wide graph retrieval API (S4):** the S6-agent contract — `list_project_graph` (a
-  project's own nodes + incident edges + cross-project "ghost" endpoints, read-time entityRef
-  label resolution), `neighborhood` (bidirectional recursive-CTE traversal, cross-project, depth
-  capped at 6), and `search_nodes` (workspace-wide or per-project, capped at 200 rows) — NOT
-  project-scoped, so an agent working project A can query project B's knowledge. A depth-3
-  neighborhood rooted at a project's strategic goal on a synthetic 500-node/1000-edge graph
-  measures ~51 ms (DoD: <100 ms).
-- **Graph canvas (S4):** a 7th `ProjectPanel` tab, «Graph», an editable `@xyflow/react` canvas —
-  drag debounced-persists a node's position, connecting two nodes adds an edge, a toolbar
-  adds/deletes nodes and searches (a match gets an accent ring), every mutating control disabled
-  while `orchd://down`. A cross-project ghost node click navigates to its own project; a local
-  `entityRef` node click is currently an honest no-op (no deep-link seam yet into a specific
-  goal/idea/insight/task row in another tab).
-- **MCP client (S-EXT):** a server registry (add/enable/disable, global or per-project) speaking
-  both **Streamable HTTP** (remote servers, e.g. prowl.chat) and **stdio** (local child
-  processes, behind a dedicated execution-consent gate); cached tool discovery with a per-tool
-  allowlist; typed `tools/call` with per-server timeout, transport-only bounded retry, and honest
-  degradation on every terminal failure. Every successful call persists a durable, `is_untrusted`
-  artifact that survives an `bpa-orchd` restart. The app's first outbound network egress and
-  macOS Keychain surface (two new crates, `bpa-secrets` and `bpa-mcp`), entirely inside
-  `bpa-orchd` — never Hop-B, never `bpa-sessiond`.
-- **Connectors (S-EXT):** external OAuth 2.1 (PKCE, SSRF-guarded, refresh-on-expiry) or api-key
-  accounts, tokens always in Keychain, never SQLite or logs. One reference `generic-rest`
-  direct-API adapter ships; `ConnectorInvoke` shares the exact same trust + durable-artifact path
-  an MCP tool call uses.
-- **Trust layer (S-EXT, closes BL-1/BL-20/BL-22):** a single pre-dispatch choke-point in
-  `bpa-orchd` gates every connect / stdio-spawn / tool-call / connector-invoke — owner consent
-  (re-prompted on a URL or stdio-binary change), the per-tool allowlist, spend/rate policy caps
-  (most-specific scope wins; a spend cap binds only when a server actually reports cost),
-  untrusted-result tagging, and an append-only audit log (never a secret or tool argument). A
-  shared `DYLD_*`/`LD_*` env denylist now filters BOTH orchd's stdio spawn AND `bpa-sessiond`'s
-  `env_overrides`.
-- **Skills (S-EXT):** a SKILL.md-format registry (portable — matches the Claude Code convention)
-  with files-as-truth (Present/Modified/Missing). **Plumbing only** — there is no runtime
-  consumer yet (that's the S6b agent org); the «Skills» tab says so honestly.
-- **«Extensions» management UI (S-EXT):** Servers / Tools / Connectors / Log /
-  Artifacts / Skills tabs, consent dialogs, untrusted-result banners; every mutating control
-  disabled while `orchd://down`.
-- **Research pipeline (S-IDEA):** `orchd.db` schema v4 adds one net-new table, `research_run` —
-  the ResearchArtifact the roadmap named is the REUSED S-EXT `mcp_artifact` a run's tool call
-  produces, not a separate blob store. `ResearchStartRun` spawns `bpa-orchd`'s FIRST long-lived
-  background task (3-phase-locked, never holds the DB mutex across the network await); every
-  transition pushes `ResearchRunsChanged`. A boot-reconcile step flips any run still
-  `pending`/`running` at daemon start to `failed{interrupted}` — the crash/restart safety net a
-  detached background task otherwise lacks — and the shipped MCP connect/`initialize` handshake is
-  now bounded by the same per-server timeout as the call itself (a hang-forever fix that benefits
-  every MCP call). **Owner-driven fit-verdict — no LLM:** S6a (the native LLM provider layer) is
-  not built, so `fit_verdict`/`fit_reasoning` are set by the owner beside a fit-context panel
-  (goals+metrics + a graph-neighborhood read); LLM-computed scoring is filed to backlog for S6a,
-  never silently claimed as done.
-- **Idea research flow UI (S-IDEA):** per idea, «Research» → `ResearchRunDialog` (pick a
-  connected MCP server + tool + args, a spend-approval preflight) → `ResearchPane` (run status;
-  a done run reuses the S-EXT artifact viewer + «unverified data» banner — NOT
-  token-streaming, an honest scope line since MCP `tools/call` is request/response) →
-  `FormInsightDialog` (fit-context beside owner-set fit-verdict, accept graph-ingests the insight)
-  → «To backlog» forms a task. `SpawnProjectFromIdea` closes BL-56 (spawn-project-from-idea UI, an
-  S3-deferred flow) — pure frontend orchestration over existing verbs, no new orchd verb. Every
-  mutating control disabled while `orchdDown`.
-- **English-only UI + a CI-enforced gate (S-POLISH, O-2):** every webview string routes through
-  `src/strings.ts` (English) and every living doc is English; `scripts/check-english.sh` fails the
-  build on any Cyrillic outside a closed frozen-record allowlist (stage 1 of `final-suite.sh`).
-- **Reliability + honesty (S-POLISH, BL-89..97):** `McpConnect` + OAuth token-exchange are now
-  timeout-bounded (no single hung endpoint can wedge orchd's sequential dispatch); import writes
-  ruleset files only after commit (no orphan on rollback); a `StorageBanner` honestly surfaces the
-  two non-persistent storage modes (in-memory fallback / recovered-from-corruption) the wire now
-  carries via `GetStorageStatus`; `useSubmitGuard` kills double-submits on every mutating control;
-  toasts are a FIFO queue with manual dismiss; reconnect rehydrates every live slice; and a
-  cancelled orchd upgrade is reopenable. Per-verb structured completion tracing
-  (`verb`/`outcome`/`error_code`/`elapsed_ms`, no secrets) is added at one choke-point per dispatch
-  layer.
-- **Tier-2 feature completeness (S-POLISH):** project **un-archive** (`UnarchiveProject` — no more
-  one-way archive trap, closes BL-53) with sidebar/banner controls; a **`metric_refs` chip editor**
-  on goals; a fully **editable knowledge graph** (a `GraphUpdateEdge` edge-kind verb + a node
-  title/body form + inline rename); and a **config-backed OAuth provider registry**
-  (`<app-support>/oauth_providers.json`, honest missing/malformed degradation, provider names only
-  on the wire via `ConnectorListProviders`) that makes the OAuth connector flow reachable. All
-  additive — orchd's wire version space stays `[1,1]`; no schema migration.
+## Table of contents
 
-## Principles
+- [Why](#why)
+- [Highlights](#highlights)
+- [Getting started](#getting-started)
+- [Running the tests](#running-the-tests)
+- [Architecture](#architecture)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Maintaining this README](#maintaining-this-readme)
+- [License](#license)
+- [Documentation index](#documentation-index)
 
-- **Production-grade, no MVP half-states.** Each slice is finished: tests (TDD), error handling
-  and honest degradation, structured logging, and docs are part of Definition of Done.
-- **Max autonomy, min human-in-the-loop.** Humans set goals and quality; agents decide the rest.
-- **Honest about boundaries.** The app never lies about session/agent state.
+---
 
-## Architecture
+## Why
 
-**Three OS processes, two independent Hop-B connections** (as of S-IDEA, `[0.7.0]`): the GUI app
-and TWO launchd-supervised daemons — `bpa-sessiond` (terminal domain) and `bpa-orchd` (app
-domain: projects/goals/ideas/insights/tasks/rulesets, a knowledge graph as of S4, an MCP client +
-connectors + skills registry as of S-EXT — the app's first outbound network egress and Keychain
-surface — and, as of S-IDEA, a research pipeline: `research_run` schema v4 + orchd's first
-long-lived background run driver, reusing the S-EXT MCP path, not a new egress). The diagram below
-shows the terminal-domain half only (`bpa-sessiond`'s daemon owns every PTY so the GUI can close,
-crash, or restart without
-killing a running shell — tmux/re-attach model; File I/O + live watch (S2) live in the Tauri core
-instead — GUI-lifetime, never over Hop-B, so the daemon's charter stays terminal-domain only) —
-full detail on BOTH daemons (incl. the three-rail UI and the two-daemon topology) in
-[`docs/architecture.md`](docs/architecture.md).
+Running several projects through AI coding agents at once is a context problem, not a typing
+problem. Goals drift, each project sits at a different stage, and you degrade into polling
+terminals and pressing buttons. Builder Pro AI's north stars:
 
-```
-┌──────────────────────── Builder Pro AI.app ────────────────────────┐
-│  React webview (UI)                Rust core (broker)               │
-│  • xterm panes (⌂ Home |           • #[tauri::command] surface      │
-│    workspace | FILES rail)         • fs_explorer.rs (listDir/       │
-│  • workspace sidebar      ◄──Hop A──►  preview/create/rename/       │
-│  • status dots             Tauri IPC   move/delete→Trash/reveal)    │
-│  • Zustand (metadata only)         • fs_watcher.rs (FSEvents watch) │
-│                                     • UDS client to daemon          │
-│                                     • app settings (tauri-plugin-store)│
-└───────────────────────────────────│────────────────────────────────┘
-                                     │ Hop B: Unix domain socket
-                                     │ (codec-agnostic preamble handshake, then u32-LE length
-                                     │  prefix + CBOR Frame)
-                          ┌──────────▼────────────┐
-                          │  bpa-sessiond (daemon) │ ◄─ launchd LaunchAgent
-                          │  • PTY supervisor      │    (KeepAlive{Crashed:true})
-                          │  • OSC-133 parser + SM │
-                          │  • sanitized byte ring │   owns ALL PTYs +
-                          │  • alacritty live grid │   ALL durable terminal-
-                          │  • rusqlite (WAL,       │   domain state (incl.
-                          │    workspace roots,     │   multi-root workspaces,
-                          │    command_events)      │   command_events) — NEVER
-                          └──────────┬─────────────┘   file content
-                     PTYs via portable-pty (child setsid'd, own pgrp)
-                          ┌──────────▼─────────────┐
-                          │ zsh / bash / agent CLI │
-                          └────────────────────────┘
-```
+1. **Time-to-context on app open** — full picture of every project in **< 30 s**.
+2. **Owner interventions per shipped task → 1** — the one approval that actually matters.
+3. **Unattended progress** — hours of agent work without stalling on a button.
 
-`launchd` — not Tauri — owns each daemon's lifecycle: the app bundles `bpa-sessiond` AND
-`bpa-orchd` (S3) as signed `externalBin` sidecars, and a per-user `LaunchAgent`
-(`KeepAlive.Crashed = true`) supervises each process. The GUI only ever holds a socket connection
-to each, never a process handle.
+Design tenets the whole codebase is held to:
 
-## Survival truth table (spec §13)
+- **Production-grade, no MVP half-states.** Every slice ships finished — TDD tests, error handling
+  + honest degradation, structured logging, and docs are part of Definition of Done.
+- **Max autonomy, min human-in-the-loop.** Humans set goals and quality; agents self-decide
+  wherever they safely can.
+- **Honest about state.** The app never fakes session or agent status, and never claims durability
+  it doesn't have.
+- **Additive, constructor-style growth.** The system grows cube-by-cube; schema and architecture
+  extend by addition, never rebuild.
 
-| Event | Sessions (`bpa-sessiond`) |
-|---|---|
-| GUI close / crash / restart | Live shells **keep running** (daemon-owned) — reattach + scrollback replay |
-| Daemon restart / upgrade / crash | Live shells **end**; session records + scrollback survive (up to the last ~1 s flush) and rehydrate as **inactive** sessions |
-| **macOS logout** | Sessions **die** — the per-user LaunchAgent is torn down with the login session |
-| **`bpa-orchd` restart / upgrade (S3, `[0.4.0]`; graph added S4, `[0.5.0]`; MCP/connectors/skills added S-EXT, `[0.6.0]`; research pipeline added S-IDEA, `[0.7.0]`)** | Domain data (projects/goals/ideas/insights/tasks/rules) **fully survives** — it's all SQLite (`orchd.db`). Through S-EXT there was no live runtime state to lose at all (no scheduler/workflow/agent runtime yet — those are roadmap, SW1/SW2/S6b+); **S-IDEA changes that honestly**: `ResearchStartRun` spawns orchd's first long-lived background task, so a run genuinely IN FLIGHT (status `running`) when the daemon stops is real live state that does NOT survive the way a SQLite row does. The fix is a boot-reconcile step, not a claim that nothing was lost: any run still `pending`/`running` at daemon start is flipped to `failed{interrupted}` (D11) — the owner re-runs, and every OTHER row (the run's own history, the idea, any insight/task formed before the interruption) is ordinary SQLite and survives untouched. A run that reaches `done` *before* a restart survives completely, artifact included (phase 8 below); a run interrupted mid-flight reconciles to an honest `failed`, never a stuck `running` row (phase 9 below). The S4 knowledge graph is the same durable-store guarantee: a graph edge that links nodes in TWO DIFFERENT projects survives a restart intact on BOTH sides (proven by `npm run e2e:orchd` phase 5 below). S-EXT extends the same guarantee to MCP tool results and connector-invoke results: both persist as a durable `is_untrusted` artifact that survives a restart (phases 6/7 below) — the account/server rows themselves are ordinary SQLite too; only the secret bytes (Keychain) live outside `orchd.db`, independent of the daemon's own lifecycle |
+## Highlights
 
-This is an honest boundary, not a bug: any daemon stop (restart, upgrade, or crash) takes its live
-child processes down with it — now including an in-flight research run, boot-reconciled to
-`failed{interrupted}` rather than lost or left stuck — and logging out tears down every per-user
-LaunchAgent along with everything it supervises. What *does* survive — GUI restart with live
-shells, daemon restart for records + scrollback (rehydrated as inactive), and `bpa-orchd` restart
-for every domain row (incl. the graph and every research-run row, terminal state included) — is
-stated in the table above.
-`npm run e2e:survive` proves the sessiond half end-to-end: phases 0-4 the client-restart half,
-phase 5 the daemon-restart half (SIGTERM-equivalent drain → relaunch → rehydrated inactive +
-scrollback intact — Pv2 §9.8, closes BL-7 in [`docs/backlog.md`](docs/backlog.md)).
-`npm run e2e:orchd` proves the orchd half: create data → drain-restart → data intact →
-export → wipe the DB → re-import → re-export equals the original (S3 spec §12); phase 5 (S4)
-creates a cross-project graph edge, restarts the daemon, and asserts it survives on both projects'
-sides — the S4 spec §8 DoD proof. Phase 6 (S-EXT) registers a local stub MCP server, connects,
-calls a tool, restarts the daemon, and asserts the resulting artifact survived; phase 7 (S-EXT)
-does the connector-shaped analogue (an api-key `generic-rest` account, `ConnectorInvoke` against a
-local stub, restart, artifact survives) — gracefully SKIPPED (never a silent pass) if the runner's
-login Keychain is locked/unavailable. Phase 8 (S-IDEA) runs the full idea→research→insight→task
-loop against a local stub research server, restarts the daemon, and asserts every row (including
-the `done` run + its artifact) survives — the roadmap DoD proof. Phase 9 (S-IDEA) starts a run
-against a BLOCKING stub, shuts the daemon down while the run is still `running`, and asserts
-boot-reconcile flips it to `failed{interrupted}` on restart (D11 proof).
+What works today (`0.8.0`):
 
-## Quickstart
+- 🖥️ **Daemon-owned terminals** — real PTYs supervised by `launchd`, so live shells survive the GUI
+  closing, crashing, or restarting (tmux-style reattach + sanitized scrollback replay). OSC-133/OSC-7
+  shell integration drives status; a command strip shows recent commands with pass/fail.
+- 🗂️ **Multi-root workspaces + file explorer** — a workspace is an ordered list of equal repo roots;
+  a gitignore-aware lazy file tree with read-only preview and debounced live FSEvents watch, all
+  path-validated against the active roots.
+- 🎯 **App-domain store** (`bpa-orchd`, a second daemon) — Projects, Goals (full tree), Ideas,
+  Insights, Tasks/Subtasks, and RuleSets, with full CRUD, invariants, cascades, and per-project /
+  whole-store JSON export–import that round-trips field-for-field.
+- 🕸️ **Cross-project knowledge graph** — typed nodes and edges, soft-references onto domain rows,
+  edges that link *different* projects and survive both projects' restarts, an editable
+  `@xyflow/react` canvas, and a workspace-wide retrieval API (the contract the future agent org
+  consumes).
+- 🔌 **Extensions (MCP + connectors + skills)** — an MCP client speaking Streamable HTTP and stdio,
+  OAuth 2.1 (PKCE) / api-key connector accounts with tokens in the macOS Keychain, a SKILL.md
+  registry, and a trust layer (consent, per-tool allowlist, spend/rate caps, untrusted-tagging,
+  append-only audit) gating every outbound call.
+- 💡 **Idea → research → insight → task pipeline** — quick-capture (⌘K), run research through a
+  connected MCP tool with a spend preflight, review the durable artifact, form an owner-evaluated
+  insight against goals + graph context, and drop a task into the backlog — end-to-end, without an
+  agent org.
+- 🧭 **Attention-first Home** — sessions waiting for input pinned first with one-click jump, then
+  running, then recently exited, across every workspace, with no polling.
+- 🛡️ **Reliability + honesty baked in** — timeout-bounded external calls (no single hung endpoint
+  wedges the daemon), honest storage-degradation banners, double-submit guards on every mutation, a
+  toast queue, reconnect that rehydrates every view, and per-verb structured tracing.
+
+The full feature log (every slice, contract, and scope line) lives in
+[`docs/architecture.md`](docs/architecture.md) and the [Roadmap](#roadmap) below; the
+contract → test matrix is [`docs/traceability.md`](docs/traceability.md).
+
+## Getting started
+
+**Prerequisites**
+
+- **macOS** (Apple Silicon or Intel) — this is a macOS-only app (PTYs, `launchd`, Keychain,
+  FSEvents).
+- **Rust** (stable; the repo pins a toolchain via `rust-toolchain.toml`) — <https://rustup.rs>
+- **Node.js 24+** and npm (enforced via `package.json` `engines`).
+- Xcode Command Line Tools (`xcode-select --install`).
+
+**Run it in dev mode**
 
 ```sh
-# Prerequisites
+# 1. Clone + install JS deps
+git clone https://github.com/ssheleg/builder-pro-ai.git
+cd builder-pro-ai
 npm install
+
+# 2. Make sure cargo is on PATH, add the macOS targets
 export PATH="$HOME/.cargo/bin:$PATH"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-# Build BOTH daemons first — dev mode (`npm run tauri dev`) resolves each daemon binary as a
-# sibling of the running core binary (target/debug/), so building each with `cargo build -p`
-# is enough for dev; it fails with an actionable error if either is missing:
+# 3. Build BOTH background daemons (the app talks to them over a Unix socket)
 cargo build -p bpa-sessiond -p bpa-orchd
 
-# BOTH daemons are declared in tauri.conf.json's `externalBin`, so Tauri's build.rs requires
-# BOTH staged under src-tauri/binaries/ (target-triple suffix) even for `tauri dev` in a fresh
-# checkout — stage each one:
+# 4. Stage the daemon binaries where Tauri's build expects them
+#    (both are declared as externalBin sidecars, so build.rs needs both, even in dev)
 mkdir -p src-tauri/binaries
 TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
 cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$TRIPLE"
-cp target/debug/bpa-orchd "src-tauri/binaries/bpa-orchd-$TRIPLE"
+cp target/debug/bpa-orchd    "src-tauri/binaries/bpa-orchd-$TRIPLE"
 
-# Run the app in dev mode
+# 5. Launch the app (Vite dev server + Tauri window)
 npm run tauri dev
+```
 
-# Run the full test + traceability + coverage + e2e gate (spec §14.3 Definition of Done)
-bash scripts/final-suite.sh
+On first launch the app installs and supervises the two daemons via per-user `launchd`
+LaunchAgents; they keep your terminals and app data alive across GUI restarts. Ops details:
+[`docs/runbook-daemon.md`](docs/runbook-daemon.md) (terminals) and
+[`docs/runbook-orchd.md`](docs/runbook-orchd.md) (app domain).
 
-# Build a signed, notarized, universal release .app (see docs/build-macos.md for credentials).
-# BOTH daemons ship in the bundle: `scripts/build-universal.sh` builds bpa-sessiond AND bpa-orchd
-# for arm64 + x86_64, lipo-merges each, and Tauri embeds both signed sidecars (BL-59, closed).
+**Build a release `.app`**
+
+```sh
+# Universal (arm64 + x86_64), signed + notarized when Apple credentials are present;
+# degrades honestly to a dev-signed build (and says so) when they aren't.
 bash scripts/build-universal.sh
 ```
 
+Full release runbook — credentials, signing, notarization, clean-VM smoke test:
+[`docs/build-macos.md`](docs/build-macos.md).
+
 ## Running the tests
 
-| Suite | Command | What it covers |
+One command runs the whole gate (the same 10 stages CI runs):
+
+```sh
+bash scripts/final-suite.sh   # → "ALL GATES PASSED"
+```
+
+| Suite | Command | Covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | three daemons/daemon-adjacent crates (`bpa-sessiond`, `bpa-orchd`, `bpa-daemon-core`), the MCP client + Keychain wrapper (`bpa-mcp`, `bpa-secrets`), shared protocols (`bpa-protocol`, `bpa-orchd-proto`), path validation (`bpa-paths`), Tauri core (`builder-pro-ai`) — **1062 tests** as of the last full run (S-POLISH, `[0.8.0]`), 0 failed. A handful of `bpa-orchd`/`bpa-secrets` tests touch the real macOS Keychain (connector/MCP-bearer round-trips) and can hit a one-time ACL-prompt stall on a fully headless runner with no prior Keychain interaction in that session — a pre-existing S-EXT-era environment quirk, not a code defect; CI's keychain-unlock step (S-EXT T19) covers it |
-| TypeScript | `npx vitest run` (or `npm test`) | Zustand store (incl. `domainSlice`/`graphByProject`/`researchRunsByIdea`), terminal-manager (attach state machine), IPC wrappers (incl. `orchd.ts`), the `useSubmitGuard` double-submit hook, components (incl. `ProjectPanel`/`GoalTree`/`IdeasList`/`TasksList`/`InsightsList`/`RulesetPanel`/`QuickCapture`/`HomeGoals`/`GraphCanvas`/`graphMapping`/`StorageBanner`/`OrchdUpgradeBanner`/the `ext/` «Extensions» components/the `idea/` research-flow components), and the English `strings.ts` centralization — **870 tests, 51 files** (S-POLISH, `[0.8.0]`), 0 failed |
-| End-to-end (sessiond) | `npm run e2e:survive` | create terminal → run a command → observe OSC-driven status → quit the CLIENT → daemon+shell survive → reattach + scrollback intact (phases 0-4, the core S1 promise, spec §14.1); phase 5 restarts the DAEMON itself and asserts rehydrated inactive sessions + scrollback (Pv2 §9.8, closes BL-7) |
-| End-to-end (orchd) | `npm run e2e:orchd` | boot on a temp HOME → handshake `[1,1]` → create a project (+2 goals, an idea, a task) → `OrchdShutdown{drain:true}` → relaunch → data intact → `ExportAll` → shutdown → delete `orchd.db*` → relaunch (fresh v1) → `ImportBundle` → re-export equals the original modulo `exportedAt` (S3 spec §12 — the roadmap DoD proof); phase 5 creates two projects + a cross-project graph edge, restarts the daemon, and asserts the edge survives on both projects' sides (S4 spec §8 DoD proof); phase 6 registers a local stub MCP server, connects, calls a tool, restarts, and asserts the artifact survived (S-EXT spec §9 Phase-1 DoD); phase 7 does the connector-invoke analogue against a local stub, gracefully skipping on a Keychain-unavailable runner (S-EXT spec §9 Phase-2 DoD); phase 8 (S-IDEA) drives the whole idea→research→insight→task loop against a local stub research server, restarts the daemon, and asserts every row survives (S-IDEA spec §8, the roadmap DoD proof); phase 9 (S-IDEA) starts a run against a BLOCKING stub, shuts the daemon down mid-run, and asserts boot-reconcile flips it to `failed{interrupted}` on restart (S-IDEA spec D11) |
-| Coverage gate | `bash scripts/coverage-gate.sh` | `cargo llvm-cov --package bpa-sessiond --fail-under-lines 80` AND `cargo llvm-cov --package bpa-orchd --fail-under-lines 80` — real, enforcing ≥80% line-coverage gates on BOTH daemon crates (requires `cargo install cargo-llvm-cov`) |
-| Everything, in order | `bash scripts/final-suite.sh` | 10 stages: English-only gate (`scripts/check-english.sh` — no Cyrillic outside the frozen-record allowlist) → Rust suite → clippy `-D warnings` → `cargo fmt --check` → TS suite → `tsc --noEmit` → ts-rs type-parity diff (`bpa-protocol` + `bpa-orchd-proto`) → coverage gate (both daemons) → e2e:survive → e2e:orchd; exits 0 with `ALL GATES PASSED` only if every stage passes. CI runs the same set (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); daemon ops live in [`docs/runbook-daemon.md`](docs/runbook-daemon.md) / [`docs/runbook-orchd.md`](docs/runbook-orchd.md) |
+| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1062 tests** (`0.8.0`) |
+| TypeScript | `npx vitest run` | store, IPC, hooks, and every UI component — **870 tests, 51 files** (`0.8.0`) |
+| e2e (terminals) | `npm run e2e:survive` | create → run → status → quit client → daemon+shell survive → reattach + scrollback |
+| e2e (app domain) | `npm run e2e:orchd` | create → drain-restart → data intact → export → wipe → re-import → graph/MCP/research survival |
+| Coverage gate | `bash scripts/coverage-gate.sh` | ≥80% line coverage on both daemon crates (needs `cargo install cargo-llvm-cov`) |
+| English-only gate | `bash scripts/check-english.sh` | fails on any Cyrillic outside the frozen-record allowlist |
 
-See [`docs/traceability.md`](docs/traceability.md) for the full contract → test matrix (every
-locked spec §14.2 contract mapped to the concrete test(s) proving it), and
-[`tests/e2e/README.md`](tests/e2e/README.md) for the three fidelity levels of the survive-restart
-proof (socket harness, launchd-managed variant, full-GUI manual/CI confirmation).
+Every locked spec contract maps to a concrete test in [`docs/traceability.md`](docs/traceability.md).
 
-## Building a release
+## Architecture
 
-See [`docs/build-macos.md`](docs/build-macos.md) for the full runbook: prerequisites, Apple
-Developer credential setup, the `build-universal.sh` → `sign-verify.sh` → `smoke-clean-vm.sh`
-pipeline, and its honest-degradation behavior when signing/notarization credentials aren't present
-(builds a dev-signed artifact and says so loudly, rather than silently claiming a notarized result).
+Three OS processes, two independent daemons:
+
+```
+┌──────────────── Builder Pro AI.app ────────────────┐
+│  React webview (UI)          Rust core (broker)     │
+│  • terminal panes            • #[tauri::command]s    │
+│  • workspace / files rail    • file explorer + watch │
+│  • project / graph panels    • Unix-socket clients   │
+└───────────────┬───────────────────┬─────────────────┘
+                │ Hop B (CBOR)       │ Hop B (CBOR)
+      ┌─────────▼────────┐  ┌────────▼─────────────────┐
+      │  bpa-sessiond    │  │  bpa-orchd               │
+      │  terminal domain │  │  app domain: projects,   │
+      │  • PTY supervisor│  │  goals, ideas, insights, │
+      │  • OSC parser    │  │  tasks, rules, knowledge │
+      │  • SQLite (WAL)  │  │  graph, MCP client,      │
+      └──────────────────┘  │  connectors, research    │
+   launchd-supervised       │  • SQLite (orchd.db)     │
+                            └──────────────────────────┘
+              both launchd-supervised sidecars
+```
+
+- **`bpa-sessiond`** owns every PTY and durable terminal state, so the GUI can die without killing
+  a running shell.
+- **`bpa-orchd`** owns the app domain (projects/goals/ideas/insights/tasks/rules), the knowledge
+  graph, the MCP client + connectors + skills, and the research pipeline — the app's only outbound
+  network egress and Keychain surface.
+- The **Tauri core** is a thin broker: `#[tauri::command]` surface, the file explorer + live watch
+  (GUI-lifetime, never over the socket), and a Unix-socket client to each daemon.
+
+Full detail — the two-daemon topology, the wire protocol, the survival table, the three-rail UI —
+is in [`docs/architecture.md`](docs/architecture.md).
+
+## Roadmap
+
+Builder Pro AI grows one self-contained slice at a time; each ships production-grade before the
+next starts. Versions are the git tags in [`CHANGELOG.md`](CHANGELOG.md).
+
+### Shipped
+
+| Version | Slice | What landed |
+|---|---|---|
+| `0.2.0` | Protocol v2 | CBOR wire, `[min,max]` version negotiation, multi-subscriber attach, drain-on-upgrade, cold-rehydrate |
+| `0.3.0` | Workspace + files (S2) | multi-root workspaces, file explorer + read-only preview + live watch, attention-first Home, command strip, terminal file links |
+| `0.4.0` | App-domain store (S3) | the `bpa-orchd` daemon + Projects/Goals/Ideas/Insights/Tasks/RuleSets, CRUD + export/import, ⌘K capture |
+| `0.5.0` | Knowledge graph (S4) | typed cross-project graph, workspace-wide retrieval API, editable `@xyflow/react` canvas |
+| `0.6.0` | Extensions (S-EXT) | MCP client (HTTP + stdio), OAuth/api-key connectors, skills registry, trust layer, Keychain |
+| `0.7.0` | Research pipeline (S-IDEA) | `research_run` + async run driver + boot-reconcile, idea→research→insight→task UI |
+| `0.8.0` | Reliability + English + Tier-2 (S-POLISH) | timeouts, storage-degradation honesty, per-verb tracing, full English-only sweep + CI gate, project un-archive, `metric_refs` editor, editable graph, OAuth registry |
+
+### Planned (not built yet)
+
+The next arc is the **agent org** — the meta-agents that decide *what* to build and drive the
+terminals — plus the surfaces that feed and observe them. In dependency order:
+
+- **S5 — Kanban view** over the Task entity (drag-persist, live agent-driven moves).
+- **S6a — LLM provider layer** — provider trait, OpenRouter/OpenAI/GLM adapters, tool-calling,
+  routing/fallback/streaming, per-call cost capture. (Unblocks owner-evaluated → LLM-evaluated
+  insight fit-scoring.)
+- **SW1 — Workflow engine** (workflow-as-data): versioned definitions, typed steps, run-observability.
+- **S6b — Agent runtime** — the CEO→PM→engineer loop as the default workflow; PM gap-analysis on a
+  real repo; runs survive GUI + daemon restarts.
+- **S6c — Approval inbox** — one generic gate for escalations, human-approval steps, and policy
+  gates, batched across all projects.
+- **SW2 / SW3 — Scheduler + triggers, and a visual workflow editor.**
+- **S6d / S6e — External worker adapters** (per-CLI stuck detection) and **custom-agent authoring**.
+- **S7 — Stats/observability**, **S8 — Metrics ingestion → sprint planning**,
+  **S9a/S9b — Telemetry ingestion + deploy/verify** (the self-heal loop).
+- **SH — Mission-control home** (capstone): six lanes per project, live agent feed, "what moved"
+  deltas, hot-questions inbox.
+
+Near-term polish tracked in [`docs/backlog.md`](docs/backlog.md) (e.g. a real PTY trailing-output
+drain fix behind the `BL-40` test flake, LLM fit-scoring, token-streaming research, semantic graph
+retrieval). The canonical, always-current roadmap with dependencies is
+[`docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md).
+
+## Contributing
+
+Contributions are welcome. Before opening a PR:
+
+1. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the process rules (branching, commit style,
+   Definition of Done).
+2. Run `bash scripts/final-suite.sh` locally — it must print `ALL GATES PASSED` (the same gate CI
+   enforces).
+3. Keep to the tenets: production-grade only (tests + error handling + docs in the same change),
+   **English** everywhere (the CI no-Cyrillic gate enforces it), and honesty about scope (label
+   anything not finished, never claim it as done).
+
+Bug reports and feature ideas go in GitHub Issues; larger designs start from a short spec in
+`docs/superpowers/specs/` before code.
+
+## Maintaining this README
+
+This README is the project's front door — treat it as a maintained artifact, not a one-time write.
+Rules for keeping it correct:
+
+1. **Truth over polish.** Every claim must be real *right now*. If something isn't built, it lives
+   under **Planned** and is labelled as such — never write a planned feature in the present tense.
+   Honesty about state is a project tenet, and it applies to the README first.
+2. **Update it in the same change that changes reality.** When a slice ships: bump the version
+   badge, move its row from **Planned** to **Shipped**, refresh the [Highlights](#highlights) if a
+   headline capability changed, and update the version in the status note under the title. A README that
+   lags the code is a bug.
+3. **Never guess numbers.** Test counts, versions, and coverage figures are *measured*
+   (`cargo test --workspace`, `npx vitest run`), then written — not recalled or estimated.
+4. **Keep the quick start runnable.** If a build/run step changes (a new sidecar, a new script, a
+   toolchain bump), fix [Getting started](#getting-started) in the same PR and verify the steps on
+   a clean checkout.
+5. **English only.** Same rule as the rest of the repo; `scripts/check-english.sh` covers this file
+   too.
+6. **Keep the screenshot current.** Replace [`docs/media/screenshot-home.svg`](docs/media/) with a
+   real capture, and re-capture it when the UI meaningfully changes.
+7. **Link, don't duplicate.** Deep detail lives in `docs/` and the specs; the README summarizes and
+   links, so there's one source of truth to keep in sync.
+
+## License
+
+**To be finalized before the first public release.** The intent is an open-source license; the
+`LICENSE` file and the badge above will be added once the license is chosen by the project owner.
+Until then, treat this repository as source-available (all rights reserved). If you want to build
+on it in the meantime, open an issue.
+
+## Documentation index
+
+- **Platform overview & roadmap:** [`2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md)
+- **Architecture summary:** [`docs/architecture.md`](docs/architecture.md)
+- **Contract → test traceability:** [`docs/traceability.md`](docs/traceability.md)
+- **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)
+- **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **Frontend conventions:** [`docs/frontend-conventions.md`](docs/frontend-conventions.md)
+- **Daemon ops runbooks:** [`docs/runbook-daemon.md`](docs/runbook-daemon.md) · [`docs/runbook-orchd.md`](docs/runbook-orchd.md)
+- **Release build/sign/notarize:** [`docs/build-macos.md`](docs/build-macos.md)
+- **Backlog:** [`docs/backlog.md`](docs/backlog.md)
+- **Per-slice specs:** [`docs/superpowers/specs/`](docs/superpowers/specs/)

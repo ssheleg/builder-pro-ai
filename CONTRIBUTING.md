@@ -12,6 +12,16 @@ under `docs/superpowers/{specs,plans,research}` and `docs/qa/` (listed exactly i
 retroactively rewriting them would falsify history. Every **new** file, anywhere, must be English:
 the allowlist is a closed list of exact paths, so anything new is enforced automatically.
 
+## Docs & the README
+
+Docs are part of Definition of Done — update them in the same change that changes reality, never as
+a follow-up. The [`README.md`](README.md) is the project's front door and has its own
+[**Maintaining this README**](README.md#maintaining-this-readme) rules (truth over polish, move
+shipped slices out of *Planned*, measure numbers instead of guessing, keep the quick start runnable
+on a clean checkout). When a slice ships, its PR updates the README roadmap + version, the
+[`CHANGELOG.md`](CHANGELOG.md), the roadmap in the platform overview, and
+[`docs/traceability.md`](docs/traceability.md) alongside the code.
+
 ## Dev setup
 
 - **Rust:** the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml) (stable 1.92 +
