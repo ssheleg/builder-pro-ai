@@ -3,6 +3,7 @@
 [![ci](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml)
 [![version](https://img.shields.io/badge/version-0.8.0-blue)](CHANGELOG.md)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](docs/build-macos.md)
+[![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
 [![built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
 
 **A macOS control panel that takes an idea to a working project and keeps the whole vibecoding
@@ -23,7 +24,7 @@ Built with **Tauri 2** (Rust core + React 19 / TypeScript UI). Ships as a univer
   <em>Placeholder — a real screenshot lands here before the first public release.</em>
 </p>
 
-> **Status: `0.8.0`, pre-1.0, macOS-only, source-available and heading open-source.** Everything
+> **Status: `0.8.0`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
 > below the "Shipped" line is implemented, tested, and documented; everything under "Planned" is
 > not built yet and is labelled as such. No pre-built binary is published yet — you build from
 > source (see [Getting started](#getting-started)). The app UI is **English**.
@@ -291,10 +292,15 @@ Rules for keeping it correct:
 
 ## License
 
-**To be finalized before the first public release.** The intent is an open-source license; the
-`LICENSE` file and the badge above will be added once the license is chosen by the project owner.
-Until then, treat this repository as source-available (all rights reserved). If you want to build
-on it in the meantime, open an issue.
+Licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)** — a source-available license
+that lets anyone use, copy, modify, and share the software for any **noncommercial** purpose
+(personal, research, education, hobby, nonprofit, government), while reserving commercial use.
+
+This is a **source-available / noncommercial** license, not an OSI-approved "open source" license —
+OSI open source disallows field-of-use restrictions like "no commercial use," and this project
+deliberately keeps that restriction. Full terms in [`LICENSE`](LICENSE).
+
+**Want to use it commercially?** Open an issue to discuss a commercial license.
 
 ## Documentation index
 
