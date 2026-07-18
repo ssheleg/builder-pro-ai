@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { readTheme, setThemePref, type Theme } from "../ui/theme";
+import { classifyError, scrubSecrets, pushCapped, DIAG_CAP, type DiagEvent } from "../ipc/diag";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
@@ -314,6 +315,24 @@ export interface AppState {
    * cancels it when the queue empties, so a stale timer can never clear a later toast. */
   dismissToast: () => void;
 
+  /**
+   * S-DIAG diagnostics ring (newest-first, capped at `DIAG_CAP`). Every recorded failure lands here
+   * so the operator can RECONSTRUCT a cause after the transient toast is gone (`DiagnosticsPanel`
+   * renders it). Secret-scrubbed at record time; survives only for the session (in-memory). */
+  diagEvents: DiagEvent[];
+  /**
+   * Record a failure AND surface it: classify `e` (`./ipc/diag`), scrub its detail, push a
+   * `DiagEvent`, `console.error` a structured breadcrumb, and `showToast` the human message — the
+   * ONE place an async/IPC failure is both logged and shown. Returns the shown message so a caller
+   * can reuse it (e.g. inline error text). `op` is the logical operation name (`"refreshProjects"`). */
+  reportError: (op: string, e: unknown) => string;
+  /** Clear the diagnostics ring (the panel's "Clear" action). */
+  clearDiag: () => void;
+  /** Record a React render crash caught by `ErrorBoundary` as a `kind:"render"` diag event (message
+   * + scrubbed component stack), so a white-screen has a reconstructable cause. Does NOT toast — the
+   * boundary already shows a full recovery card in place of the crashed subtree. */
+  recordRenderCrash: (error: Error, componentStack: string) => void;
+
   /** Re-fetch `projects` wholesale from orchd (`orchd_list_projects` has no filter). The
    * `orchd://projects-changed` handler (App.tsx) and T18's project UI both call this directly —
    * a failure shows the mapped honest message as a toast (spec §7) rather than being swallowed. */
@@ -411,6 +430,10 @@ const TOAST_AUTO_DISMISS_MS = 4000;
  * unboundedly, so the queue never holds more than this many pending notices. */
 const TOAST_QUEUE_CAP = 5;
 
+// Monotonic per-session id for diagnostics events (module scope so it survives store re-creation in
+// a single session; not persisted). Not `Math.random`/`Date.now`-based so ids stay stable + ordered.
+let diagSeq = 0;
+
 export const useAppStore = create<AppState>((set, get) => {
   // Toast auto-advance bookkeeping (closure state, not store state — it's write-only plumbing,
   // like terminal-manager's attachGeneration guard). A single timer drives the visible head; it is
@@ -474,6 +497,7 @@ export const useAppStore = create<AppState>((set, get) => {
     storageStatus: null,
     toast: null,
     toastQueue: [],
+    diagEvents: [],
 
     upsertSession: (meta) =>
       set((s) => ({ sessions: { ...s.sessions, [meta.id]: meta } })),
@@ -611,6 +635,39 @@ export const useAppStore = create<AppState>((set, get) => {
       else clearToastTimer();
     },
 
+    reportError: (op, e) => {
+      const message = describeOrchdError(e);
+      const { kind, detail } = classifyError(e);
+      const event: DiagEvent = {
+        id: ++diagSeq,
+        ts: Date.now(),
+        op,
+        kind,
+        message,
+        detail: detail ? scrubSecrets(detail) : null,
+      };
+      set((s) => ({ diagEvents: pushCapped(s.diagEvents, event, DIAG_CAP) }));
+      // A structured, secret-scrubbed devtools breadcrumb IN ADDITION to the ring + toast — so a
+      // failure is reconstructable from the console too, never console-only (spec §7).
+      console.error(`[diag] ${op} (${kind}): ${message}`, event.detail ?? "");
+      get().showToast(message);
+      return message;
+    },
+    clearDiag: () => set({ diagEvents: [] }),
+
+    recordRenderCrash: (error, componentStack) => {
+      const event: DiagEvent = {
+        id: ++diagSeq,
+        ts: Date.now(),
+        op: "render",
+        kind: "render",
+        message: scrubSecrets(error.message || "render error"),
+        detail: componentStack ? scrubSecrets(componentStack.trim().split("\n").slice(0, 6).join("\n")) : null,
+      };
+      set((s) => ({ diagEvents: pushCapped(s.diagEvents, event, DIAG_CAP) }));
+      console.error(`[diag] render crash: ${event.message}`, event.detail ?? "");
+    },
+
     // ── app-domain slice (spec §10, S3 T13) ─────────────────────────────────────────────────
     //
     // Every `refresh*` below follows the same shape: fetch via `./orchd.ts`, replace the
@@ -623,7 +680,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const projects = await orchdListProjects();
         set({ projects });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshProjects", e);
       }
     },
 
@@ -632,7 +689,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const goals = await orchdListGoals(projectId);
         set((s) => ({ goalsByProject: { ...s.goalsByProject, [projectId]: goals } }));
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshGoals", e);
       }
     },
 
@@ -641,7 +698,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const ideas = await orchdListIdeas(null);
         set({ ideas });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshIdeas", e);
       }
     },
 
@@ -650,7 +707,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const insights = await orchdListInsights(null);
         set({ insights });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshInsights", e);
       }
     },
 
@@ -659,7 +716,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const tasks = await orchdListTasks(projectId);
         set((s) => ({ tasksByProject: { ...s.tasksByProject, [projectId]: tasks } }));
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshTasks", e);
       }
     },
 
@@ -668,7 +725,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const runs = await researchListRuns(ideaId);
         set((s) => ({ researchRunsByIdea: { ...s.researchRunsByIdea, [ideaId]: runs } }));
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshResearchRuns", e);
       }
     },
 
@@ -677,7 +734,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const graph = await orchdGraphListProject(projectId);
         set((s) => ({ graphByProject: { ...s.graphByProject, [projectId]: graph } }));
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshGraph", e);
       }
     },
 
@@ -687,7 +744,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const view = await orchdGetRuleset(scope, projectId);
         set((s) => ({ rulesets: { ...s.rulesets, [key]: view } }));
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshRuleset", e);
       }
     },
 
@@ -700,7 +757,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const mcpServers = await mcpListServers(null);
         set({ mcpServers });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshMcpServers", e);
       }
     },
 
@@ -709,7 +766,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const tools = await mcpListTools(serverId);
         set((s) => ({ mcpToolsByServer: { ...s.mcpToolsByServer, [serverId]: tools } }));
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshMcpTools", e);
       }
     },
 
@@ -718,7 +775,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const mcpArtifacts = await mcpListArtifacts(null, null, null);
         set({ mcpArtifacts });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshMcpArtifacts", e);
       }
     },
 
@@ -729,7 +786,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const accounts = await connectorListAccounts();
         set({ accounts });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshAccounts", e);
       }
     },
 
@@ -740,7 +797,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const skills = await skillList(null);
         set({ skills });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshSkills", e);
       }
     },
 
@@ -751,7 +808,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const invocations = await mcpListInvocations(null, null, null);
         set({ invocations });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshInvocations", e);
       }
     },
 
@@ -760,7 +817,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const auditRows = await trustListAudit(null);
         set({ auditRows });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshAuditRows", e);
       }
     },
 
@@ -769,7 +826,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const policies = await trustListPolicies();
         set({ policies });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshPolicies", e);
       }
     },
 
@@ -780,7 +837,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const storageStatus = await orchdStorageStatus();
         set({ storageStatus });
       } catch (e) {
-        get().showToast(describeOrchdError(e));
+        get().reportError("refreshStorageStatus", e);
       }
     },
 

@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./ui/tokens.css";
 import { App } from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { initTheme } from "./ui/theme";
 
 // Apply the persisted light/dark/system theme BEFORE the first render so there is no flash of the
@@ -13,6 +14,8 @@ if (!rootEl) throw new Error("root element #root not found");
 
 createRoot(rootEl).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>,
 );

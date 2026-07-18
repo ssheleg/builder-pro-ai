@@ -6,6 +6,7 @@ import { orchdAddProjectWorkspace, describeOrchdError } from "../ipc/orchd";
 import type { Project } from "../ipc/orchd-types";
 import type { Workspace } from "../ipc/types";
 import { CreateProjectDialog } from "./CreateProjectDialog";
+import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { ThemeToggle } from "../ui/ThemeToggle";
 import { strings } from "../strings";
 
@@ -81,6 +82,8 @@ export function WorkspaceSidebar(props: {
   const showToast = useAppStore((s) => s.showToast);
 
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showDiag, setShowDiag] = useState(false);
+  const diagCount = useAppStore((s) => s.diagEvents.length);
   const [attachSelection, setAttachSelection] = useState<Record<WorkspaceId, string>>({});
   // Archived projects live in a collapsed, dimmed group (O-3, spec D7) — collapsed by default so
   // the active-project navigation stays uncluttered.
@@ -407,8 +410,48 @@ export function WorkspaceSidebar(props: {
         >
           {strings.chrome.sidebar.addWorkspace}
         </button>
+        <button
+          type="button"
+          data-testid="diag-open"
+          aria-label="Open diagnostics"
+          onClick={() => setShowDiag(true)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "var(--sp-2)",
+            margin: "var(--sp-2)",
+            padding: "var(--sp-2) var(--sp-3)",
+            border: "1px solid var(--border-strong)",
+            background: "var(--panel-2)",
+            color: "var(--muted)",
+            cursor: "pointer",
+            fontSize: "var(--fs-sm)",
+            borderRadius: "var(--r-sm)",
+          }}
+        >
+          Diagnostics
+          {diagCount > 0 && (
+            <span
+              data-testid="diag-count"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontVariantNumeric: "tabular-nums",
+                fontSize: "var(--fs-xs)",
+                fontWeight: 600,
+                color: "var(--danger)",
+                background: "var(--danger-weak)",
+                borderRadius: 999,
+                padding: "0 var(--sp-2)",
+              }}
+            >
+              {diagCount}
+            </span>
+          )}
+        </button>
       </aside>
       {showCreateDialog && <CreateProjectDialog onClose={() => setShowCreateDialog(false)} />}
+      <DiagnosticsPanel open={showDiag} onClose={() => setShowDiag(false)} />
     </>
   );
 }

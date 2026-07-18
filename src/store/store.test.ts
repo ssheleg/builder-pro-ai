@@ -1181,4 +1181,28 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().storageStatus).toBeNull();
     expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
+
+  // ---- S-DIAG diagnostics ring ----
+
+  it("reportError records a structured diag event AND shows the toast (returns the message)", () => {
+    useAppStore.setState({ diagEvents: [], toast: null, toastQueue: [] });
+    const err = { kind: "daemon", code: "Invariant", message: "last workspace" };
+    const shown = useAppStore.getState().reportError("createWorkspace", err);
+    // Toast text mirrors describeOrchdError (mocked to `mapped: …` here) and is returned to the caller.
+    expect(shown).toBe(`mapped: ${JSON.stringify(err)}`);
+    expect(useAppStore.getState().toast).toBe(shown);
+    // ...AND a structured event is captured so the cause survives the toast (real classifyError).
+    const [ev] = useAppStore.getState().diagEvents;
+    expect(ev.op).toBe("createWorkspace");
+    expect(ev.kind).toBe("Invariant");
+    expect(ev.detail).toBe("last workspace");
+  });
+
+  it("clearDiag empties the diagnostics ring", () => {
+    useAppStore.setState({
+      diagEvents: [{ id: 1, ts: 0, op: "x", kind: "unknown", message: "m", detail: null }],
+    });
+    useAppStore.getState().clearDiag();
+    expect(useAppStore.getState().diagEvents).toEqual([]);
+  });
 });
