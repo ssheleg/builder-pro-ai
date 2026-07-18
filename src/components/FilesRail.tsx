@@ -4,7 +4,6 @@ import { startWorkspaceWatch } from "../ipc/fs";
 import type { Workspace } from "../ipc/types";
 import { FileTree } from "./FileTree";
 import { FilePreview } from "./FilePreview";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 /**
@@ -38,12 +37,12 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
         style={{
           width: 28,
           flexShrink: 0,
-          borderLeft: `1px solid ${theme.colors.border}`,
-          background: theme.colors.bgElevated,
+          borderLeft: "1px solid var(--border)",
+          background: "var(--panel)",
           display: "flex",
           alignItems: "flex-start",
           justifyContent: "center",
-          paddingTop: 8,
+          paddingTop: "var(--sp-2)",
         }}
       >
         <button
@@ -53,9 +52,9 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
           style={{
             border: "none",
             background: "transparent",
-            color: theme.colors.textDim,
+            color: "var(--muted)",
             cursor: "pointer",
-            fontSize: 14,
+            fontSize: "var(--fs-md)",
           }}
         >
           ⟨
@@ -102,18 +101,18 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
-        borderLeft: `1px solid ${theme.colors.border}`,
-        background: theme.colors.bgElevated,
-        color: theme.colors.text,
+        borderLeft: "1px solid var(--border)",
+        background: "var(--panel)",
+        color: "var(--ink)",
       }}
     >
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          padding: "6px 8px",
-          borderBottom: `1px solid ${theme.colors.border}`,
+          gap: "var(--sp-2)",
+          padding: "var(--sp-2) var(--sp-2)",
+          borderBottom: "1px solid var(--border)",
         }}
       >
         <button
@@ -123,19 +122,19 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
           style={{
             border: "none",
             background: "transparent",
-            color: theme.colors.textDim,
+            color: "var(--muted)",
             cursor: "pointer",
-            fontSize: 14,
+            fontSize: "var(--fs-md)",
           }}
         >
           ⟩
         </button>
         <span
           style={{
-            fontSize: 12,
+            fontSize: "var(--fs-sm)",
             textTransform: "uppercase",
             letterSpacing: 0.5,
-            color: theme.colors.textDim,
+            color: "var(--muted)",
             flex: 1,
           }}
         >
@@ -145,9 +144,9 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 4,
-            fontSize: 11,
-            color: theme.colors.textDim,
+            gap: "var(--sp-1)",
+            fontSize: "var(--fs-xs)",
+            color: "var(--muted)",
             cursor: "pointer",
           }}
         >
@@ -163,13 +162,13 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
             display: "block",
             width: "100%",
             textAlign: "left",
-            padding: "6px 8px",
+            padding: "var(--sp-2)",
             border: "none",
-            borderBottom: `1px solid ${theme.colors.border}`,
-            borderLeft: `3px solid ${theme.colors.statusWaiting}`,
-            background: "transparent",
-            color: theme.colors.text,
-            fontSize: 12,
+            borderBottom: "1px solid var(--border)",
+            borderLeft: "3px solid var(--warn)",
+            background: "var(--warn-weak)",
+            color: "var(--ink)",
+            fontSize: "var(--fs-sm)",
             cursor: "pointer",
           }}
         >
@@ -180,7 +179,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
         style={{
           flex: "1 1 60%",
           minHeight: 0,
-          borderBottom: `1px solid ${theme.colors.border}`,
+          borderBottom: "1px solid var(--border)",
           overflow: "hidden",
         }}
       >

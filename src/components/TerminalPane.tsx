@@ -1,7 +1,6 @@
 import { useEffect, useRef, type JSX } from "react";
 import type { SessionId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
-import { theme } from "../theme";
 
 /**
  * Hosts one session's xterm Terminal. App mounts exactly one `TerminalPane` — the ACTIVE
@@ -66,7 +65,7 @@ export function TerminalPane(props: {
       style={{
         width: "100%",
         height: "100%",
-        background: theme.colors.bg,
+        background: "var(--bg)",
       }}
     />
   );

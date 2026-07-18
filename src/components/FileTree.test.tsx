@@ -116,19 +116,52 @@ describe("FileTree", () => {
     expect(screen.queryByText(strings.files.loading)).toBeNull();
   });
 
-  it("a FAILED dir load keeps the loading placeholder + toasts — NOT the empty marker (P-12 distinctness)", async () => {
+  it("a FAILED dir load shows a DISTINCT failed row with a Retry control + toasts — NOT the loading or empty marker (FI-02 / P-12 distinctness)", async () => {
     listDirMock.mockRejectedValueOnce({ kind: "notFound" });
     render(<FileTree workspace={ws} />);
 
     await act(async () => {
       fireEvent.click(screen.getByText("proj"));
       await Promise.resolve();
+      await Promise.resolve();
     });
-    // A failed load must never masquerade as an empty directory.
+    // A failed load renders its OWN distinct row with an inline Retry — never masquerading as an
+    // empty directory, and never a lingering "Loading…" placeholder (the old buggy behavior).
+    expect(screen.getByTestId("file-row-failed")).toBeTruthy();
+    expect(screen.getByTestId("file-row-retry")).toBeTruthy();
     expect(screen.queryByTestId("file-row-empty")).toBeNull();
+    expect(screen.queryByText(strings.files.loading)).toBeNull();
+    // Still toasts honestly (behavioral assertion preserved).
     expect(useAppStore.getState().toast).toBe(
       strings.files.readFolderFailed(strings.errors.fs.notFound),
     );
+  });
+
+  it("FI-02: Retry on a failed dir row re-fetches; on success the children render and the failed row is gone", async () => {
+    const entries: FsEntry[] = [
+      { name: "a.txt", relPath: "a.txt", isDir: false, size: 3, isIgnored: false },
+    ];
+    listDirMock.mockRejectedValueOnce({ kind: "io", message: "disk full" });
+    listDirMock.mockResolvedValueOnce(entries);
+    render(<FileTree workspace={ws} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("proj"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("file-row-failed")).toBeTruthy();
+    expect(listDirMock).toHaveBeenCalledTimes(1);
+
+    // Retry re-triggers the exact same fetch (a genuine retry, not a page reload).
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("file-row-retry"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(listDirMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("file-row-failed")).toBeNull();
+    expect(screen.getByText("a.txt")).toBeTruthy();
   });
 
   it("(b) clearing a still-expanded dir's cache entry (simulating invalidation) triggers a refetch", async () => {

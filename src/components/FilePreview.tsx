@@ -2,10 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react
 import { useAppStore } from "../store/store";
 import { readFilePreview } from "../ipc/fs";
 import type { FilePreview as FilePreviewData, FsError } from "../ipc/fs";
-import { theme } from "../theme";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Honest message for a rejected `FsError` (spec §7). Deliberately duplicated from
  * `FileTree.tsx`'s copy (same tiny pure function, same vocabulary) rather than imported, so this
@@ -47,10 +44,10 @@ const containerStyle: CSSProperties = {
   height: "100%",
   minHeight: 0,
   overflow: "auto",
-  padding: 8,
-  fontSize: 12,
-  color: theme.colors.textDim,
-  fontFamily: MONO_FONT,
+  padding: "var(--sp-2)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
 };
 
 /**
@@ -110,7 +107,7 @@ export function FilePreview(): JSX.Element {
 
   if (error !== null) {
     return (
-      <div style={{ ...containerStyle, color: theme.colors.statusExited }}>
+      <div style={{ ...containerStyle, color: "var(--danger)" }}>
         {strings.files.openFileFailed(error)}
       </div>
     );
@@ -135,18 +132,25 @@ export function FilePreview(): JSX.Element {
   return (
     <div style={{ height: "100%", minHeight: 0, overflow: "auto" }}>
       {preview.truncated && (
-        <div style={{ padding: "4px 8px", fontSize: 11, color: theme.colors.statusWaiting }}>
+        <div
+          style={{
+            padding: "var(--sp-1) var(--sp-2)",
+            fontSize: "var(--fs-xs)",
+            color: "var(--warn)",
+            background: "var(--warn-weak)",
+          }}
+        >
           {strings.files.contentMayHaveChanged}
         </div>
       )}
       <pre
         style={{
           margin: 0,
-          padding: 8,
-          fontSize: 12,
+          padding: "var(--sp-2)",
+          fontSize: "var(--fs-sm)",
           lineHeight: 1.5,
-          color: theme.colors.text,
-          fontFamily: MONO_FONT,
+          color: "var(--ink)",
+          fontFamily: "var(--font-mono)",
           whiteSpace: "pre",
         }}
       >

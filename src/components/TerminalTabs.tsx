@@ -4,7 +4,6 @@ import { createSession, killSession } from "../ipc/commands";
 import type { CreateSessionOpts, WorkspaceId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
 import { StatusDot } from "./StatusDot";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 /**
@@ -102,9 +101,9 @@ export function TerminalTabs(props: {
       style={{
         display: "flex",
         alignItems: "stretch",
-        gap: 2,
-        background: theme.colors.bgElevated,
-        borderBottom: `1px solid ${theme.colors.border}`,
+        gap: "var(--sp-1)",
+        background: "var(--panel)",
+        borderBottom: "1px solid var(--border)",
       }}
     >
       <div role="tablist" style={{ display: "flex", alignItems: "stretch", flex: 1, minWidth: 0 }}>
@@ -117,16 +116,27 @@ export function TerminalTabs(props: {
               aria-selected={selected}
               tabIndex={0}
               onClick={() => setActiveSession(s.id)}
+              // TE-04 (a11y): a focusable tab must also activate from the keyboard. Enter/Space
+              // select the tab, matching the click. Guarded to the tab element itself so an
+              // Enter/Space on the nested close button (which natively fires its own click) never
+              // double-fires an activation.
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setActiveSession(s.id);
+                }
+              }}
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: 6,
-                padding: "6px 10px",
+                gap: "var(--sp-2)",
+                padding: "var(--sp-2) var(--sp-3)",
                 cursor: "pointer",
-                color: selected ? theme.colors.text : theme.colors.textDim,
-                background: selected ? theme.colors.bg : "transparent",
-                borderRight: `1px solid ${theme.colors.border}`,
-                fontSize: 13,
+                color: selected ? "var(--ink)" : "var(--muted)",
+                background: selected ? "var(--bg)" : "transparent",
+                borderRight: "1px solid var(--border)",
+                fontSize: "var(--fs-md)",
               }}
             >
               <StatusDot lifecycle={s.lifecycle} waitingForInput={s.waitingForInput} />
@@ -141,9 +151,9 @@ export function TerminalTabs(props: {
                 style={{
                   border: "none",
                   background: "transparent",
-                  color: theme.colors.textDim,
+                  color: "var(--muted)",
                   cursor: "pointer",
-                  fontSize: 13,
+                  fontSize: "var(--fs-md)",
                   lineHeight: 1,
                 }}
               >
@@ -161,10 +171,10 @@ export function TerminalTabs(props: {
         style={{
           border: "none",
           background: "transparent",
-          color: activeWorkspaceId ? theme.colors.text : theme.colors.textDim,
+          color: activeWorkspaceId ? "var(--ink)" : "var(--muted)",
           cursor: activeWorkspaceId ? "pointer" : "not-allowed",
-          padding: "6px 12px",
-          fontSize: 16,
+          padding: "var(--sp-2) var(--sp-3)",
+          fontSize: "var(--fs-lg)",
         }}
       >
         {strings.terminal.tabs.newTerminal}

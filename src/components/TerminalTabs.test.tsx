@@ -87,6 +87,25 @@ describe("TerminalTabs", () => {
     expect(disposeMock).not.toHaveBeenCalled();
   });
 
+  it("TE-04 (a11y): a tab activates from the keyboard (Enter and Space) matching the click", () => {
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    // Enter on the bash tab selects it, exactly like a click.
+    act(() => {
+      fireEvent.keyDown(screen.getByRole("tab", { name: /bash/i }), { key: "Enter" });
+    });
+    expect(useAppStore.getState().activeSessionId).toBe("s2");
+    expect(disposeMock).not.toHaveBeenCalled(); // keep-alive: no dispose on switch
+
+    // Reset to s1 and confirm Space activates too.
+    act(() => {
+      useAppStore.setState({ activeSessionId: "s1" }, false);
+    });
+    act(() => {
+      fireEvent.keyDown(screen.getByRole("tab", { name: /bash/i }), { key: " " });
+    });
+    expect(useAppStore.getState().activeSessionId).toBe("s2");
+  });
+
   it("new-terminal button calls createSession with the active workspace id and its roots[0] as cwd (no file selected)", async () => {
     render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
     await act(async () => {

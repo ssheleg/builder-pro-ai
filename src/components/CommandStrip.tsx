@@ -4,10 +4,8 @@ import { getCommandEvents } from "../ipc/commands";
 import type { SessionId } from "../ipc/commands";
 import type { CommandEvent } from "../ipc/types";
 import { StatusDot } from "./StatusDot";
-import { theme } from "../theme";
+import { Button } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Matches the `limit` spec §6.3 calls out ("last ~10 command_events"). */
 const COMMAND_STRIP_LIMIT = 10;
@@ -72,53 +70,45 @@ function pairCommandEvents(events: CommandEvent[], isLive: boolean): StripItem[]
   return items;
 }
 
-/** Chip atom (design-system.md §5: "mono 11px, 1px border, radius 999; optional status dot;
- * counts use tabular-nums"). No shared `Chip.tsx` component exists yet in this codebase — this
- * style object is deliberately local (same precedent as `FileTree.tsx`/`FilePreview.tsx`'s
- * duplicated `describeFsError`: each component stays independently deployable). */
+/** Chip atom (token-only, Badge-like: mono, tabular-nums, radius 999, a weak semantic-tone bg +
+ * strong tone fg; optional status dot). No shared `Chip.tsx` exists yet — this style object is
+ * deliberately local (same precedent as `FileTree.tsx`/`FilePreview.tsx`'s duplicated
+ * `describeFsError`: each component stays independently deployable). Because these chips carry
+ * `role="listitem"` + `aria-label`/`title`/`data-testid`, they can't be the `Badge` primitive (it
+ * forwards none of those) — they mirror its look on tokens instead. */
 const chipBaseStyle: CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
-  padding: "2px 8px",
+  gap: "var(--sp-1)",
+  padding: "1px var(--sp-2)",
   borderRadius: 999,
-  border: `1px solid ${theme.colors.border}`,
-  fontFamily: MONO_FONT,
-  fontSize: 11,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  fontWeight: 600,
   fontVariantNumeric: "tabular-nums",
-  background: theme.colors.bgElevated,
   flexShrink: 0,
 };
 
 const stripContainerStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 6,
-  padding: "6px 12px",
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2) var(--sp-3)",
   overflowX: "auto",
-  borderTop: `1px solid ${theme.colors.border}`,
-  background: theme.colors.bgElevated,
+  borderTop: "1px solid var(--border)",
+  background: "var(--panel)",
 };
 
 const emptyStyle: CSSProperties = {
-  padding: "6px 12px",
-  fontSize: 11,
-  fontFamily: MONO_FONT,
-  color: theme.colors.textDim,
-  borderTop: `1px solid ${theme.colors.border}`,
-  background: theme.colors.bgElevated,
-};
-
-const retryButtonStyle: CSSProperties = {
-  marginLeft: 8,
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "1px 6px",
+  display: "flex",
+  alignItems: "center",
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2) var(--sp-3)",
+  fontSize: "var(--fs-xs)",
+  fontFamily: "var(--font-mono)",
+  color: "var(--muted)",
+  borderTop: "1px solid var(--border)",
+  background: "var(--panel)",
 };
 
 /**
@@ -185,16 +175,17 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element {
   // rendering null forever (P-13), which left the strip permanently blank with no recovery path.
   if (status === "failed") {
     return (
-      <div data-testid="command-strip-failed" style={emptyStyle}>
-        {strings.terminal.loadHistoryFailed}
-        <button
+      <div data-testid="command-strip-failed" style={{ ...emptyStyle, color: "var(--danger)" }}>
+        <span style={{ flex: 1 }}>{strings.terminal.loadHistoryFailed}</span>
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           data-testid="command-strip-retry"
           onClick={() => load()}
-          style={retryButtonStyle}
         >
           {strings.common.retry}
-        </button>
+        </Button>
       </div>
     );
   }
@@ -234,7 +225,7 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element {
             key={item.key}
             role="listitem"
             data-testid="command-chip-running"
-            style={{ ...chipBaseStyle, color: theme.colors.textDim }}
+            style={{ ...chipBaseStyle, color: "var(--info)", background: "var(--info-weak)" }}
           >
             <StatusDot lifecycle={{ kind: "running" }} waitingForInput={false} />
             running
@@ -250,7 +241,7 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element {
             aria-label={strings.terminal.interrupted}
             data-testid="command-chip-interrupted"
             title={strings.terminal.interruptedTitle}
-            style={{ ...chipBaseStyle, color: theme.colors.statusExited }}
+            style={{ ...chipBaseStyle, color: "var(--danger)", background: "var(--danger-weak)" }}
           >
             <StatusDot
               lifecycle={{ kind: "exited", code: null, signal: null }}
@@ -266,7 +257,8 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element {
             title={item.ok ? "exit 0" : `exit ${item.exitCode ?? "?"}`}
             style={{
               ...chipBaseStyle,
-              color: item.ok ? theme.colors.statusRunning : theme.colors.statusExited,
+              color: item.ok ? "var(--ok)" : "var(--danger)",
+              background: item.ok ? "var(--ok-weak)" : "var(--danger-weak)",
             }}
           >
             {item.ok ? "✓" : `✗ ${item.exitCode ?? "?"}`}

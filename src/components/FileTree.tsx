@@ -12,20 +12,18 @@ import {
 import type { FsEntry, FsError } from "../ipc/fs";
 import { pickFolder, addWorkspaceRoot } from "../ipc/commands";
 import type { Workspace } from "../ipc/types";
-import { theme } from "../theme";
+import { Button, Input } from "../ui/primitives";
 import { strings } from "../strings";
 
 /** Fixed row height the windowing math is built on (spec §6.4 "plain scroll-offset windowing,
- * no new dependency"). A real DOM height, not measured — every row (loading, dir, file) renders
- * at exactly this height so the spacer math below stays exact. */
+ * no new dependency"). A real DOM height, not measured — every row (loading, dir, file, failed)
+ * renders at exactly this height so the spacer math below stays exact. */
 const ROW_HEIGHT = 22;
 /** Deterministic fallback viewport (px) used until/unless a real `ResizeObserver` measurement is
  * available (jsdom has none — tests get this exact, reproducible window). */
 const DEFAULT_VIEWPORT_HEIGHT = 480;
 /** Extra rows rendered above/below the visible window so a fast scroll never flashes blank. */
 const OVERSCAN = 8;
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Matches `store.ts`'s `fsKey` exactly (`expanded`/`treeCache` are keyed this way) — not
  * exported from the store, so mirrored here (tab-separated: `rel` may contain `/`). */
@@ -103,6 +101,11 @@ interface FlatNode {
   /** Synthetic marker for an expanded directory that loaded successfully but has zero visible
    * entries (P-12) — rendered non-interactively, distinct from the `loading` placeholder. */
   empty?: boolean;
+  /** Synthetic marker for an expanded directory whose `listDir` FAILED (FI-02) — rendered as a
+   * DISTINCT failed row with an inline Retry, never left indistinguishable from a still-loading
+   * one. The dir is NOT re-added to `pending` (no silent auto-retry loop); Retry clears the
+   * failed flag, which re-enters it into `pending` for a fresh fetch. */
+  failed?: boolean;
 }
 
 function sortEntries(entries: FsEntry[]): FsEntry[] {
@@ -123,6 +126,7 @@ function computeFlatten(
   expanded: Record<string, true>,
   treeCache: Record<string, FsEntry[]>,
   showIgnored: boolean,
+  failedDirs: Record<string, string>,
 ): { nodes: FlatNode[]; pending: { root: string; rel: string }[] } {
   const nodes: FlatNode[] = [];
   const pending: { root: string; rel: string }[] = [];
@@ -131,6 +135,24 @@ function computeFlatten(
     const key = fsKey(root, rel);
     const cached = treeCache[key];
     if (cached === undefined) {
+      // A prior `listDir` for this dir FAILED (FI-02): render a DISTINCT failed row instead of a
+      // "Loading…" one, and do NOT re-add it to `pending` — an auto-retry against a stable error
+      // would just re-toast forever. Retry (the row's own control) clears the failed flag, which
+      // lets this dir fall back into the `pending` branch below for a genuine re-fetch.
+      if (failedDirs[key] !== undefined) {
+        nodes.push({
+          id: `${key}::failed`,
+          root,
+          rel,
+          name: strings.files.readFolderFailed(failedDirs[key]),
+          isDir: false,
+          isIgnored: false,
+          depth,
+          size: 0,
+          failed: true,
+        });
+        return;
+      }
       pending.push({ root, rel });
       nodes.push({
         id: `${key}::loading`,
@@ -208,14 +230,14 @@ type FormState =
 const popoverStyle: CSSProperties = {
   position: "absolute",
   top: "100%",
-  left: 8,
+  left: "var(--sp-2)",
   zIndex: 20,
   minWidth: 180,
-  background: theme.colors.bgElevated,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  boxShadow: theme.shadow,
-  padding: 4,
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  boxShadow: "var(--shadow-1)",
+  padding: "var(--sp-1)",
   display: "flex",
   flexDirection: "column",
   gap: 2,
@@ -223,27 +245,42 @@ const popoverStyle: CSSProperties = {
 
 const menuItemStyle: CSSProperties = {
   textAlign: "left",
-  padding: "6px 8px",
+  padding: "var(--sp-2)",
   border: "none",
   background: "transparent",
-  color: theme.colors.text,
-  fontSize: 12,
+  color: "var(--ink)",
+  fontSize: "var(--fs-sm)",
   cursor: "pointer",
-  borderRadius: 4,
+  borderRadius: "var(--r-sm)",
+};
+
+/** Compact inline Retry for a failed dir row (FI-02) — sized to sit inside the fixed ROW_HEIGHT
+ * without breaking the windowing math (so it can't be the taller `Button` primitive). */
+const retryRowButtonStyle: CSSProperties = {
+  border: "1px solid var(--border-strong)",
+  background: "var(--panel)",
+  color: "var(--ink)",
+  cursor: "pointer",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  borderRadius: "var(--r-sm)",
+  padding: "0 var(--sp-2)",
+  lineHeight: "16px",
+  flexShrink: 0,
 };
 
 function rowBaseStyle(depth: number): CSSProperties {
   return {
     display: "flex",
     alignItems: "center",
-    gap: 4,
+    gap: "var(--sp-1)",
     height: ROW_HEIGHT,
     lineHeight: `${ROW_HEIGHT}px`,
     paddingLeft: 8 + depth * 14,
     paddingRight: 8,
     cursor: "pointer",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--fs-sm)",
     position: "relative",
     whiteSpace: "nowrap",
   };
@@ -276,14 +313,18 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [formFor, setFormFor] = useState<FormState | null>(null);
   const [formValue, setFormValue] = useState("");
+  // Dirs whose `listDir` FAILED (FI-02), keyed by `fsKey` → the honest error message. A failed dir
+  // renders a distinct failed row (not the "Loading…" placeholder) and is kept OUT of `pending`
+  // until Retry clears its entry here, which re-enters it for a fresh fetch.
+  const [failedDirs, setFailedDirs] = useState<Record<string, string>>({});
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const fetchingRef = useRef<Set<string>>(new Set());
 
   const { nodes, pending } = useMemo(
-    () => computeFlatten(workspace.roots, expanded, treeCache, showIgnored),
-    [workspace.roots, expanded, treeCache, showIgnored],
+    () => computeFlatten(workspace.roots, expanded, treeCache, showIgnored, failedDirs),
+    [workspace.roots, expanded, treeCache, showIgnored, failedDirs],
   );
 
   // Fetch every expanded-but-uncached directory. Re-runs only when `pending` (derived from
@@ -296,9 +337,23 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
       if (fetchingRef.current.has(key)) continue;
       fetchingRef.current.add(key);
       listDir(root, rel, showIgnored)
-        .then((entries) => cacheDir(root, rel, entries))
+        .then((entries) => {
+          cacheDir(root, rel, entries);
+          // A retry (or a first success) clears any prior failed marker so a later invalidation
+          // re-fetches honestly rather than surfacing the stale failed row again.
+          setFailedDirs((prev) => {
+            if (!(key in prev)) return prev; // no-op → React bails out, no extra render
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
+        })
         .catch((err: unknown) => {
-          showToast(strings.files.readFolderFailed(describeFsError(err)));
+          // FI-02: record the failure so this dir renders a distinct, retryable failed row (and is
+          // NOT re-added to `pending`), instead of an indistinguishable, never-retried "Loading…".
+          const msg = describeFsError(err);
+          setFailedDirs((prev) => ({ ...prev, [key]: msg }));
+          showToast(strings.files.readFolderFailed(msg));
         })
         .finally(() => {
           fetchingRef.current.delete(key);
@@ -345,6 +400,18 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
   function toggleDir(node: FlatNode): void {
     const key = fsKey(node.root, node.rel);
     setExpanded(node.root, node.rel, !expanded[key]);
+  }
+
+  // FI-02: clear the dir's failed marker so `computeFlatten` re-adds it to `pending` and the fetch
+  // effect runs a genuine re-fetch (mirrors CommandStrip's failed→Retry recovery path).
+  function retryDir(root: string, rel: string): void {
+    const key = fsKey(root, rel);
+    setFailedDirs((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   }
 
   function selectFile(node: FlatNode): void {
@@ -564,7 +631,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => e.stopPropagation()}
       >
-        <input
+        <Input
           autoFocus
           aria-label={label}
           value={formValue}
@@ -579,13 +646,9 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
             }
           }}
           style={{
-            fontSize: 12,
-            padding: "4px 6px",
-            background: theme.colors.bg,
-            border: `1px solid ${theme.colors.border}`,
-            color: theme.colors.text,
-            borderRadius: 4,
-            fontFamily: MONO_FONT,
+            fontSize: "var(--fs-sm)",
+            padding: "var(--sp-1) var(--sp-2)",
+            fontFamily: "var(--font-mono)",
           }}
         />
       </div>
@@ -593,6 +656,38 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
   }
 
   function renderRow(node: FlatNode): JSX.Element {
+    if (node.failed) {
+      // FI-02: a directory whose listing FAILED — a distinct, honest row (never mistaken for a
+      // still-loading one) carrying the error message + an inline Retry that re-fetches.
+      return (
+        <div
+          key={node.id}
+          data-testid="file-row-failed"
+          style={{
+            ...rowBaseStyle(node.depth),
+            color: "var(--danger)",
+            cursor: "default",
+          }}
+        >
+          <span aria-hidden style={{ width: 12, flexShrink: 0 }} />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+            {node.name}
+          </span>
+          <button
+            type="button"
+            data-testid="file-row-retry"
+            onClick={(e) => {
+              e.stopPropagation();
+              retryDir(node.root, node.rel);
+            }}
+            style={retryRowButtonStyle}
+          >
+            {strings.common.retry}
+          </button>
+        </div>
+      );
+    }
+
     if (node.loading || node.empty) {
       return (
         <div
@@ -600,7 +695,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
           data-testid={node.empty ? "file-row-empty" : "file-row"}
           style={{
             ...rowBaseStyle(node.depth),
-            color: theme.colors.textDim,
+            color: "var(--muted)",
             cursor: "default",
             fontStyle: node.empty ? "italic" : undefined,
           }}
@@ -638,13 +733,13 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
         }}
         style={{
           ...rowBaseStyle(node.depth),
-          color: node.isIgnored ? theme.colors.textDim : theme.colors.text,
-          background: selected ? theme.colors.bg : "transparent",
+          color: node.isIgnored ? "var(--muted)" : "var(--ink)",
+          background: selected ? "var(--accent-weak)" : "transparent",
         }}
       >
         <span
           aria-hidden
-          style={{ width: 12, textAlign: "center", color: theme.colors.textDim, flexShrink: 0 }}
+          style={{ width: 12, textAlign: "center", color: "var(--muted)", flexShrink: 0 }}
         >
           {node.isDir ? (isExpanded ? "▾" : "▸") : ""}
         </span>
@@ -662,11 +757,11 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
           style={{
             border: "none",
             background: "transparent",
-            color: theme.colors.textDim,
+            color: "var(--muted)",
             cursor: "pointer",
-            fontSize: 13,
+            fontSize: "var(--fs-md)",
             lineHeight: 1,
-            padding: "0 4px",
+            padding: "0 var(--sp-1)",
             flexShrink: 0,
           }}
         >
@@ -698,24 +793,16 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
         {visible.map((n) => renderRow(n))}
         <div style={{ height: Math.max(0, (total - endIndex) * ROW_HEIGHT) }} />
       </div>
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="sm"
         aria-label="Add root"
         onClick={() => void onAddRoot()}
-        style={{
-          margin: 8,
-          padding: "6px 10px",
-          border: `1px solid ${theme.colors.border}`,
-          background: theme.colors.bg,
-          color: theme.colors.text,
-          cursor: "pointer",
-          fontSize: 13,
-          borderRadius: 4,
-          flexShrink: 0,
-        }}
+        style={{ margin: "var(--sp-2)", flexShrink: 0 }}
       >
         + Add root
-      </button>
+      </Button>
     </div>
   );
 }
