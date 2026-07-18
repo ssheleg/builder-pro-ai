@@ -22,6 +22,18 @@ on a clean checkout). When a slice ships, its PR updates the README roadmap + ve
 [`CHANGELOG.md`](CHANGELOG.md), the roadmap in the platform overview, and
 [`docs/traceability.md`](docs/traceability.md) alongside the code.
 
+## UX scenarios
+
+[`docs/qa/ux-scenarios.md`](docs/qa/ux-scenarios.md) is the maintained catalog of every user-facing
+scenario (all features / buttons / states / worked-or-not / errors / results) and the base for UX
+testing. **Rule:** any change that adds, changes, or removes a user-facing control, view, or state
+— or a wire verb the UI consumes — MUST update `docs/qa/ux-scenarios.md` in the **same change**
+(add/edit the affected rows + bump the `synced @ <commit>` header). This is part of Definition of
+Done. The advisory `scripts/check-ux-scenarios.sh` (a non-blocking stage in `final-suite.sh` and a
+`continue-on-error` CI step) warns when `src/components/**`, `src/App.tsx`, or `src/store/**`
+changed without the catalog — it reminds, it never fails the build. UX-test findings land in
+[`docs/qa/ux-test-results.md`](docs/qa/ux-test-results.md).
+
 ## Dev setup
 
 - **Rust:** the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml) (stable 1.92 +

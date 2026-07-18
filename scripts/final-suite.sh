@@ -29,6 +29,12 @@ echo "== 1/10 English-only gate (no Cyrillic outside allowlist) =="
 bash "$REPO/scripts/check-english.sh"
 
 echo
+echo "== advisory: UX-scenarios sync reminder (non-blocking, S-UXR A2) =="
+# Never blocks: the script always exits 0, and `|| true` is belt-and-braces so a transient git
+# error here can't abort the `set -e` gate. It only reminds when UI changed without the catalog.
+bash "$REPO/scripts/check-ux-scenarios.sh" || true
+
+echo
 echo "== 2/10 Rust workspace tests =="
 cargo test --workspace
 echo "OK: cargo test --workspace"

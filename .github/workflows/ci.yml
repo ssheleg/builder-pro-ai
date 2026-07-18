@@ -39,6 +39,11 @@ jobs:
         # Cheap textual lint, run before the expensive Rust/e2e steps so it fails fast. Mirrors
         # the first stage of scripts/final-suite.sh — keep the two in lockstep (CONTRIBUTING.md).
         run: bash scripts/check-english.sh
+      - name: UX-scenarios sync reminder (advisory, non-blocking — S-UXR A2)
+        # Warns (never fails) when UI files changed without docs/qa/ux-scenarios.md. Mirrors the
+        # advisory stage in scripts/final-suite.sh (CONTRIBUTING.md keeps them in lockstep).
+        continue-on-error: true
+        run: bash scripts/check-ux-scenarios.sh "${{ github.event.before }}" "${{ github.sha }}"
       - name: stage sidecars (tauri build.rs requires BOTH daemons in a fresh checkout)
         run: |
           cargo build -p bpa-sessiond -p bpa-orchd
