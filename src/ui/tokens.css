@@ -19,16 +19,19 @@
   --border: #e6e9ef;
   --border-strong: #d7dce4;
 
-  /* Accent + semantic tones (each has a strong fg + a weak bg) */
-  --accent: #2f6feb;
+  /* Accent + semantic tones (each has a strong fg + a weak bg). Foreground tones are tuned so each
+   * clears WCAG AA (4.5:1) as text on its own `-weak` background — the tightest pairing — verified
+   * by tokens.contrast.test.ts. `--on-accent` is the label color ON an `--accent`-filled control. */
+  --accent: #2b66d8;
   --accent-weak: #eaf0fe;
-  --ok: #1f9d55;
+  --on-accent: #ffffff;
+  --ok: #187c43;
   --ok-weak: #e4f5ec;
-  --warn: #a9720a;
+  --warn: #906109;
   --warn-weak: #fbecd2;
-  --danger: #d23b3b;
+  --danger: #bf3636;
   --danger-weak: #fbe6e6;
-  --info: #2f6feb;
+  --info: #2b66d8;
   --info-weak: #eaf0fe;
 
   /* Spacing scale */
@@ -70,6 +73,9 @@
 
   --accent: #4b8bff;
   --accent-weak: #1b2740;
+  /* Dark keeps a light-blue accent (legible as link text on the dark panel), so the label on an
+   * accent-filled control must be DARK to clear AA — a single accent can't satisfy both. */
+  --on-accent: #0d1420;
   --ok: #48c98a;
   --ok-weak: #123425;
   --warn: #e0a83a;

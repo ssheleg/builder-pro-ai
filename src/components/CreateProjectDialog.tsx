@@ -154,9 +154,9 @@ const primaryButtonStyle: CSSProperties = {
   borderRadius: "var(--r-md)",
   border: "none",
   background: "var(--accent)",
-  // On-accent foreground — the design system's fixed white for filled accent buttons
-  // (see primitives.tsx Button "primary"), readable on the blue accent in both themes.
-  color: "#fff",
+  // On-accent foreground — the theme-aware `--on-accent` token (white in light, dark ink in dark;
+  // see primitives.tsx Button "primary"), which clears WCAG AA on the accent fill in BOTH themes.
+  color: "var(--on-accent)",
   fontSize: "var(--fs-md)",
   fontWeight: 600,
   cursor: "pointer",

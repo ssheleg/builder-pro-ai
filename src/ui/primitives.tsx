@@ -239,7 +239,7 @@ export function Button({
     border: "1px solid transparent",
   };
   const variants: Record<string, CSSProperties> = {
-    primary: { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" },
+    primary: { background: "var(--accent)", color: "var(--on-accent)", borderColor: "var(--accent)" },
     ghost: { background: "transparent", color: "var(--ink)", borderColor: "var(--border-strong)" },
     danger: { background: "var(--danger-weak)", color: "var(--danger)", borderColor: "transparent" },
   };

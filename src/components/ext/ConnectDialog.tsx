@@ -47,7 +47,7 @@ const primaryButtonStyle: CSSProperties = {
   borderRadius: "var(--r-md)",
   border: "1px solid var(--accent)",
   background: "var(--accent)",
-  color: "#fff",
+  color: "var(--on-accent)",
   fontSize: "var(--fs-md)",
   fontWeight: 600,
   cursor: "pointer",
