@@ -21,10 +21,8 @@ import { InsightsList } from "./InsightsList";
 import { RulesetPanel } from "./RulesetPanel";
 import { OrchdDownBanner } from "./OrchdDownBanner";
 import { GraphCanvas } from "./graph/GraphCanvas";
-import { theme } from "../theme";
+import { Badge, Button, Panel, Stat } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 type TabKey = "overview" | "goals" | "ideas" | "tasks" | "insights" | "rules" | "graph";
 
@@ -44,66 +42,36 @@ const panelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   overflow: "hidden",
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const headerStyle: CSSProperties = {
-  padding: "10px 16px",
-  borderBottom: `1px solid ${theme.colors.border}`,
+  padding: "var(--sp-3) var(--sp-4)",
+  borderBottom: "1px solid var(--border)",
 };
 
 const tabBarStyle: CSSProperties = {
   display: "flex",
-  gap: 4,
-  padding: "6px 16px",
-  borderBottom: `1px solid ${theme.colors.border}`,
+  gap: "var(--sp-1)",
+  padding: "var(--sp-2) var(--sp-4)",
+  borderBottom: "1px solid var(--border)",
 };
 
 const contentStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
   overflowY: "auto",
-  padding: 16,
-};
-
-const sectionLabelStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  color: theme.colors.textDim,
-  textTransform: "uppercase",
-  letterSpacing: "0.05em",
-  marginBottom: 6,
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 12,
-  borderRadius: 4,
-  padding: "4px 8px",
-};
-
-const chipStyle: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  padding: "2px 8px",
-  borderRadius: 999,
-  border: `1px solid ${theme.colors.statusExited}`,
-  color: theme.colors.statusExited,
+  padding: "var(--sp-4)",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: "inherit",
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "4px 6px",
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-1) var(--sp-2)",
 };
 
 /**
@@ -190,7 +158,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
 
   if (!project) {
     return (
-      <div data-testid="project-panel-loading" style={{ ...panelStyle, padding: 16, color: theme.colors.textDim, fontSize: 13 }}>
+      <div data-testid="project-panel-loading" style={{ ...panelStyle, padding: "var(--sp-4)", color: "var(--muted)", fontSize: "var(--fs-md)" }}>
         {strings.project.loading}
       </div>
     );
@@ -304,9 +272,9 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
   return (
     <div data-testid="project-panel" style={panelStyle}>
       <div style={headerStyle}>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>{project.name}</div>
+        <div style={{ fontSize: "var(--fs-lg)", fontWeight: 700, color: "var(--ink)" }}>{project.name}</div>
         {project.description !== "" && (
-          <div style={{ fontSize: 12, color: theme.colors.textDim, marginTop: 2 }}>{project.description}</div>
+          <div style={{ fontSize: "var(--fs-sm)", color: "var(--muted)", marginTop: 2 }}>{project.description}</div>
         )}
       </div>
 
@@ -322,12 +290,14 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
             data-testid={`project-tab-${t.key}`}
             onClick={() => setActiveTab(t.key)}
             style={{
-              padding: "6px 10px",
-              fontSize: 13,
+              padding: "var(--sp-2) var(--sp-3)",
+              fontSize: "var(--fs-md)",
+              fontFamily: "var(--font-ui)",
+              fontWeight: activeTab === t.key ? 600 : 400,
               border: "none",
-              borderBottom: activeTab === t.key ? `2px solid ${theme.colors.accent}` : "2px solid transparent",
+              borderBottom: activeTab === t.key ? "2px solid var(--accent)" : "2px solid transparent",
               background: "transparent",
-              color: activeTab === t.key ? theme.colors.text : theme.colors.textDim,
+              color: activeTab === t.key ? "var(--ink)" : "var(--muted)",
               cursor: "pointer",
             }}
           >
@@ -347,68 +317,73 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
-                  gap: 12,
-                  padding: "8px 12px",
-                  borderRadius: 4,
-                  border: `1px solid ${theme.colors.statusExited}`,
-                  color: theme.colors.statusExited,
-                  fontSize: 13,
+                  gap: "var(--sp-3)",
+                  padding: "var(--sp-2) var(--sp-3)",
+                  borderRadius: "var(--r-md)",
+                  border: "1px solid var(--warn)",
+                  background: "var(--warn-weak)",
+                  color: "var(--warn)",
+                  fontSize: "var(--fs-md)",
                 }}
               >
                 <span>{strings.project.archivedBanner}</span>
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="sm"
                   data-testid="project-unarchive"
                   onClick={() => void unarchiveProject()}
                   disabled={orchdDown || submitting}
-                  style={{
-                    ...textButtonStyle,
-                    borderColor: theme.colors.statusExited,
-                    color: theme.colors.statusExited,
-                    cursor: orchdDown || submitting ? "not-allowed" : "pointer",
-                    opacity: orchdDown || submitting ? 0.5 : 1,
-                    whiteSpace: "nowrap",
-                  }}
+                  style={{ whiteSpace: "nowrap" }}
                 >
                   {strings.project.unarchive}
-                </button>
+                </Button>
               </div>
             )}
             <div
               data-testid="project-counters"
-              style={{ display: "flex", gap: 16, fontSize: 13, color: theme.colors.textDim }}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))",
+                gap: "var(--sp-3)",
+              }}
             >
-              <span data-testid="project-counter-goals">{strings.project.tabs.goals}: {goalsCount}</span>
-              <span data-testid="project-counter-ideas">{strings.project.tabs.ideas}: {ideasCount}</span>
-              <span data-testid="project-counter-tasks">{strings.project.tabs.tasks}: {tasksCount}</span>
-              <span data-testid="project-counter-insights">{strings.project.tabs.insights}: {insightsCount}</span>
+              <Stat data-testid="project-counter-goals" label={strings.project.tabs.goals} value={goalsCount} />
+              <Stat data-testid="project-counter-ideas" label={strings.project.tabs.ideas} value={ideasCount} />
+              <Stat data-testid="project-counter-tasks" label={strings.project.tabs.tasks} value={tasksCount} />
+              <Stat
+                data-testid="project-counter-insights"
+                label={strings.project.tabs.insights}
+                value={insightsCount}
+              />
             </div>
 
-            <div>
-              <div style={sectionLabelStyle}>Workspaces</div>
+            <Panel title="Workspaces">
               <ul
                 data-testid="project-workspaces"
-                style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}
+                style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}
               >
                 {project.workspaceIds.map((wsId) => {
                   const ws = workspaces[wsId];
                   return (
-                    <li key={wsId} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <li key={wsId} style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
                       {ws ? (
-                        <span style={{ fontSize: 13 }}>{ws.name}</span>
+                        <span style={{ fontSize: "var(--fs-md)", color: "var(--ink)", flex: 1 }}>{ws.name}</span>
                       ) : (
-                        <span data-testid={`project-workspace-unresolved-${wsId}`} style={chipStyle}>
+                        <Badge data-testid={`project-workspace-unresolved-${wsId}`} tone="danger">
                           {strings.project.workspaceUnavailable}
-                        </span>
+                        </Badge>
                       )}
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="sm"
                         data-testid={`project-workspace-detach-${wsId}`}
                         onClick={() => void handleDetachWorkspace(wsId)}
-                        style={textButtonStyle}
+                        style={{ flexShrink: 0 }}
                       >
                         {strings.project.unlink}
-                      </button>
+                      </Button>
                     </li>
                   );
                 })}
@@ -423,7 +398,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                     setAddWorkspaceSelection(wsId);
                     void handleAddWorkspace(wsId);
                   }}
-                  style={{ ...selectStyle, marginTop: 8 }}
+                  style={{ ...selectStyle, marginTop: "var(--sp-2)" }}
                 >
                   <option value="">{strings.project.addWorkspaceOption}</option>
                   {unlinkedWorkspaces.map((w) => (
@@ -433,75 +408,77 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                   ))}
                 </select>
               )}
-            </div>
+            </Panel>
 
-            <div>
-              <div style={sectionLabelStyle}>{strings.project.exportLabel}</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button type="button" data-testid="project-export-copy" onClick={() => void handleCopyJson()} style={textButtonStyle}>
-                  {strings.project.copyJson}
-                </button>
-                <button
+            <Panel title={strings.project.exportLabel}>
+              <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="sm"
+                  data-testid="project-export-copy"
+                  onClick={() => void handleCopyJson()}
+                >
+                  {strings.project.copyJson}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
                   data-testid="project-export-file"
                   onClick={() => void handleExportToFile()}
-                  style={textButtonStyle}
                 >
                   {strings.project.saveToFile}
-                </button>
+                </Button>
               </div>
-            </div>
+            </Panel>
 
-            <div>
-              <div style={sectionLabelStyle}>{strings.project.importLabel}</div>
-              <button
+            <Panel title={strings.project.importLabel}>
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 data-testid="project-import-browse"
                 onClick={() => void handleBrowseImport()}
-                style={textButtonStyle}
               >
                 {strings.project.importFromFile}
-              </button>
+              </Button>
               {importDir !== null && (
-                <div data-testid="project-import-files" style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                <div data-testid="project-import-files" style={{ marginTop: "var(--sp-2)", display: "flex", flexDirection: "column", gap: "var(--sp-1)" }}>
                   {importFiles.length === 0 ? (
-                    <span style={{ fontSize: 12, color: theme.colors.textDim }}>{strings.project.noJsonFiles}</span>
+                    <span style={{ fontSize: "var(--fs-sm)", color: "var(--muted)" }}>{strings.project.noJsonFiles}</span>
                   ) : (
                     importFiles.map((f) => (
-                      <button
+                      <Button
                         key={f.relPath}
                         type="button"
+                        variant="ghost"
+                        size="sm"
                         data-testid={`project-import-file-${f.name}`}
                         onClick={() => void handleImportFile(f)}
-                        style={{ ...textButtonStyle, alignSelf: "flex-start" }}
+                        style={{ alignSelf: "flex-start" }}
                       >
                         {f.name}
-                      </button>
+                      </Button>
                     ))
                   )}
                 </div>
               )}
-            </div>
+            </Panel>
 
             {!isArchived && (
-              <div>
-                <div style={sectionLabelStyle}>{strings.project.dangerLabel}</div>
-                <button
+              <Panel title={strings.project.dangerLabel}>
+                <Button
                   type="button"
+                  variant="danger"
+                  size="sm"
                   data-testid="project-archive"
                   onClick={() => void archiveProject()}
                   disabled={orchdDown || submitting}
-                  style={{
-                    ...textButtonStyle,
-                    borderColor: theme.colors.statusExited,
-                    color: theme.colors.statusExited,
-                    cursor: orchdDown || submitting ? "not-allowed" : "pointer",
-                    opacity: orchdDown || submitting ? 0.5 : 1,
-                  }}
                 >
                   {strings.project.archive}
-                </button>
-              </div>
+                </Button>
+              </Panel>
             )}
           </div>
         )}

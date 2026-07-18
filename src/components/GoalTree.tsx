@@ -9,10 +9,8 @@ import {
 } from "../ipc/orchd";
 import type { Goal, GoalStatus } from "../ipc/orchd-types";
 import { useSubmitGuard } from "../hooks/useSubmitGuard";
-import { theme } from "../theme";
+import { Badge, Button, EmptyState, Panel } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Confirm copy for the delete-subtree action (S3 spec §10, task-14 brief verbatim). Deleting a
  * goal deletes its whole subtree server-side — this text says so up front, never a silent
@@ -67,15 +65,16 @@ function siblingsOf(goals: Goal[], goal: Goal): Goal[] {
   return goals.filter((g) => g.parentId === goal.parentId).sort((a, b) => a.ord - b.ord);
 }
 
-/** The outer treeitem: carries the depth indent (the paddingLeft the indent test asserts), the
- * row's bottom border, and the shared mono font — a column so the metric-refs editor (P4b, D7)
- * stacks under the main control line rather than overflowing the fixed-height line. */
+/** The outer treeitem: carries the depth indent (the paddingLeft the indent test asserts — kept as
+ * a literal px so `el.style.paddingLeft` reads back exactly `8/24/40px`), the row's bottom border,
+ * and the shared mono font — a column so the metric-refs editor (P4b, D7) stacks under the main
+ * control line rather than overflowing the fixed-height line. */
 function rowContainerStyle(depth: number): CSSProperties {
   return {
     paddingLeft: 8 + depth * 16,
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    borderBottom: `1px solid ${theme.colors.border}`,
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--fs-sm)",
+    borderBottom: "1px solid var(--border)",
   };
 }
 
@@ -100,37 +99,24 @@ const metricLineStyle: CSSProperties = {
   paddingBottom: 6,
 };
 
-const chipStyle: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 3,
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bgElevated,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 10,
-  padding: "1px 3px 1px 7px",
-};
-
 const chipRemoveButtonStyle: CSSProperties = {
   border: "none",
   background: "transparent",
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   cursor: "pointer",
-  fontSize: 12,
+  fontSize: "var(--fs-sm)",
   lineHeight: 1,
   padding: "0 2px",
   flexShrink: 0,
 };
 
 const metricInputStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--ink)",
   background: "transparent",
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
   padding: "2px 6px",
   width: 100,
   flexShrink: 0,
@@ -139,22 +125,22 @@ const metricInputStyle: CSSProperties = {
 const titleInputStyle: CSSProperties = {
   flex: 1,
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
   background: "transparent",
   border: "1px solid transparent",
-  borderRadius: 4,
+  borderRadius: "var(--r-sm)",
   padding: "3px 6px",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--ink)",
+  background: "var(--panel)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
   padding: "2px 4px",
   flexShrink: 0,
 };
@@ -162,30 +148,12 @@ const selectStyle: CSSProperties = {
 const iconButtonStyle: CSSProperties = {
   border: "none",
   background: "transparent",
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   cursor: "pointer",
-  fontSize: 12,
+  fontSize: "var(--fs-sm)",
   lineHeight: 1,
   padding: "2px 4px",
   flexShrink: 0,
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const deleteButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.statusExited,
-  borderColor: theme.colors.statusExited,
 };
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
@@ -337,24 +305,28 @@ function GoalRow(props: GoalRowProps): JSX.Element {
             ▼
           </button>
         )}
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           disabled={disabled}
           onClick={() => onAddSubgoal(goal.id)}
-          style={textButtonStyle}
+          style={{ flexShrink: 0, whiteSpace: "nowrap" }}
         >
           {strings.goals.addSubgoal}
-        </button>
+        </Button>
         {!isStrategic && (
-          <button
+          <Button
             type="button"
+            variant="danger"
+            size="sm"
             data-testid={`goal-delete-${goal.id}`}
             disabled={disabled}
             onClick={() => onDelete(goal.id)}
-            style={deleteButtonStyle}
+            style={{ flexShrink: 0 }}
           >
             {strings.common.delete}
-          </button>
+          </Button>
         )}
       </div>
       <div
@@ -364,11 +336,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
         style={metricLineStyle}
       >
         {goal.metricRefs.map((ref) => (
-          <span
-            key={ref}
-            data-testid={`goal-metric-chip-${goal.id}-${ref}`}
-            style={chipStyle}
-          >
+          <Badge key={ref} data-testid={`goal-metric-chip-${goal.id}-${ref}`} tone="muted">
             {ref}
             <button
               type="button"
@@ -380,7 +348,7 @@ function GoalRow(props: GoalRowProps): JSX.Element {
             >
               ×
             </button>
-          </span>
+          </Badge>
         ))}
         <input
           data-testid={`goal-metric-input-${goal.id}`}
@@ -543,16 +511,17 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
   }
 
   if (rows.length === 0) {
-    return (
-      <div data-testid="goal-tree-empty" style={{ color: theme.colors.textDim, fontSize: 13 }}>
-        {strings.goals.empty}
-      </div>
-    );
+    return <EmptyState data-testid="goal-tree-empty" title={strings.goals.empty} />;
   }
 
   return (
-    <div data-testid="goal-tree" role="tree" aria-label={strings.goals.treeAria}>
-      {rows.map(({ goal, depth }) => {
+    <Panel
+      padded={false}
+      title={strings.project.tabs.goals}
+      actions={<Badge tone="muted">{goals.length}</Badge>}
+    >
+      <div data-testid="goal-tree" role="tree" aria-label={strings.goals.treeAria}>
+        {rows.map(({ goal, depth }) => {
         const isStrategic = goal.kind === "strategic";
         const siblings = siblingsOf(goals, goal);
         const idx = siblings.findIndex((g) => g.id === goal.id);
@@ -572,9 +541,10 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
             onMoveUp={handleMoveUp}
             onMoveDown={handleMoveDown}
             onMetricRefsChange={changeMetricRefs}
-          />
-        );
-      })}
-    </div>
+            />
+          );
+        })}
+      </div>
+    </Panel>
   );
 }

@@ -9,10 +9,8 @@ import {
 } from "../ipc/orchd";
 import type { DomainTask, TaskSource, TaskStatus } from "../ipc/orchd-types";
 import { useSubmitGuard } from "../hooks/useSubmitGuard";
-import { theme } from "../theme";
+import { Badge, Button } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Locked enum order (spec §4.2 `TaskStatus`) — the status groups render in exactly this order,
  * always, even for an empty group (design-system.md "Status group" atom, S3 §10). */
@@ -103,31 +101,31 @@ function rowDepth(task: DomainTask): number {
 const sectionStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
-  marginBottom: 12,
+  gap: "var(--sp-1)",
+  marginBottom: "var(--sp-3)",
 };
 
 const sectionHeaderStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
   fontWeight: 600,
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   textTransform: "uppercase",
   letterSpacing: "0.04em",
-  padding: "4px 8px",
+  padding: "var(--sp-1) var(--sp-2)",
 };
 
 function rowStyle(depth: number): CSSProperties {
   return {
     display: "flex",
     alignItems: "center",
-    gap: 6,
+    gap: "var(--sp-2)",
     paddingLeft: 8 + depth * 16,
     paddingRight: 8,
     height: 32,
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    borderBottom: `1px solid ${theme.colors.border}`,
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--fs-sm)",
+    borderBottom: "1px solid var(--border)",
   };
 }
 
@@ -137,16 +135,16 @@ const titleTextStyle: CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--ink)",
+  background: "var(--panel)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
   padding: "2px 4px",
   flexShrink: 0,
 };
@@ -154,58 +152,34 @@ const selectStyle: CSSProperties = {
 const iconButtonStyle: CSSProperties = {
   border: "none",
   background: "transparent",
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   cursor: "pointer",
-  fontSize: 12,
+  fontSize: "var(--fs-sm)",
   lineHeight: 1,
   padding: "2px 4px",
   flexShrink: 0,
 };
 
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const deleteButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.statusExited,
-  borderColor: theme.colors.statusExited,
-};
-
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
-};
-
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
-  padding: "8px 12px",
-  marginBottom: 12,
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2) var(--sp-3)",
+  marginBottom: "var(--sp-3)",
+  border: "1px dashed var(--border-strong)",
+  borderRadius: "var(--r-lg)",
+  background: "var(--panel-2)",
 };
 
 const createInputStyle: CSSProperties = {
   flex: "1 1 160px",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
   padding: "3px 6px",
 };
 
@@ -235,6 +209,11 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       <span data-testid={`task-title-${task.id}`} style={titleTextStyle}>
         {task.title}
       </span>
+      {task.source && (
+        <Badge data-testid={`task-source-${task.id}`} tone="muted">
+          {SOURCE_LABEL[task.source]}
+        </Badge>
+      )}
       <select
         data-testid={`task-status-select-${task.id}`}
         aria-label={strings.tasks.statusAria}
@@ -269,15 +248,17 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       >
         ▼
       </button>
-      <button
+      <Button
         type="button"
+        variant="danger"
+        size="sm"
         data-testid={`task-delete-${task.id}`}
         disabled={disabled}
         onClick={() => onDelete(task)}
-        style={deleteButtonStyle}
+        style={{ flexShrink: 0 }}
       >
         {strings.common.delete}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -464,15 +445,17 @@ export function TasksList(props: { projectId: string }): JSX.Element {
           onChange={(e) => setCreateTags(e.target.value)}
           style={createInputStyle}
         />
-        <button
+        <Button
           type="button"
+          variant="primary"
+          size="sm"
           data-testid="task-create-submit"
           disabled={orchdDown || createTitle.trim() === "" || submitting}
           onClick={() => void submitCreate()}
-          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" || submitting ? 0.5 : 1 }}
+          style={{ flexShrink: 0 }}
         >
           {strings.tasks.addTask}
-        </button>
+        </Button>
       </div>
 
       {STATUS_VALUES.map((status) => {
@@ -485,7 +468,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
             {group.length === 0 ? (
               <div
                 data-testid={`task-empty-group-${status}`}
-                style={{ color: theme.colors.textDim, fontSize: 12, padding: "0 8px" }}
+                style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", padding: "0 var(--sp-2)" }}
               >
                 {strings.tasks.empty}
               </div>

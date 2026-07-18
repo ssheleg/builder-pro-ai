@@ -22,6 +22,7 @@ vi.mock("../ipc/orchd", () => ({
 
 import { TasksList } from "./TasksList";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { DomainTask } from "../ipc/orchd-types";
 
 const projectId = "proj-1";
@@ -86,6 +87,16 @@ describe("TasksList", () => {
     );
     // t3 (rank 10) before t1 (rank 20)
     expect(rowsInTodo).toEqual(["task-row-t3", "task-row-t1"]);
+  });
+
+  it("renders a task's source/provenance as a chip on its row (TA-06)", () => {
+    const t = makeTask({ id: "t1", status: "backlog", rank: 0, source: "insight" });
+    useAppStore.setState({ tasksByProject: { [projectId]: [t] } }, false);
+
+    render(<TasksList projectId={projectId} />);
+
+    const chip = within(screen.getByTestId("task-row-t1")).getByTestId("task-source-t1");
+    expect(chip.textContent).toContain(strings.tasks.source.insight);
   });
 
   it("▲ on a middle row calls orchdSetTaskRank with the exact midpoint of its two new neighbors", async () => {

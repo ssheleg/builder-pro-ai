@@ -7,10 +7,8 @@ import {
   describeOrchdError,
 } from "../ipc/orchd";
 import type { PolicyRules, RuleScope } from "../ipc/orchd-types";
-import { theme } from "../theme";
+import { Badge, Button } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Locked banner copy for the `missing` file state (task-17 brief verbatim: "file lost"). No
  * copy is locked for `externallyModified` — this one is written to the same terse honesty
@@ -61,133 +59,102 @@ function validatePolicy(
 const panelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 12,
-  fontFamily: MONO_FONT,
+  gap: "var(--sp-3)",
+  fontFamily: "var(--font-ui)",
 };
 
 const pathRowStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
+  gap: "var(--sp-2)",
   flexWrap: "wrap",
 };
 
 const pathTextStyle: CSSProperties = {
-  fontSize: 11,
-  color: theme.colors.textDim,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--muted)",
   wordBreak: "break-all",
 };
 
 /** Info banner (design-system.md "File-state banner" atom, task-17): the SAME inbox-item shape as
- * `DaemonBanner`'s incompatible case (left-edge accent + text + inline action) but with `accent`
- * (the one neutral/info color) instead of `statusWaiting` — amber is reserved for "needs you"
- * (design-system.md §2), and a stale/missing rules file is informational, not a human-attention
- * gate. */
+ * `DaemonBanner`'s incompatible case (left-edge accent + text + inline action) but with the calm
+ * `--info` accent instead of `--warn` — amber is reserved for "needs you" (design-system.md §2),
+ * and a stale/missing rules file is informational, not a human-attention gate. */
 const bannerStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 12,
-  padding: "6px 12px",
-  borderLeft: `3px solid ${theme.colors.accent}`,
-  background: theme.colors.bgElevated,
-  color: theme.colors.text,
-  fontSize: 13,
-  borderRadius: 4,
+  gap: "var(--sp-3)",
+  padding: "var(--sp-2) var(--sp-3)",
+  borderLeft: "3px solid var(--info)",
+  background: "var(--info-weak)",
+  color: "var(--ink)",
+  fontSize: "var(--fs-md)",
+  borderRadius: "var(--r-sm)",
 };
 
 const textareaStyle: CSSProperties = {
   width: "100%",
   minHeight: 200,
   boxSizing: "border-box",
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "8px 10px",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-3)",
   resize: "vertical",
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
-  alignSelf: "flex-start",
 };
 
 const policyFormStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 8,
-  padding: "8px 12px",
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
-  background: theme.colors.bgElevated,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-3) var(--sp-4)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-lg)",
+  background: "var(--panel)",
+  boxShadow: "var(--shadow-1)",
 };
 
 const labelStyle: CSSProperties = {
-  fontSize: 11,
+  fontSize: "var(--fs-xs)",
   fontWeight: 600,
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   textTransform: "uppercase",
   letterSpacing: "0.05em",
 };
 
 const numberInputStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: "transparent",
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
   padding: "3px 6px",
   maxWidth: 140,
 };
 
 const errorTextStyle: CSSProperties = {
-  fontSize: 11,
-  color: theme.colors.statusExited,
+  fontSize: "var(--fs-xs)",
+  color: "var(--danger)",
 };
 
 const chipRowStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
   alignItems: "center",
-  gap: 6,
-};
-
-const chipStyle: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  padding: "2px 8px",
-  borderRadius: 999,
-  border: `1px solid ${theme.colors.border}`,
-  color: theme.colors.text,
+  gap: "var(--sp-2)",
 };
 
 const chipRemoveStyle: CSSProperties = {
   border: "none",
   background: "transparent",
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   cursor: "pointer",
-  fontSize: 12,
+  fontSize: "var(--fs-sm)",
   lineHeight: 1,
   padding: 0,
 };
@@ -195,12 +162,12 @@ const chipRemoveStyle: CSSProperties = {
 const chipInputStyle: CSSProperties = {
   flex: "1 1 140px",
   minWidth: 100,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: "transparent",
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
   padding: "3px 6px",
 };
 
@@ -231,7 +198,7 @@ function ChipList(props: ChipListProps): JSX.Element {
   return (
     <div style={chipRowStyle}>
       {values.map((v) => (
-        <span key={v} data-testid={`${testIdPrefix}-chip-${v}`} style={chipStyle}>
+        <Badge key={v} data-testid={`${testIdPrefix}-chip-${v}`} tone="muted">
           {v}
           <button
             type="button"
@@ -242,7 +209,7 @@ function ChipList(props: ChipListProps): JSX.Element {
           >
             ×
           </button>
-        </span>
+        </Badge>
       ))}
       <input
         data-testid={`${testIdPrefix}-input`}
@@ -258,14 +225,16 @@ function ChipList(props: ChipListProps): JSX.Element {
         }}
         style={chipInputStyle}
       />
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="sm"
         data-testid={`${testIdPrefix}-add`}
         onClick={commitAdd}
-        style={textButtonStyle}
+        style={{ flexShrink: 0, whiteSpace: "nowrap" }}
       >
         {strings.rules.addEntry}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -351,7 +320,7 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
 
   if (!view) {
     return (
-      <div data-testid="ruleset-panel-loading" style={{ color: theme.colors.textDim, fontSize: 13 }}>
+      <div data-testid="ruleset-panel-loading" style={{ color: "var(--muted)", fontSize: "var(--fs-md)" }}>
         {strings.rules.loading}
       </div>
     );
@@ -415,43 +384,49 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
         <span data-testid="ruleset-path" style={pathTextStyle}>
           {rule.mdPath}
         </span>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           data-testid="ruleset-reveal"
           onClick={() => void handleReveal()}
-          style={textButtonStyle}
+          style={{ flexShrink: 0, whiteSpace: "nowrap" }}
         >
           {strings.rules.revealFile}
-        </button>
+        </Button>
       </div>
 
       {fileState === "externallyModified" && (
         <div data-testid="ruleset-banner-modified" role="status" style={bannerStyle}>
-          <span>{MODIFIED_BANNER_TEXT}</span>
-          <button
+          <span style={{ flex: 1 }}>{MODIFIED_BANNER_TEXT}</span>
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             data-testid="ruleset-acknowledge"
             disabled={orchdDown}
             onClick={() => void handleAcknowledge()}
-            style={textButtonStyle}
+            style={{ flexShrink: 0, whiteSpace: "nowrap" }}
           >
             {strings.common.accept}
-          </button>
+          </Button>
         </div>
       )}
 
       {fileState === "missing" && (
         <div data-testid="ruleset-banner-missing" role="status" style={bannerStyle}>
-          <span>{MISSING_BANNER_TEXT}</span>
-          <button
+          <span style={{ flex: 1 }}>{MISSING_BANNER_TEXT}</span>
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             data-testid="ruleset-recreate"
             disabled={orchdDown}
             onClick={() => void handleRecreate()}
-            style={textButtonStyle}
+            style={{ flexShrink: 0, whiteSpace: "nowrap" }}
           >
             {strings.rules.recreate}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -465,15 +440,17 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
             rows={12}
             style={textareaStyle}
           />
-          <button
+          <Button
             type="button"
+            variant="primary"
+            size="sm"
             data-testid="ruleset-save-content"
             disabled={orchdDown}
             onClick={() => void handleSaveContent()}
-            style={primaryButtonStyle}
+            style={{ alignSelf: "flex-start" }}
           >
             {strings.common.save}
-          </button>
+          </Button>
         </>
       )}
 
@@ -524,15 +501,17 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           </span>
         )}
 
-        <button
+        <Button
           type="button"
+          variant="primary"
+          size="sm"
           data-testid="ruleset-save-policy"
           disabled={orchdDown}
           onClick={() => void handleSavePolicy()}
-          style={primaryButtonStyle}
+          style={{ alignSelf: "flex-start" }}
         >
           {strings.rules.savePolicy}
-        </button>
+        </Button>
       </div>
     </div>
   );
