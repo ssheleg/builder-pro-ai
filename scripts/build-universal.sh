@@ -55,6 +55,10 @@ AARCH="$BIN_DIR/bpa-sessiond-aarch64-apple-darwin"
 XARCH="$BIN_DIR/bpa-sessiond-x86_64-apple-darwin"
 ORCHD_AARCH="$BIN_DIR/bpa-orchd-aarch64-apple-darwin"
 ORCHD_XARCH="$BIN_DIR/bpa-orchd-x86_64-apple-darwin"
+# The `--target universal-apple-darwin` bundler looks for each externalBin sidecar at
+# "binaries/<name>-universal-apple-darwin" (it merges the MAIN binary itself, NOT the sidecars).
+SESSIOND_UNI="$BIN_DIR/bpa-sessiond-universal-apple-darwin"
+ORCHD_UNI="$BIN_DIR/bpa-orchd-universal-apple-darwin"
 
 log()  { echo "[build-universal] $*"; }
 warn() { echo "WARNING: $*" >&2; }
@@ -104,7 +108,14 @@ build_sidecars() {
   for f in "$AARCH" "$XARCH" "$ORCHD_AARCH" "$ORCHD_XARCH"; do
     head -c 15 "$f" | grep -q '^#!/bin/sh$' && fail "$f is still the placeholder stub — real cargo build did not overwrite it"
   done
-  log "OK: all four per-arch sidecars present at $BIN_DIR"
+
+  # `tauri build --target universal-apple-darwin` lipo-merges the MAIN app binary itself, but it
+  # does NOT merge the externalBin sidecars — it looks for each already-universal file at
+  # "binaries/<name>-universal-apple-darwin". Produce those by lipo-merging the two per-arch daemons.
+  lipo -create "$AARCH" "$XARCH" -output "$SESSIOND_UNI"
+  lipo -create "$ORCHD_AARCH" "$ORCHD_XARCH" -output "$ORCHD_UNI"
+  [ -f "$SESSIOND_UNI" ] && [ -f "$ORCHD_UNI" ] || fail "lipo failed to produce the universal sidecars"
+  log "OK: per-arch + universal sidecars staged at $BIN_DIR"
 }
 
 build_app() {
