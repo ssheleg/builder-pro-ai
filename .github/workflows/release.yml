@@ -40,6 +40,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable # rustup honors rust-toolchain.toml (1.92)
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # dtolnay adds the targets to `stable`, but rust-toolchain.toml pins 1.92 and overrides the
+      # active toolchain — so add both targets to the ACTUAL toolchain build-universal.sh uses
+      # (run inside the checkout so rustup resolves rust-toolchain.toml → 1.92).
+      - name: Ensure both macOS targets on the pinned toolchain
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-node@v4
