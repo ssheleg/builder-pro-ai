@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readTheme, setThemePref, type Theme } from "../ui/theme";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
@@ -377,6 +378,12 @@ export interface AppState {
   setOrchdIncompatible: (v: boolean) => void;
   /** Set `orchdUpgradeDialogOpen`. See its doc above. */
   setOrchdUpgradeDialogOpen: (v: boolean) => void;
+
+  /** Current theme preference (light / dark / system). Boot-applied in main.tsx; `setTheme`
+   * persists + re-applies it to the document root (S-UXR B1). */
+  theme: Theme;
+  /** Persist + apply + store the theme preference. */
+  setTheme: (t: Theme) => void;
 }
 
 /** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
@@ -778,6 +785,12 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     setOrchdDown: (v) => set({ orchdDown: v }),
+
+    theme: readTheme(),
+    setTheme: (t) => {
+      setThemePref(t);
+      set({ theme: t });
+    },
     setOrchdIncompatible: (v) => set({ orchdIncompatible: v }),
     setOrchdUpgradeDialogOpen: (v) => set({ orchdUpgradeDialogOpen: v }),
   };

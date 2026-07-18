@@ -68,6 +68,12 @@ export const strings = {
 
   // ── chrome: banners, upgrade dialog, sidebar, toasts ─────────────────────────────────────────
   chrome: {
+    theme: {
+      system: "System theme",
+      light: "Light theme",
+      dark: "Dark theme",
+      toggleAria: (current: string) => `Theme: ${current}. Click to switch.`,
+    },
     daemonOutdated: "Background service is outdated — update required",
     orchdOutdated: "Orchestrator service is outdated — update required",
     orchdUnavailable: "Orchestrator unavailable",

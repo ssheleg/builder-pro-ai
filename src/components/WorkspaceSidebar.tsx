@@ -6,6 +6,7 @@ import { orchdAddProjectWorkspace, describeOrchdError } from "../ipc/orchd";
 import type { Project } from "../ipc/orchd-types";
 import type { Workspace } from "../ipc/types";
 import { CreateProjectDialog } from "./CreateProjectDialog";
+import { ThemeToggle } from "../ui/ThemeToggle";
 import { theme } from "../theme";
 import { strings } from "../strings";
 
@@ -371,6 +372,7 @@ export function WorkspaceSidebar(props: {
           )}
         </div>
 
+        <ThemeToggle />
         <button
           type="button"
           data-testid="create-project-open"
