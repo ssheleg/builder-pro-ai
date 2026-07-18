@@ -379,3 +379,21 @@ variables -> Actions** to get a signed, notarized build:
 
 The env-var -> credential mapping is exactly the one `scripts/build-universal.sh` documents in its
 header; the workflow just forwards these secrets into that script.
+
+### Entitlements (hardened runtime) — no comments, no sandbox-inherit
+
+`src-tauri/entitlements.plist` MUST NOT contain XML comments. `plutil -lint` accepts them, but
+codesign's AMFI entitlements parser does not (`AMFIUnserializeXML: syntax error near line N` →
+`failed to sign app`). Keep it comment-free. The four entitlements it carries are the standard
+Tauri/WebKit hardened-runtime set, and each is required:
+
+- `com.apple.security.cs.allow-jit` + `...allow-unsigned-executable-memory` — WKWebView's JS engine
+  allocates executable pages; without these the webview cannot render under the hardened runtime.
+- `com.apple.security.cs.disable-library-validation` — WebKit dynamically loads Apple-signed (not
+  Developer-ID) system frameworks the default library validation would reject.
+- `com.apple.security.cs.allow-dyld-environment-variables` — WebKit's process-launch machinery uses
+  DYLD env vars the hardened runtime otherwise strips.
+
+`com.apple.security.inherit` was intentionally REMOVED: it is an App-Sandbox inheritance entitlement
+and is meaningless (and a notarization snag) for a hardened-runtime, non-sandboxed Developer ID app.
+The `bpa-sessiond`/`bpa-orchd` sidecars run under the hardened runtime, not the sandbox.
