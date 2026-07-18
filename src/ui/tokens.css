@@ -94,8 +94,17 @@ body,
   font-size: var(--fs-md);
 }
 
-/* Keyboard focus is always visible (a11y), themed to the accent. */
+/* App-wide accessible focus ring (BL-29; design-system.md §6.8 "Focus visible" UX law): a 2px
+   accent outline, offset 2px, on every interactive element. Themed to the accent token so it
+   recolours in light and dark. This is the single source — there is no other global stylesheet. */
 :focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: 2px;
+}
+
+/* :focus-visible only matches keyboard/programmatic focus; a plain :focus (e.g. a mouse click)
+   would otherwise still draw the browser's default ring on elements the :focus-visible heuristic
+   doesn't cover — suppress it so a click never shows a ring, only Tab/keyboard nav does. */
+:focus:not(:focus-visible) {
+  outline: none;
 }
