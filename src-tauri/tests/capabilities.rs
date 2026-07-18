@@ -87,16 +87,28 @@ fn entitlements_plist_has_hardened_runtime_keys() {
     let raw = include_str!("../entitlements.plist");
     assert!(raw.contains("<!DOCTYPE plist"), "must be a plist doctype");
     assert!(raw.contains("<plist"), "must have a <plist> root");
-    // Hardened runtime for a WKWebView app that also embeds a signed sidecar (spec §14.3). The
-    // daemon spawns child processes (shells) so it needs the inherit exception; the app uses JS
-    // so it needs the JIT/unsigned-executable-memory exceptions that WKWebView requires.
+    // Hardened runtime for a WKWebView app that also embeds signed sidecars (spec §14.3): the app
+    // uses JS, so it needs the JIT / unsigned-executable-memory / library-validation exceptions
+    // WKWebView requires, plus allow-dyld-environment-variables for the sidecar launch.
     for key in [
         "com.apple.security.cs.allow-jit",
         "com.apple.security.cs.allow-unsigned-executable-memory",
         "com.apple.security.cs.disable-library-validation",
         "com.apple.security.cs.allow-dyld-environment-variables",
-        "com.apple.security.inherit",
     ] {
         assert!(raw.contains(key), "entitlements must declare {key}");
+    }
+    // The app is deliberately NOT sandboxed — it orchestrates real terminals and spawns the two
+    // launchd daemons — so the sandbox keys are intentionally ABSENT. `com.apple.security.inherit`
+    // is a sandbox-container inheritance key (meaningless without `app-sandbox`) and, under the
+    // hardened runtime, its presence broke AMFI codesigning (removed in the release fix, 63c0397).
+    for absent in [
+        "com.apple.security.app-sandbox",
+        "com.apple.security.inherit",
+    ] {
+        assert!(
+            !raw.contains(absent),
+            "entitlements must NOT declare the sandbox key {absent} (the app is not sandboxed)"
+        );
     }
 }
