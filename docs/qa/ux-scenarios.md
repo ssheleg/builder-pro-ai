@@ -1,6 +1,6 @@
 # UX-scenario catalog — Builder Pro AI
 
-**synced @ 501bbe3**
+**synced @ ac581d4**
 
 This is the single, maintained source of truth for every user-facing scenario in the webview
 (React 19 + TypeScript over the Tauri host). It supersedes the frozen Russian first-session catalog

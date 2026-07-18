@@ -57,10 +57,31 @@ Lesser observations left ✅ but noted: **TE-04** terminal tab has no `onKeyDown
 catalog-assigned to XC-06 → fix in B-T5); **ON-07/HomeGoals** shares FI-02's milder "loading label after a
 failed fetch" pattern (catalog-documented → same fix family in B-T4).
 
-## Catalog maintenance due
+## Catalog maintenance due — done
 
-- Header says `synced @ 78af949`; HEAD is `501bbe3`. Re-sync after the B3/B4 fixes land.
-- Correct rows **FI-02**, **EX-04**, **RE-12** per the findings above; retire **BL-89** from `docs/backlog.md`.
+- Catalog re-synced to `ac581d4` (post Part-B). Rows **EX-04** / **RE-12** corrected in A-T3
+  (BL-89 was already `done` in `docs/backlog.md`, shipped `[0.8.0]`). The **FI-02** row's promise
+  ("loading / empty / failed are visually distinct") is now satisfied by the B-T5 code.
+
+## Pass 2 — post-redesign verification (2026-07-18, code at `ac581d4`)
+
+Part B restyled every view onto the token system + primitives kit. Pass 2 verifies the redesign
+did not regress behavior and that every actionable pass-1 finding landed:
+
+- **Behavior preserved.** The 886-test suite is green; an adversarial whole-branch review of the
+  8 redesign commits (`63a4857..ac581d4`) confirmed no `data-testid` / `role` / `aria` / handler
+  was dropped and no test assertion was weakened (test diffs are strengthened). **Verdict: SHIP**
+  — 0 Critical, 0 Important, 2 non-blocking Minor (six dialogs still inline the scrim/on-accent
+  literals → **BL-98**; one bare-digit HomeView assertion — cosmetic).
+- **Findings resolved:** FI-02 (distinct failed-dir row + Retry), TE-04 (terminal-tab keyboard
+  activation), TA-06 (task-provenance Badge), ID-05 (disabled-look while orchd down), GR-02/GR-12
+  (optimistic-edge rollback), ON-07 (loading line clears after a failed fetch). **XC-03** (theme
+  not applied to chrome) is resolved by the token migration itself.
+- **Deferred (accepted / backlog):** RE-01 (Extensions CTA), DG-12 (ops-select loading affordance)
+  — both need new copy, out of a behavior-preserving restyle; IN-07/P-26, XC-09 (windowing) —
+  accepted per catalog.
+
+**Net: 0 reproducible bugs across 181 scenarios; the redesign shipped behavior-preserving.**
 
 ---
 
