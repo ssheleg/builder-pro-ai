@@ -1,70 +1,48 @@
 import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../../store/store";
 import type { McpArtifact } from "../../ipc/orchd-types";
-import { theme } from "../../theme";
+import { Badge, Button, EmptyState } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const rowStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 6,
-  padding: "8px 12px",
-  marginBottom: 8,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-3)",
+  marginBottom: "var(--sp-2)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel)",
 };
 
 const rowHeaderStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
   alignItems: "center",
-  gap: 8,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
+  gap: "var(--sp-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
 };
 
 const titleTextStyle: CSSProperties = {
-  color: theme.colors.text,
+  color: "var(--ink)",
   fontWeight: 600,
 };
 
 const metaStyle: CSSProperties = {
-  color: theme.colors.textDim,
-  fontSize: 11,
-};
-
-const untrustedBannerStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  color: theme.colors.statusWaiting,
-  border: `1px solid ${theme.colors.statusWaiting}`,
-  borderRadius: 4,
-  padding: "2px 8px",
-  alignSelf: "flex-start",
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 8px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
+  color: "var(--muted)",
+  fontSize: "var(--fs-xs)",
+  fontVariantNumeric: "tabular-nums",
 };
 
 const preStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.textDim,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: 6,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--muted)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-2)",
   margin: 0,
   whiteSpace: "pre-wrap",
   wordBreak: "break-all",
@@ -118,18 +96,19 @@ export function ArtifactViewer(props: {
         )}
         <span style={metaStyle}>{formatTimestamp(artifact.createdAt)}</span>
         {artifact.isUntrusted && (
-          <span data-testid={`artifact-untrusted-${artifact.id}`} style={untrustedBannerStyle}>
+          <Badge tone="warn" data-testid={`artifact-untrusted-${artifact.id}`}>
             {strings.ext.unverified}
-          </span>
+          </Badge>
         )}
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           data-testid={`artifact-toggle-${artifact.id}`}
           onClick={() => setIsOpen((v) => !v)}
-          style={textButtonStyle}
         >
           {isOpen ? strings.ext.artifacts.toggleHide : strings.ext.artifacts.toggleShow}
-        </button>
+        </Button>
       </div>
       {isOpen && (
         <pre data-testid={`artifact-content-${artifact.id}`} style={preStyle}>
@@ -172,9 +151,7 @@ export function ArtifactsTab(): JSX.Element {
   return (
     <div data-testid="artifacts-tab">
       {artifacts.length === 0 ? (
-        <div data-testid="artifacts-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          {strings.ext.artifacts.empty}
-        </div>
+        <EmptyState data-testid="artifacts-empty" title={strings.ext.artifacts.empty} />
       ) : (
         <div role="list">
           {artifacts.map((artifact) => {

@@ -2,47 +2,46 @@ import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../../store/store";
 import { mcpSetToolEnabled, mcpCallTool, describeOrchdError, isConsentError } from "../../ipc/orchd";
 import type { McpTool } from "../../ipc/orchd-types";
-import { theme } from "../../theme";
+import { Badge, Button, TextArea, EmptyState } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const toolRowStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
-  padding: "8px 12px",
-  marginBottom: 8,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-1)",
+  padding: "var(--sp-3)",
+  marginBottom: "var(--sp-2)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel)",
 };
 
 const headerRowStyle: CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "flex-start",
-  gap: 8,
+  gap: "var(--sp-2)",
 };
 
 const metaTextStyle: CSSProperties = {
-  fontSize: 11,
-  fontFamily: MONO_FONT,
-  color: theme.colors.textDim,
+  fontSize: "var(--fs-xs)",
+  fontFamily: "var(--font-mono)",
+  color: "var(--muted)",
 };
 
 const descTextStyle: CSSProperties = {
-  fontSize: 12,
-  color: theme.colors.text,
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
 };
 
 const schemaStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.textDim,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: 6,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--muted)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-2)",
   margin: 0,
   whiteSpace: "pre-wrap",
   wordBreak: "break-all",
@@ -50,52 +49,23 @@ const schemaStyle: CSSProperties = {
 
 const invokeRowStyle: CSSProperties = {
   display: "flex",
-  gap: 6,
+  gap: "var(--sp-2)",
   alignItems: "flex-start",
 };
 
 const textareaStyle: CSSProperties = {
   flex: 1,
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "3px 6px",
-  resize: "vertical",
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 8px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-  alignSelf: "flex-start",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
 };
 
 const inlineErrorStyle: CSSProperties = {
-  fontSize: 12,
+  fontSize: "var(--fs-sm)",
   lineHeight: 1.4,
-  color: theme.colors.statusExited,
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  paddingLeft: 8,
-};
-
-const untrustedBannerStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  color: theme.colors.statusWaiting,
-  border: `1px solid ${theme.colors.statusWaiting}`,
-  borderRadius: 4,
-  padding: "2px 8px",
-  alignSelf: "flex-start",
+  color: "var(--danger)",
+  borderLeft: "3px solid var(--danger)",
+  paddingLeft: "var(--sp-2)",
 };
 
 interface ToolCallResult {
@@ -199,9 +169,7 @@ export function ToolsBrowser(): JSX.Element {
   return (
     <div data-testid="tools-browser">
       {rows.length === 0 ? (
-        <div data-testid="tools-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          {strings.ext.tools.empty}
-        </div>
+        <EmptyState data-testid="tools-empty" title={strings.ext.tools.empty} />
       ) : (
         rows.map(({ server, tool }) => {
           const callDisabled = orchdDown || !tool.enabled;
@@ -210,7 +178,9 @@ export function ToolsBrowser(): JSX.Element {
             <div key={tool.id} data-testid={`tool-row-${tool.id}`} style={toolRowStyle}>
               <div style={headerRowStyle}>
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>{tool.title ?? tool.name}</div>
+                  <div style={{ fontWeight: 600, fontSize: "var(--fs-md)", color: "var(--ink)" }}>
+                    {tool.title ?? tool.name}
+                  </div>
                   <div style={metaTextStyle}>
                     {server.name} · {tool.name}
                   </div>
@@ -218,7 +188,15 @@ export function ToolsBrowser(): JSX.Element {
                     <div style={descTextStyle}>{tool.description}</div>
                   )}
                 </div>
-                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "var(--sp-1)",
+                    fontSize: "var(--fs-xs)",
+                    color: "var(--muted)",
+                  }}
+                >
                   <input
                     type="checkbox"
                     data-testid={`tool-enabled-${tool.id}`}
@@ -242,7 +220,7 @@ export function ToolsBrowser(): JSX.Element {
               )}
 
               <details>
-                <summary style={{ fontSize: 11, color: theme.colors.textDim, cursor: "pointer" }}>
+                <summary style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", cursor: "pointer" }}>
                   {strings.ext.tools.schema}
                 </summary>
                 <pre data-testid={`tool-schema-${tool.id}`} style={schemaStyle}>
@@ -251,7 +229,7 @@ export function ToolsBrowser(): JSX.Element {
               </details>
 
               <div style={invokeRowStyle}>
-                <textarea
+                <TextArea
                   data-testid={`tool-args-${tool.id}`}
                   aria-label={strings.ext.tools.argsFor(tool.name)}
                   placeholder="{}"
@@ -261,15 +239,16 @@ export function ToolsBrowser(): JSX.Element {
                   rows={2}
                   style={textareaStyle}
                 />
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="sm"
                   data-testid={`tool-call-${tool.id}`}
                   disabled={callDisabled}
                   onClick={() => void handleCall(tool)}
-                  style={textButtonStyle}
                 >
                   {strings.ext.invoke}
-                </button>
+                </Button>
               </div>
 
               {callError[tool.id] != null && (
@@ -279,12 +258,12 @@ export function ToolsBrowser(): JSX.Element {
               )}
 
               {toolResult && (
-                <div data-testid={`tool-result-${tool.id}`} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span data-testid={`tool-result-untrusted-${tool.id}`} style={untrustedBannerStyle}>
+                <div data-testid={`tool-result-${tool.id}`} style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)" }}>
+                  <Badge tone="warn" data-testid={`tool-result-untrusted-${tool.id}`}>
                     {strings.ext.unverified}
-                  </span>
+                  </Badge>
                   {toolResult.isError && (
-                    <span style={{ fontSize: 12, color: theme.colors.statusExited }}>
+                    <span style={{ fontSize: "var(--fs-sm)", color: "var(--danger)" }}>
                       {strings.ext.tools.toolError}
                     </span>
                   )}

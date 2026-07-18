@@ -2,13 +2,12 @@ import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react
 import { useAppStore } from "../../store/store";
 import { trustGrantConsent, mcpConnect, describeOrchdError } from "../../ipc/orchd";
 import type { McpServer } from "../../ipc/orchd-types";
-import { theme } from "../../theme";
 import { strings } from "../../strings";
 
 const overlayStyle: CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "rgba(1, 4, 9, 0.6)",
+  background: "rgba(0, 0, 0, 0.4)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -17,55 +16,55 @@ const overlayStyle: CSSProperties = {
 
 const cardStyle: CSSProperties = {
   width: 380,
-  background: theme.colors.bgElevated,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 10,
-  boxShadow: theme.shadow,
-  padding: 16,
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-lg)",
+  boxShadow: "var(--shadow-1)",
+  padding: "var(--sp-4)",
   display: "flex",
   flexDirection: "column",
-  gap: 12,
+  gap: "var(--sp-3)",
 };
 
 const titleStyle: CSSProperties = {
-  fontSize: 15,
+  fontSize: "var(--fs-lg)",
   fontWeight: 600,
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const secondaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: `1px solid ${theme.colors.border}`,
+  padding: "var(--sp-2) var(--sp-3)",
+  borderRadius: "var(--r-md)",
+  border: "1px solid var(--border-strong)",
   background: "transparent",
-  color: theme.colors.text,
-  fontSize: 13,
+  color: "var(--ink)",
+  fontSize: "var(--fs-md)",
   cursor: "pointer",
 };
 
 const primaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: "none",
-  background: theme.colors.accent,
-  color: theme.colors.text,
-  fontSize: 13,
+  padding: "var(--sp-2) var(--sp-3)",
+  borderRadius: "var(--r-md)",
+  border: "1px solid var(--accent)",
+  background: "var(--accent)",
+  color: "#fff",
+  fontSize: "var(--fs-md)",
   fontWeight: 600,
   cursor: "pointer",
 };
 
 const inlineErrorStyle: CSSProperties = {
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   lineHeight: 1.5,
-  color: theme.colors.statusExited,
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  paddingLeft: 8,
+  color: "var(--danger)",
+  borderLeft: "3px solid var(--danger)",
+  paddingLeft: "var(--sp-2)",
 };
 
 /**
  * First-connect consent dialog (S-EXT §8/§10 D10 trust choke-point, T8). Design-system "Dialog /
  * modal overlay" atom, mirrors `CreateProjectDialog`/`UpgradeDialog` byte-for-byte (dim backdrop +
- * centered `bgElevated` card, `role="dialog"` + `aria-modal` + labelled title, focus the primary
+ * centered `--panel` card, `role="dialog"` + `aria-modal` + labelled title, focus the primary
  * button on open, `Escape` runs the same cancel path as the Cancel button).
  *
  * Shows the server's endpoint (its `url` for an http server; `command` for a future stdio one —
@@ -136,11 +135,14 @@ export function ConnectDialog(props: { server: McpServer; onClose: () => void })
           {strings.ext.connectDialog.title(server.name)}
         </div>
 
-        <div data-testid="connect-dialog-url" style={{ fontSize: 13, color: theme.colors.textDim }}>
+        <div
+          data-testid="connect-dialog-url"
+          style={{ fontSize: "var(--fs-md)", color: "var(--muted)", fontFamily: "var(--font-mono)" }}
+        >
           {endpoint}
         </div>
 
-        <div style={{ fontSize: 12, color: theme.colors.textDim }}>
+        <div style={{ fontSize: "var(--fs-sm)", color: "var(--muted)", lineHeight: 1.5 }}>
           {strings.ext.connectDialog.body}
         </div>
 
@@ -150,7 +152,7 @@ export function ConnectDialog(props: { server: McpServer; onClose: () => void })
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "var(--sp-2)", marginTop: "var(--sp-1)" }}>
           <button
             type="button"
             data-testid="connect-dialog-cancel"

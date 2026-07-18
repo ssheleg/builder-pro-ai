@@ -4,10 +4,8 @@ import { pickSkillFile } from "../../ipc/commands";
 import { skillAdd, skillDelete, describeOrchdError } from "../../ipc/orchd";
 import type { Skill, SkillFileState } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { theme } from "../../theme";
+import { Badge, Button, Input, Select, EmptyState } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Honest message for a rejected `CommandError` (`pickSkillFile` is a sessiond native-picker
  * round-trip — `src-tauri/src/commands.rs::CommandError`, a DIFFERENT error union than orchd's).
@@ -35,45 +33,34 @@ function describeCommandError(err: unknown): string {
 }
 
 const bannerStyle: CSSProperties = {
-  fontSize: 12,
+  fontSize: "var(--fs-sm)",
   lineHeight: 1.5,
-  color: theme.colors.statusWaiting,
-  border: `1px solid ${theme.colors.statusWaiting}`,
-  borderRadius: 6,
-  padding: "8px 12px",
-  marginBottom: 16,
+  color: "var(--warn)",
+  background: "var(--warn-weak)",
+  border: "1px solid var(--warn)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-3)",
+  marginBottom: "var(--sp-4)",
 };
 
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
-  padding: "8px 12px",
-  marginBottom: 12,
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
+  alignItems: "center",
+  gap: "var(--sp-2)",
+  padding: "var(--sp-3)",
+  marginBottom: "var(--sp-3)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel-2)",
 };
 
 const createInputStyle: CSSProperties = {
   flex: "1 1 160px",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "3px 6px",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "2px 4px",
   flexShrink: 0,
 };
 
@@ -81,22 +68,22 @@ const rowStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
   alignItems: "center",
-  gap: 8,
-  padding: "6px 8px",
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  borderBottom: `1px solid ${theme.colors.border}`,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  borderBottom: "1px solid var(--border)",
 };
 
 const titleTextStyle: CSSProperties = {
   minWidth: 0,
-  color: theme.colors.text,
+  color: "var(--ink)",
   fontWeight: 600,
 };
 
 const metaStyle: CSSProperties = {
-  color: theme.colors.textDim,
-  fontSize: 11,
+  color: "var(--muted)",
+  fontSize: "var(--fs-xs)",
   minWidth: 0,
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -106,42 +93,6 @@ const metaStyle: CSSProperties = {
 const pathTextStyle: CSSProperties = {
   ...metaStyle,
   flex: "1 1 200px",
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const deleteButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.statusExited,
-  borderColor: theme.colors.statusExited,
-};
-
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
-};
-
-const badgeStyle: CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: theme.colors.statusExited,
-  border: `1px solid ${theme.colors.statusExited}`,
-  borderRadius: 4,
-  padding: "1px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
 };
 
 /** Files-as-truth badge copy (task-17 brief: "modified"/"file missing" for Modified/Missing).
@@ -245,7 +196,7 @@ export function SkillsTab(): JSX.Element {
       </div>
 
       <div style={createFormStyle}>
-        <input
+        <Input
           data-testid="skill-create-name"
           aria-label={strings.ext.skills.nameAria}
           placeholder={strings.ext.skills.namePlaceholder}
@@ -253,7 +204,7 @@ export function SkillsTab(): JSX.Element {
           onChange={(e) => setName(e.target.value)}
           style={createInputStyle}
         />
-        <input
+        <Input
           data-testid="skill-create-description"
           aria-label={strings.ext.skills.descriptionAria}
           placeholder={strings.common.descriptionOptional}
@@ -261,7 +212,7 @@ export function SkillsTab(): JSX.Element {
           onChange={(e) => setDescription(e.target.value)}
           style={createInputStyle}
         />
-        <select
+        <Select
           data-testid="skill-create-scope"
           aria-label={strings.ext.skills.scopeAria}
           value="global"
@@ -272,35 +223,35 @@ export function SkillsTab(): JSX.Element {
           <option value="project" disabled>
             {strings.ext.projectSoon}
           </option>
-        </select>
-        <button
+        </Select>
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           data-testid="skill-pick-path"
           onClick={() => void handlePickFile()}
-          style={textButtonStyle}
         >
           {strings.ext.skills.chooseSkillMd}
-        </button>
+        </Button>
         {mdPath !== null && (
           <span data-testid="skill-picked-path" style={pathTextStyle} title={mdPath}>
             {mdPath}
           </span>
         )}
-        <button
+        <Button
           type="button"
+          variant="primary"
+          size="sm"
           data-testid="skill-create-submit"
           disabled={orchdDown || addBlocked || submitting}
           onClick={() => void submitAdd()}
-          style={{ ...primaryButtonStyle, opacity: addBlocked || submitting ? 0.5 : 1 }}
         >
           {strings.ext.skills.addSkill}
-        </button>
+        </Button>
       </div>
 
       {skills.length === 0 ? (
-        <div data-testid="skills-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          {strings.ext.skills.empty}
-        </div>
+        <EmptyState data-testid="skills-empty" title={strings.ext.skills.empty} />
       ) : (
         <div role="list">
           {skills.map((skill) => {
@@ -329,19 +280,20 @@ export function SkillsTab(): JSX.Element {
                   {SCOPE_LABEL[skill.scope]}
                 </span>
                 {badgeLabel !== undefined && (
-                  <span data-testid={`skill-filestate-${skill.id}`} style={badgeStyle}>
+                  <Badge tone="danger" data-testid={`skill-filestate-${skill.id}`}>
                     {badgeLabel}
-                  </span>
+                  </Badge>
                 )}
-                <button
+                <Button
                   type="button"
+                  variant="danger"
+                  size="sm"
                   data-testid={`skill-delete-${skill.id}`}
                   disabled={orchdDown}
                   onClick={() => void handleDelete(skill)}
-                  style={deleteButtonStyle}
                 >
                   {strings.ext.delete}
-                </button>
+                </Button>
               </div>
             );
           })}

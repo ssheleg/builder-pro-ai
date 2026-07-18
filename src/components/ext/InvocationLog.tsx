@@ -3,114 +3,62 @@ import { useAppStore } from "../../store/store";
 import { trustSetPolicy, describeOrchdError } from "../../ipc/orchd";
 import type { McpInvocation, Policy, PolicyScope } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { theme } from "../../theme";
+import { Badge, Button, Input, Select, Panel, EmptyState } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
-
-const sectionStyle: CSSProperties = {
-  marginBottom: 20,
-};
-
-const sectionTitleStyle: CSSProperties = {
-  fontSize: 13,
-  fontWeight: 700,
-  marginBottom: 8,
-  color: theme.colors.text,
-};
 
 const tableStyle: CSSProperties = {
   width: "100%",
   borderCollapse: "collapse",
-  fontFamily: MONO_FONT,
-  fontSize: 11,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  fontVariantNumeric: "tabular-nums",
 };
 
 const thStyle: CSSProperties = {
   textAlign: "left",
-  padding: "4px 8px",
-  borderBottom: `1px solid ${theme.colors.border}`,
-  color: theme.colors.textDim,
+  padding: "var(--sp-1) var(--sp-2)",
+  borderBottom: "1px solid var(--border)",
+  background: "var(--panel-2)",
+  color: "var(--muted)",
   fontWeight: 600,
   whiteSpace: "nowrap",
 };
 
+const thNumStyle: CSSProperties = {
+  ...thStyle,
+  textAlign: "right",
+};
+
 const tdStyle: CSSProperties = {
-  padding: "4px 8px",
-  borderBottom: `1px solid ${theme.colors.border}`,
-  color: theme.colors.text,
+  padding: "var(--sp-1) var(--sp-2)",
+  borderBottom: "1px solid var(--border)",
+  color: "var(--ink)",
   whiteSpace: "nowrap",
   overflow: "hidden",
   textOverflow: "ellipsis",
   maxWidth: 220,
 };
 
-const okStyle: CSSProperties = {
-  color: theme.colors.statusRunning,
-  fontWeight: 700,
-};
-
-const errStyle: CSSProperties = {
-  color: theme.colors.statusExited,
-  fontWeight: 700,
+const tdNumStyle: CSSProperties = {
+  ...tdStyle,
+  textAlign: "right",
 };
 
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
-  padding: "8px 12px",
-  marginBottom: 12,
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
+  marginBottom: "var(--sp-3)",
   alignItems: "center",
 };
 
 const createInputStyle: CSSProperties = {
   flex: "1 1 140px",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "3px 6px",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "2px 4px",
   flexShrink: 0,
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 8px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
-};
-
-const emptyStyle: CSSProperties = {
-  color: theme.colors.textDim,
-  fontSize: 12,
 };
 
 const SCOPE_LABEL: Record<PolicyScope, string> = {
@@ -197,11 +145,10 @@ export function InvocationLog(): JSX.Element {
   const submitSetPolicy = guard(handleSetPolicy);
 
   return (
-    <div data-testid="invocation-log">
-      <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>{strings.ext.log.limitsTitle}</div>
+    <div data-testid="invocation-log" style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
+      <Panel title={strings.ext.log.limitsTitle}>
         <div style={createFormStyle}>
-          <select
+          <Select
             data-testid="policy-scope"
             aria-label={strings.ext.log.scopeAria}
             value={scope}
@@ -211,8 +158,8 @@ export function InvocationLog(): JSX.Element {
             <option value="global">{strings.common.scope.global}</option>
             <option value="project">{strings.common.scope.project}</option>
             <option value="server">{strings.common.scope.server}</option>
-          </select>
-          <input
+          </Select>
+          <Input
             data-testid="policy-ref-id"
             aria-label={strings.ext.log.refIdAria}
             placeholder={scope === "global" ? strings.ext.log.refIdNotRequired : strings.ext.log.refIdPlaceholder}
@@ -221,7 +168,7 @@ export function InvocationLog(): JSX.Element {
             onChange={(e) => setRefId(e.target.value)}
             style={createInputStyle}
           />
-          <input
+          <Input
             data-testid="policy-spend-cap"
             aria-label={strings.ext.log.spendCapAria}
             placeholder={strings.ext.log.spendCapPlaceholder}
@@ -229,7 +176,7 @@ export function InvocationLog(): JSX.Element {
             onChange={(e) => setSpendCapUsd(e.target.value)}
             style={createInputStyle}
           />
-          <input
+          <Input
             data-testid="policy-rate-per-min"
             aria-label={strings.ext.log.ratePerMinAria}
             placeholder={strings.ext.log.ratePerMinPlaceholder}
@@ -237,29 +184,28 @@ export function InvocationLog(): JSX.Element {
             onChange={(e) => setRatePerMin(e.target.value)}
             style={createInputStyle}
           />
-          <button
+          <Button
             type="button"
+            variant="primary"
+            size="sm"
             data-testid="policy-set-submit"
             disabled={orchdDown || setBlocked || submitting}
             onClick={() => void submitSetPolicy()}
-            style={{ ...primaryButtonStyle, opacity: orchdDown || setBlocked || submitting ? 0.5 : 1 }}
           >
             {strings.ext.log.setLimit}
-          </button>
+          </Button>
         </div>
 
         {policies.length === 0 ? (
-          <div data-testid="policies-empty" style={emptyStyle}>
-            {strings.ext.log.noLimits}
-          </div>
+          <EmptyState data-testid="policies-empty" title={strings.ext.log.noLimits} />
         ) : (
           <table style={tableStyle}>
             <thead>
               <tr>
                 <th style={thStyle}>{strings.ext.log.thScope}</th>
                 <th style={thStyle}>id</th>
-                <th style={thStyle}>{strings.ext.log.thCap}</th>
-                <th style={thStyle}>{strings.ext.log.thRate}</th>
+                <th style={thNumStyle}>{strings.ext.log.thCap}</th>
+                <th style={thNumStyle}>{strings.ext.log.thRate}</th>
               </tr>
             </thead>
             <tbody>
@@ -267,21 +213,18 @@ export function InvocationLog(): JSX.Element {
                 <tr key={p.id} data-testid={`policy-row-${p.id}`}>
                   <td style={tdStyle}>{SCOPE_LABEL[p.scope]}</td>
                   <td style={tdStyle}>{p.refId ?? "—"}</td>
-                  <td style={tdStyle}>{p.spendCapUsd ?? "—"}</td>
-                  <td style={tdStyle}>{p.ratePerMin ?? "—"}</td>
+                  <td style={tdNumStyle}>{p.spendCapUsd ?? "—"}</td>
+                  <td style={tdNumStyle}>{p.ratePerMin ?? "—"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-      </div>
+      </Panel>
 
-      <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>{strings.ext.log.callsTitle}</div>
+      <Panel title={strings.ext.log.callsTitle}>
         {invocations.length === 0 ? (
-          <div data-testid="invocations-empty" style={emptyStyle}>
-            {strings.ext.log.noCalls}
-          </div>
+          <EmptyState data-testid="invocations-empty" title={strings.ext.log.noCalls} />
         ) : (
           <table style={tableStyle}>
             <thead>
@@ -289,8 +232,8 @@ export function InvocationLog(): JSX.Element {
                 <th style={thStyle}>{strings.ext.log.thSource}</th>
                 <th style={thStyle}>{strings.ext.log.thTool}</th>
                 <th style={thStyle}>{strings.ext.log.thStatus}</th>
-                <th style={thStyle}>{strings.ext.log.thLatency}</th>
-                <th style={thStyle}>{strings.ext.log.thCost}</th>
+                <th style={thNumStyle}>{strings.ext.log.thLatency}</th>
+                <th style={thNumStyle}>{strings.ext.log.thCost}</th>
                 <th style={thStyle}>{strings.ext.log.thTime}</th>
               </tr>
             </thead>
@@ -300,15 +243,15 @@ export function InvocationLog(): JSX.Element {
                   <td style={tdStyle}>{sourceLabel(inv, serverNames)}</td>
                   <td style={tdStyle}>{inv.toolName}</td>
                   <td style={tdStyle}>
-                    <span
+                    <Badge
                       data-testid={`invocation-status-${inv.id}`}
-                      style={inv.ok ? okStyle : errStyle}
+                      tone={inv.ok ? "ok" : "danger"}
                     >
                       {inv.ok ? "ok" : (inv.errorKind ?? "err")}
-                    </span>
+                    </Badge>
                   </td>
-                  <td style={tdStyle}>{inv.latencyMs}</td>
-                  <td style={tdStyle} data-testid={`invocation-cost-${inv.id}`}>
+                  <td style={tdNumStyle}>{inv.latencyMs}</td>
+                  <td style={tdNumStyle} data-testid={`invocation-cost-${inv.id}`}>
                     {inv.costUsd ?? "—"}
                   </td>
                   <td style={tdStyle}>{formatTimestamp(inv.startedAt)}</td>
@@ -317,14 +260,11 @@ export function InvocationLog(): JSX.Element {
             </tbody>
           </table>
         )}
-      </div>
+      </Panel>
 
-      <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>{strings.ext.log.auditTitle}</div>
+      <Panel title={strings.ext.log.auditTitle}>
         {auditRows.length === 0 ? (
-          <div data-testid="audit-rows-empty" style={emptyStyle}>
-            {strings.ext.log.noAudit}
-          </div>
+          <EmptyState data-testid="audit-rows-empty" title={strings.ext.log.noAudit} />
         ) : (
           <table style={tableStyle}>
             <thead>
@@ -340,12 +280,12 @@ export function InvocationLog(): JSX.Element {
                 <tr key={row.id} data-testid={`audit-row-${row.id}`}>
                   <td style={tdStyle}>{row.action}</td>
                   <td style={tdStyle}>
-                    <span
+                    <Badge
                       data-testid={`audit-decision-${row.id}`}
-                      style={row.decision === "allow" ? okStyle : errStyle}
+                      tone={row.decision === "allow" ? "ok" : "danger"}
                     >
                       {row.decision}
-                    </span>
+                    </Badge>
                   </td>
                   <td style={tdStyle}>{row.reason ?? "—"}</td>
                   <td style={tdStyle}>{formatTimestamp(row.at)}</td>
@@ -354,7 +294,7 @@ export function InvocationLog(): JSX.Element {
             </tbody>
           </table>
         )}
-      </div>
+      </Panel>
     </div>
   );
 }

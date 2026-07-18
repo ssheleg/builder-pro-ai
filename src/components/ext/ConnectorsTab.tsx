@@ -14,168 +14,98 @@ import {
 } from "../../ipc/orchd";
 import type { Account, AccountAuthKind, ConnectorOp, OAuthChallenge } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { theme } from "../../theme";
+import { Badge, Button, Input, Select, TextArea, Panel, EmptyState } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const AUTH_LABEL: Record<AccountAuthKind, string> = {
   oauth: "OAuth",
   apikey: strings.ext.connectors.apiKeyLabel,
 };
 
-const sectionStyle: CSSProperties = {
-  marginBottom: 20,
-};
-
-const sectionTitleStyle: CSSProperties = {
-  fontSize: 13,
-  fontWeight: 700,
-  marginBottom: 8,
-  color: theme.colors.text,
-};
-
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
-  padding: "8px 12px",
-  marginBottom: 12,
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
 };
 
 const createInputStyle: CSSProperties = {
   flex: "1 1 160px",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "3px 6px",
 };
 
 const rowStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 6,
-  padding: "8px 12px",
-  marginBottom: 8,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-3)",
+  marginBottom: "var(--sp-2)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel-2)",
 };
 
 const rowHeaderStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
   alignItems: "center",
-  gap: 8,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
+  gap: "var(--sp-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
 };
 
 const titleTextStyle: CSSProperties = {
-  color: theme.colors.text,
+  color: "var(--ink)",
   fontWeight: 600,
 };
 
 const metaStyle: CSSProperties = {
-  color: theme.colors.textDim,
-  fontSize: 11,
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const deleteButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.statusExited,
-  borderColor: theme.colors.statusExited,
-};
-
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
+  color: "var(--muted)",
+  fontSize: "var(--fs-xs)",
+  fontVariantNumeric: "tabular-nums",
 };
 
 const linkStyle: CSSProperties = {
-  color: theme.colors.accent,
-  fontSize: 12,
+  color: "var(--accent)",
+  fontSize: "var(--fs-sm)",
 };
 
 const invokeRowStyle: CSSProperties = {
   display: "flex",
-  gap: 6,
+  gap: "var(--sp-2)",
   alignItems: "flex-start",
-  marginTop: 4,
+  marginTop: "var(--sp-1)",
 };
 
 const textareaStyle: CSSProperties = {
   flex: 1,
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "3px 6px",
-  resize: "vertical",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "2px 4px",
   flexShrink: 0,
 };
 
 const preStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.textDim,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: 6,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--muted)",
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-2)",
   margin: 0,
   whiteSpace: "pre-wrap",
   wordBreak: "break-all",
 };
 
 const inlineErrorStyle: CSSProperties = {
-  fontSize: 12,
+  fontSize: "var(--fs-sm)",
   lineHeight: 1.4,
-  color: theme.colors.statusExited,
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  paddingLeft: 8,
-};
-
-const untrustedBannerStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  color: theme.colors.statusWaiting,
-  border: `1px solid ${theme.colors.statusWaiting}`,
-  borderRadius: 4,
-  padding: "2px 8px",
-  alignSelf: "flex-start",
+  color: "var(--danger)",
+  borderLeft: "3px solid var(--danger)",
+  paddingLeft: "var(--sp-2)",
 };
 
 /** `provider === "generic-rest"` is the one reference `ConnectorAdapter` this Phase-1 slice ships
@@ -449,13 +379,10 @@ export function ConnectorsTab(): JSX.Element {
   }
 
   return (
-    <div data-testid="connectors-tab">
-      <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>{strings.ext.connectors.accountsTitle}</div>
+    <div data-testid="connectors-tab" style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
+      <Panel title={strings.ext.connectors.accountsTitle}>
         {accounts.length === 0 ? (
-          <div data-testid="accounts-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-            {strings.ext.connectors.noAccounts}
-          </div>
+          <EmptyState data-testid="accounts-empty" title={strings.ext.connectors.noAccounts} />
         ) : (
           <div role="list">
             {accounts.map((account) => {
@@ -478,24 +405,25 @@ export function ConnectorsTab(): JSX.Element {
                     <span data-testid={`account-label-${account.id}`} style={metaStyle}>
                       {account.label}
                     </span>
-                    <span data-testid={`account-authkind-${account.id}`} style={metaStyle}>
+                    <Badge tone="muted" data-testid={`account-authkind-${account.id}`}>
                       {AUTH_LABEL[account.authKind]}
-                    </span>
+                    </Badge>
                     <span data-testid={`account-scopes-${account.id}`} style={metaStyle}>
                       {strings.ext.connectors.scopesLabel} {formatScopes(account.scopes)}
                     </span>
                     <span data-testid={`account-expiry-${account.id}`} style={metaStyle}>
                       {strings.ext.connectors.expiresLabel} {formatExpiry(account.expiresAt)}
                     </span>
-                    <button
+                    <Button
                       type="button"
+                      variant="danger"
+                      size="sm"
                       data-testid={`account-delete-${account.id}`}
                       disabled={orchdDown}
                       onClick={() => void handleDeleteAccount(account)}
-                      style={deleteButtonStyle}
                     >
                       {strings.ext.delete}
-                    </button>
+                    </Button>
                   </div>
 
                   {isGenericRest && (
@@ -506,26 +434,27 @@ export function ConnectorsTab(): JSX.Element {
                           style={{
                             display: "flex",
                             alignItems: "center",
-                            gap: 8,
-                            marginBottom: 4,
+                            gap: "var(--sp-2)",
+                            marginBottom: "var(--sp-1)",
                           }}
                         >
-                          <span style={{ color: theme.colors.statusExited, fontSize: 12 }}>
+                          <span style={{ color: "var(--danger)", fontSize: "var(--fs-sm)" }}>
                             {strings.ext.connectors.opsLoadFailed}
                           </span>
-                          <button
+                          <Button
                             type="button"
+                            variant="ghost"
+                            size="sm"
                             data-testid={`ops-retry-${account.id}`}
                             disabled={orchdDown}
                             onClick={() => loadOps(account.id)}
-                            style={textButtonStyle}
                           >
                             {strings.common.retry}
-                          </button>
+                          </Button>
                         </div>
                       )}
                       <div style={invokeRowStyle}>
-                        <select
+                        <Select
                           data-testid={`ops-select-${account.id}`}
                           aria-label={strings.ext.connectors.operationFor(account.label)}
                           value={selected}
@@ -541,8 +470,8 @@ export function ConnectorsTab(): JSX.Element {
                               {op.name}
                             </option>
                           ))}
-                        </select>
-                        <textarea
+                        </Select>
+                        <TextArea
                           data-testid={`ops-args-${account.id}`}
                           aria-label={strings.ext.connectors.argsFor(account.label)}
                           placeholder="{}"
@@ -554,15 +483,16 @@ export function ConnectorsTab(): JSX.Element {
                           rows={2}
                           style={textareaStyle}
                         />
-                        <button
+                        <Button
                           type="button"
+                          variant="ghost"
+                          size="sm"
                           data-testid={`ops-invoke-${account.id}`}
                           disabled={invokeDisabled}
                           onClick={() => void handleInvoke(account.id)}
-                          style={textButtonStyle}
                         >
                           {strings.ext.invoke}
-                        </button>
+                        </Button>
                       </div>
 
                       {opsCallError[account.id] != null && (
@@ -578,16 +508,13 @@ export function ConnectorsTab(): JSX.Element {
                       {result && (
                         <div
                           data-testid={`ops-result-${account.id}`}
-                          style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}
+                          style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)", marginTop: "var(--sp-1)" }}
                         >
-                          <span
-                            data-testid={`ops-result-untrusted-${account.id}`}
-                            style={untrustedBannerStyle}
-                          >
+                          <Badge tone="warn" data-testid={`ops-result-untrusted-${account.id}`}>
                             {strings.ext.unverified}
-                          </span>
+                          </Badge>
                           {result.isError && (
-                            <span style={{ fontSize: 12, color: theme.colors.statusExited }}>
+                            <span style={{ fontSize: "var(--fs-sm)", color: "var(--danger)" }}>
                               {strings.ext.connectors.operationError}
                             </span>
                           )}
@@ -601,12 +528,11 @@ export function ConnectorsTab(): JSX.Element {
             })}
           </div>
         )}
-      </div>
+      </Panel>
 
-      <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>{strings.ext.connectors.addApiKeyTitle}</div>
+      <Panel title={strings.ext.connectors.addApiKeyTitle}>
         <div style={createFormStyle}>
-          <input
+          <Input
             data-testid="apikey-provider"
             aria-label={strings.ext.connectors.providerAria}
             placeholder={strings.ext.connectors.providerPlaceholder}
@@ -614,7 +540,7 @@ export function ConnectorsTab(): JSX.Element {
             onChange={(e) => setApiKeyProvider(e.target.value)}
             style={createInputStyle}
           />
-          <input
+          <Input
             data-testid="apikey-label"
             aria-label={strings.ext.connectors.labelAria}
             placeholder={strings.ext.connectors.labelPlaceholder}
@@ -622,7 +548,7 @@ export function ConnectorsTab(): JSX.Element {
             onChange={(e) => setApiKeyLabel(e.target.value)}
             style={createInputStyle}
           />
-          <input
+          <Input
             type="password"
             data-testid="apikey-key"
             aria-label={strings.ext.connectors.apiKeyAria}
@@ -631,30 +557,30 @@ export function ConnectorsTab(): JSX.Element {
             onChange={(e) => setApiKeyValue(e.target.value)}
             style={createInputStyle}
           />
-          <button
+          <Button
             type="button"
+            variant="primary"
+            size="sm"
             data-testid="apikey-submit"
             disabled={orchdDown || apiKeyBlocked || apiKeyForm.submitting}
             onClick={() => void submitAddApiKey()}
-            style={{ ...primaryButtonStyle, opacity: apiKeyBlocked || apiKeyForm.submitting ? 0.5 : 1 }}
           >
             {strings.ext.connectors.addApiKey}
-          </button>
+          </Button>
         </div>
-      </div>
+      </Panel>
 
-      <div style={sectionStyle}>
-        <div style={sectionTitleStyle}>{strings.ext.connectors.connectOAuthTitle}</div>
+      <Panel title={strings.ext.connectors.connectOAuthTitle}>
         {providersLoaded && oauthProviders.length === 0 ? (
           <div
             data-testid="oauth-no-providers"
-            style={{ color: theme.colors.textDim, fontSize: 12, marginBottom: 8 }}
+            style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", marginBottom: "var(--sp-2)" }}
           >
             {strings.ext.connectors.noProviders}
           </div>
         ) : null}
         <div style={createFormStyle}>
-          <select
+          <Select
             data-testid="oauth-provider"
             aria-label={strings.ext.connectors.oauthProviderAria}
             value={oauthProvider}
@@ -668,8 +594,8 @@ export function ConnectorsTab(): JSX.Element {
                 {p}
               </option>
             ))}
-          </select>
-          <input
+          </Select>
+          <Input
             data-testid="oauth-label"
             aria-label={strings.ext.connectors.labelAria}
             placeholder={strings.ext.connectors.labelPlaceholder}
@@ -677,7 +603,7 @@ export function ConnectorsTab(): JSX.Element {
             onChange={(e) => setOauthLabel(e.target.value)}
             style={createInputStyle}
           />
-          <input
+          <Input
             data-testid="oauth-scopes"
             aria-label={strings.ext.connectors.scopesAria}
             placeholder={strings.ext.connectors.scopesPlaceholder}
@@ -685,18 +611,19 @@ export function ConnectorsTab(): JSX.Element {
             onChange={(e) => setOauthScopes(e.target.value)}
             style={createInputStyle}
           />
-          <button
+          <Button
             type="button"
+            variant="primary"
+            size="sm"
             data-testid="oauth-begin-submit"
             disabled={orchdDown || oauthBeginBlocked || oauthBeginForm.submitting}
             onClick={() => void submitBeginOAuth()}
-            style={{ ...primaryButtonStyle, opacity: oauthBeginBlocked || oauthBeginForm.submitting ? 0.5 : 1 }}
           >
             {strings.ext.connectors.startOAuth}
-          </button>
+          </Button>
 
           {oauthChallenge && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, width: "100%" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)", width: "100%" }}>
               <a
                 data-testid="oauth-authorize-link"
                 href={oauthChallenge.authorizeUrl}
@@ -706,8 +633,8 @@ export function ConnectorsTab(): JSX.Element {
               >
                 {strings.ext.connectors.openAuthPage}
               </a>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
+              <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+                <Input
                   data-testid="oauth-code-input"
                   aria-label={strings.ext.connectors.codeAria}
                   placeholder={strings.ext.connectors.codePlaceholder}
@@ -715,20 +642,21 @@ export function ConnectorsTab(): JSX.Element {
                   onChange={(e) => setOauthCode(e.target.value)}
                   style={createInputStyle}
                 />
-                <button
+                <Button
                   type="button"
+                  variant="primary"
+                  size="sm"
                   data-testid="oauth-complete-submit"
                   disabled={orchdDown || oauthCompleteBlocked || oauthCompleteForm.submitting}
                   onClick={() => void submitCompleteOAuth()}
-                  style={{ ...primaryButtonStyle, opacity: oauthCompleteBlocked || oauthCompleteForm.submitting ? 0.5 : 1 }}
                 >
                   {strings.ext.connectors.finish}
-                </button>
+                </Button>
               </div>
             </div>
           )}
         </div>
-      </div>
+      </Panel>
     </div>
   );
 }

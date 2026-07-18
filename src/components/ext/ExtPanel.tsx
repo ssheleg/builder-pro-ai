@@ -7,7 +7,6 @@ import { ConnectorsTab } from "./ConnectorsTab";
 import { SkillsTab } from "./SkillsTab";
 import { InvocationLog } from "./InvocationLog";
 import { ArtifactsTab } from "./ArtifactsTab";
-import { theme } from "../../theme";
 import { strings } from "../../strings";
 
 type TabKey = "servers" | "tools" | "connectors" | "log" | "artifacts" | "skills";
@@ -27,26 +26,27 @@ const panelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   overflow: "hidden",
-  color: theme.colors.text,
+  color: "var(--ink)",
+  background: "var(--bg)",
 };
 
 const headerStyle: CSSProperties = {
-  padding: "10px 16px",
-  borderBottom: `1px solid ${theme.colors.border}`,
+  padding: "var(--sp-3) var(--sp-4)",
+  borderBottom: "1px solid var(--border)",
 };
 
 const tabBarStyle: CSSProperties = {
   display: "flex",
-  gap: 4,
-  padding: "6px 16px",
-  borderBottom: `1px solid ${theme.colors.border}`,
+  gap: "var(--sp-1)",
+  padding: "var(--sp-2) var(--sp-4)",
+  borderBottom: "1px solid var(--border)",
 };
 
 const contentStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
   overflowY: "auto",
-  padding: 16,
+  padding: "var(--sp-4)",
 };
 
 /**
@@ -80,33 +80,40 @@ export function ExtPanel(): JSX.Element {
   return (
     <div data-testid="ext-panel" style={panelStyle}>
       <div style={headerStyle}>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>{strings.ext.panelTitle}</div>
+        <div style={{ fontSize: "var(--fs-lg)", fontWeight: 700, color: "var(--ink)" }}>
+          {strings.ext.panelTitle}
+        </div>
       </div>
 
       {orchdDown && <OrchdDownBanner />}
 
       <div role="tablist" style={tabBarStyle}>
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === t.key}
-            data-testid={`ext-tab-${t.key}`}
-            onClick={() => setActiveTab(t.key)}
-            style={{
-              padding: "6px 10px",
-              fontSize: 13,
-              border: "none",
-              borderBottom: activeTab === t.key ? `2px solid ${theme.colors.accent}` : "2px solid transparent",
-              background: "transparent",
-              color: activeTab === t.key ? theme.colors.text : theme.colors.textDim,
-              cursor: "pointer",
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
+        {TABS.map((t) => {
+          const active = activeTab === t.key;
+          return (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              data-testid={`ext-tab-${t.key}`}
+              onClick={() => setActiveTab(t.key)}
+              style={{
+                padding: "var(--sp-2) var(--sp-3)",
+                fontSize: "var(--fs-md)",
+                fontFamily: "var(--font-ui)",
+                fontWeight: active ? 600 : 500,
+                border: "none",
+                borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
+                background: "transparent",
+                color: active ? "var(--ink)" : "var(--muted)",
+                cursor: "pointer",
+              }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
       <div style={contentStyle}>

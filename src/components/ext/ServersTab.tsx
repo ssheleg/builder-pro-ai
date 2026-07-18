@@ -11,10 +11,8 @@ import {
 import type { McpAuthKind, McpScope, McpServer } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { ConnectDialog } from "./ConnectDialog";
-import { theme } from "../../theme";
+import { Button, Input, Select, EmptyState } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const AUTH_LABEL: Record<McpAuthKind, string> = {
   none: strings.ext.servers.authKind.none,
@@ -25,33 +23,20 @@ const AUTH_LABEL: Record<McpAuthKind, string> = {
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
-  padding: "8px 12px",
-  marginBottom: 12,
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-3)",
+  marginBottom: "var(--sp-3)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel-2)",
 };
 
 const createInputStyle: CSSProperties = {
   flex: "1 1 160px",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "3px 6px",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "2px 4px",
   flexShrink: 0,
 };
 
@@ -59,11 +44,11 @@ const rowStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
   alignItems: "center",
-  gap: 8,
-  padding: "6px 8px",
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  borderBottom: `1px solid ${theme.colors.border}`,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  borderBottom: "1px solid var(--border)",
 };
 
 const dotStyle: CSSProperties = {
@@ -79,38 +64,20 @@ const titleTextStyle: CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  color: theme.colors.text,
+  color: "var(--ink)",
   fontWeight: 600,
 };
 
 const metaStyle: CSSProperties = {
-  color: theme.colors.textDim,
-  fontSize: 11,
+  color: "var(--muted)",
+  fontSize: "var(--fs-xs)",
+  fontVariantNumeric: "tabular-nums",
 };
 
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const deleteButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.statusExited,
-  borderColor: theme.colors.statusExited,
-};
-
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
+const bearerInputStyle: CSSProperties = {
+  flex: "1 1 160px",
+  minWidth: 0,
+  fontFamily: "var(--font-mono)",
 };
 
 /**
@@ -221,7 +188,7 @@ export function ServersTab(): JSX.Element {
   return (
     <div data-testid="servers-tab">
       <div style={createFormStyle}>
-        <input
+        <Input
           data-testid="server-create-name"
           aria-label={strings.ext.servers.nameAria}
           placeholder={strings.ext.servers.namePlaceholder}
@@ -229,7 +196,7 @@ export function ServersTab(): JSX.Element {
           onChange={(e) => setName(e.target.value)}
           style={createInputStyle}
         />
-        <select
+        <Select
           data-testid="server-create-transport"
           aria-label={strings.ext.servers.transportAria}
           value="http"
@@ -238,8 +205,8 @@ export function ServersTab(): JSX.Element {
         >
           <option value="http">HTTP</option>
           <option value="stdio">{strings.ext.servers.stdioSoon}</option>
-        </select>
-        <input
+        </Select>
+        <Input
           data-testid="server-create-url"
           aria-label={strings.ext.servers.urlAria}
           placeholder="https://…/mcp"
@@ -247,7 +214,7 @@ export function ServersTab(): JSX.Element {
           onChange={(e) => setUrl(e.target.value)}
           style={createInputStyle}
         />
-        <select
+        <Select
           data-testid="server-create-scope"
           aria-label={strings.ext.servers.scopeAria}
           value={scope}
@@ -258,8 +225,8 @@ export function ServersTab(): JSX.Element {
           <option value="project" disabled>
             {strings.ext.projectSoon}
           </option>
-        </select>
-        <select
+        </Select>
+        <Select
           data-testid="server-create-auth"
           aria-label={strings.ext.servers.authAria}
           value={authKind}
@@ -271,22 +238,21 @@ export function ServersTab(): JSX.Element {
           <option value="oauth" disabled>
             {AUTH_LABEL.oauth}
           </option>
-        </select>
-        <button
+        </Select>
+        <Button
           type="button"
+          variant="primary"
+          size="sm"
           data-testid="server-create-submit"
           disabled={orchdDown || addBlocked || submitting}
           onClick={() => void submitAdd()}
-          style={{ ...primaryButtonStyle, opacity: addBlocked || submitting ? 0.5 : 1 }}
         >
           {strings.ext.servers.addServer}
-        </button>
+        </Button>
       </div>
 
       {servers.length === 0 ? (
-        <div data-testid="servers-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-          {strings.ext.servers.empty}
-        </div>
+        <EmptyState data-testid="servers-empty" title={strings.ext.servers.empty} />
       ) : (
         <div role="list">
           {servers.map((server) => (
@@ -295,7 +261,7 @@ export function ServersTab(): JSX.Element {
                 data-testid={`server-enabled-dot-${server.id}`}
                 style={{
                   ...dotStyle,
-                  background: server.enabled ? theme.colors.statusRunning : theme.colors.textDim,
+                  background: server.enabled ? "var(--ok)" : "var(--muted)",
                 }}
               />
               <span data-testid={`server-name-${server.id}`} style={titleTextStyle}>
@@ -310,34 +276,37 @@ export function ServersTab(): JSX.Element {
                   ? strings.ext.servers.protocol(server.protocolVersion)
                   : strings.ext.servers.notConnected}
               </span>
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 data-testid={`server-toggle-enabled-${server.id}`}
                 disabled={orchdDown}
                 onClick={() => void handleToggleEnabled(server)}
-                style={textButtonStyle}
               >
                 {server.enabled ? strings.ext.servers.disable : strings.ext.servers.enable}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 data-testid={`server-connect-${server.id}`}
                 disabled={orchdDown}
                 onClick={() => setConnectTarget(server)}
-                style={textButtonStyle}
               >
                 {strings.ext.servers.connect}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 data-testid={`server-disconnect-${server.id}`}
                 disabled={orchdDown}
                 onClick={() => void handleDisconnect(server)}
-                style={textButtonStyle}
               >
                 {strings.ext.servers.disconnect}
-              </button>
-              <input
+              </Button>
+              <Input
                 type="password"
                 data-testid={`server-bearer-input-${server.id}`}
                 aria-label={strings.ext.servers.tokenFor(server.name)}
@@ -347,26 +316,28 @@ export function ServersTab(): JSX.Element {
                 onChange={(e) =>
                   setBearerDrafts((prev) => ({ ...prev, [server.id]: e.target.value }))
                 }
-                style={createInputStyle}
+                style={bearerInputStyle}
               />
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 data-testid={`server-bearer-submit-${server.id}`}
                 disabled={orchdDown || (bearerDrafts[server.id] ?? "").trim() === ""}
                 onClick={() => void handleSetBearer(server)}
-                style={textButtonStyle}
               >
                 {strings.ext.servers.setToken}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                variant="danger"
+                size="sm"
                 data-testid={`server-delete-${server.id}`}
                 disabled={orchdDown}
                 onClick={() => void handleDelete(server)}
-                style={deleteButtonStyle}
               >
                 {strings.ext.delete}
-              </button>
+              </Button>
             </div>
           ))}
         </div>
