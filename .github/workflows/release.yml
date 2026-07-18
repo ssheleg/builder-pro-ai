@@ -1,0 +1,126 @@
+name: release
+
+# MANUAL ONLY. This workflow never runs on push, tag, or schedule — it fires only when you click
+# "Run workflow" in the Actions tab (or `gh workflow run release.yml`). macOS runners are billed at
+# a 10x multiplier and a signed build needs your Apple credentials, so releasing stays a deliberate,
+# owner-triggered act. The Release it produces is a DRAFT by default: nothing is published to users
+# until you review the draft and press Publish.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for the tag + release title, e.g. 0.8.0 (tag becomes v<version>)"
+        required: true
+        type: string
+      draft:
+        description: "Create the GitHub Release as a draft (you publish it manually)"
+        required: false
+        type: boolean
+        default: true
+      prerelease:
+        description: "Mark the release as a pre-release"
+        required: false
+        type: boolean
+        default: true
+
+# Never cancel an in-flight release build; never run two at once.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the Release + upload assets
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable # rustup honors rust-toolchain.toml (1.92)
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+
+      # Universal (arm64 + x86_64) .app + .dmg. build-universal.sh signs + notarizes when the Apple
+      # env vars below are present, and DEGRADES HONESTLY to a dev/ad-hoc build (loud warning, not a
+      # failure) when they are absent — an unsigned artifact that Gatekeeper will reject on other
+      # Macs. Set the secrets (see docs/build-macos.md) to get a distributable signed build.
+      - name: Build universal .app / .dmg
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: bash scripts/build-universal.sh
+
+      # Locate the produced bundle (productName has spaces; the target dir may be the workspace
+      # root or src-tauri/target depending on the Cargo layout — search both, fail loud if absent).
+      - name: Collect release assets
+        id: assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          dmg="$(find target src-tauri/target -path '*universal-apple-darwin/release/bundle/dmg/*.dmg' 2>/dev/null | head -n1 || true)"
+          app="$(find target src-tauri/target -path '*universal-apple-darwin/release/bundle/macos/*.app' -type d 2>/dev/null | head -n1 || true)"
+          if [ -z "$dmg" ] && [ -z "$app" ]; then
+            echo "::error::no .app or .dmg produced under */universal-apple-darwin/release/bundle/"
+            exit 1
+          fi
+          if [ -n "$dmg" ]; then
+            cp "$dmg" "dist-release/Builder-Pro-AI-${{ inputs.version }}-universal.dmg"
+            echo "  found dmg: $dmg"
+          fi
+          if [ -n "$app" ]; then
+            # ditto preserves symlinks + resource forks correctly for a macOS .app (plain zip breaks it).
+            ditto -c -k --keepParent "$app" "dist-release/Builder-Pro-AI-${{ inputs.version }}-universal-app.zip"
+            echo "  found app: $app"
+          fi
+          ls -la dist-release
+
+      # Keep the build downloadable from the run even if the Release step is skipped/edited later.
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: builder-pro-ai-${{ inputs.version }}-macos-universal
+          path: dist-release/*
+          if-no-files-found: error
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          tag="v${{ inputs.version }}"
+          signed_note="**Unsigned / dev build** — Gatekeeper will reject it on other Macs. Set the Apple secrets (docs/build-macos.md) and re-run for a signed, notarized build."
+          if [ -n "$APPLE_SIGNING_IDENTITY" ] || [ -n "$APPLE_API_KEY" ]; then
+            signed_note="Signed + notarized build (Apple credentials were present)."
+          fi
+          draft_flag=""; [ "${{ inputs.draft }}" = "true" ] && draft_flag="--draft"
+          pre_flag="";   [ "${{ inputs.prerelease }}" = "true" ] && pre_flag="--prerelease"
+          notes="Builder Pro AI ${tag} — universal macOS build (arm64 + x86_64).
+
+          $signed_note
+
+          Source-available under the PolyForm Noncommercial License 1.0.0 (see LICENSE). Build from
+          source: see the README. Changelog: CHANGELOG.md."
+          # Reuse the tag's release if it already exists (re-run), else create it.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist-release/* --clobber
+          else
+            gh release create "$tag" dist-release/* $draft_flag $pre_flag \
+              --title "Builder Pro AI $tag" --notes "$notes" --target "${{ github.sha }}"
+          fi
+          echo "Release $tag ready. Review the DRAFT in the Releases tab and press Publish when ready."

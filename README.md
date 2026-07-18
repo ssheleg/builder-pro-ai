@@ -154,6 +154,12 @@ bash scripts/build-universal.sh
 Full release runbook — credentials, signing, notarization, clean-VM smoke test:
 [`docs/build-macos.md`](docs/build-macos.md).
 
+**Prefer a prebuilt binary?** There's a **manual, owner-triggered** release workflow
+(`.github/workflows/release.yml`) — it never runs on its own. When the owner runs it (Actions →
+*release* → *Run workflow*), a universal `.app`/`.dmg` is built and attached to a **draft**
+[GitHub Release](https://github.com/ssheleg/builder-pro-ai/releases); once published it's
+downloadable there. See [`docs/build-macos.md`](docs/build-macos.md#manual-release-workflow-github-actions-owner-triggered).
+
 ## Running the tests
 
 One command runs the whole gate (the same 10 stages CI runs):

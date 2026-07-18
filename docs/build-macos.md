@@ -341,3 +341,41 @@ environment:
 
 Running the actual notarized build, and the clean-VM smoke test, are the
 **human/CI steps** described in §2-§5 above.
+
+---
+
+## Manual release workflow (GitHub Actions, owner-triggered)
+
+`.github/workflows/release.yml` packages a universal `.app`/`.dmg` on CI and attaches it to a
+GitHub Release. It is **manual only** — it declares no `push`/`tag`/`schedule` trigger, so it never
+runs on its own (macOS runners bill at ~10x and a signed build needs your Apple credentials, so a
+release stays a deliberate act). It wraps the same `scripts/build-universal.sh` pipeline documented
+above, with the identical honest-degradation contract.
+
+### How to trigger
+
+- GitHub UI: **Actions -> `release` -> Run workflow** -> fill in `version` (e.g. `0.8.0`) -> Run.
+- CLI: `gh workflow run release.yml -f version=0.8.0` (optionally `-f draft=false -f prerelease=false`).
+
+The workflow builds, uploads the artifacts to the run, and creates a **draft** Release tagged
+`v<version>`. Nothing reaches users until you open the draft in the **Releases** tab and press
+**Publish** — a second, deliberate gate on top of the manual trigger.
+
+### Required repository secrets (for a SIGNED, distributable build)
+
+With none of these set, the workflow still succeeds but produces an **unsigned / dev build**
+(loud warning; Gatekeeper rejects it on other Macs). Set them under **Settings -> Secrets and
+variables -> Actions** to get a signed, notarized build:
+
+| Secret | Purpose |
+|---|---|
+| `APPLE_CERTIFICATE` | base64 of your **Developer ID Application** `.p12` (Tauri imports it into a temp keychain) |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
+| `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_TEAM_ID` | your 10-char Apple Developer Team ID |
+| Notarization — **one** of: | |
+| `APPLE_API_ISSUER` + `APPLE_API_KEY` + `APPLE_API_KEY_PATH` | App Store Connect API key (preferred, non-interactive) |
+| `APPLE_ID` + `APPLE_PASSWORD` (+ `APPLE_TEAM_ID`) | Apple ID + an app-specific password |
+
+The env-var -> credential mapping is exactly the one `scripts/build-universal.sh` documents in its
+header; the workflow just forwards these secrets into that script.
