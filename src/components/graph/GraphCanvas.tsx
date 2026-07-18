@@ -38,10 +38,9 @@ import {
   dedupeMovesById,
   type GraphNodeMove,
 } from "./graphMapping";
-import { theme } from "../../theme";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+import { Badge, Button, EmptyState, Input, Select, TextArea } from "../../ui/primitives";
+import type { Tone } from "../../ui/theme";
 
 /** Per-id position-move debounce (S4 §7 brief, D8/D10): a drag emits many intermediate `position`
  * `NodeChange`s — only the LAST one per node, `MOVE_DEBOUNCE_MS` after the last change in a
@@ -75,6 +74,22 @@ const EDGE_KINDS: GraphEdgeKind[] = [
  * `window.confirm` guard before a destructive delete — same terse-question register). */
 const DELETE_CONFIRM_TEXT = strings.graph.deleteConfirm;
 
+/** Node-kind → semantic tone for the per-node kind `Badge` — one calm accent plus the semantic
+ * palette (design-system "Calm Control Room"), so a kind reads at a glance in BOTH themes (every
+ * tone resolves through `tokens.css`). `entityRef` keeps the neutral-`info` ref register. */
+const KIND_TONE: Record<string, Tone> = {
+  concept: "info",
+  fact: "ok",
+  artifact: "warn",
+  decision: "accent",
+  note: "muted",
+  entityRef: "info",
+};
+
+function kindTone(kind: string): Tone {
+  return KIND_TONE[kind] ?? "muted";
+}
+
 /** A simple deterministic grid default for a freshly added node's position — avoids every new
  * node landing exactly on top of the last one without resorting to non-deterministic randomness
  * (keeps this testable). Wraps every 5 columns, 160px/120px apart. */
@@ -107,120 +122,47 @@ interface GraphEdgeData extends Record<string, unknown> {
 type GraphFlowNode = Node<GraphNodeData>;
 type GraphFlowEdge = Edge<GraphEdgeData>;
 
+/** The flow canvas frame — a token-bordered surface so it flips with the theme (`--bg` inside a
+ * `--border` frame, rounded to `--r-lg`). */
 const flowWrapStyle: CSSProperties = {
   position: "relative",
   width: "100%",
   height: 520,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
-  background: theme.colors.bg,
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-lg)",
+  background: "var(--bg)",
+  overflow: "hidden",
 };
 
-const emptyStateStyle: CSSProperties = {
+/** Non-interactive overlay that centres the empty affordance over the (still-mounted) canvas —
+ * `pointerEvents: none` so it never eats a click meant for the flow beneath it. */
+const emptyOverlayStyle: CSSProperties = {
   position: "absolute",
   inset: 0,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  color: theme.colors.textDim,
-  fontSize: 13,
   pointerEvents: "none",
 };
 
 const toolbarStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
+  gap: "var(--sp-2)",
   flexWrap: "wrap",
-  marginBottom: 8,
-};
-
-const selectStyle: CSSProperties = {
-  fontFamily: "inherit",
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "4px 6px",
-};
-
-const buttonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 12,
-  borderRadius: 4,
-  padding: "4px 8px",
-};
-
-/** Primary (accent-fill) button — design-system.md §5: "primary = accent fill (one per view
- * maximum)". The toolbar's one primary action is adding a node. */
-const primaryButtonStyle: CSSProperties = {
-  ...buttonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
-};
-
-/** Destructive (red-ghost) button — design-system.md §5: "destructive = red border ghost with
- * confirm", mirrors `GoalTree.tsx`/`TasksList.tsx`/`IdeasList.tsx`'s identical `deleteButtonStyle`. */
-const deleteButtonStyle: CSSProperties = {
-  ...buttonStyle,
-  color: theme.colors.statusExited,
-  borderColor: theme.colors.statusExited,
-};
-
-const searchInputStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: "transparent",
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "4px 8px",
-  minWidth: 180,
-  marginLeft: "auto",
-};
-
-const kindLabelStyle: CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  textTransform: "uppercase",
-  letterSpacing: "0.05em",
-  color: theme.colors.textDim,
+  marginBottom: "var(--sp-2)",
 };
 
 /** Add-node form row — the title input + body textarea + kind select + "Add node" button (spec
  * D7): a group of controls (not an HTML `<form>` — the codebase submits via a guarded button
  * `onClick`, mirroring `CreateProjectDialog`). Aligns its controls to the top so a multi-line body
- * textarea grows downward without stretching its neighbors. */
+ * textarea grows downward without stretching its neighbours. */
 const formStyle: CSSProperties = {
   display: "flex",
   alignItems: "flex-start",
-  gap: 8,
+  gap: "var(--sp-2)",
   flexWrap: "wrap",
-  marginBottom: 8,
-};
-
-const textInputStyle: CSSProperties = {
-  fontFamily: "inherit",
-  fontSize: 12,
-  color: theme.colors.text,
-  background: "transparent",
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "4px 8px",
-  minWidth: 160,
-};
-
-const bodyTextareaStyle: CSSProperties = {
-  ...textInputStyle,
-  minWidth: 200,
-  minHeight: 30,
-  resize: "vertical",
-  fontFamily: MONO_FONT,
+  marginBottom: "var(--sp-2)",
 };
 
 /** Inline-rename bar — appears (below the add-node form) only while a LOCAL node is being renamed
@@ -228,36 +170,61 @@ const bodyTextareaStyle: CSSProperties = {
 const renameBarStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
-  marginBottom: 8,
+  gap: "var(--sp-2)",
+  marginBottom: "var(--sp-2)",
 };
 
 /** Wraps the edge-kind `<select>` with its "edge:" caption when exactly one edge is selected. */
 const edgeEditLabelStyle: CSSProperties = {
-  ...kindLabelStyle,
   display: "flex",
   alignItems: "center",
-  gap: 6,
+  gap: "var(--sp-1)",
+  fontSize: "var(--fs-xs)",
+  fontWeight: 600,
+  textTransform: "uppercase",
+  letterSpacing: "0.05em",
+  color: "var(--muted)",
+};
+
+/** Per-control style overrides layered on top of the primitives' shared control style — only the
+ * min sizes / mono numerals that differ from the default, never a repeat of the token base. */
+const titleInputStyle: CSSProperties = { minWidth: 160 };
+const bodyTextareaStyle: CSSProperties = {
+  minWidth: 200,
+  minHeight: 30,
+  fontFamily: "var(--font-mono)",
+};
+const searchInputStyle: CSSProperties = {
+  minWidth: 180,
+  marginLeft: "auto",
+  fontFamily: "var(--font-mono)",
 };
 
 const nodeLabelStyle: CSSProperties = {
-  fontSize: 12,
-  color: theme.colors.text,
-  marginTop: 2,
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
   wordBreak: "break-word",
 };
 
 /** Base node card style, layered with per-state accents (external/orphan/match) below — mirrors
- * `design-system.md`'s "Card" atom (`bgElevated` + 1px `border` + radius) shrunk to node scale. */
+ * the primitives' "Card" surface (`--panel` fill + 1px `--border` + `--r-md`) shrunk to node
+ * scale, so every node stroke/fill resolves through `tokens.css` and reads in light AND dark. */
 function nodeCardStyle(data: GraphNodeData, selected: boolean | undefined): CSSProperties {
+  const borderColor = data.isOrphan
+    ? "var(--danger)"
+    : selected
+      ? "var(--accent)"
+      : "var(--border)";
   return {
-    padding: "6px 10px",
-    borderRadius: 6,
-    background: theme.colors.bgElevated,
-    border: `1px solid ${
-      data.isOrphan ? theme.colors.statusExited : selected ? theme.colors.accent : theme.colors.border
-    }`,
-    boxShadow: data.isMatch ? `0 0 0 2px ${theme.colors.accent}` : undefined,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: "var(--sp-1)",
+    padding: "var(--sp-2) var(--sp-3)",
+    borderRadius: "var(--r-md)",
+    background: "var(--panel)",
+    border: `1px solid ${borderColor}`,
+    boxShadow: data.isMatch ? "0 0 0 2px var(--accent)" : undefined,
     opacity: data.isExternal ? 0.6 : 1,
     borderStyle: data.isExternal ? "dashed" : "solid",
     minWidth: 96,
@@ -279,7 +246,7 @@ export function DomainNode({ data, selected }: NodeProps<GraphFlowNode>): JSX.El
   return (
     <div style={nodeCardStyle(data, selected)}>
       <Handle type="target" position={Position.Top} />
-      <div style={kindLabelStyle}>{data.kind}</div>
+      <Badge tone={kindTone(data.kind)}>{data.kind}</Badge>
       <div style={nodeLabelStyle}>{data.label}</div>
       <Handle type="source" position={Position.Bottom} />
     </div>
@@ -295,7 +262,7 @@ export function EntityRefNode({ data, selected }: NodeProps<GraphFlowNode>): JSX
   return (
     <div style={nodeCardStyle(data, selected)}>
       <Handle type="target" position={Position.Top} />
-      <div style={kindLabelStyle}>ref · {data.entityType ?? "?"}</div>
+      <Badge tone={kindTone("entityRef")}>ref · {data.entityType ?? "?"}</Badge>
       <div style={nodeLabelStyle}>{data.isOrphan ? strings.graph.sourceRemoved : data.label}</div>
       <Handle type="source" position={Position.Bottom} />
     </div>
@@ -310,6 +277,13 @@ const nodeTypes: NodeTypes = {
   note: DomainNode,
   entityRef: EntityRefNode,
 };
+
+/** Token-driven default edge/connection styling so an edge's stroke resolves through `tokens.css`
+ * and stays legible in BOTH themes (xyflow's own default `.react-flow__edge-path` grey does not
+ * flip with the theme). A calm `--border-strong` for resting edges; the one `--accent` for the
+ * in-flight connection line the user is dragging. */
+const defaultEdgeOptions = { style: { stroke: "var(--border-strong)" } };
+const connectionLineStyle: CSSProperties = { stroke: "var(--accent)" };
 
 /**
  * Project knowledge-graph canvas (S4 §7 T7). Controlled `@xyflow/react` v12 flow: local
@@ -326,13 +300,16 @@ const nodeTypes: NodeTypes = {
  * so a multi-step drag fires exactly ONE `orchdGraphMoveNode` per node once it settles, not one
  * per intermediate frame.
  *
- * `onConnect` is optimistic (`addEdge` into local state immediately) + `orchdGraphAddEdge(source,
- * target, "relates", "")`; deliberately NOT followed by an explicit `refreshGraph` — the
- * `orchd://graph-changed` push (App.tsx) reconciles the real server-assigned edge id, same as the
- * brief's documented "coarse refresh reconciles" contract for this one path. Every OTHER mutation
- * below (add-node, delete-selected) DOES explicitly `refreshGraph` after success, mirroring every
- * other domain surface's convention (`GoalTree`/`TasksList`/`RulesetPanel`: explicit refresh after
- * a structural mutation, never waiting on the push alone).
+ * `onConnect` is optimistic (`addEdge` into local state immediately, under a KNOWN id) +
+ * `orchdGraphAddEdge(source, target, "relates", "")`. A SUCCESSFUL add is deliberately NOT followed
+ * by an explicit `refreshGraph` — the `orchd://graph-changed` push (App.tsx) reconciles the real
+ * server-assigned edge id, same as the brief's documented "coarse refresh reconciles" contract for
+ * this one path. A REJECTED add (self-loop / duplicate / daemon failure — GR-02/GR-12) rolls the
+ * optimistic edge back out of local state immediately, so a refused edge never lingers on the
+ * canvas until some later push. Every OTHER mutation below (add-node, delete-selected) explicitly
+ * `refreshGraph`es after success, mirroring every other domain surface's convention
+ * (`GoalTree`/`TasksList`/`RulesetPanel`: explicit refresh after a structural mutation, never
+ * waiting on the push alone).
  *
  * Graph editing (spec D7, O-7): (a) an add-node FORM — a required title `<input>`, an optional
  * body `<textarea>`, and the kind `<select>` — replaces the old hardcoded "New node" placeholder:
@@ -494,9 +471,19 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
   const onConnect = useCallback(
     (connection: Connection): void => {
       if (useAppStore.getState().orchdDown) return;
-      setEdges((eds) => addEdge<GraphFlowEdge>(connection, eds));
-      void orchdGraphAddEdge(connection.source, connection.target, "relates", "").catch((e: unknown) =>
-        showToast(describeOrchdError(e)),
+      // Optimistic add under a KNOWN id so a rejected add can be rolled back precisely (GR-02/GR-12):
+      // `addEdge` still runs its own duplicate-connection guard, but tagging the edge with our own
+      // id lets the failure path below filter out exactly this edge (xyflow's auto-generated id
+      // would otherwise be opaque to us).
+      const optimisticId = `e-optimistic-${connection.source}-${connection.target}-${Date.now()}`;
+      setEdges((eds) => addEdge<GraphFlowEdge>({ ...connection, id: optimisticId }, eds));
+      void orchdGraphAddEdge(connection.source, connection.target, "relates", "").catch(
+        (e: unknown) => {
+          // Roll the optimistic edge back out — the daemon refused it (self-loop / duplicate /
+          // failure), so it never existed server-side and must not linger until the next push.
+          setEdges((eds) => eds.filter((ed) => ed.id !== optimisticId));
+          showToast(describeOrchdError(e));
+        },
       );
     },
     [showToast],
@@ -622,16 +609,16 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     <div data-testid="graph-canvas">
       {/* Add-node form (spec D7): required title + optional body + kind + guarded Add button. */}
       <div style={formStyle} data-testid="graph-add-form">
-        <input
+        <Input
           data-testid="graph-add-title-input"
           aria-label={strings.graph.titleAria}
           placeholder={strings.graph.titlePlaceholder}
           value={addTitle}
           disabled={orchdDown || submitting}
           onChange={(e) => setAddTitle(e.target.value)}
-          style={textInputStyle}
+          style={titleInputStyle}
         />
-        <textarea
+        <TextArea
           data-testid="graph-add-body-input"
           aria-label={strings.graph.bodyAria}
           placeholder={strings.graph.bodyPlaceholder}
@@ -641,35 +628,35 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
           onChange={(e) => setAddBody(e.target.value)}
           style={bodyTextareaStyle}
         />
-        <select
+        <Select
           data-testid="graph-add-kind-select"
           aria-label={strings.graph.newNodeTypeAria}
           value={addKind}
           disabled={orchdDown || submitting}
           onChange={(e) => setAddKind(e.target.value as GraphNodeKind)}
-          style={selectStyle}
         >
           {ADDABLE_KINDS.map((k) => (
             <option key={k} value={k}>
               {k}
             </option>
           ))}
-        </select>
-        <button
+        </Select>
+        <Button
           type="button"
+          variant="primary"
+          size="sm"
           data-testid="graph-add-node-button"
           disabled={orchdDown || submitting || addTitleEmpty}
           onClick={() => void addNode()}
-          style={primaryButtonStyle}
         >
           {strings.graph.addNode}
-        </button>
+        </Button>
       </div>
 
       {/* Inline-rename bar — only while a local node is being renamed (double-click). */}
       {renamingNodeId !== null && (
         <div style={renameBarStyle} data-testid="graph-rename-bar">
-          <input
+          <Input
             data-testid="graph-rename-input"
             aria-label={strings.graph.renameAria}
             value={renameValue}
@@ -685,59 +672,61 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
                 cancelRename();
               }
             }}
-            style={textInputStyle}
+            style={titleInputStyle}
           />
-          <button
+          <Button
             type="button"
+            variant="primary"
+            size="sm"
             data-testid="graph-rename-save"
             disabled={orchdDown || submitting || renameValueEmpty}
             onClick={() => void commitRename()}
-            style={primaryButtonStyle}
           >
             {strings.graph.renameSave}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             data-testid="graph-rename-cancel"
             onClick={cancelRename}
-            style={buttonStyle}
           >
             {strings.graph.renameCancel}
-          </button>
+          </Button>
         </div>
       )}
 
       <div style={toolbarStyle}>
-        <button
+        <Button
           type="button"
+          variant="danger"
+          size="sm"
           data-testid="graph-delete-selected-button"
           disabled={orchdDown}
           onClick={() => void handleDeleteSelected()}
-          style={deleteButtonStyle}
         >
           {strings.graph.deleteSelection}
-        </button>
+        </Button>
         {/* Edge-kind editor — shown only when exactly one edge is selected (spec D7). */}
         {selectedEdge && (
           <label style={edgeEditLabelStyle}>
             {strings.graph.edgeKindLabel}
-            <select
+            <Select
               data-testid="graph-edge-kind-select"
               aria-label={strings.graph.edgeKindAria}
               value={(selectedEdge.data?.kind as GraphEdgeKind | undefined) ?? "relates"}
               disabled={orchdDown || submitting}
               onChange={(e) => void changeEdgeKind(selectedEdge.id, e.target.value as GraphEdgeKind)}
-              style={selectStyle}
             >
               {EDGE_KINDS.map((k) => (
                 <option key={k} value={k}>
                   {k}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
         )}
-        <input
+        <Input
           data-testid="graph-search-input"
           aria-label={strings.graph.searchAria}
           placeholder={strings.graph.searchPlaceholder}
@@ -758,12 +747,14 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
             onConnect={onConnect}
             onNodeClick={onNodeClick}
             onNodeDoubleClick={onNodeDoubleClick}
+            defaultEdgeOptions={defaultEdgeOptions}
+            connectionLineStyle={connectionLineStyle}
             fitView
           />
         </ReactFlowProvider>
         {isEmpty && (
-          <div data-testid="graph-empty-state" style={emptyStateStyle}>
-            {strings.graph.empty}
+          <div style={emptyOverlayStyle}>
+            <EmptyState data-testid="graph-empty-state" title={strings.graph.empty} />
           </div>
         )}
       </div>

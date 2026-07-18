@@ -33,6 +33,17 @@ vi.mock("@xyflow/react", async (importOriginal) => {
         >
           stub-connect
         </button>
+        {/* A NON-duplicate connection (n2→n1, opposite direction to fixture edge e1) so xyflow's real
+            `addEdge` actually appends an optimistic edge — the seam the GR-02/GR-12 rollback test needs. */}
+        <button
+          type="button"
+          data-testid="stub-connect-fresh"
+          onClick={() =>
+            props.onConnect?.({ source: "n2", target: "n1", sourceHandle: null, targetHandle: null })
+          }
+        >
+          stub-connect-fresh
+        </button>
         <button
           type="button"
           data-testid="stub-move-a"
@@ -94,6 +105,11 @@ vi.mock("@xyflow/react", async (importOriginal) => {
           >
             {n.data?.label}
           </div>
+        ))}
+        {/* Edge seam — one element per edge so a test can count local edges (used by the
+            optimistic-edge rollback test). eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+        {(props.edges ?? []).map((e: any) => (
+          <div key={e.id} data-testid={`stub-edge-${e.id}`} />
         ))}
       </div>
     ),
@@ -651,6 +667,38 @@ describe("GraphCanvas", () => {
 
     await waitFor(() => {
       expect(describeOrchdErrorMock).toHaveBeenCalled();
+      expect(useAppStore.getState().toast).toBe("orchestrator: error");
+    });
+  });
+
+  it("onConnect optimistically adds a fresh edge and KEEPS it when the add succeeds (no false rollback)", async () => {
+    orchdGraphAddEdgeMock.mockResolvedValue({});
+    render(<GraphCanvas projectId="p1" />);
+
+    // Fixture starts with exactly one edge (e1).
+    expect(screen.getAllByTestId(/^stub-edge-/)).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId("stub-connect-fresh"));
+
+    await waitFor(() =>
+      expect(orchdGraphAddEdgeMock).toHaveBeenCalledWith("n2", "n1", "relates", ""),
+    );
+    // The optimistic edge stays: a successful add is reconciled by the push, never rolled back.
+    expect(screen.getAllByTestId(/^stub-edge-/)).toHaveLength(2);
+  });
+
+  it("a REJECTED onConnect rolls the optimistic edge back out AND toasts (GR-02/GR-12 audit fix)", async () => {
+    orchdGraphAddEdgeMock.mockRejectedValue({ kind: "daemon", code: "Invariant", message: "boom" });
+    render(<GraphCanvas projectId="p1" />);
+
+    expect(screen.getAllByTestId(/^stub-edge-/)).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId("stub-connect-fresh"));
+
+    // After the daemon refuses the add, the optimistically-added edge is removed (back to just e1)
+    // and the failure is surfaced — no phantom edge lingers until the next graph://changed push.
+    await waitFor(() => {
+      expect(screen.getAllByTestId(/^stub-edge-/)).toHaveLength(1);
       expect(useAppStore.getState().toast).toBe("orchestrator: error");
     });
   });

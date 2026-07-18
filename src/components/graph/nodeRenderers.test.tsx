@@ -5,7 +5,6 @@ import { ReactFlow, ReactFlowProvider, type Node, type NodeTypes } from "@xyflow
 import "@xyflow/react/dist/style.css";
 import { mockReactFlow } from "./mockReactFlow";
 import { EntityRefNode, DomainNode } from "./GraphCanvas";
-import { theme } from "../../theme";
 import { strings } from "../../strings";
 
 /**
@@ -102,7 +101,8 @@ describe("graph node renderers (S4 final review — D3 honesty signal + match/gh
 
     const label = screen.getByText("Matched node");
     const card = label.parentElement as HTMLElement;
-    expect(card.style.boxShadow).toBe(`0 0 0 2px ${theme.colors.accent}`);
+    // Match-highlight ring now resolves through the design token (light+dark), not the legacy hex.
+    expect(card.style.boxShadow).toBe("0 0 0 2px var(--accent)");
   });
 
   it("a node with data.isMatch:false (or unset) has NO match-highlight ring", async () => {
