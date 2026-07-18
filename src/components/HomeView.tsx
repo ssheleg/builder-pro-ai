@@ -5,10 +5,8 @@ import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
 import { StatusDot } from "./StatusDot";
 import { HomeGoals } from "./HomeGoals";
-import { theme } from "../theme";
+import { Panel, Stat, Badge, Button, EmptyState } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 interface WorkspaceGroup {
   workspaceId: WorkspaceId;
@@ -59,11 +57,45 @@ function lifecycleText(meta: SessionMeta): string {
   }
 }
 
+// ── token-only style atoms (Calm Control Room, S-UXR B) ──────────────────────────────────────
+
+const containerStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  minHeight: 0,
+  overflowY: "auto",
+  padding: "var(--sp-4)",
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--sp-5)",
+};
+
+const statsRowStyle: CSSProperties = {
+  display: "flex",
+  gap: "var(--sp-3)",
+  flexWrap: "wrap",
+};
+
+const sectionStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--sp-2)",
+};
+
 const sectionHeadingStyle: CSSProperties = {
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   fontWeight: 600,
-  margin: "0 0 8px 0",
-  color: theme.colors.text,
+  margin: 0,
+  color: "var(--ink)",
+};
+
+/** «Needs you» leads with the warn tone — amber stays reserved for "a human is needed". */
+const needsYouHeadingStyle: CSSProperties = { ...sectionHeadingStyle, color: "var(--warn)" };
+
+const groupStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--sp-1)",
 };
 
 const groupHeaderStyle: CSSProperties = {
@@ -72,74 +104,73 @@ const groupHeaderStyle: CSSProperties = {
   textAlign: "left",
   background: "transparent",
   border: "none",
-  color: theme.colors.textDim,
-  fontFamily: MONO_FONT,
-  fontSize: 11,
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
   textTransform: "uppercase",
   letterSpacing: 0.5,
-  padding: "4px 0",
+  padding: "var(--sp-1) 0",
   cursor: "pointer",
-};
-
-const monoNameStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 13,
-  color: theme.colors.text,
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-};
-
-const dimTextStyle: CSSProperties = {
-  fontSize: 12,
-  color: theme.colors.textDim,
-  flex: 1,
-  textAlign: "left",
 };
 
 const rowBaseStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
+  gap: "var(--sp-2)",
   width: "100%",
-  padding: "8px 12px",
-  marginBottom: 4,
-  borderRadius: 6,
-  background: theme.colors.bgElevated,
-  border: "none",
+  padding: "var(--sp-2) var(--sp-3)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
   textAlign: "left",
+  color: "var(--ink)",
+  font: "inherit",
 };
 
 /** design-system.md §5 "Inbox item": amber left-edge = "a human is needed". */
 const waitingRowStyle: CSSProperties = {
   ...rowBaseStyle,
-  borderLeft: `3px solid ${theme.colors.statusWaiting}`,
+  borderLeft: "3px solid var(--warn)",
 };
 
 const clickableRowStyle: CSSProperties = {
   ...rowBaseStyle,
-  borderLeft: `3px solid transparent`,
   cursor: "pointer",
 };
 
-const proceedButtonStyle: CSSProperties = {
-  background: theme.colors.accent,
-  color: "#fff",
-  border: "none",
-  borderRadius: 6,
-  padding: "4px 10px",
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: "pointer",
+const monoNameStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-md)",
+  color: "var(--ink)",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const metaTextStyle: CSSProperties = {
+  fontSize: "var(--fs-sm)",
+  color: "var(--muted)",
   flexShrink: 0,
 };
 
-const primaryButtonStyle: CSSProperties = {
-  ...proceedButtonStyle,
-  padding: "6px 12px",
-  fontSize: 13,
-  alignSelf: "flex-start",
+const codeTextStyle: CSSProperties = {
+  ...metaTextStyle,
+  fontFamily: "var(--font-mono)",
+  fontVariantNumeric: "tabular-nums",
 };
+
+function glyphStyle(ok: boolean): CSSProperties {
+  return {
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--fs-md)",
+    color: ok ? "var(--ok)" : "var(--danger)",
+    width: 14,
+    flexShrink: 0,
+    textAlign: "center",
+  };
+}
 
 /**
  * Attention-first Home (spec §6.2, design decision D6): a pure composition over the existing
@@ -150,8 +181,9 @@ const primaryButtonStyle: CSSProperties = {
  *   ② «Running»            — active, non-waiting sessions; the whole row is the navigation target.
  *   ③ «Recently finished»  — exited sessions, ✓/✗ by exit code.
  * Every section groups its rows by workspace (a clickable group header jumps to that workspace
- * with no session selected). A thin stats strip counts across ALL workspaces/sessions, not just
- * what's rendered below it.
+ * with no session selected). A whole-store metrics strip counts across ALL workspaces/sessions,
+ * not just what's rendered below it — surfaced as `Stat` tiles (mono, tabular-nums) so the numbers
+ * have a real home instead of a raw inline sentence (S-UXR B, "metrics-forward").
  *
  * Navigation (`goTo`, spec §6.2 "Go"): `setActiveWorkspaceId` (App-owned UI selection, not
  * store data) -> `setView("workspace")` ->, for a specific session, `setActiveSession` ->
@@ -192,7 +224,7 @@ export function HomeView(props: {
   const runningGroups = groupByWorkspace(running, workspaces);
   const exitedGroups = groupByWorkspace(exited, workspaces);
 
-  // Stats strip counts the WHOLE store, not just what's rendered below (spec §6.2 "N workspaces
+  // Stats count the WHOLE store, not just what's rendered below (spec §6.2 "N workspaces
   // · M live · K waiting" — the owner's context across ALL projects, not a filtered subset).
   const workspaceCount = Object.keys(workspaces).length;
   const waitingCount = waiting.length;
@@ -204,57 +236,44 @@ export function HomeView(props: {
   const firstWorkspace = orderedWorkspaces[0];
 
   return (
-    <div
-      style={{
-        flex: 1,
-        minWidth: 0,
-        minHeight: 0,
-        overflowY: "auto",
-        padding: 16,
-        display: "flex",
-        flexDirection: "column",
-        gap: 20,
-      }}
-    >
-      <div
-        data-testid="home-stats"
-        style={{
-          fontFamily: MONO_FONT,
-          fontSize: 11,
-          color: theme.colors.textDim,
-          letterSpacing: 0.3,
-        }}
-      >
-        {workspaceCount} workspaces · {liveCount} live · {waitingCount} waiting
-      </div>
+    <div style={containerStyle}>
+      <Panel data-testid="home-stats">
+        <div style={statsRowStyle}>
+          <Stat data-testid="home-stat-workspaces" label="workspaces" value={workspaceCount} />
+          <Stat
+            data-testid="home-stat-live"
+            label="live"
+            value={liveCount}
+            tone={liveCount > 0 ? "info" : "ink"}
+          />
+          <Stat
+            data-testid="home-stat-waiting"
+            label="waiting"
+            value={waitingCount}
+            tone={waitingCount > 0 ? "warn" : "ink"}
+          />
+        </div>
+      </Panel>
 
       {all.length === 0 ? (
-        <div
+        <EmptyState
           data-testid="home-empty"
-          style={{ display: "flex", flexDirection: "column", gap: 8 }}
-        >
-          <div style={{ color: theme.colors.textDim, fontSize: 13 }}>
-            {strings.home.noActiveSessions}
-          </div>
-          {firstWorkspace && (
-            <button
-              type="button"
-              style={primaryButtonStyle}
-              onClick={() => goTo(firstWorkspace.id)}
-            >
-              {strings.home.openWorkspace(firstWorkspace.name)}
-            </button>
-          )}
-        </div>
+          title={strings.home.noActiveSessions}
+          action={
+            firstWorkspace ? (
+              <Button onClick={() => goTo(firstWorkspace.id)}>
+                {strings.home.openWorkspace(firstWorkspace.name)}
+              </Button>
+            ) : undefined
+          }
+        />
       ) : (
         <>
           {waitingGroups.length > 0 && (
-            <section aria-label={strings.home.needsYou}>
-              <h2 style={{ ...sectionHeadingStyle, color: theme.colors.statusWaiting }}>
-                {strings.home.needsYou}
-              </h2>
+            <section aria-label={strings.home.needsYou} style={sectionStyle}>
+              <h2 style={needsYouHeadingStyle}>{strings.home.needsYou}</h2>
               {waitingGroups.map((group) => (
-                <div key={group.workspaceId}>
+                <div key={group.workspaceId} style={groupStyle}>
                   <button
                     type="button"
                     style={groupHeaderStyle}
@@ -272,14 +291,14 @@ export function HomeView(props: {
                       <span style={monoNameStyle}>
                         {group.workspaceName}/{meta.title}
                       </span>
-                      <span style={dimTextStyle}>{strings.home.waitingForInput}</span>
-                      <button
-                        type="button"
-                        style={proceedButtonStyle}
+                      <Badge status="waiting">{strings.home.waitingForInput}</Badge>
+                      <Button
+                        size="sm"
+                        style={{ flexShrink: 0 }}
                         onClick={() => goTo(meta.workspaceId, meta.id)}
                       >
                         {strings.home.go}
-                      </button>
+                      </Button>
                     </div>
                   ))}
                 </div>
@@ -288,10 +307,10 @@ export function HomeView(props: {
           )}
 
           {runningGroups.length > 0 && (
-            <section aria-label={strings.home.runningSection}>
+            <section aria-label={strings.home.runningSection} style={sectionStyle}>
               <h2 style={sectionHeadingStyle}>{strings.home.runningSection}</h2>
               {runningGroups.map((group) => (
-                <div key={group.workspaceId}>
+                <div key={group.workspaceId} style={groupStyle}>
                   <button
                     type="button"
                     style={groupHeaderStyle}
@@ -311,7 +330,7 @@ export function HomeView(props: {
                       <span style={monoNameStyle}>
                         {group.workspaceName}/{meta.title}
                       </span>
-                      <span style={dimTextStyle}>{lifecycleText(meta)}</span>
+                      <span style={metaTextStyle}>{lifecycleText(meta)}</span>
                     </button>
                   ))}
                 </div>
@@ -320,10 +339,10 @@ export function HomeView(props: {
           )}
 
           {exitedGroups.length > 0 && (
-            <section aria-label={strings.home.recentlyFinished}>
+            <section aria-label={strings.home.recentlyFinished} style={sectionStyle}>
               <h2 style={sectionHeadingStyle}>{strings.home.recentlyFinished}</h2>
               {exitedGroups.map((group) => (
-                <div key={group.workspaceId}>
+                <div key={group.workspaceId} style={groupStyle}>
                   <button
                     type="button"
                     style={groupHeaderStyle}
@@ -344,20 +363,14 @@ export function HomeView(props: {
                       >
                         <span
                           aria-label={ok ? strings.home.ok : strings.home.withError}
-                          style={{
-                            fontFamily: MONO_FONT,
-                            fontSize: 13,
-                            color: ok ? theme.colors.statusRunning : theme.colors.statusExited,
-                            width: 14,
-                            flexShrink: 0,
-                          }}
+                          style={glyphStyle(ok)}
                         >
                           {ok ? "✓" : "✗"}
                         </span>
                         <span style={monoNameStyle}>
                           {group.workspaceName}/{meta.title}
                         </span>
-                        <span style={dimTextStyle}>code {code ?? "—"}</span>
+                        <span style={codeTextStyle}>code {code ?? "—"}</span>
                       </button>
                     );
                   })}

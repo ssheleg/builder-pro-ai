@@ -140,8 +140,15 @@ describe("HomeView", () => {
     });
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
     // 2 workspaces total; live = waiting(1) + running(1) = 2; waiting = 1. The exited session
-    // does not count toward "live".
-    expect(screen.getByTestId("home-stats").textContent).toBe("2 workspaces · 2 live · 1 waiting");
+    // does not count toward "live". The strip is now a row of Stat tiles (S-UXR B redesign), so
+    // the counts are asserted per labelled tile rather than as one inline sentence.
+    expect(screen.getByTestId("home-stats")).toBeTruthy();
+    expect(screen.getByTestId("home-stat-workspaces").textContent).toContain("workspaces");
+    expect(screen.getByTestId("home-stat-workspaces").textContent).toContain("2");
+    expect(screen.getByTestId("home-stat-live").textContent).toContain("live");
+    expect(screen.getByTestId("home-stat-live").textContent).toContain("2");
+    expect(screen.getByTestId("home-stat-waiting").textContent).toContain("waiting");
+    expect(screen.getByTestId("home-stat-waiting").textContent).toContain("1");
   });
 
   it("exited rows show ✓ for a zero exit code and ✗ (red) for a non-zero one", () => {
@@ -235,7 +242,9 @@ describe("HomeView", () => {
     expect(row.textContent).not.toContain(strings.home.waitingForInput);
 
     // the whole-store stats strip must not count a dead session as waiting or live
-    expect(screen.getByTestId("home-stats").textContent).toBe("1 workspaces · 0 live · 0 waiting");
+    expect(screen.getByTestId("home-stat-workspaces").textContent).toContain("1");
+    expect(screen.getByTestId("home-stat-live").textContent).toContain("0");
+    expect(screen.getByTestId("home-stat-waiting").textContent).toContain("0");
   });
 
   it("F2: an exited row's ✓/✗ glyph exposes an accessible name distinguishing success from failure", () => {

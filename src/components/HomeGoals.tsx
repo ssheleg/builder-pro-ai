@@ -1,10 +1,9 @@
-import { useEffect, type CSSProperties, type JSX } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../store/store";
 import type { Goal, GoalStatus, Project } from "../ipc/orchd-types";
-import { theme } from "../theme";
+import { Badge } from "../ui/primitives";
+import type { Tone } from "../ui/theme";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
   active: strings.goals.status.active,
@@ -12,76 +11,67 @@ const STATUS_LABEL: Record<GoalStatus, string> = {
   dropped: strings.goals.status.dropped,
 };
 
-/** Status-chip accent (design-system.md "Lifecycle chip" atom, read-only variant here — no amber,
+/** Status-chip tone (design-system.md "Lifecycle chip" atom, read-only variant here — no warn,
  * amber stays reserved for "needs you"): `active` is the neutral default, `achieved` gets the
- * green success color, `dropped` gets the red exited color — a glance tells state without reading
- * the label. */
-const STATUS_COLOR: Record<GoalStatus, string> = {
-  active: theme.colors.textDim,
-  achieved: theme.colors.statusRunning,
-  dropped: theme.colors.statusExited,
+ * success tone, `dropped` gets the danger tone — a glance tells state without reading the label. */
+const STATUS_TONE: Record<GoalStatus, Tone> = {
+  active: "muted",
+  achieved: "ok",
+  dropped: "danger",
+};
+
+const sectionStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--sp-2)",
 };
 
 const sectionHeadingStyle: CSSProperties = {
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   fontWeight: 600,
-  margin: "0 0 8px 0",
-  color: theme.colors.text,
+  margin: 0,
+  color: "var(--ink)",
 };
 
 const projectBlockStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   alignItems: "flex-start",
-  gap: 6,
+  gap: "var(--sp-2)",
   width: "100%",
-  padding: "10px 12px",
-  marginBottom: 8,
-  borderRadius: 8,
-  border: `1px solid ${theme.colors.border}`,
-  background: theme.colors.bgElevated,
+  padding: "var(--sp-3)",
+  borderRadius: "var(--r-lg)",
+  border: "1px solid var(--border)",
+  background: "var(--panel)",
   cursor: "pointer",
   textAlign: "left",
+  font: "inherit",
 };
 
 const projectNameStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-xs)",
   textTransform: "uppercase",
   letterSpacing: 0.5,
-  color: theme.colors.textDim,
+  color: "var(--muted)",
 };
 
 const strategicTitleStyle: CSSProperties = {
-  fontSize: 14,
+  fontSize: "var(--fs-lg)",
   fontWeight: 600,
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const chipRowStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
+  gap: "var(--sp-1)",
 };
 
 const emptyNoteStyle: CSSProperties = {
-  color: theme.colors.textDim,
-  fontSize: 13,
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
 };
-
-function chipStyle(status: GoalStatus): CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 4,
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    padding: "2px 8px",
-    borderRadius: 999,
-    border: `1px solid ${theme.colors.border}`,
-    color: STATUS_COLOR[status],
-  };
-}
 
 /** Active (non-archived) projects, sorted by name for a deterministic render order — mirrors
  * `groupByWorkspace`'s sort convention in `HomeView.tsx`. */
@@ -120,6 +110,13 @@ function directChildrenOf(goals: Goal[], strategicId: string): Goal[] {
  * appearing). A rejection is NOT swallowed here — `refreshGoals` itself already surfaces the
  * mapped honest message as a toast (spec §7), so this effect doesn't need its own try/catch.
  *
+ * ON-07: the "Goals are loading…" line must not persist after a *failed* fetch. `refreshGoals`
+ * catches its own error (toasts + leaves the entry absent) and always resolves, so absence alone
+ * can't tell "still in flight" from "failed". A local, presentational `settling` flag — flipped
+ * true when we dispatch fetches and back to false once they all settle (success OR failure) —
+ * gates the line, so a failed load shows the toast and then a quiet (not perpetually "loading")
+ * panel. No new store state, no new IPC, no new copy.
+ *
  * Clicking anywhere in a project's block navigates to that project's panel (`openProject`) — the
  * whole block is one `<button>`, matching `HomeView`'s own clickable-row convention, since every
  * click target inside it (title, any goal chip) leads to the exact same destination.
@@ -130,14 +127,32 @@ export function HomeGoals(): JSX.Element | null {
   const refreshGoals = useAppStore((s) => s.refreshGoals);
   const openProject = useAppStore((s) => s.openProject);
 
+  const [settling, setSettling] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
   const activeProjects = activeProjectsOf(projects);
 
   useEffect(() => {
     const current = useAppStore.getState().goalsByProject;
-    for (const p of activeProjectsOf(useAppStore.getState().projects)) {
-      if (!(p.id in current)) {
-        void refreshGoals(p.id);
-      }
+    const toFetch = activeProjectsOf(useAppStore.getState().projects).filter(
+      (p) => !(p.id in current),
+    );
+    if (toFetch.length === 0) return;
+    let remaining = toFetch.length;
+    setSettling(true);
+    for (const p of toFetch) {
+      // refreshGoals always resolves (it catches + toasts internally), so `.finally` fires on both
+      // the loaded and the failed path — that is exactly what lets the loading line clear.
+      void Promise.resolve(refreshGoals(p.id)).finally(() => {
+        remaining -= 1;
+        if (remaining <= 0 && mounted.current) setSettling(false);
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects]);
@@ -145,7 +160,7 @@ export function HomeGoals(): JSX.Element | null {
   if (activeProjects.length === 0) return null;
 
   return (
-    <section aria-label={strings.home.goals} data-testid="home-goals">
+    <section aria-label={strings.home.goals} data-testid="home-goals" style={sectionStyle}>
       <h2 style={sectionHeadingStyle}>{strings.home.goals}</h2>
       {activeProjects.map((p) => {
         const goals = goalsByProject[p.id];
@@ -166,20 +181,20 @@ export function HomeGoals(): JSX.Element | null {
             {children.length > 0 && (
               <span style={chipRowStyle}>
                 {children.map((g) => (
-                  <span
+                  <Badge
                     key={g.id}
                     data-testid={`home-goals-chip-${g.id}`}
-                    style={chipStyle(g.status)}
+                    tone={STATUS_TONE[g.status]}
                   >
                     {g.title} · {STATUS_LABEL[g.status]}
-                  </span>
+                  </Badge>
                 ))}
               </span>
             )}
           </button>
         );
       })}
-      {activeProjects.every((p) => !goalsByProject[p.id]) && (
+      {settling && activeProjects.every((p) => !goalsByProject[p.id]) && (
         <div data-testid="home-goals-empty" style={emptyNoteStyle}>
           {strings.home.goalsLoading}
         </div>
