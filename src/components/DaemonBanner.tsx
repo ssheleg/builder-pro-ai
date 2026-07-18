@@ -1,6 +1,5 @@
 import type { JSX } from "react";
 import { useAppStore } from "../store/store";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 /**
@@ -28,15 +27,15 @@ export function DaemonBanner(): JSX.Element | null {
       <div
         role="alert"
         style={{
-          padding: "6px 12px",
-          borderLeft: `3px solid ${theme.colors.statusWaiting}`,
-          background: theme.colors.bgElevated,
-          color: theme.colors.text,
-          fontSize: 13,
+          padding: "var(--sp-2) var(--sp-3)",
+          borderLeft: "3px solid var(--warn)",
+          background: "var(--warn-weak)",
+          color: "var(--warn)",
+          fontSize: "var(--fs-md)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          gap: 12,
+          gap: "var(--sp-3)",
         }}
       >
         <span>{strings.chrome.daemonOutdated}</span>
@@ -44,12 +43,12 @@ export function DaemonBanner(): JSX.Element | null {
           type="button"
           onClick={() => setUpgradeDialogOpen(true)}
           style={{
-            padding: "2px 10px",
-            borderRadius: 6,
-            border: `1px solid ${theme.colors.border}`,
+            padding: "var(--sp-1) var(--sp-3)",
+            borderRadius: "var(--r-md)",
+            border: "1px solid var(--border-strong)",
             background: "transparent",
-            color: theme.colors.text,
-            fontSize: 12,
+            color: "var(--ink)",
+            fontSize: "var(--fs-sm)",
             cursor: "pointer",
           }}
         >
@@ -65,10 +64,11 @@ export function DaemonBanner(): JSX.Element | null {
     <div
       role="alert"
       style={{
-        padding: "6px 12px",
-        background: theme.colors.statusExited,
-        color: theme.colors.text,
-        fontSize: 13,
+        padding: "var(--sp-2) var(--sp-3)",
+        borderLeft: "3px solid var(--danger)",
+        background: "var(--danger-weak)",
+        color: "var(--danger)",
+        fontSize: "var(--fs-md)",
         textAlign: "center",
       }}
     >

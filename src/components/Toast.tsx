@@ -1,6 +1,5 @@
 import type { JSX } from "react";
 import { useAppStore } from "../store/store";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 /**
@@ -30,21 +29,21 @@ export function Toast(): JSX.Element | null {
       style={{
         position: "fixed",
         left: "50%",
-        bottom: 24,
+        bottom: "var(--sp-5)",
         transform: "translateX(-50%)",
         maxWidth: 480,
         display: "flex",
         alignItems: "center",
-        gap: 12,
-        padding: "10px 16px",
-        borderRadius: 8,
-        border: `1px solid ${theme.colors.border}`,
-        borderLeft: `3px solid ${theme.colors.statusExited}`,
-        background: theme.colors.bgElevated,
-        color: theme.colors.text,
-        fontSize: 13,
+        gap: "var(--sp-3)",
+        padding: "var(--sp-3) var(--sp-4)",
+        borderRadius: "var(--r-md)",
+        border: "1px solid var(--border)",
+        borderLeft: "3px solid var(--danger)",
+        background: "var(--panel)",
+        color: "var(--ink)",
+        fontSize: "var(--fs-md)",
         lineHeight: 1.5,
-        boxShadow: theme.shadow,
+        boxShadow: "var(--shadow-1)",
         zIndex: 1100,
       }}
     >
@@ -58,9 +57,9 @@ export function Toast(): JSX.Element | null {
           flexShrink: 0,
           border: "none",
           background: "transparent",
-          color: theme.colors.textDim,
+          color: "var(--muted)",
           cursor: "pointer",
-          fontSize: 16,
+          fontSize: "var(--fs-lg)",
           lineHeight: 1,
           padding: 0,
         }}

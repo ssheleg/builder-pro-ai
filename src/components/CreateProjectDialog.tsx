@@ -5,7 +5,6 @@ import { pickFolder, createWorkspace } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";
 import type { Project } from "../ipc/orchd-types";
 import { useSubmitGuard } from "../hooks/useSubmitGuard";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 /** Mirrors `WorkspaceSidebar.tsx`'s identical helper (same tiny, self-contained pattern — see
@@ -54,7 +53,9 @@ const BLOCKED_TEXT = strings.project.workspaceRequired;
 const overlayStyle: CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "rgba(1, 4, 9, 0.6)",
+  // Scrim over the app — a translucent black veil (matching the frozen Dialog primitive), not a
+  // palette surface, so there is no theme token for it.
+  background: "rgba(0, 0, 0, 0.4)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -65,44 +66,44 @@ const cardStyle: CSSProperties = {
   width: 380,
   maxHeight: "80vh",
   overflowY: "auto",
-  background: theme.colors.bgElevated,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 10,
-  boxShadow: theme.shadow,
-  padding: 16,
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-lg)",
+  boxShadow: "var(--shadow-1)",
+  padding: "var(--sp-4)",
   display: "flex",
   flexDirection: "column",
-  gap: 12,
+  gap: "var(--sp-3)",
 };
 
 const titleStyle: CSSProperties = {
-  fontSize: 15,
+  fontSize: "var(--fs-lg)",
   fontWeight: 600,
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const fieldLabelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
-  fontSize: 12,
+  gap: "var(--sp-1)",
+  fontSize: "var(--fs-sm)",
   fontWeight: 600,
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   textTransform: "uppercase",
   letterSpacing: "0.05em",
 };
 
 const inputStyle: CSSProperties = {
   fontFamily: "inherit",
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   fontWeight: 400,
   textTransform: "none",
   letterSpacing: "normal",
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "6px 8px",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2)",
 };
 
 const textareaStyle: CSSProperties = {
@@ -114,7 +115,7 @@ const textareaStyle: CSSProperties = {
 const workspaceListStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
+  gap: "var(--sp-1)",
   maxHeight: 140,
   overflowY: "auto",
 };
@@ -122,56 +123,58 @@ const workspaceListStyle: CSSProperties = {
 const checkboxRowStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 6,
-  fontSize: 13,
-  color: theme.colors.text,
+  gap: "var(--sp-2)",
+  fontSize: "var(--fs-md)",
+  color: "var(--ink)",
 };
 
 const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
+  border: "1px solid var(--border-strong)",
   background: "transparent",
-  color: theme.colors.text,
+  color: "var(--ink)",
   cursor: "pointer",
-  fontSize: 12,
-  borderRadius: 4,
-  padding: "4px 8px",
+  fontSize: "var(--fs-sm)",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-1) var(--sp-2)",
   alignSelf: "flex-start",
 };
 
 const secondaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: `1px solid ${theme.colors.border}`,
+  padding: "var(--sp-2) var(--sp-3)",
+  borderRadius: "var(--r-md)",
+  border: "1px solid var(--border-strong)",
   background: "transparent",
-  color: theme.colors.text,
-  fontSize: 13,
+  color: "var(--ink)",
+  fontSize: "var(--fs-md)",
   cursor: "pointer",
 };
 
 const primaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
+  padding: "var(--sp-2) var(--sp-3)",
+  borderRadius: "var(--r-md)",
   border: "none",
-  background: theme.colors.accent,
-  color: theme.colors.text,
-  fontSize: 13,
+  background: "var(--accent)",
+  // On-accent foreground — the design system's fixed white for filled accent buttons
+  // (see primitives.tsx Button "primary"), readable on the blue accent in both themes.
+  color: "#fff",
+  fontSize: "var(--fs-md)",
   fontWeight: 600,
   cursor: "pointer",
 };
 
 const errorTextStyle: CSSProperties = {
-  fontSize: 12,
-  color: theme.colors.statusExited,
+  fontSize: "var(--fs-sm)",
+  color: "var(--danger)",
 };
 
-/** In-dialog failure line (design-system.md dialog atom: red statusExited text + left-edge accent,
+/** In-dialog failure line (design-system.md dialog atom: --danger text + left-edge accent,
  * distinct from the amber trigger-condition marker). Mirrors `UpgradeDialog`'s in-dialog error. */
 const inlineErrorStyle: CSSProperties = {
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   lineHeight: 1.5,
-  color: theme.colors.statusExited,
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  paddingLeft: 8,
+  color: "var(--danger)",
+  borderLeft: "3px solid var(--danger)",
+  paddingLeft: "var(--sp-2)",
 };
 
 /**
@@ -318,7 +321,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
           <div style={fieldLabelStyle}>Workspaces</div>
           <div data-testid="create-project-workspaces" style={workspaceListStyle}>
             {unlinked.length === 0 ? (
-              <span style={{ fontSize: 12, color: theme.colors.textDim }}>{strings.project.noFreeWorkspaces}</span>
+              <span style={{ fontSize: "var(--fs-sm)", color: "var(--muted)" }}>{strings.project.noFreeWorkspaces}</span>
             ) : (
               unlinked.map((w) => (
                 <label key={w.id} style={checkboxRowStyle}>

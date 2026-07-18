@@ -7,7 +7,6 @@ import type { Project } from "../ipc/orchd-types";
 import type { Workspace } from "../ipc/types";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { ThemeToggle } from "../ui/ThemeToggle";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 function basename(path: string): string {
@@ -142,15 +141,15 @@ export function WorkspaceSidebar(props: {
           display: "block",
           width: "100%",
           textAlign: "left",
-          padding: "6px 12px",
-          fontSize: 13,
+          padding: "var(--sp-2) var(--sp-3)",
+          fontSize: "var(--fs-md)",
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
           border: "none",
           cursor: "pointer",
-          color: selected ? theme.colors.text : theme.colors.textDim,
-          background: selected ? theme.colors.bg : "transparent",
+          color: selected ? "var(--accent)" : "var(--muted)",
+          background: selected ? "var(--accent-weak)" : "transparent",
         }}
       >
         {w.name}
@@ -165,9 +164,9 @@ export function WorkspaceSidebar(props: {
         style={{
           width: 200,
           flexShrink: 0,
-          background: theme.colors.bgElevated,
-          borderRight: `1px solid ${theme.colors.border}`,
-          color: theme.colors.text,
+          background: "var(--panel)",
+          borderRight: "1px solid var(--border)",
+          color: "var(--ink)",
           display: "flex",
           flexDirection: "column",
         }}
@@ -181,14 +180,14 @@ export function WorkspaceSidebar(props: {
             display: "block",
             width: "100%",
             textAlign: "left",
-            padding: "8px 12px",
-            fontSize: 13,
+            padding: "var(--sp-2) var(--sp-3)",
+            fontSize: "var(--fs-md)",
             fontWeight: 600,
             border: "none",
-            borderBottom: `1px solid ${theme.colors.border}`,
+            borderBottom: "1px solid var(--border)",
             cursor: "pointer",
-            color: view === "home" ? theme.colors.text : theme.colors.textDim,
-            background: view === "home" ? theme.colors.bg : "transparent",
+            color: view === "home" ? "var(--accent)" : "var(--muted)",
+            background: view === "home" ? "var(--accent-weak)" : "transparent",
           }}
         >
           ⌂ Home
@@ -204,14 +203,14 @@ export function WorkspaceSidebar(props: {
             display: "block",
             width: "100%",
             textAlign: "left",
-            padding: "8px 12px",
-            fontSize: 13,
+            padding: "var(--sp-2) var(--sp-3)",
+            fontSize: "var(--fs-md)",
             fontWeight: 600,
             border: "none",
-            borderBottom: `1px solid ${theme.colors.border}`,
+            borderBottom: "1px solid var(--border)",
             cursor: "pointer",
-            color: view === "ext" ? theme.colors.text : theme.colors.textDim,
-            background: view === "ext" ? theme.colors.bg : "transparent",
+            color: view === "ext" ? "var(--accent)" : "var(--muted)",
+            background: view === "ext" ? "var(--accent-weak)" : "transparent",
           }}
         >
           {strings.chrome.sidebar.extensionsNav}
@@ -222,10 +221,10 @@ export function WorkspaceSidebar(props: {
             <div
               data-testid="sidebar-empty"
               style={{
-                padding: "12px",
-                fontSize: 12,
+                padding: "var(--sp-3)",
+                fontSize: "var(--fs-sm)",
                 lineHeight: 1.5,
-                color: theme.colors.textDim,
+                color: "var(--muted)",
               }}
             >
               {strings.chrome.sidebar.emptyState}
@@ -247,14 +246,14 @@ export function WorkspaceSidebar(props: {
                     display: "block",
                     width: "100%",
                     textAlign: "left",
-                    padding: "6px 12px",
-                    fontSize: 13,
+                    padding: "var(--sp-2) var(--sp-3)",
+                    fontSize: "var(--fs-md)",
                     fontWeight: 700,
                     border: "none",
-                    borderTop: `1px solid ${theme.colors.border}`,
+                    borderTop: "1px solid var(--border)",
                     cursor: "pointer",
-                    color: projectActive ? theme.colors.text : theme.colors.textDim,
-                    background: projectActive ? theme.colors.bg : "transparent",
+                    color: projectActive ? "var(--accent)" : "var(--ink)",
+                    background: projectActive ? "var(--accent-weak)" : "transparent",
                   }}
                 >
                   {project.name}
@@ -271,12 +270,12 @@ export function WorkspaceSidebar(props: {
           <div data-testid="project-group-unassigned">
             <div
               style={{
-                padding: "8px 12px",
-                fontSize: 12,
+                padding: "var(--sp-2) var(--sp-3)",
+                fontSize: "var(--fs-sm)",
                 textTransform: "uppercase",
-                color: theme.colors.textDim,
+                color: "var(--muted)",
                 letterSpacing: 0.5,
-                borderTop: `1px solid ${theme.colors.border}`,
+                borderTop: "1px solid var(--border)",
               }}
             >
               {strings.chrome.sidebar.noProject}
@@ -295,7 +294,7 @@ export function WorkspaceSidebar(props: {
                         setAttachSelection((prev) => ({ ...prev, [w.id]: projectId }));
                         void handleAttach(w.id, projectId);
                       }}
-                      style={{ fontSize: 11, marginRight: 8, maxWidth: 90 }}
+                      style={{ fontSize: "var(--fs-xs)", marginRight: "var(--sp-2)", maxWidth: 90 }}
                     >
                       <option value="">{strings.chrome.sidebar.linkPlaceholder}</option>
                       {activeProjects.map((p) => (
@@ -322,14 +321,14 @@ export function WorkspaceSidebar(props: {
                   display: "block",
                   width: "100%",
                   textAlign: "left",
-                  padding: "8px 12px",
-                  fontSize: 12,
+                  padding: "var(--sp-2) var(--sp-3)",
+                  fontSize: "var(--fs-sm)",
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
                   border: "none",
-                  borderTop: `1px solid ${theme.colors.border}`,
+                  borderTop: "1px solid var(--border)",
                   cursor: "pointer",
-                  color: theme.colors.textDim,
+                  color: "var(--muted)",
                   background: "transparent",
                 }}
               >
@@ -350,15 +349,15 @@ export function WorkspaceSidebar(props: {
                             display: "block",
                             width: "100%",
                             textAlign: "left",
-                            padding: "6px 12px",
-                            fontSize: 13,
+                            padding: "var(--sp-2) var(--sp-3)",
+                            fontSize: "var(--fs-md)",
                             whiteSpace: "nowrap",
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                             border: "none",
                             cursor: "pointer",
-                            color: projectActive ? theme.colors.text : theme.colors.textDim,
-                            background: projectActive ? theme.colors.bg : "transparent",
+                            color: projectActive ? "var(--accent)" : "var(--muted)",
+                            background: projectActive ? "var(--accent-weak)" : "transparent",
                           }}
                         >
                           {project.name}
@@ -378,15 +377,15 @@ export function WorkspaceSidebar(props: {
           data-testid="create-project-open"
           onClick={() => setShowCreateDialog(true)}
           style={{
-            margin: 8,
+            margin: "var(--sp-2)",
             marginBottom: 0,
-            padding: "6px 10px",
-            border: `1px solid ${theme.colors.border}`,
-            background: theme.colors.bg,
-            color: theme.colors.text,
+            padding: "var(--sp-2) var(--sp-3)",
+            border: "1px solid var(--border-strong)",
+            background: "var(--panel-2)",
+            color: "var(--ink)",
             cursor: "pointer",
-            fontSize: 13,
-            borderRadius: 4,
+            fontSize: "var(--fs-md)",
+            borderRadius: "var(--r-sm)",
           }}
         >
           {strings.chrome.sidebar.addProject}
@@ -396,14 +395,14 @@ export function WorkspaceSidebar(props: {
           aria-label={strings.chrome.sidebar.addWorkspaceAria}
           onClick={() => void onAdd()}
           style={{
-            margin: 8,
-            padding: "6px 10px",
-            border: `1px solid ${theme.colors.border}`,
-            background: theme.colors.bg,
-            color: theme.colors.text,
+            margin: "var(--sp-2)",
+            padding: "var(--sp-2) var(--sp-3)",
+            border: "1px solid var(--border-strong)",
+            background: "var(--panel-2)",
+            color: "var(--ink)",
             cursor: "pointer",
-            fontSize: 13,
-            borderRadius: 4,
+            fontSize: "var(--fs-md)",
+            borderRadius: "var(--r-sm)",
           }}
         >
           {strings.chrome.sidebar.addWorkspace}

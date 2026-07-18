@@ -1,27 +1,26 @@
 import type { CSSProperties, JSX } from "react";
 import { orchdReconnect } from "../ipc/orchd";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 const bannerStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  gap: 12,
-  padding: "6px 12px",
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  background: theme.colors.bgElevated,
-  color: theme.colors.text,
-  fontSize: 13,
+  gap: "var(--sp-3)",
+  padding: "var(--sp-2) var(--sp-3)",
+  borderLeft: "3px solid var(--danger)",
+  background: "var(--danger-weak)",
+  color: "var(--danger)",
+  fontSize: "var(--fs-md)",
 };
 
 const buttonStyle: CSSProperties = {
-  padding: "2px 10px",
-  borderRadius: 6,
-  border: `1px solid ${theme.colors.border}`,
+  padding: "var(--sp-1) var(--sp-3)",
+  borderRadius: "var(--r-md)",
+  border: "1px solid var(--border-strong)",
   background: "transparent",
-  color: theme.colors.text,
-  fontSize: 12,
+  color: "var(--ink)",
+  fontSize: "var(--fs-sm)",
   cursor: "pointer",
 };
 

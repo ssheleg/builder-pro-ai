@@ -50,7 +50,6 @@ import { HomeView } from "./components/HomeView";
 import { ProjectPanel } from "./components/ProjectPanel";
 import { ExtPanel } from "./components/ext/ExtPanel";
 import { Toast } from "./components/Toast";
-import { theme } from "./theme";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 /** Module singleton (used by main.tsx). Tests inject a fake via the `manager` prop. */
@@ -461,9 +460,9 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         display: "flex",
         flexDirection: "column",
         height: "100vh",
-        background: theme.colors.bg,
-        color: theme.colors.text,
-        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+        background: "var(--bg)",
+        color: "var(--ink)",
+        fontFamily: "var(--font-ui)",
       }}
     >
       <DaemonBanner />
@@ -525,8 +524,8 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
                       alignItems: "center",
                       justifyContent: "center",
                       height: "100%",
-                      color: theme.colors.textDim,
-                      fontSize: 13,
+                      color: "var(--muted)",
+                      fontSize: "var(--fs-md)",
                     }}
                   >
                     {Object.keys(sessions).length === 0
@@ -548,21 +547,21 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   );
 }
 
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+const MONO_FONT = "var(--font-mono)";
 
 type StatKey = "live" | "waiting" | "exited" | "roots";
 
 const statChipStyle: CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  padding: "2px 8px",
+  padding: "2px var(--sp-2)",
   borderRadius: 999,
-  border: `1px solid ${theme.colors.border}`,
-  background: theme.colors.bg,
+  border: "1px solid var(--border)",
+  background: "var(--panel)",
   fontFamily: MONO_FONT,
-  fontSize: 11,
+  fontSize: "var(--fs-xs)",
   fontVariantNumeric: "tabular-nums",
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   cursor: "pointer",
 };
 
@@ -603,10 +602,10 @@ function WorkspaceStatsChips(props: {
       style={{
         display: "flex",
         flexDirection: "column",
-        gap: 4,
-        padding: "6px 12px",
-        borderBottom: `1px solid ${theme.colors.border}`,
-        background: theme.colors.bgElevated,
+        gap: "var(--sp-1)",
+        padding: "var(--sp-2) var(--sp-3)",
+        borderBottom: "1px solid var(--border)",
+        background: "var(--panel-2)",
       }}
     >
       <div style={{ display: "flex", gap: 6 }}>
@@ -619,8 +618,8 @@ function WorkspaceStatsChips(props: {
             onClick={() => setOpen((cur) => (cur === chip.key ? null : chip.key))}
             style={{
               ...statChipStyle,
-              borderColor: open === chip.key ? theme.colors.accent : theme.colors.border,
-              color: open === chip.key ? theme.colors.text : theme.colors.textDim,
+              borderColor: open === chip.key ? "var(--accent)" : "var(--border)",
+              color: open === chip.key ? "var(--ink)" : "var(--muted)",
             }}
           >
             {chip.label}
@@ -630,7 +629,7 @@ function WorkspaceStatsChips(props: {
       {openChip && (
         <div
           data-testid="workspace-stat-detail"
-          style={{ fontSize: 11, fontFamily: MONO_FONT, color: theme.colors.textDim }}
+          style={{ fontSize: "var(--fs-xs)", fontFamily: MONO_FONT, color: "var(--muted)" }}
         >
           {openChip.items.length === 0 ? "—" : openChip.items.join(" · ")}
         </div>

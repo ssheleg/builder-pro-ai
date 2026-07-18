@@ -1,18 +1,17 @@
 import type { CSSProperties, JSX } from "react";
 import { useAppStore } from "../store/store";
-import { theme } from "../theme";
 import { strings } from "../strings";
 
 const bannerStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  gap: 12,
-  padding: "6px 12px",
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  background: theme.colors.bgElevated,
-  color: theme.colors.text,
-  fontSize: 13,
+  gap: "var(--sp-3)",
+  padding: "var(--sp-2) var(--sp-3)",
+  borderLeft: "3px solid var(--danger)",
+  background: "var(--danger-weak)",
+  color: "var(--danger)",
+  fontSize: "var(--fs-md)",
 };
 
 /**

@@ -1,9 +1,86 @@
-import { useEffect, useRef, useState, type JSX } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore } from "../store/store";
 import { upgradeDaemon } from "../ipc/commands";
 import { orchdUpgrade } from "../ipc/orchd";
-import { theme } from "../theme";
 import { strings } from "../strings";
+
+// Shared dialog-atom styles (token-only, theme-aware) reused by both the sessiond and orchd
+// branches so the two variants stay pixel-identical. `--warn` marks the "needs you" upgrade
+// affordance (top accent + title); `--danger` marks an honest post-failure error line.
+const overlayStyle: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  // Scrim over the app — a translucent black veil (matching the frozen Dialog primitive), not a
+  // palette surface, so there is no theme token for it.
+  background: "rgba(0, 0, 0, 0.4)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 1000,
+};
+
+const cardStyle: CSSProperties = {
+  width: 360,
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderTop: "2px solid var(--warn)",
+  borderRadius: "var(--r-lg)",
+  boxShadow: "var(--shadow-1)",
+  padding: "var(--sp-4)",
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--sp-3)",
+};
+
+const titleStyle: CSSProperties = {
+  fontSize: "var(--fs-lg)",
+  fontWeight: 600,
+  color: "var(--warn)",
+};
+
+const bodyStyle: CSSProperties = {
+  fontSize: "var(--fs-md)",
+  lineHeight: 1.5,
+  color: "var(--ink)",
+};
+
+const errorStyle: CSSProperties = {
+  fontSize: "var(--fs-md)",
+  lineHeight: 1.5,
+  color: "var(--danger)",
+  borderLeft: "3px solid var(--danger)",
+  paddingLeft: "var(--sp-2)",
+};
+
+const footerRowStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "flex-end",
+  gap: "var(--sp-2)",
+  marginTop: "var(--sp-1)",
+};
+
+const cancelButtonStyle: CSSProperties = {
+  padding: "var(--sp-2) var(--sp-3)",
+  borderRadius: "var(--r-md)",
+  border: "1px solid var(--border-strong)",
+  background: "transparent",
+  color: "var(--ink)",
+  fontSize: "var(--fs-md)",
+  cursor: "pointer",
+};
+
+const primaryButtonStyle: CSSProperties = {
+  padding: "var(--sp-2) var(--sp-3)",
+  borderRadius: "var(--r-md)",
+  border: "none",
+  background: "var(--accent)",
+  // On-accent foreground — the design system's fixed white for filled accent buttons
+  // (see primitives.tsx Button "primary"), readable on the blue accent in both themes.
+  color: "#fff",
+  fontSize: "var(--fs-md)",
+  fontWeight: 600,
+  cursor: "pointer",
+};
 
 /** Extracts `CommandError::UpgradeFailed`'s `reason` field from a rejected upgrade promise (S3
  * T19: shared between `upgradeDaemon()`'s and `orchdUpgrade()`'s identical rejection shape —
@@ -116,93 +193,29 @@ export function UpgradeDialog(): JSX.Element | null {
       : strings.chrome.upgrade.daemonDetailAll;
 
     return (
-      <div
-        style={{
-          position: "fixed",
-          inset: 0,
-          background: "rgba(1, 4, 9, 0.6)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 1000,
-        }}
-      >
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="upgrade-dialog-title"
-          style={{
-            width: 360,
-            background: theme.colors.bgElevated,
-            border: `1px solid ${theme.colors.border}`,
-            borderTop: `2px solid ${theme.colors.statusWaiting}`,
-            borderRadius: 10,
-            boxShadow: theme.shadow,
-            padding: 16,
-            display: "flex",
-            flexDirection: "column",
-            gap: 12,
-          }}
-        >
-          <div
-            id="upgrade-dialog-title"
-            style={{
-              fontSize: 15,
-              fontWeight: 600,
-              color: theme.colors.statusWaiting,
-            }}
-          >
+      <div style={overlayStyle}>
+        <div role="dialog" aria-modal="true" aria-labelledby="upgrade-dialog-title" style={cardStyle}>
+          <div id="upgrade-dialog-title" style={titleStyle}>
             {strings.chrome.upgrade.required}
           </div>
-          <div style={{ fontSize: 13, lineHeight: 1.5, color: theme.colors.text }}>{copy}</div>
+          <div style={bodyStyle}>{copy}</div>
           {upgradeError !== null && (
-            // Error state (finding [13], spec §6.2.4 "honest failure"): red statusExited accent —
-            // never amber (amber is reserved for "a human is needed", not for a failure that
-            // already happened). Reason + an actionable hint so the user knows what to check.
-            <div
-              role="alert"
-              style={{
-                fontSize: 13,
-                lineHeight: 1.5,
-                color: theme.colors.statusExited,
-                borderLeft: `3px solid ${theme.colors.statusExited}`,
-                paddingLeft: 8,
-              }}
-            >
+            // Error state (finding [13], spec §6.2.4 "honest failure"): a --danger accent — never
+            // amber (amber is reserved for "a human is needed", not for a failure that already
+            // happened). Reason + an actionable hint so the user knows what to check.
+            <div role="alert" style={errorStyle}>
               {strings.chrome.upgrade.daemonRestartFailed(upgradeError)}
             </div>
           )}
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+          <div style={footerRowStyle}>
             <button
               type="button"
               onClick={() => setUpgradeDialogOpen(false)}
-              style={{
-                padding: "6px 12px",
-                borderRadius: 6,
-                border: `1px solid ${theme.colors.border}`,
-                background: "transparent",
-                color: theme.colors.text,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
+              style={cancelButtonStyle}
             >
               {strings.common.cancel}
             </button>
-            <button
-              ref={primaryRef}
-              type="button"
-              onClick={handleUpgradeClick}
-              style={{
-                padding: "6px 12px",
-                borderRadius: 6,
-                border: "none",
-                background: theme.colors.accent,
-                color: theme.colors.text,
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
+            <button ref={primaryRef} type="button" onClick={handleUpgradeClick} style={primaryButtonStyle}>
               {strings.common.update}
             </button>
           </div>
@@ -215,75 +228,28 @@ export function UpgradeDialog(): JSX.Element | null {
   // orchd's locked copy has NO live-session warning — orchd has no PTYs, so there is no
   // "N live sessions" to count.
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(1, 4, 9, 0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
+    <div style={overlayStyle}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="orchd-upgrade-dialog-title"
         data-testid="orchd-upgrade-dialog"
-        style={{
-          width: 360,
-          background: theme.colors.bgElevated,
-          border: `1px solid ${theme.colors.border}`,
-          borderTop: `2px solid ${theme.colors.statusWaiting}`,
-          borderRadius: 10,
-          boxShadow: theme.shadow,
-          padding: 16,
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-        }}
+        style={cardStyle}
       >
-        <div
-          id="orchd-upgrade-dialog-title"
-          style={{
-            fontSize: 15,
-            fontWeight: 600,
-            color: theme.colors.statusWaiting,
-          }}
-        >
+        <div id="orchd-upgrade-dialog-title" style={titleStyle}>
           {strings.chrome.upgrade.required}
         </div>
-        <div style={{ fontSize: 13, lineHeight: 1.5, color: theme.colors.text }}>
-          {strings.chrome.upgrade.orchdBody}
-        </div>
+        <div style={bodyStyle}>{strings.chrome.upgrade.orchdBody}</div>
         {orchdUpgradeError !== null && (
-          <div
-            role="alert"
-            style={{
-              fontSize: 13,
-              lineHeight: 1.5,
-              color: theme.colors.statusExited,
-              borderLeft: `3px solid ${theme.colors.statusExited}`,
-              paddingLeft: 8,
-            }}
-          >
+          <div role="alert" style={errorStyle}>
             {strings.chrome.upgrade.orchdRestartFailed(orchdUpgradeError)}
           </div>
         )}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+        <div style={footerRowStyle}>
           <button
             type="button"
             onClick={() => setOrchdUpgradeDialogOpen(false)}
-            style={{
-              padding: "6px 12px",
-              borderRadius: 6,
-              border: `1px solid ${theme.colors.border}`,
-              background: "transparent",
-              color: theme.colors.text,
-              fontSize: 13,
-              cursor: "pointer",
-            }}
+            style={cancelButtonStyle}
           >
             {strings.common.cancel}
           </button>
@@ -291,16 +257,7 @@ export function UpgradeDialog(): JSX.Element | null {
             ref={primaryRef}
             type="button"
             onClick={handleOrchdUpgradeClick}
-            style={{
-              padding: "6px 12px",
-              borderRadius: 6,
-              border: "none",
-              background: theme.colors.accent,
-              color: theme.colors.text,
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
+            style={primaryButtonStyle}
           >
             {strings.common.update}
           </button>

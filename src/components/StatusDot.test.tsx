@@ -2,7 +2,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 import { StatusDot, dotStateOf } from "./StatusDot";
-import { theme } from "../theme";
 import type { SessionLifecycle } from "../ipc/types";
 
 afterEach(cleanup);
@@ -44,21 +43,24 @@ describe("StatusDot rendering", () => {
     render(<StatusDot lifecycle={{ kind: "atPrompt" }} waitingForInput={false} />);
     const dot = screen.getByRole("img", { name: /idle/i });
     expect(dot.getAttribute("data-state")).toBe("idle");
-    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusIdle));
+    // idle → neutral tone (statusTone("pending") === "muted")
+    expect(dot.style.backgroundColor).toContain("--muted");
   });
 
   it("renders the running color for running", () => {
     render(<StatusDot lifecycle={{ kind: "running" }} waitingForInput={false} />);
     const dot = screen.getByRole("img", { name: /running/i });
     expect(dot.getAttribute("data-state")).toBe("running");
-    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusRunning));
+    // running → in-progress tone (statusTone("running") === "info")
+    expect(dot.style.backgroundColor).toContain("--info");
   });
 
   it("renders the waiting color for running+waitingForInput", () => {
     render(<StatusDot lifecycle={{ kind: "running" }} waitingForInput={true} />);
     const dot = screen.getByRole("img", { name: /waiting for input/i });
     expect(dot.getAttribute("data-state")).toBe("waiting");
-    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusWaiting));
+    // waiting → needs-you tone (statusTone("waiting") === "warn")
+    expect(dot.style.backgroundColor).toContain("--warn");
   });
 
   it("renders the exited color for exited", () => {
@@ -67,15 +69,7 @@ describe("StatusDot rendering", () => {
     );
     const dot = screen.getByRole("img", { name: /exited/i });
     expect(dot.getAttribute("data-state")).toBe("exited");
-    expect(dot.style.backgroundColor).toBe(hexToRgb(theme.colors.statusExited));
+    // exited → terminal-failure tone (statusTone("failed") === "danger")
+    expect(dot.style.backgroundColor).toContain("--danger");
   });
 });
-
-// jsdom serializes inline background-color as rgb(...); convert #rrggbb for comparison.
-function hexToRgb(hex: string): string {
-  const h = hex.replace("#", "");
-  const r = parseInt(h.slice(0, 2), 16);
-  const g = parseInt(h.slice(2, 4), 16);
-  const b = parseInt(h.slice(4, 6), 16);
-  return `rgb(${r}, ${g}, ${b})`;
-}
