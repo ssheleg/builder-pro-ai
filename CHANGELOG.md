@@ -2,6 +2,61 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.9.0] — 2026-07-18
+
+**S-UXR — UX-scenario base + testing loop + "Calm Control Room" UI redesign.** A frontend + QA
+slice: a maintained catalog of every first-session UX scenario, a code-traced audit of all of
+them, and a full restyle of the webview onto a design-token system so the app is metrics-forward
+and works in light **and** dark. **No wire version bump** — `bpa-orchd` stays `[1,1]`; **no schema
+migration** — this slice adds no verb and no persisted-shape change. The 886-test suite is the
+behavior-preservation guarantee. See `docs/superpowers/plans/2026-07-18-s-uxr.md`.
+
+### Added
+- **Design-token system (`src/ui/tokens.css`):** a full light/dark palette (neutral slate + one
+  calm-blue accent + `ok`/`warn`/`danger`/`info` semantics), plus space/radius/type/shadow scales,
+  driven by `data-theme` on the root. Every colour/space/type value in the UI is now a `var(--…)`.
+- **Theme system + toggle (`src/ui/theme.ts`, `ThemeToggle`):** `light`/`dark`/`system` with
+  OS-preference follow, `localStorage` persistence, and FOUC-free boot apply; `statusTone()` maps
+  entity status → tone. A toggle in the sidebar footer cycles the three modes.
+- **Primitives kit (`src/ui/primitives.tsx`):** token-only building blocks — `Panel`, `Stat`
+  (mono tabular-nums metric tile), `Sparkline` (inline SVG), `Badge`, `Button`, `Field`/`Input`/
+  `TextArea`/`Select`, `EmptyState`, `Dialog`. No external UI/icon/chart dependency.
+- **UX-scenario base (`docs/qa/ux-scenarios.md`):** 181 English scenarios across 15 epics
+  (onboarding → every feature/button/state/error/result), a 7-column format, plus a maintenance
+  **rule** (CONTRIBUTING) and an **advisory CI gate** (`scripts/check-ux-scenarios.sh`) that warns
+  when UI changes land without a catalog update.
+- **UX audit results (`docs/qa/ux-test-results.md`):** every scenario traced against code
+  (handler → IPC verb → store slice → UI). Pass-1 verdict: **169 OK / 10 UX-gaps / 0 bugs / 2
+  stale-doc** over 181 scenarios.
+
+### Changed
+- **Every view restyled onto tokens + primitives**, behavior-preserving: app shell + sidebar +
+  banners, Home (whole-store `Stat` tiles), workspace/terminal/files, project panel (goals/tasks/
+  rules), ideas/research/insights, the knowledge graph, and the extensions surface. The result is
+  calmer, denser, metrics-forward, and correctly themed in both light and dark.
+- **Focus ring is now theme-aware and single-source** in `tokens.css` (`var(--accent)`, offset 2px
+  per design-system §6.8) with its `:focus:not(:focus-visible)` companion.
+
+### Fixed
+- **FI-02 (Important):** a failed directory load in the file tree now renders a distinct
+  `file-row-failed` row with a working inline **Retry**, instead of a permanently stuck "Loading…"
+  row.
+- **TE-04 (a11y):** terminal tabs activate from the keyboard (Enter/Space), matching click.
+- **TA-06:** a task's provenance (`source`) now renders as a Badge on the row.
+- **ID-05:** the "+ idea" and orphan link-to-project buttons now *look* disabled (not just behave
+  disabled) while the orchestrator is down.
+- **GR-02 / GR-12:** a rejected optimistic graph edge (self-loop / duplicate / failure) is rolled
+  back instead of lingering until the next reconcile push.
+- **ON-07:** the Home "goals loading" line clears after a *failed* fetch instead of persisting.
+
+### Removed
+- **Legacy static dark-only palette (`src/theme.ts`) and `src/index.css`** — fully superseded by
+  the token system; no remaining consumer.
+
+### Docs
+- `ux-scenarios.md` re-synced to code; the stale **EX-04 / RE-12** rows (which still branded the
+  already-fixed MCP-connect timeout, BL-89, a Tier-0 Critical) corrected to "timeout-bounded".
+
 ## [0.8.0] — 2026-07-17
 
 **S-POLISH — reliability, honesty, English-only, and Tier-2 feature completeness (P1–P4).** A

@@ -38,14 +38,18 @@ attach guards in component refs (a pane instance is reused across tab switches �
 
 ## Design tokens
 
-- Source of truth: `src/theme.ts` (`Theme.colors`: `bg`, `bgElevated`, `border`, `text`,
-  `textDim`, `accent`, `statusIdle`, `statusRunning`, `statusExited`, `statusWaiting`).
-- Status-color semantics are part of the product language (grey=idle, green=running,
-  amber=waiting-for-input, red=exited) — reuse them everywhere state is shown (kanban cards,
-  agent dashboards), never re-invent.
-- At the next UI slice: extract spacing / typography / radius into the same module and expose all
-  tokens as CSS variables; until then inline styles read `theme` directly (current pattern).
-- **Color scheme posture: dark-only for v0.x** (explicit decision; light mode is future work).
+- Source of truth (since [0.9.0], S-UXR): `src/ui/tokens.css` — the colour/space/radius/type/shadow
+  palette as CSS variables (`--bg`, `--panel`, `--panel-2`, `--ink`, `--muted`, `--border`,
+  `--accent`, the `ok`/`warn`/`danger`/`info` semantic tones + their `-weak` fills, `--sp-1..6`,
+  `--r-sm/md/lg`, `--fs-xs..2xl`, `--shadow-1`). Consume as `var(--…)` — never a raw hex.
+- `src/ui/theme.ts` owns theme resolve/apply (`light`/`dark`/`system` + `data-theme`), the
+  `Theme`/`Tone` types, and `statusTone(status)`; `src/ui/primitives.tsx` is the token-only
+  building-block kit (`Panel`/`Stat`/`Sparkline`/`Badge`/`Button`/`Field`/`EmptyState`/`Dialog`).
+- Status-color semantics are part of the product language (grey=idle, blue=running, green=done,
+  amber=waiting-for-input, red=failed) — reuse them via `statusTone`/`Badge`/`StatusDot` everywhere
+  state is shown (kanban cards, agent dashboards), never re-invent.
+- **Color scheme posture: light AND dark**, system-default with a manual toggle (S-UXR). The legacy
+  static dark-only palette (`src/theme.ts`) has been removed.
 
 ## Extensions view — `ExtPanel`, consent dialogs, untrusted banners (S-EXT)
 

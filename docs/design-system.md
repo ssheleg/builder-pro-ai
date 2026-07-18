@@ -3,7 +3,11 @@
 Written 2026-07-06 (vision v4 §4: «super minimalist, light, modern, pleasant font,
 compact»). **Binds every feature designed after this date.** Extends
 [`frontend-conventions.md`](frontend-conventions.md) (store/events/testing architecture); this doc
-owns the VISUAL and UX language. Tokens live in `src/theme.ts` — this doc is their contract.
+owns the VISUAL and UX language. Since [0.9.0] (S-UXR) the tokens live in `src/ui/tokens.css` (the
+CSS-variable palette, light **and** dark), `src/ui/theme.ts` (the `Theme`/`Tone` types, theme
+resolve/apply, and `statusTone()`), and the reusable, token-only building blocks that consume them
+in `src/ui/primitives.tsx` (`Panel`/`Stat`/`Sparkline`/`Badge`/`Button`/`Field`/`EmptyState`/
+`Dialog`). This doc is their contract.
 
 ## 1. Design principles (in priority order)
 
@@ -22,31 +26,44 @@ owns the VISUAL and UX language. Tokens live in `src/theme.ts` — this doc is t
 6. **Keyboard-first.** Every primary action reachable via keyboard (⌘K command palette is the
    front door); mouse is the alternative, not the requirement.
 
-## 2. Color (tokens — `src/theme.ts` is the source of truth)
+## 2. Color (tokens — `src/ui/tokens.css` is the source of truth)
 
-Dark-only for v0.x (locked in frontend-conventions).
+Light **and** dark since [0.9.0] (S-UXR). The palette is defined as CSS variables on `:root`
+(light) and `:root[data-theme="dark"]` (dark) in `src/ui/tokens.css`; `src/ui/theme.ts` resolves
+`light`/`dark`/`system` and applies `data-theme`. Consume tokens as `var(--…)` — never a raw hex.
 
-| Token | Value | Use |
-|---|---|---|
-| `bg` | `#0d1117` | app ground |
-| `bgElevated` | `#161b22` | cards, bars, inputs |
-| `border` | `#30363d` | ALL borders — 1px, never heavier |
-| `text` | `#e6edf3` | primary text |
-| `textDim` | `#8b949e` | secondary text, labels, metadata |
-| `accent` | `#2f81f7` | THE one accent: primary actions, links, selection, focus |
+**Surfaces & text**
 
-**Status language (locked product vocabulary — reuse everywhere, never re-invent):**
+| Token | Light | Dark | Use |
+|---|---|---|---|
+| `--bg` | `#f7f8fa` | `#0f1218` | app ground |
+| `--panel` | `#ffffff` | `#161b24` | cards, bars, dialogs, inputs |
+| `--panel-2` | `#f7f8fa` | `#1b212c` | inset / secondary / table headers |
+| `--ink` | `#1a1f2b` | `#e8ecf3` | primary text |
+| `--muted` | `#5b6472` | `#8a93a6` | secondary text, labels, metadata |
+| `--border` / `--border-strong` | `#e6e9ef` / `#d7dce4` | `#232a36` / `#2c3441` | 1px lines / stronger edges |
+| `--accent` (`--accent-weak`) | `#2f6feb` (`#eaf0fe`) | `#4b8bff` (`#1b2740`) | THE one accent + its tint |
+| `--shadow-1` | subtle | subtle | the ONE elevation shadow (dialogs/panels); elevation is otherwise `--border` |
 
-| Token | Value | Meaning — everywhere in the product |
-|---|---|---|
-| `statusIdle` | `#8b949e` grey | idle / at prompt / nothing happening |
-| `statusRunning` | `#2ea043` green | working / healthy / success |
-| `statusWaiting` | `#d29922` amber | needs a human / waiting / gate / warning |
-| `statusExited` | `#f85149` red | exited / error / prod incident |
+**Status / semantic language (locked product vocabulary — reuse everywhere, never re-invent).**
+`statusTone(status)` in `theme.ts` maps an entity status to one of these tones; `Badge` and
+`StatusDot` render it. Each semantic tone also has a `-weak` background token (`--ok-weak`,
+`--warn-weak`, `--danger-weak`, `--info-weak`, `--accent-weak`) for tinted fills (badges, banners).
+
+| Tone (token) | Meaning — everywhere in the product |
+|---|---|
+| `info` (`--info`) blue | running / working (`running`) |
+| `ok` (`--ok`) green | done / accepted / shipped / healthy / success |
+| `warn` (`--warn`) amber | needs a human / waiting / gate / warning (`waiting`) |
+| `danger` (`--danger`) red | failed / interrupted / error / prod incident |
+| `muted` (`--muted`) grey | idle / at prompt / nothing happening |
 
 Rules: semantic colors are STATE ONLY — never decoration; amber is reserved for
 "a human is needed" (the hot-questions color); one accent — a second accent hue is a design
-defect. New tokens are added to `theme.ts` first, doc second, usage third.
+defect. New tokens are added to `tokens.css` first, this doc second, usage third (via `var(--…)`
+or a primitive). (Legacy token names used elsewhere in this doc — `bgElevated`, `text`, `textDim`,
+`statusRunning`/`statusWaiting`/`statusExited`/`statusIdle`, `theme.shadow` — map to the new names
+above: `--panel`, `--ink`, `--muted`, the `info`/`warn`/`danger`/`muted` tones, and `--shadow-1`.)
 
 ## 3. Typography
 
@@ -85,8 +102,8 @@ defect. New tokens are added to `theme.ts` first, doc second, usage third.
 | **Step card** (flows) | kind label (mono uppercase) + name + tool-binding chip (agent=accent, terminal=green, MCP=purple `#bc8cff`) |
 | **Terminal pane** | `#010409` ground, xterm defaults, mono 11-12px chrome |
 | **Empty state** | one dim sentence + one primary action; no illustrations |
-| **Dialog / modal overlay** | fixed full-viewport dim backdrop + centered `bgElevated` card, 1px `border`, radius 10, the ONE soft-shadow token (`theme.shadow`, introduced by this atom — the first true overlay in the app); amber top-edge accent marks "a human is needed" (never amber fill decoration elsewhere); one primary (accent-fill) + one secondary (1px-border ghost) button; `role="dialog"` + `aria-modal` + labelled title, focus the primary button on open, `Escape` = the secondary (cancel) action, visible 2px accent focus ring; an in-dialog failure (an action the user took just failed) renders as a `role="alert"` line with `statusExited` (red) text + left-edge, reason + actionable hint, below the body copy — distinct from the amber top-edge, which marks the dialog's own trigger condition, not an in-flight action's outcome; the dialog stays open so the primary button can be retried |
-| **Toast** | queue-of-ONE (`showToast` replaces, never queues — the "one inbox" spirit applied to transient notices), bottom-anchored fixed overlay, `role="alert"`, `statusExited` (red) left-edge accent as the DEFAULT (this atom exists to surface failures honestly, spec §7 error-surfacing contract — not console-only); auto-dismisses ~4s or `dismissToast()`; `bgElevated` + 1px `border` + the shared `theme.shadow` token |
+| **Dialog / modal overlay** | fixed full-viewport dim backdrop + centered `bgElevated` card, 1px `border`, radius 10, the ONE soft-shadow token (`--shadow-1`, introduced by this atom — the first true overlay in the app); amber top-edge accent marks "a human is needed" (never amber fill decoration elsewhere); one primary (accent-fill) + one secondary (1px-border ghost) button; `role="dialog"` + `aria-modal` + labelled title, focus the primary button on open, `Escape` = the secondary (cancel) action, visible 2px accent focus ring; an in-dialog failure (an action the user took just failed) renders as a `role="alert"` line with `statusExited` (red) text + left-edge, reason + actionable hint, below the body copy — distinct from the amber top-edge, which marks the dialog's own trigger condition, not an in-flight action's outcome; the dialog stays open so the primary button can be retried |
+| **Toast** | queue-of-ONE (`showToast` replaces, never queues — the "one inbox" spirit applied to transient notices), bottom-anchored fixed overlay, `role="alert"`, `statusExited` (red) left-edge accent as the DEFAULT (this atom exists to surface failures honestly, spec §7 error-surfacing contract — not console-only); auto-dismisses ~4s or `dismissToast()`; `--panel` + 1px `--border` + the shared `--shadow-1` token |
 | **Tree row** | indent level × 16px, inline title edit, status select; strategic root pinned, no delete/move |
 | **File tree** | lazy per-level fetch (`listDir` on expand, cached in the store until invalidated — re-expanding never re-fetches; a cache entry vanishing out from under a still-expanded dir auto-refetches with no click needed) + plain scroll-offset windowing over the flattened visible-node list (fixed row height, no virtualization dependency — stays smooth at 10k+ entries, DoD: <500 DOM rows rendered at any time); dirs-first sort then name; ignored entries hidden by default, dimmed (`textDim`) and shown only behind the "show ignored" toggle; per-row `⋯`/right-click context menu (new file/new folder → inline name input, rename, delete → Trash with `confirm`, reveal in Finder, open external); root nodes get New File/Folder only — no rename/delete on a workspace root (§9 "workspace deletion verb" out of scope) |
 | **Preview pane** | read-only mono text under the tree, no editing, no syntax highlighting (YAGNI v1, spec §9); `binary`/`tooLarge`/error each render an explicit placeholder card with a humanized size — never a truncated read presented as the whole file (spec §7); an error placeholder ALSO fires a toast, never console-only |
