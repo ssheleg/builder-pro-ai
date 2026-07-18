@@ -374,7 +374,7 @@ variables -> Actions** to get a signed, notarized build:
 | `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
 | `APPLE_TEAM_ID` | your 10-char Apple Developer Team ID |
 | Notarization — **one** of: | |
-| `APPLE_API_ISSUER` + `APPLE_API_KEY` + `APPLE_API_KEY_PATH` | App Store Connect API key (preferred, non-interactive) |
+| `APPLE_API_ISSUER` + `APPLE_API_KEY` + `APPLE_API_KEY_P8` | App Store Connect API key (preferred, non-interactive). `APPLE_API_KEY_P8` is the **contents** of the `AuthKey_*.p8` — the workflow writes it to a temp file on the runner |
 | `APPLE_ID` + `APPLE_PASSWORD` (+ `APPLE_TEAM_ID`) | Apple ID + an app-specific password |
 
 The env-var -> credential mapping is exactly the one `scripts/build-universal.sh` documents in its

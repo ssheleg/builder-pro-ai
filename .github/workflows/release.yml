@@ -57,12 +57,24 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Notarization option A — App Store Connect API key. The runner has no .p8 file, so we
+          # materialize APPLE_API_KEY_P8 (the .p8 CONTENTS) to a temp file and point
+          # APPLE_API_KEY_PATH at it (what build-universal.sh expects).
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          # Notarization option B — Apple ID + app-specific password (no file needed).
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        run: bash scripts/build-universal.sh
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_API_KEY_P8:-}" ]; then
+            key_path="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
+            export APPLE_API_KEY_PATH="$key_path"
+            echo "materialized App Store Connect API key to a temp file"
+          fi
+          bash scripts/build-universal.sh
 
       # Locate the produced bundle (productName has spaces; the target dir may be the workspace
       # root or src-tauri/target depending on the Cargo layout — search both, fail loud if absent).
