@@ -6,10 +6,9 @@ import {
   describeOrchdError,
 } from "../ipc/orchd";
 import type { FitVerdict, Insight, InsightStatus } from "../ipc/orchd-types";
-import { theme } from "../theme";
+import { Badge, Button, EmptyState } from "../ui/primitives";
+import type { Tone } from "../ui/theme";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const FIT_VERDICT_VALUES: FitVerdict[] = ["fit", "noFit", "unknown"];
 
@@ -18,6 +17,18 @@ const FIT_VERDICT_LABEL: Record<FitVerdict, string> = {
   noFit: strings.insights.fitVerdict.noFit,
   unknown: strings.insights.fitVerdict.unknown,
 };
+
+/** Fit-verdict → semantic tone for the read-only badge (owner-facing signal, not a status enum
+ * `statusTone` covers): a fit reads as "ok", a non-fit as "danger", unknown/absent as neutral. */
+const FIT_VERDICT_TONE: Record<FitVerdict, Tone> = {
+  fit: "ok",
+  noFit: "danger",
+  unknown: "muted",
+};
+
+function fitBadgeTone(v: FitVerdict | null): Tone {
+  return v === null ? "muted" : FIT_VERDICT_TONE[v];
+}
 
 const STATUS_VALUES: InsightStatus[] = ["new", "accepted", "archived"];
 
@@ -30,99 +41,77 @@ const STATUS_LABEL: Record<InsightStatus, string> = {
 const listStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 8,
+  gap: "var(--sp-2)",
 };
 
 const rowStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 6,
-  padding: "8px 12px",
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
-  background: theme.colors.bgElevated,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2) var(--sp-3)",
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-sm)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel)",
 };
 
 const headerRowStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
+  gap: "var(--sp-2)",
   flexWrap: "wrap",
 };
 
 const titleStyle: CSSProperties = {
   flex: "1 1 auto",
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   fontWeight: 600,
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const captionStyle: CSSProperties = {
-  fontSize: 11,
-  color: theme.colors.textDim,
+  fontSize: "var(--fs-xs)",
+  color: "var(--muted)",
 };
 
 const bodyStyle: CSSProperties = {
-  fontSize: 12,
-  color: theme.colors.textDim,
-};
-
-const badgeStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  padding: "2px 8px",
-  borderRadius: 999,
-  border: `1px solid ${theme.colors.border}`,
-  color: theme.colors.text,
-  flexShrink: 0,
+  fontSize: "var(--fs-sm)",
+  color: "var(--muted)",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
   borderRadius: 999,
-  padding: "2px 8px",
+  padding: "var(--sp-1) var(--sp-2)",
   flexShrink: 0,
 };
 
 const inputStyle: CSSProperties = {
   flex: "1 1 160px",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: "transparent",
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 4,
-  padding: "3px 6px",
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-1) var(--sp-2)",
 };
 
 const errorTextStyle: CSSProperties = {
-  fontSize: 11,
-  color: theme.colors.statusExited,
+  fontSize: "var(--fs-xs)",
+  color: "var(--danger)",
 };
 
 const rowGroupStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 6,
+  gap: "var(--sp-2)",
   flexWrap: "wrap",
 };
 
@@ -194,9 +183,12 @@ function InsightRow(props: InsightRowProps): JSX.Element {
     <div data-testid={`insight-row-${insight.id}`} style={rowStyle}>
       <div style={headerRowStyle}>
         <span style={titleStyle}>{insight.title}</span>
-        <span data-testid={`insight-fit-badge-${insight.id}`} style={badgeStyle}>
+        <Badge
+          tone={fitBadgeTone(insight.fitVerdict)}
+          data-testid={`insight-fit-badge-${insight.id}`}
+        >
           {fitBadgeText(insight.fitVerdict)}
-        </span>
+        </Badge>
         <select
           data-testid={`insight-status-${insight.id}`}
           aria-label={strings.insights.statusAria}
@@ -231,15 +223,16 @@ function InsightRow(props: InsightRowProps): JSX.Element {
             }}
             style={inputStyle}
           />
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
             type="button"
             data-testid={`insight-archive-confirm-${insight.id}`}
             disabled={disabled}
             onClick={handleArchiveConfirm}
-            style={textButtonStyle}
           >
             {strings.insights.confirmArchival}
-          </button>
+          </Button>
           {archiveError && (
             <span data-testid={`insight-archive-error-${insight.id}`} style={errorTextStyle}>
               {strings.insights.archiveReasonRequired}
@@ -271,17 +264,18 @@ function InsightRow(props: InsightRowProps): JSX.Element {
           onChange={(e) => setVerdictReasoning(e.target.value)}
           style={inputStyle}
         />
-        <button
+        <Button
+          variant="ghost"
+          size="sm"
           type="button"
           data-testid={`insight-verdict-apply-${insight.id}`}
           disabled={disabled}
           onClick={() =>
             onVerdictApply(insight.id, verdict === "" ? null : verdict, verdictReasoning)
           }
-          style={textButtonStyle}
         >
           {strings.insights.applyVerdict}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -346,12 +340,10 @@ export function InsightsList(props: { projectId: string | null }): JSX.Element {
   return (
     <div data-testid="insights-list" style={listStyle}>
       {rows.length === 0 ? (
-        <div
+        <EmptyState
           data-testid="insights-list-empty"
-          style={{ color: theme.colors.textDim, fontSize: 13 }}
-        >
-          {isOrphanView ? strings.insights.emptyOrphan : strings.insights.emptyProject}
-        </div>
+          title={isOrphanView ? strings.insights.emptyOrphan : strings.insights.emptyProject}
+        />
       ) : (
         rows.map((insight) => (
           <InsightRow

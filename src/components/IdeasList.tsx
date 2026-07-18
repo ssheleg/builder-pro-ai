@@ -13,10 +13,8 @@ import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { ResearchRunDialog } from "./idea/ResearchRunDialog";
 import { ResearchPane } from "./idea/ResearchPane";
 import { SpawnProjectFromIdea } from "./idea/SpawnProjectFromIdea";
-import { theme } from "../theme";
+import { Badge, Button, EmptyState } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Locked enum order (spec §4.2 `IdeaLifecycle`) — the lifecycle chip cycles exactly these six
  * values, never re-orders or filters them (design-system.md "Lifecycle chip" atom). */
@@ -51,107 +49,72 @@ const RESEARCH_STATUS_LABEL: Record<ResearchStatus, string> = {
 const listStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 8,
+  gap: "var(--sp-2)",
 };
 
 const rowStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
   alignItems: "center",
-  gap: 6,
-  padding: "8px 12px",
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
-  background: theme.colors.bgElevated,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2) var(--sp-3)",
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-sm)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  background: "var(--panel)",
 };
 
 const titleInputStyle: CSSProperties = {
   flex: "1 1 160px",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
   background: "transparent",
   border: "1px solid transparent",
-  borderRadius: 4,
-  padding: "3px 6px",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-1) var(--sp-2)",
 };
 
 const bodyInputStyle: CSSProperties = {
   flex: "1 1 100%",
   minWidth: 0,
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.textDim,
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--muted)",
   background: "transparent",
   border: "1px solid transparent",
-  borderRadius: 4,
-  padding: "3px 6px",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-1) var(--sp-2)",
   resize: "vertical",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-xs)",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
   borderRadius: 999,
-  padding: "2px 8px",
+  padding: "var(--sp-1) var(--sp-2)",
   flexShrink: 0,
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const deleteButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.statusExited,
-  borderColor: theme.colors.statusExited,
-};
-
-const primaryButtonStyle: CSSProperties = {
-  ...textButtonStyle,
-  color: theme.colors.bg,
-  background: theme.colors.accent,
-  borderColor: theme.colors.accent,
 };
 
 const orphanRowStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 6,
+  gap: "var(--sp-2)",
   flex: "1 1 100%",
-};
-
-const researchBadgeStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  padding: "1px 6px",
-  borderRadius: 999,
-  border: `1px solid ${theme.colors.border}`,
-  color: theme.colors.text,
-  flexShrink: 0,
 };
 
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
-  padding: "8px 12px",
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
+  padding: "var(--sp-2) var(--sp-3)",
+  border: "1px dashed var(--border-strong)",
+  borderRadius: "var(--r-md)",
 };
 
 interface IdeaRowProps {
@@ -269,37 +232,40 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
           </option>
         ))}
       </select>
-      <button
+      <Button
+        variant="danger"
+        size="sm"
         type="button"
         data-testid={`idea-delete-${idea.id}`}
         disabled={disabled}
         onClick={() => onDelete(idea.id)}
-        style={deleteButtonStyle}
       >
         {strings.common.delete}
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
         type="button"
         data-testid={`idea-research-${idea.id}`}
         disabled={disabled}
         onClick={() => setResearchDialogOpen(true)}
-        style={textButtonStyle}
       >
         {strings.ideas.research}
-      </button>
+      </Button>
       {latestRun && (
-        <span data-testid={`idea-research-badge-${idea.id}`} style={researchBadgeStyle}>
+        <Badge status={latestRun.status} data-testid={`idea-research-badge-${idea.id}`}>
           {RESEARCH_STATUS_LABEL[latestRun.status]}
-        </span>
+        </Badge>
       )}
-      <button
+      <Button
+        variant="ghost"
+        size="sm"
         type="button"
         data-testid={`idea-research-toggle-${idea.id}`}
         onClick={() => setResearchExpanded((v) => !v)}
-        style={textButtonStyle}
       >
         {researchExpanded ? strings.ideas.hideResearch : strings.ideas.researchCount(researchRuns.length)}
-      </button>
+      </Button>
       {isOrphan && <SpawnProjectFromIdea idea={idea} />}
       <textarea
         data-testid={`idea-body-input-${idea.id}`}
@@ -327,15 +293,16 @@ function IdeaRow(props: IdeaRowProps): JSX.Element {
               </option>
             ))}
           </select>
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
             type="button"
             data-testid={`idea-attach-button-${idea.id}`}
             disabled={disabled || attachTo === ""}
             onClick={() => onAttach(idea.id, attachTo)}
-            style={{ ...textButtonStyle, opacity: attachTo === "" ? 0.5 : 1 }}
           >
             {strings.ideas.linkToProject}
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -487,24 +454,23 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
           rows={2}
           style={bodyInputStyle}
         />
-        <button
+        <Button
+          variant="primary"
+          size="sm"
           type="button"
           data-testid="idea-create-submit"
           disabled={orchdDown || createTitle.trim() === "" || submitting}
           onClick={() => void submitCreate()}
-          style={{ ...primaryButtonStyle, opacity: createTitle.trim() === "" || submitting ? 0.5 : 1 }}
         >
           {strings.ideas.addIdea}
-        </button>
+        </Button>
       </div>
 
       {rows.length === 0 ? (
-        <div
+        <EmptyState
           data-testid="ideas-list-empty"
-          style={{ color: theme.colors.textDim, fontSize: 13 }}
-        >
-          {isOrphanView ? strings.ideas.emptyOrphan : strings.ideas.emptyProject}
-        </div>
+          title={isOrphanView ? strings.ideas.emptyOrphan : strings.ideas.emptyProject}
+        />
       ) : (
         rows.map((idea) => (
           <IdeaRow

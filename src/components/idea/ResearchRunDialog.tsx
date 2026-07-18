@@ -3,15 +3,13 @@ import { useAppStore } from "../../store/store";
 import { researchStartRun, describeOrchdError } from "../../ipc/orchd";
 import type { Idea, Policy } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { theme } from "../../theme";
+import { Button } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 const overlayStyle: CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "rgba(1, 4, 9, 0.6)",
+  background: "rgba(0, 0, 0, 0.4)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -22,54 +20,54 @@ const cardStyle: CSSProperties = {
   width: 460,
   maxHeight: "85vh",
   overflowY: "auto",
-  background: theme.colors.bgElevated,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 10,
-  boxShadow: theme.shadow,
-  padding: 16,
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-lg)",
+  boxShadow: "var(--shadow-1)",
+  padding: "var(--sp-4)",
   display: "flex",
   flexDirection: "column",
-  gap: 12,
+  gap: "var(--sp-3)",
 };
 
 const titleStyle: CSSProperties = {
-  fontSize: 15,
+  fontSize: "var(--fs-lg)",
   fontWeight: 600,
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const fieldLabelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
-  fontSize: 12,
+  gap: "var(--sp-1)",
+  fontSize: "var(--fs-sm)",
   fontWeight: 600,
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   textTransform: "uppercase",
   letterSpacing: "0.05em",
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: "inherit",
-  fontSize: 13,
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-md)",
   fontWeight: 400,
   textTransform: "none",
   letterSpacing: "normal",
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "6px 8px",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-3)",
 };
 
 const textareaStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "6px 8px",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-3)",
   resize: "vertical",
   minHeight: 90,
 };
@@ -77,52 +75,31 @@ const textareaStyle: CSSProperties = {
 const preflightStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
-  fontSize: 12,
-  color: theme.colors.textDim,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "8px 10px",
-  background: theme.colors.bg,
+  gap: "var(--sp-1)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--muted)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-3)",
+  background: "var(--panel-2)",
 };
 
 const noteStyle: CSSProperties = {
-  fontSize: 11,
-  color: theme.colors.statusWaiting,
+  fontSize: "var(--fs-xs)",
+  color: "var(--warn)",
 };
 
 const errorTextStyle: CSSProperties = {
-  fontSize: 12,
-  color: theme.colors.statusExited,
+  fontSize: "var(--fs-sm)",
+  color: "var(--danger)",
 };
 
 const inlineErrorStyle: CSSProperties = {
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   lineHeight: 1.5,
-  color: theme.colors.statusExited,
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  paddingLeft: 8,
-};
-
-const secondaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const primaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: "none",
-  background: theme.colors.accent,
-  color: theme.colors.text,
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
+  color: "var(--danger)",
+  borderLeft: "3px solid var(--danger)",
+  paddingLeft: "var(--sp-2)",
 };
 
 /** Seed JSON for the args textarea (owner-editable) — a reasonable generic starting point for a
@@ -336,24 +313,24 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-          <button
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "var(--sp-2)", marginTop: "var(--sp-1)" }}>
+          <Button
+            variant="ghost"
             type="button"
             data-testid="research-run-cancel"
             onClick={onClose}
-            style={secondaryButtonStyle}
           >
             {strings.common.cancel}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="primary"
             type="button"
             data-testid="research-run-submit"
             disabled={submitBlocked}
             onClick={() => void submit()}
-            style={{ ...primaryButtonStyle, opacity: submitBlocked ? 0.5 : 1 }}
           >
             {strings.research.run}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

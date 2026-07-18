@@ -356,6 +356,10 @@ describe("IdeasList", () => {
     fireEvent.change(screen.getByTestId("idea-create-title"), { target: { value: "x" } });
     const submitButton = screen.getByTestId("idea-create-submit") as HTMLButtonElement;
     expect(submitButton.disabled).toBe(true);
+    // ID-05: a disabled control must also LOOK disabled — orchdDown is folded into its opacity, so
+    // a filled-title "+ idea" button that is disabled purely by orchdDown is still dimmed, not
+    // rendered full-strength (which read as clickable).
+    expect(Number(submitButton.style.opacity)).toBeLessThan(1);
 
     vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(deleteButton);
@@ -377,6 +381,9 @@ describe("IdeasList", () => {
     fireEvent.change(screen.getByTestId("idea-attach-select-i1"), { target: { value: "p1" } });
     const attachButton = screen.getByTestId("idea-attach-button-i1") as HTMLButtonElement;
     expect(attachButton.disabled).toBe(true);
+    // ID-05: even with a project selected (so the button is disabled purely by orchdDown), it must
+    // still LOOK disabled — orchdDown is folded into its opacity, not just the empty-selection case.
+    expect(Number(attachButton.style.opacity)).toBeLessThan(1);
 
     fireEvent.click(attachButton);
     expect(orchdSetIdeaProjectMock).not.toHaveBeenCalled();

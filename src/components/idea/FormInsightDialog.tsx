@@ -11,7 +11,7 @@ import {
 } from "../../ipc/orchd";
 import type { FitVerdict, GraphNeighborhood, Idea, Insight, McpArtifact } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { theme } from "../../theme";
+import { Button } from "../../ui/primitives";
 import { strings } from "../../strings";
 
 const FIT_VERDICT_VALUES: FitVerdict[] = ["fit", "noFit", "unknown"];
@@ -25,7 +25,7 @@ const FIT_VERDICT_LABEL: Record<FitVerdict, string> = {
 const overlayStyle: CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "rgba(1, 4, 9, 0.6)",
+  background: "rgba(0, 0, 0, 0.4)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -37,25 +37,25 @@ const cardStyle: CSSProperties = {
   maxWidth: "95vw",
   maxHeight: "85vh",
   overflowY: "auto",
-  background: theme.colors.bgElevated,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 10,
-  boxShadow: theme.shadow,
-  padding: 16,
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-lg)",
+  boxShadow: "var(--shadow-1)",
+  padding: "var(--sp-4)",
   display: "flex",
   flexDirection: "column",
-  gap: 12,
+  gap: "var(--sp-3)",
 };
 
 const titleStyle: CSSProperties = {
-  fontSize: 15,
+  fontSize: "var(--fs-lg)",
   fontWeight: 600,
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const bodyLayoutStyle: CSSProperties = {
   display: "flex",
-  gap: 16,
+  gap: "var(--sp-4)",
   flexWrap: "wrap",
 };
 
@@ -63,7 +63,7 @@ const formColumnStyle: CSSProperties = {
   flex: "1 1 320px",
   display: "flex",
   flexDirection: "column",
-  gap: 12,
+  gap: "var(--sp-3)",
   minWidth: 0,
 };
 
@@ -72,19 +72,19 @@ const fitContextColumnStyle: CSSProperties = {
   minWidth: 0,
   display: "flex",
   flexDirection: "column",
-  gap: 10,
-  fontSize: 12,
-  color: theme.colors.textDim,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 8,
-  padding: 10,
-  background: theme.colors.bg,
+  gap: "var(--sp-2)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--muted)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-3)",
+  background: "var(--panel-2)",
 };
 
 const fitContextTitleStyle: CSSProperties = {
-  fontSize: 11,
+  fontSize: "var(--fs-xs)",
   fontWeight: 600,
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   textTransform: "uppercase",
   letterSpacing: "0.05em",
 };
@@ -92,25 +92,25 @@ const fitContextTitleStyle: CSSProperties = {
 const fieldLabelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
-  fontSize: 12,
+  gap: "var(--sp-1)",
+  fontSize: "var(--fs-sm)",
   fontWeight: 600,
-  color: theme.colors.textDim,
+  color: "var(--muted)",
   textTransform: "uppercase",
   letterSpacing: "0.05em",
 };
 
 const inputStyle: CSSProperties = {
-  fontFamily: "inherit",
-  fontSize: 13,
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-md)",
   fontWeight: 400,
   textTransform: "none",
   letterSpacing: "normal",
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "6px 8px",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-3)",
 };
 
 const textareaStyle: CSSProperties = {
@@ -124,41 +124,20 @@ const selectStyle: CSSProperties = {
 };
 
 const goalRowStyle: CSSProperties = {
-  fontSize: 12,
-};
-
-const secondaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const primaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: "none",
-  background: theme.colors.accent,
-  color: theme.colors.text,
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
+  fontSize: "var(--fs-sm)",
 };
 
 const inlineErrorStyle: CSSProperties = {
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   lineHeight: 1.5,
-  color: theme.colors.statusExited,
-  borderLeft: `3px solid ${theme.colors.statusExited}`,
-  paddingLeft: 8,
+  color: "var(--danger)",
+  borderLeft: "3px solid var(--danger)",
+  paddingLeft: "var(--sp-2)",
 };
 
 const statusLineStyle: CSSProperties = {
-  fontSize: 12,
-  color: theme.colors.textDim,
+  fontSize: "var(--fs-sm)",
+  color: "var(--muted)",
 };
 
 /**
@@ -477,45 +456,45 @@ export function FormInsightDialog(props: {
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-          <button
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "var(--sp-2)", marginTop: "var(--sp-1)" }}>
+          <Button
+            variant="ghost"
             type="button"
             data-testid="form-insight-cancel"
             onClick={onClose}
-            style={secondaryButtonStyle}
           >
             {strings.common.cancel}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="primary"
             type="button"
             data-testid="form-insight-create"
             disabled={createBlocked}
             onClick={() => void submitCreate()}
-            style={{ ...primaryButtonStyle, opacity: createBlocked ? 0.5 : 1 }}
           >
             {strings.common.create}
-          </button>
+          </Button>
           {insight !== null && (
-            <button
+            <Button
+              variant="primary"
               type="button"
               data-testid="form-insight-accept"
               disabled={acceptBlocked}
               onClick={() => void submitAccept()}
-              style={{ ...primaryButtonStyle, opacity: acceptBlocked ? 0.5 : 1 }}
             >
               {strings.common.accept}
-            </button>
+            </Button>
           )}
           {insight !== null && insight.status === "accepted" && (
-            <button
+            <Button
+              variant="primary"
               type="button"
               data-testid="form-insight-backlog"
               disabled={backlogBlocked}
               onClick={() => void submitBacklog()}
-              style={{ ...primaryButtonStyle, opacity: backlogBlocked ? 0.5 : 1 }}
             >
               {strings.insights.form.toBacklog}
-            </button>
+            </Button>
           )}
         </div>
       </div>

@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react
 import { useAppStore } from "../store/store";
 import { orchdCreateIdea, describeOrchdError } from "../ipc/orchd";
 import { useSubmitGuard } from "../hooks/useSubmitGuard";
-import { theme } from "../theme";
+import { Button } from "../ui/primitives";
 import { strings } from "../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Locked toast copy (task-19 brief verbatim) shown after a successful capture. */
 const SAVED_TOAST = strings.capture.ideaSaved;
@@ -33,7 +31,7 @@ function isTypingTarget(el: Element | null): boolean {
 const overlayStyle: CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "rgba(1, 4, 9, 0.6)",
+  background: "rgba(0, 0, 0, 0.4)",
   display: "flex",
   alignItems: "flex-start",
   justifyContent: "center",
@@ -43,79 +41,58 @@ const overlayStyle: CSSProperties = {
 
 const cardStyle: CSSProperties = {
   width: 480,
-  background: theme.colors.bgElevated,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 10,
-  boxShadow: theme.shadow,
-  padding: 16,
+  background: "var(--panel)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-lg)",
+  boxShadow: "var(--shadow-1)",
+  padding: "var(--sp-4)",
   display: "flex",
   flexDirection: "column",
-  gap: 10,
+  gap: "var(--sp-2)",
 };
 
 const titleHeadingStyle: CSSProperties = {
-  fontSize: 15,
+  fontSize: "var(--fs-lg)",
   fontWeight: 600,
-  color: theme.colors.text,
+  color: "var(--ink)",
 };
 
 const inputStyle: CSSProperties = {
-  fontFamily: "inherit",
-  fontSize: 14,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "8px 10px",
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-md)",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-3)",
 };
 
 const textareaStyle: CSSProperties = {
   ...inputStyle,
-  fontSize: 13,
+  fontSize: "var(--fs-sm)",
   resize: "vertical",
   minHeight: 72,
 };
 
 const selectStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  color: theme.colors.text,
-  background: theme.colors.bg,
-  border: `1px solid ${theme.colors.border}`,
-  borderRadius: 6,
-  padding: "6px 8px",
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--r-md)",
+  padding: "var(--sp-2) var(--sp-2)",
   alignSelf: "flex-start",
 };
 
 /** Non-amber note (design-system.md "File-state banner" atom's `accent` convention — amber stays
  * reserved for "needs you"): honest, not urgent — the owner just can't save right now. */
 const noteStyle: CSSProperties = {
-  fontSize: 13,
+  fontSize: "var(--fs-md)",
   lineHeight: 1.5,
-  color: theme.colors.textDim,
-  borderLeft: `3px solid ${theme.colors.accent}`,
-  paddingLeft: 8,
-};
-
-const secondaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const primaryButtonStyle: CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 6,
-  border: "none",
-  background: theme.colors.accent,
-  color: theme.colors.text,
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
+  color: "var(--muted)",
+  borderLeft: "3px solid var(--accent)",
+  paddingLeft: "var(--sp-2)",
 };
 
 /**
@@ -276,24 +253,24 @@ export function QuickCapture(): JSX.Element | null {
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-          <button
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "var(--sp-2)", marginTop: "var(--sp-1)" }}>
+          <Button
+            variant="ghost"
             type="button"
             data-testid="quick-capture-cancel"
             onClick={close}
-            style={secondaryButtonStyle}
           >
             {strings.common.cancel}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="primary"
             type="button"
             data-testid="quick-capture-submit"
             disabled={blocked}
             onClick={() => void submit()}
-            style={{ ...primaryButtonStyle, opacity: blocked ? 0.5 : 1 }}
           >
             {strings.common.save}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

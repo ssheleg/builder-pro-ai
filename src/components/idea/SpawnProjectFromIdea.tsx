@@ -4,7 +4,7 @@ import { orchdCreateProject, orchdSetIdeaProject, describeOrchdError } from "../
 import { pickFolder, createWorkspace } from "../../ipc/commands";
 import type { Idea } from "../../ipc/orchd-types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { theme } from "../../theme";
+import { Button } from "../../ui/primitives";
 import { strings } from "../../strings";
 
 /** Mirrors `WorkspaceSidebar.tsx`'s / `CreateProjectDialog.tsx`'s identical helper (same tiny,
@@ -14,21 +14,9 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 6px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
 const errorTextStyle: CSSProperties = {
-  fontSize: 11,
-  color: theme.colors.statusExited,
+  fontSize: "var(--fs-xs)",
+  color: "var(--danger)",
 };
 
 /**
@@ -142,15 +130,16 @@ export function SpawnProjectFromIdea(props: { idea: Idea }): JSX.Element {
 
   return (
     <>
-      <button
+      <Button
+        variant="ghost"
+        size="sm"
         type="button"
         data-testid={`spawn-project-${idea.id}`}
         disabled={orchdDown || submitting}
         onClick={() => void spawn()}
-        style={textButtonStyle}
       >
         {resuming ? strings.ideas.spawn.retry : strings.ideas.spawn.createProject}
-      </button>
+      </Button>
       {error !== null && (
         <span data-testid={`spawn-project-error-${idea.id}`} style={errorTextStyle}>
           {error}

@@ -4,10 +4,8 @@ import { mcpGetArtifact, describeOrchdError } from "../../ipc/orchd";
 import type { Idea, McpArtifact, ResearchRun, ResearchStatus } from "../../ipc/orchd-types";
 import { ArtifactViewer } from "../ext/ArtifactsTab";
 import { FormInsightDialog } from "./FormInsightDialog";
-import { theme } from "../../theme";
+import { Badge, Button, EmptyState } from "../../ui/primitives";
 import { strings } from "../../strings";
-
-const MONO_FONT = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 /** Self-poll cadence (spec D8, BL-92): while a non-terminal run is on screen, re-list the idea's
  * runs on this interval so a lost `orchd://research-runs-changed` push (or a boot-reconcile) can
@@ -30,51 +28,30 @@ const RESEARCH_STATUS_LABEL: Record<ResearchStatus, string> = {
 const paneStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 8,
-  marginTop: 6,
-  padding: "8px 10px",
-  border: `1px dashed ${theme.colors.border}`,
-  borderRadius: 8,
+  gap: "var(--sp-2)",
+  marginTop: "var(--sp-1)",
+  padding: "var(--sp-2) var(--sp-3)",
+  border: "1px dashed var(--border-strong)",
+  borderRadius: "var(--r-md)",
 };
 
 const runRowStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
+  gap: "var(--sp-1)",
 };
 
 const runHeaderStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-};
-
-const badgeStyle: CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 11,
-  padding: "1px 6px",
-  borderRadius: 999,
-  border: `1px solid ${theme.colors.border}`,
-  color: theme.colors.text,
+  gap: "var(--sp-2)",
+  fontFamily: "var(--font-ui)",
+  fontSize: "var(--fs-xs)",
 };
 
 const errorKindStyle: CSSProperties = {
-  fontSize: 11,
-  color: theme.colors.statusExited,
-};
-
-const textButtonStyle: CSSProperties = {
-  border: `1px solid ${theme.colors.border}`,
-  background: "transparent",
-  color: theme.colors.text,
-  cursor: "pointer",
-  fontSize: 11,
-  borderRadius: 4,
-  padding: "2px 8px",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
+  fontSize: "var(--fs-xs)",
+  color: "var(--danger)",
 };
 
 interface OpenInsightTarget {
@@ -171,11 +148,7 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
   }
 
   if (runs.length === 0) {
-    return (
-      <div data-testid="research-pane-empty" style={{ color: theme.colors.textDim, fontSize: 12 }}>
-        {strings.research.emptyRuns}
-      </div>
-    );
+    return <EmptyState data-testid="research-pane-empty" title={strings.research.emptyRuns} />;
   }
 
   return (
@@ -185,45 +158,48 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
         return (
           <div key={run.id} data-testid={`research-run-row-${run.id}`} style={runRowStyle}>
             <div style={runHeaderStyle}>
-              <span data-testid={`research-run-status-${run.id}`} style={badgeStyle}>
+              <Badge status={run.status} data-testid={`research-run-status-${run.id}`}>
                 {RESEARCH_STATUS_LABEL[run.status]}
-              </span>
-              <span style={{ color: theme.colors.textDim }}>
+              </Badge>
+              <span style={{ color: "var(--muted)" }}>
                 {serverNames[run.serverId] ?? run.serverId} · {run.toolName}
               </span>
 
               {run.status === "done" && (
                 <>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     type="button"
                     data-testid={`research-run-show-artifact-${run.id}`}
                     onClick={() => void handleShowArtifact(run)}
-                    style={textButtonStyle}
                   >
                     {strings.research.showArtifact}
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     type="button"
                     data-testid={`research-run-form-insight-${run.id}`}
                     disabled={disabled}
                     onClick={() => void handleFormInsightFromDone(run)}
-                    style={textButtonStyle}
                   >
                     {strings.research.formInsight}
-                  </button>
+                  </Button>
                 </>
               )}
 
               {run.status === "failed" && (
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
                   type="button"
                   data-testid={`research-run-no-research-${run.id}`}
                   disabled={disabled}
                   onClick={() => handleFormInsightWithoutResearch(run)}
-                  style={textButtonStyle}
                 >
                   {strings.research.formInsightNoResearch}
-                </button>
+                </Button>
               )}
             </div>
 
