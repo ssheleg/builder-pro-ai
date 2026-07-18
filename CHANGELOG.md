@@ -2,6 +2,36 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.9.1] — 2026-07-19
+
+**S-DIAG + S-DESIGN — reconstructable error logs and a WCAG-AA contrast pass.** A follow-up to the
+0.9.0 redesign: a final design review (measured contrast) plus a diagnostics layer so failure causes
+survive the toast. Frontend-only, no wire/schema change; 925-test suite green.
+
+### Added
+- **Structured, reconstructable error log (S-DIAG).** Errors were surfaced only as a 4 s toast and
+  then lost; a React render crash was an unrecoverable white screen. Now:
+  - `src/ipc/diag.ts` — a secret-scrubbed (`Bearer`/token/key/app-password/home-dir redaction),
+    bounded (200) diagnostics ring with machine error classification.
+  - `store.reportError(op, e)` records a structured event (op, kind, message, scrubbed detail) +
+    a `console.error` breadcrumb + the toast; every `refresh*` failure path routes through it.
+  - An **`ErrorBoundary`** around the app catches render crashes, records them, and shows a recovery
+    card instead of a white screen.
+  - A **Diagnostics panel** (sidebar footer, with an error-count badge) lists the log newest-first
+    with "Copy support bundle" (scrubbed JSON) and "Clear".
+
+### Fixed
+- **WCAG AA contrast across the palette (S-DESIGN).** The design review measured that in the light
+  theme every colored Badge failed AA (each semantic tone 3.09–4.00 as text on its `-weak` bg), and
+  in dark the white primary-button label was 3.26 on `--accent`. Darkened the five light foreground
+  tones to clear 4.5:1 on their tightest pairing, and added a theme-aware `--on-accent` token for
+  button labels. `src/ui/contrast.ts` + a `tokens.css`-parsing test now assert AA for every text
+  pair in both themes as a permanent regression guard.
+
+### Changed
+- The primary-button label color is the `--on-accent` token (was a literal `#fff`) — the last
+  hardcoded color in the component tree is gone.
+
 ## [0.9.0] — 2026-07-18
 
 **S-UXR — UX-scenario base + testing loop + "Calm Control Room" UI redesign.** A frontend + QA
