@@ -198,6 +198,7 @@ export function FormInsightDialog(props: {
   // created, its id is held so a retry after a failed lifecycle flip re-runs ONLY the flip — never
   // a duplicate `orchdCreateTask`.
   const [createdTaskId, setCreatedTaskId] = useState<string | null>(null);
+  const [createdInsightId, setCreatedInsightId] = useState<string | null>(null);
 
   const titleRef = useRef<HTMLInputElement>(null);
 
@@ -244,10 +245,18 @@ export function FormInsightDialog(props: {
   async function handleCreate(): Promise<void> {
     if (title.trim() === "") return;
     setErrorMessage(null);
+    // Skip re-creating the insight on a resume (C3): once created, only the fit-verdict step is
+    // retried, so a verdict-failure retry can never duplicate the insight (mirrors handleBacklog's
+    // createdTaskId guard).
+    let insightId = createdInsightId;
     try {
-      const created = await orchdCreateInsight(idea.projectId, `research-run:${runId}`, title.trim(), body);
+      if (insightId === null) {
+        const created = await orchdCreateInsight(idea.projectId, `research-run:${runId}`, title.trim(), body);
+        insightId = created.id;
+        setCreatedInsightId(created.id);
+      }
       const verdict = fitVerdict === "" ? null : fitVerdict;
-      const updated = await orchdSetInsightFitVerdict(created.id, verdict, fitReasoning);
+      const updated = await orchdSetInsightFitVerdict(insightId, verdict, fitReasoning);
       setInsight(updated);
       await refreshInsights();
       showToast(strings.insights.form.created);
