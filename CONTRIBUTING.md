@@ -47,6 +47,10 @@ changed without the catalog — it reminds, it never fails the build. UX-test fi
   cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$(rustc -vV | sed -n 's/host: //p')"
   ```
   (dev mode and the e2e harness spawn `target/debug/bpa-sessiond`).
+- **Git hooks** (run once per clone): `bash scripts/setup-git-hooks.sh` installs the `pre-push`
+  guard that refuses a force-push or deletion of `main`. On the free plan this local hook (plus
+  `release.yml`'s main-only ref guard) is `main`'s protection — server-side branch protection needs
+  GitHub Pro or a public repo. See [`docs/branching.md`](docs/branching.md) → "Protecting `main`".
 
 ## Branch model & builds
 
