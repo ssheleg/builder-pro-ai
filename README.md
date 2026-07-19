@@ -177,8 +177,8 @@ bash scripts/final-suite.sh   # → "ALL GATES PASSED"
 
 | Suite | Command | Covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1062 tests** (`0.9.2`) |
-| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **925 tests, 57 files** (`0.9.2`) |
+| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1072 tests** (`0.9.2`) |
+| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **932 tests, 57 files** (`0.9.2`) |
 | e2e (terminals) | `npm run e2e:survive` | create → run → status → quit client → daemon+shell survive → reattach + scrollback |
 | e2e (app domain) | `npm run e2e:orchd` | create → drain-restart → data intact → export → wipe → re-import → graph/MCP/research survival |
 | Coverage gate | `bash scripts/coverage-gate.sh` | ≥80% line coverage on both daemon crates (needs `cargo install cargo-llvm-cov`) |

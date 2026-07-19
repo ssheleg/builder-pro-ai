@@ -41,9 +41,12 @@ configured) actually executes the pipeline.
   that authored these scripts for exactly this reason (see "Why this wasn't run
   here" below).
 - **Workspace crates** (all built as part of the above): `crates/sessiond`
-  (`bpa-sessiond`, the daemon), `crates/protocol` (`bpa-protocol`, shared wire
-  types), `crates/paths` (`bpa-paths`, shared core+daemon path validation), and
-  `src-tauri` (`builder-pro-ai`, the Tauri core).
+  (`bpa-sessiond`, the terminal daemon), `crates/orchd` (`bpa-orchd`, the app-domain
+  daemon), `crates/protocol` (`bpa-protocol`, shared sessiond wire types),
+  `crates/orchd-proto` (`bpa-orchd-proto`, orchd wire types), `crates/paths`
+  (`bpa-paths`, shared core+daemon path validation), and `src-tauri`
+  (`builder-pro-ai`, the Tauri core). Both daemons are embedded as sidecars
+  (`tauri.conf.json` `externalBin`).
 - **An Apple Developer Program membership** (paid, $99/yr) for a Developer ID
   Application certificate. Notarization is impossible without one.
 
@@ -251,8 +254,12 @@ command, watch the status dot, quit, relaunch, confirm scrollback repaints).
   dev build below is for LOCAL use only).
 - The signing identity / Team ID and the App Store Connect API key are the only human-held
   secrets in the release path; they live in the environment (§3), never in the repo.
-- CI builds are **test-only** (unsigned; they never produce release artifacts). Release builds run
-  `scripts/build-universal.sh` + `scripts/sign-verify.sh` locally with credentials present.
+- Two build paths, both signing-aware: (1) the **`ci.yml`** workflow is test-only (unsigned; it
+  never produces release artifacts); (2) the **`release.yml`** workflow (manual `workflow_dispatch`,
+  `main`-only) runs on a `macos-15` CI runner and DOES produce the signed + notarized + stapled
+  universal `.dmg`/`.app.zip` — this is the published-release path (see "Manual release workflow"
+  below). Running `scripts/build-universal.sh` + `scripts/sign-verify.sh` locally with credentials
+  present is the equivalent manual alternative.
 
 ---
 
@@ -354,12 +361,15 @@ above, with the identical honest-degradation contract.
 
 ### How to trigger
 
-- GitHub UI: **Actions -> `release` -> Run workflow** -> fill in `version` (e.g. `0.8.0`) -> Run.
-- CLI: `gh workflow run release.yml -f version=0.8.0` (optionally `-f draft=false -f prerelease=false`).
+- GitHub UI: **Actions -> `release` -> Run workflow** -> fill in `version` (e.g. `0.9.2`) -> Run.
+- CLI: `gh workflow run release.yml -f version=0.9.2` (optionally `-f draft=false -f prerelease=false`).
 
-The workflow builds, uploads the artifacts to the run, and creates a **draft** Release tagged
-`v<version>`. Nothing reaches users until you open the draft in the **Releases** tab and press
-**Publish** — a second, deliberate gate on top of the manual trigger.
+The workflow builds, uploads the artifacts to the run, and creates a Release tagged `v<version>`
+that is a **draft** AND a **pre-release** by default (`draft` and `prerelease` inputs both default
+to `true`). Nothing reaches users until you open the draft in the **Releases** tab and press
+**Publish** — a second, deliberate gate on top of the manual trigger. (`v0.9.0`/`v0.9.1`/`v0.9.2`
+shipped this way as published pre-releases; `v0.8.0` was an abandoned draft — don't use it as an
+example.)
 
 ### Required repository secrets (for a SIGNED, distributable build)
 

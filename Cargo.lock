@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "builder-pro-ai"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "bpa-orchd-proto",
  "bpa-paths",
