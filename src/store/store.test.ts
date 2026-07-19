@@ -428,6 +428,23 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().sessions["ghost"]).toBeUndefined();
   });
 
+  it("setLifecycle never resurrects an already-exited session (C4 — exited always wins)", () => {
+    useAppStore.getState().upsertSession(meta());
+    useAppStore.getState().markExited({ sessionId: "s1", code: 0, signal: null });
+    // A late / out-of-order state-changed push arriving AFTER exited must not un-exit the session
+    // nor re-set waitingForInput (mirrors markExited's honest-state invariant).
+    useAppStore.getState().setLifecycle({
+      sessionId: "s1",
+      lifecycle: { kind: "running" },
+      waitingForInput: true,
+      cwd: "/work",
+    });
+    const s = useAppStore.getState().sessions["s1"];
+    expect(s.lifecycle).toEqual({ kind: "exited", code: 0, signal: null });
+    expect(s.waitingForInput).toBe(false);
+    expect(s.isActive).toBe(false);
+  });
+
   it("markExited clears waitingForInput — a finished process is not waiting for input, the honest state for every consumer (stats/StatusDot/HomeView) per review finding F1", () => {
     useAppStore.getState().upsertSession(meta({ waitingForInput: true }));
     const p: ExitedPayload = { sessionId: "s1", code: 1, signal: null };

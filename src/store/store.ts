@@ -516,6 +516,10 @@ export const useAppStore = create<AppState>((set, get) => {
       set((s) => {
         const existing = s.sessions[p.sessionId];
         if (!existing) return {};
+        // Exited always wins (C4): a late/out-of-order `session://state-changed` that arrives after
+        // `session://exited` must not resurrect a dead session to a running lifecycle or re-set
+        // waitingForInput — the same honest-state invariant markExited enforces.
+        if (existing.lifecycle.kind === "exited") return {};
         return {
           sessions: {
             ...s.sessions,
