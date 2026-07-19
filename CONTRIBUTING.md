@@ -48,6 +48,20 @@ changed without the catalog — it reminds, it never fails the build. UX-test fi
   ```
   (dev mode and the e2e harness spawn `target/debug/bpa-sessiond`).
 
+## Branch model & builds
+
+Two long-lived branches — full detail in [`docs/branching.md`](docs/branching.md):
+
+- **`nightbuild`** is the working branch. Do all day-to-day work here (or on a short branch / git
+  worktree that merges **back into `nightbuild`**, never into `main`). Validate locally with
+  `bash scripts/final-suite.sh`, and produce a local test build with `npm run build:test` (unsigned,
+  host-arch, debug — for your machine only).
+- **`main`** is stable and release-only. It advances **only** by merging `nightbuild` (via a PR, once
+  `final-suite` + CI are green). GitHub CI runs only on the path to `main`; the manual release
+  workflow (`release.yml`) refuses to run from any ref other than `main`.
+
+Rule of thumb: **local test builds come from `nightbuild`; distributable releases come from `main`.**
+
 ## Gates
 
 One command gates the whole Definition of Done:

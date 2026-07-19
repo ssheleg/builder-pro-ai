@@ -35,6 +35,18 @@ jobs:
   release:
     runs-on: macos-15
     steps:
+      # Releases are cut ONLY from `main` (docs/branching.md rule 4). `workflow_dispatch` lets you
+      # pick any ref in the Actions UI, so guard here BEFORE the expensive checkout/build: fail fast
+      # if this run was dispatched from anything other than `main`.
+      - name: Enforce release-from-main only
+        run: |
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "FAIL: releases are cut only from 'main' (this run's ref is '${{ github.ref_name }}')."
+            echo "Merge nightbuild -> main first, then dispatch release.yml from main. See docs/branching.md."
+            exit 1
+          fi
+          echo "OK: releasing from main."
+
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable # rustup honors rust-toolchain.toml (1.92)

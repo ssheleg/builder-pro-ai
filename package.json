@@ -12,6 +12,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "build:test": "bash scripts/build-local-test.sh",
     "tauri": "tauri",
     "e2e:survive": "node tests/e2e/survive-restart.mjs",
     "e2e:orchd": "node tests/e2e/orchd-survive.mjs"
