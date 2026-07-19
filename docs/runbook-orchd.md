@@ -73,14 +73,14 @@ bounded-retry connect sequence used at boot — no app restart needed for a plai
 
 The one-time developer reset: drop just the SQLite store (and its `-wal`/`-shm` sidecars) while
 leaving the LaunchAgent, rules markdown, logs, and socket in place. The daemon recreates a fresh
-schema-v1 `orchd.db` at its next boot, so this is the fastest way to start from an empty domain
+schema-v4 `orchd.db` at its next boot, so this is the fastest way to start from an empty domain
 store on your own machine (e.g. after a dev run left stale rows).
 
 ```bash
 launchctl bootout gui/$(id -u)/ai.builderpro.desktop.orchd 2>/dev/null
 rm -f ~/Library/Application\ Support/ai.builderpro.desktop/orchd.db*
 # Relaunch the app (or `launchctl kickstart -k gui/$(id -u)/ai.builderpro.desktop.orchd`) —
-# boot recreates orchd.db with schema v1 and re-seeds the global ruleset row idempotently.
+# boot recreates orchd.db with schema v4 and re-seeds the global ruleset row idempotently.
 ```
 
 The `orchd.db*` glob covers `orchd.db`, `orchd.db-wal`, and `orchd.db-shm`. This touches ONLY
@@ -113,7 +113,7 @@ rm ~/Library/LaunchAgents/ai.builderpro.desktop.orchd.plist
 ## DB quarantine (corruption recovery)
 
 On open, a corrupt/not-a-database image is **quarantined, not fatal**: the daemon renames it to
-`orchd.db.corrupt-<unix-ts>` in place and recreates a fresh schema-v1 database
+`orchd.db.corrupt-<unix-ts>` in place and recreates a fresh schema-v4 database
 (`crates/orchd/src/persistence.rs`, mirrors `bpa-sessiond`'s identical quarantine behavior). To
 attempt manual recovery, inspect the quarantined file with `sqlite3`; there is no automatic
 re-import — use `ExportAll`/`ImportBundle` (a project or whole-store JSON export/import, see the

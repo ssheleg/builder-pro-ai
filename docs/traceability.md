@@ -225,6 +225,26 @@ append-only (orchd stays `[1,1]`); no schema migration. Shipped `[0.8.0]`.
 | Frontend: graph editor controls (O-7) — add-node title/body form, inline rename (local nodes), edge-kind dropdown; ghosts read-only; mutating controls disabled while `orchd://down` | `npx vitest run src/components/graph/GraphCanvas.test.tsx` |
 | English-only gate (O-2): no Cyrillic (`U+0400..U+04FF`) outside the frozen-record allowlist | `bash scripts/check-english.sh` (stage 1 of `scripts/final-suite.sh`) |
 
+## S-UXR / S-DESIGN / S-DIAG / BL-101 contract rows (`docs/superpowers/plans/2026-07-18-s-uxr.md`)
+
+The post-`[0.8.0]` UX remediation: a design-token / primitives / theme redesign (S-UXR, `[0.9.0]`), a
+WCAG-AA contrast guard (S-DESIGN, `[0.9.1]`), a reconstructable diagnostics layer (S-DIAG, `[0.9.1]`),
+and a boot-order fix (BL-101, `[0.9.2]`). Frontend-only except BL-101; **no wire version bump**
+(`bpa-orchd` stays `[1,1]`), **no schema migration**.
+
+| Contract (slice `[ver]` / §) | Test (command) |
+|---|---|
+| S-UXR `[0.9.0]` — design tokens: the single global `src/ui/tokens.css` defines the light/dark palette and the app-wide 2px accent `:focus-visible` ring (BL-29, design-system §6.8), and suppresses the plain `:focus` outline for mouse interaction | `npx vitest run src/ui/tokens.css.test.ts` (`defines a 2px accent-token :focus-visible outline offset 2px`, `suppresses the plain :focus outline for mouse interaction (standard :focus-visible pattern)`) |
+| S-UXR `[0.9.0]` — primitives kit `src/ui/primitives.tsx`: token-only `Panel`/`Stat`/`Sparkline`/`Badge`/`Button`/`Field`/`Input`/`TextArea`/`Select`/`EmptyState`/`Dialog`, no external UI/icon/chart dependency | `npx vitest run src/ui/primitives.test.tsx` |
+| S-UXR `[0.9.0]` — theme system + toggle (`src/ui/theme.ts`, `src/ui/ThemeToggle.tsx`): `light`/`dark`/`system` with OS-preference follow, `localStorage` persistence, FOUC-free boot apply, `statusTone()` status→tone mapping | `npx vitest run src/ui/theme.test.ts src/ui/ThemeToggle.test.tsx` |
+| S-UXR `[0.9.0]` — UX-scenario base: the maintained catalog `docs/qa/ux-scenarios.md` + the advisory (non-failing) gate that warns when UI changes land without a catalog update | `bash scripts/check-ux-scenarios.sh` (INFORMATIONAL stage of `scripts/final-suite.sh`; `set -uo pipefail`, `exit 0` on a missing base — never fails the build) |
+| S-DESIGN `[0.9.1]` — WCAG-AA contrast guard: `src/ui/contrast.ts` (`hexToRgb`/`relativeLuminance`/`contrastRatio`/`AA_TEXT`); the test parses the real `tokens.css` and asserts every text pairing the UI renders clears 4.5:1 in BOTH the `:root` (light) and `:root[data-theme="dark"]` themes | `npx vitest run src/ui/contrast.test.ts` |
+| S-DIAG `[0.9.1]` — diagnostics ring `src/ipc/diag.ts`: secret-scrubbed, bounded (`DIAG_CAP`) event ring with machine error classification | `npx vitest run src/ipc/diag.test.ts` |
+| S-DIAG `[0.9.1]` — `store.reportError(op, e)` records a structured diag event + the toast, and scrubs secrets / home-path from the stored message so the support bundle can't leak them (C1) | `npx vitest run src/store/store.test.ts` (`reportError records a structured diag event AND shows the toast (returns the message)`, `reportError scrubs secrets/home-path from the stored message so the support bundle can't leak them (C1)`) |
+| S-DIAG `[0.9.1]` — `ErrorBoundary` catches a render crash, shows the recovery card (no white screen), and records a render diag event | `npx vitest run src/components/ErrorBoundary.test.tsx` (`catches a render crash, shows the recovery card, and records a render diag event`) |
+| S-DIAG `[0.9.1]` — `DiagnosticsPanel` renders one row per event (op/kind/message), an empty state, Clear, and a `Copy support bundle` that writes scrubbed JSON | `npx vitest run src/components/DiagnosticsPanel.test.tsx` (`Copy support bundle writes scrubbed JSON to the clipboard`) |
+| BL-101 `[0.9.2]` — `AppState` is `manage`d synchronously in `setup()` (`src-tauri/src/lib.rs`), before either daemon bring-up task is spawned, so a first-frame command returns an honest `Disconnected` instead of a raw "state not managed" framework error. No dedicated named test — the synchronous-`manage` boot path is carried by the crate's existing boot-path tests (per CHANGELOG `[0.9.2]`; behavior otherwise unchanged) | `cargo test -p builder-pro-ai --lib` (the crate's boot-path suite) |
+
 ## Uncovered rows
 
 None in the S0+S1/S2/S3/S4 rows above — every §14.2 row (and every S2/S3/S4 contract row) resolves
@@ -242,30 +262,38 @@ currently-passing test — the two connect/OAuth timeout regressions, the import
 orphan-file test, the storage-mode wire + command round-trips, the completion-trace no-secrets test,
 the un-archive / `GraphUpdateEdge` / OAuth-registry unit + dispatch + command tests, and the
 frontend reliability + Tier-2 component suites; the English-only gate is itself a build stage.
+**None in the `[0.9.0]`–`[0.9.2]` slices above either:** every S-UXR / S-DESIGN / S-DIAG / BL-101
+contract row resolves to at least one real, currently-passing test — the design-token focus-ring +
+primitives + theme suites, the WCAG-AA contrast guard, the diagnostics ring / `reportError` /
+`ErrorBoundary` / `DiagnosticsPanel` trio, and BL-101's synchronous-`manage` boot fix carried by the
+crate's existing boot-path tests (the single row with no dedicated named test, honestly flagged as
+such above). This completeness sweep now extends through `[0.9.2]`.
 
-## Test totals — current (S-POLISH, `[0.8.0]`, 2026-07-17)
+## Test totals — current (S-UXR/S-DESIGN/S-DIAG/BL-101, `[0.9.2]`, 2026-07-19)
 
-- Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **1062 tests**, 0 failed —
-  measured this pass via `cargo test --workspace -- --list | grep -c ': test$'` → 1062. Delta vs.
-  the prior S-IDEA pass (1023): **+39**, entirely inside the S-POLISH surface — `bpa-orchd` (the
-  un-archive persistence + dispatch tests, the `graph::update_edge` unit + dispatch tests, the
-  `connectors::registry_config` loader tests + the `ConnectorListProviders` dispatch tests, the
-  `open_with_outcome`/`GetStorageStatus` storage-mode tests, and the new
-  `no_secrets_in_logs_tracing`/extended `no_secrets_in_logs_connectors` integration tests),
-  `bpa-orchd-proto` (the four new append-only request variants in `every_request_variant_roundtrips`
-  + the `storage_status_types_are_exported` ts-rs check), and `builder-pro-ai` (the
-  `orchd_unarchive_project`/`orchd_graph_update_edge`/`orchd_storage_status`/`connector_list_providers`
-  command round-trips). No wire version bump (orchd stays `[1,1]`); no schema migration. Re-run
+- Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **1072 tests**, 0 failed —
+  measured this pass via `cargo test --workspace -- --list | grep -c ': test$'` → 1072. Delta vs.
+  the prior S-POLISH pass (1062): **+10**, entirely from the `[Unreleased]` QA-hardening backend
+  guards — `retry_transient` (BL-40/A1 PTY `openpty`-EAGAIN backoff), the connector oversized-body
+  8 MiB cap (B1), `effective_timeout` default-on-nonpositive (B2), `expires_at_from` saturation (B3),
+  the `GraphSearch` LIKE-metacharacter literalness (B4), the MCP `401`/`403` status-code boundary
+  (B6), and the CBOR nested-body + max-frame-length boundary. The `[0.9.0]`–`[0.9.2]` slices add no
+  net new Rust test: S-UXR / S-DESIGN / S-DIAG are frontend-only, and BL-101's synchronous-`manage`
+  boot fix is carried by the crate's existing boot-path tests (no dedicated named test). No wire
+  version bump (orchd stays `[1,1]`); no schema migration. Re-run
   `cargo test --workspace -- --list | grep -c ': test$'` yourself for the current per-crate
   breakdown.
-- TypeScript (`npx vitest run`): **870 tests**, **51 test files**, 0 failed (freshly re-measured this
-  pass). Delta vs. the prior S-IDEA pass (772, 47 files): **+98 tests, +4 files** — the four new
-  files are `src/hooks/useSubmitGuard.test.ts` (double-fire guard), `src/components/StorageBanner.test.tsx`
-  (degraded-mode alert), `src/components/OrchdUpgradeBanner.test.tsx` (reopenable upgrade banner), and
-  `src/strings.test.ts` (the English `strings.ts` centralization, O-2); the remaining growth is inside
-  existing suites — archive/un-archive (`ProjectPanel`/`WorkspaceSidebar`), `metric_refs` (`GoalTree`),
-  graph-editor (`GraphCanvas`), provider-dropdown (`ext/ConnectorsTab`), and the Tier-3
-  empty/loading/failed coverage.
+- TypeScript (`npx vitest run`): **932 tests**, **57 test files**, 0 failed (freshly re-measured this
+  pass). Delta vs. the prior S-POLISH pass (870, 51 files): **+62 tests, +6 net files** — eight
+  new frontend/diagnostics test files, offset by two legacy suites (`src/index.css.test.ts` and the
+  old `src/theme.test.ts`) retired in the S-UXR restyle. `[0.9.0]` S-UXR (→886) added the
+  design-token + primitives + theme kit: `src/ui/tokens.css.test.ts` (incl. the BL-29 focus ring),
+  `src/ui/primitives.test.tsx`, `src/ui/theme.test.ts`, and `src/ui/ThemeToggle.test.tsx`. `[0.9.1]`
+  (→925) added the S-DESIGN WCAG-AA contrast guard `src/ui/contrast.test.ts` and the S-DIAG trio
+  `src/ipc/diag.test.ts`, `src/components/ErrorBoundary.test.tsx`, and
+  `src/components/DiagnosticsPanel.test.tsx`. The remaining growth is the `[Unreleased]` QA-hardening
+  pass (925 → 932) inside existing suites — the `reportError`/support-bundle no-secret,
+  `onDaemonIncompatible`, and HTML-injection-sink regression guards.
 - E2E: `npm run e2e:survive` and `npm run e2e:orchd` unchanged by S-POLISH (P1–P4 add no new e2e
   phase — the reliability + feature work is covered by unit/integration/component tests above); both
   stay green. `scripts/final-suite.sh` is now **10 stages** (the English-only gate

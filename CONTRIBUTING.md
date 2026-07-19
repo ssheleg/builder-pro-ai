@@ -40,13 +40,16 @@ changed without the catalog — it reminds, it never fails the build. UX-test fi
   rustfmt + clippy) — rustup honors it automatically; no manual install step.
 - **Node:** `>= 24` (enforced via `package.json` `engines`). Then `npm ci`.
 - **Daemon dev build + sidecar staging** (required once per fresh checkout — the Tauri build
-  script checks the sidecar exists):
+  script checks BOTH sidecars exist; `tauri.conf.json` `externalBin` embeds `bpa-sessiond` AND
+  `bpa-orchd`):
   ```sh
-  cargo build -p bpa-sessiond
+  cargo build -p bpa-sessiond -p bpa-orchd
   mkdir -p src-tauri/binaries
-  cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$(rustc -vV | sed -n 's/host: //p')"
+  host=$(rustc -vV | sed -n 's/host: //p')
+  cp target/debug/bpa-sessiond "src-tauri/binaries/bpa-sessiond-$host"
+  cp target/debug/bpa-orchd "src-tauri/binaries/bpa-orchd-$host"
   ```
-  (dev mode and the e2e harness spawn `target/debug/bpa-sessiond`).
+  (dev mode and the e2e harnesses spawn `target/debug/bpa-sessiond` and `target/debug/bpa-orchd`.)
 - **Git hooks** (run once per clone): `bash scripts/setup-git-hooks.sh` installs the `pre-push`
   guard that refuses a force-push or deletion of `main`. On the free plan this local hook (plus
   `release.yml`'s main-only ref guard) is `main`'s protection — server-side branch protection needs
@@ -80,7 +83,8 @@ type parity (regenerate + diff `src/ipc/types.ts` and `src/ipc/orchd-types.ts`) 
 gate (≥ 80 % line coverage on `bpa-sessiond` and `bpa-orchd`) · e2e survive-restart · e2e orchd
 survive-restart + export/import round-trip.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same set on every push/PR.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same set on every push to
+`main` and every PR targeting `main` (the working branch is not auto-built — see `docs/branching.md`).
 **Local and CI gates must never diverge** — if you change one, change both in the same commit.
 
 ## TDD + Definition of Done
