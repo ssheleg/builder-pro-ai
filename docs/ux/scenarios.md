@@ -6,50 +6,50 @@
 
 | ID | Title | Feature | Persona | Status | Last audit |
 |----|-------|---------|---------|--------|------------|
-| SCN-001 | First launch — empty app | onboarding | new-user | validated | never |
-| SCN-002 | Add first workspace | onboarding | new-user | validated | never |
-| SCN-003 | Capture first idea with ⌘K | capture | new-user | validated | never |
-| SCN-004 | Home attention triage | home | owner | validated | never |
-| SCN-005 | Home goals overview | home | owner | validated | never |
-| SCN-006 | Theme toggle cycle | chrome | owner | validated | never |
-| SCN-007 | Sidebar navigation | chrome | owner | validated | never |
-| SCN-008 | Link workspace to project from sidebar | chrome | owner | validated | never |
-| SCN-009 | Create project | projects | owner | validated | never |
-| SCN-010 | Project overview & workspace management | projects | owner | validated | never |
-| SCN-011 | Export / import project | projects | owner | validated | never |
-| SCN-012 | Archive and un-archive project | projects | owner | validated | never |
-| SCN-013 | Open a new terminal | terminals | owner | validated | never |
-| SCN-014 | Switch terminal tabs (keep-alive) | terminals | owner | validated | never |
-| SCN-015 | Close a terminal | terminals | owner | validated | never |
-| SCN-016 | Session lifecycle indicators | terminals | owner | validated | never |
-| SCN-017 | Command history strip | terminals | owner | validated | never |
-| SCN-018 | Click a link in terminal output | terminals | owner | validated | never |
-| SCN-019 | Daemon restart reconnect | terminals | returning-owner | validated | never |
-| SCN-020 | Browse the file tree | files | owner | validated | never |
-| SCN-021 | Preview a file | files | owner | validated | never |
-| SCN-022 | Create / rename files and folders | files | owner | validated | never |
-| SCN-023 | Delete a file or folder | files | owner | validated | never |
-| SCN-024 | Live watch degradation and refresh | files | owner | validated | never |
-| SCN-025 | Manage ideas in a project | ideas | owner | validated | never |
-| SCN-026 | Run research on an idea | research | owner | validated | never |
-| SCN-027 | Form an insight from research | research | owner | validated | never |
-| SCN-028 | Orphan idea flows (spawn project, link) | ideas | owner | validated | never |
-| SCN-029 | Manage insights | insights | owner | validated | never |
-| SCN-030 | Manage tasks | tasks | owner | validated | never |
-| SCN-031 | Manage the goal tree | goals | owner | validated | never |
-| SCN-032 | Build the knowledge graph | graph | owner | validated | never |
-| SCN-033 | MCP server lifecycle and consent | extensions | owner | validated | never |
-| SCN-034 | Invoke tools and connectors | extensions | owner | validated | never |
-| SCN-035 | Limits, call log, artifacts, skills | extensions | owner | validated | never |
-| SCN-036 | Edit rules and policy | rules | owner | validated | never |
-| SCN-037 | Sessiond disconnect and reconnect | system-status | owner | validated | never |
-| SCN-038 | Sessiond upgrade required | system-status | owner | validated | never |
-| SCN-039 | Orchd down degradation | system-status | owner | validated | never |
-| SCN-040 | Orchd upgrade and cancel re-entry | system-status | owner | validated | never |
-| SCN-041 | Storage degradation banners | system-status | owner | validated | never |
-| SCN-042 | Diagnostics panel | diagnostics | owner | validated | never |
-| SCN-043 | Render crash recovery | error-recovery | owner | validated | never |
-| SCN-044 | Terminal attach failure surfaced | terminals | owner | validated | never |
+| SCN-001 | First launch — empty app | onboarding | new-user | implemented | 2026-07-19 PASS |
+| SCN-002 | Add first workspace | onboarding | new-user | implemented | 2026-07-19 PASS |
+| SCN-003 | Capture first idea with ⌘K | capture | new-user | implemented | 2026-07-19 PASS |
+| SCN-004 | Home attention triage | home | owner | implemented | 2026-07-19 PASS |
+| SCN-005 | Home goals overview | home | owner | implemented | 2026-07-19 PASS |
+| SCN-006 | Theme toggle cycle | chrome | owner | implemented | 2026-07-19 PASS |
+| SCN-007 | Sidebar navigation | chrome | owner | implemented | 2026-07-19 PASS |
+| SCN-008 | Link workspace to project from sidebar | chrome | owner | implemented | 2026-07-19 PASS |
+| SCN-009 | Create project | projects | owner | implemented | 2026-07-19 PASS |
+| SCN-010 | Project overview & workspace management | projects | owner | validated | 2026-07-19 PARTIAL |
+| SCN-011 | Export / import project | projects | owner | implemented | 2026-07-19 PASS |
+| SCN-012 | Archive and un-archive project | projects | owner | implemented | 2026-07-19 PASS |
+| SCN-013 | Open a new terminal | terminals | owner | implemented | 2026-07-19 PASS |
+| SCN-014 | Switch terminal tabs (keep-alive) | terminals | owner | implemented | 2026-07-19 PASS |
+| SCN-015 | Close a terminal | terminals | owner | implemented | 2026-07-19 PASS |
+| SCN-016 | Session lifecycle indicators | terminals | owner | implemented | 2026-07-19 PASS |
+| SCN-017 | Command history strip | terminals | owner | implemented | 2026-07-19 PASS |
+| SCN-018 | Click a link in terminal output | terminals | owner | implemented | 2026-07-19 PASS |
+| SCN-019 | Daemon restart reconnect | terminals | returning-owner | implemented | 2026-07-19 PASS |
+| SCN-020 | Browse the file tree | files | owner | implemented | 2026-07-19 PASS |
+| SCN-021 | Preview a file | files | owner | implemented | 2026-07-19 PASS |
+| SCN-022 | Create / rename files and folders | files | owner | implemented | 2026-07-19 PASS |
+| SCN-023 | Delete a file or folder | files | owner | implemented | 2026-07-19 PASS |
+| SCN-024 | Live watch degradation and refresh | files | owner | implemented | 2026-07-19 PASS |
+| SCN-025 | Manage ideas in a project | ideas | owner | implemented | 2026-07-19 PASS |
+| SCN-026 | Run research on an idea | research | owner | implemented | 2026-07-19 PASS |
+| SCN-027 | Form an insight from research | research | owner | implemented | 2026-07-19 PASS |
+| SCN-028 | Orphan idea flows (spawn project, link) | ideas | owner | validated | 2026-07-19 FAIL |
+| SCN-029 | Manage insights | insights | owner | implemented | 2026-07-19 PASS |
+| SCN-030 | Manage tasks | tasks | owner | implemented | 2026-07-19 PASS |
+| SCN-031 | Manage the goal tree | goals | owner | implemented | 2026-07-19 PASS |
+| SCN-032 | Build the knowledge graph | graph | owner | implemented | 2026-07-19 PASS |
+| SCN-033 | MCP server lifecycle and consent | extensions | owner | implemented | 2026-07-19 PASS |
+| SCN-034 | Invoke tools and connectors | extensions | owner | implemented | 2026-07-19 PASS |
+| SCN-035 | Limits, call log, artifacts, skills | extensions | owner | implemented | 2026-07-19 PASS |
+| SCN-036 | Edit rules and policy | rules | owner | implemented | 2026-07-19 PASS |
+| SCN-037 | Sessiond disconnect and reconnect | system-status | owner | implemented | 2026-07-19 PASS |
+| SCN-038 | Sessiond upgrade required | system-status | owner | implemented | 2026-07-19 PASS |
+| SCN-039 | Orchd down degradation | system-status | owner | implemented | 2026-07-19 PASS |
+| SCN-040 | Orchd upgrade and cancel re-entry | system-status | owner | implemented | 2026-07-19 PASS |
+| SCN-041 | Storage degradation banners | system-status | owner | implemented | 2026-07-19 PASS |
+| SCN-042 | Diagnostics panel | diagnostics | owner | implemented | 2026-07-19 PASS |
+| SCN-043 | Render crash recovery | error-recovery | owner | implemented | 2026-07-19 PASS |
+| SCN-044 | Terminal attach failure surfaced | terminals | owner | validated | 2026-07-19 FAIL |
 
 ## Personas
 
@@ -81,7 +81,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** sidebar empty-state sentence, stat tiles, EmptyState "No active sessions.", "+ project" button, "+ Add workspace" button, ThemeToggle, Diagnostics button
 - **States covered:** empty
 - **Errors & recovery:** daemon not yet connected → red "Daemon disconnected — reconnecting…" banner, auto-retries with backoff [500,1000,2000,5000]ms
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/store/store.ts:470, src/components/WorkspaceSidebar.tsx:223-235, src/strings.ts:106, src/components/HomeView.tsx:240-269, src/App.tsx:334-388
 
 ### SCN-002: Add first workspace
@@ -96,7 +96,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "+ Add workspace" button, OS folder picker, workspace row in sidebar
 - **States covered:** success
 - **Errors & recovery:** picker cancelled → silent no-op; createWorkspace rejects → toast "Failed to add workspace: {msg}" via describeCommandError (disconnected / incompatible / too large / internal)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/WorkspaceSidebar.tsx:107-119,396-412, src/strings.ts:102,59-66
 
 ### SCN-003: Capture first idea with ⌘K
@@ -112,7 +112,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** QuickCapture dialog, title input, description textarea, project select, "Cancel" / "Save" buttons
 - **States covered:** success, error
 - **Errors & recovery:** ⌘K ignored while typing in input/textarea/.xterm or while an upgrade dialog is open; empty title → Save disabled; orchd down → inline "orchestrator unavailable" note, Save disabled; save rejects → toast, dialog stays open for retry
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/QuickCapture.tsx:24-29,144-184,192,250-273, src/strings.ts:261-269
 
 ## home
@@ -130,7 +130,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** stat tiles, group headers, StatusDot, "waiting for input" badge, "Go →" button, running rows, finished rows with ✓/✗ glyph + "code {n}"
 - **States covered:** empty, success
 - **Errors & recovery:** no sessions → "No active sessions." + "Open {name}" button when a workspace exists (no button with zero workspaces)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/HomeView.tsx:205-212,240-379, src/strings.ts:120-121
 
 ### SCN-005: Home goals overview
@@ -145,7 +145,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "Goals" heading, project block buttons, status chips "{title} · {status}"
 - **States covered:** loading, empty, success
 - **Errors & recovery:** goals still fetching → "Goals are loading…" (only while all active projects unfetched); no active projects → section renders nothing; fetch failures toast via refreshGoals
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/HomeGoals.tsx:141-201, src/strings.ts:129
 
 ## chrome
@@ -161,7 +161,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** ThemeToggle button
 - **States covered:** success
 - **Errors & recovery:** nothing can fail (local only)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/ui/ThemeToggle.tsx:8-26, src/ui/theme.ts:6-81, src/main.tsx:10
 
 ### SCN-007: Sidebar navigation
@@ -176,7 +176,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "⌂ Home", "⚙ Extensions", project group headers, workspace rows, "Archived (N)" toggle, archived project rows
 - **States covered:** empty, success
 - **Errors & recovery:** zero projects and workspaces → empty-state sentence (SCN-001); nothing else can fail (navigation is local)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/WorkspaceSidebar.tsx:102-105,177-374, src/store/store.ts:101,571-573,760
 
 ### SCN-008: Link workspace to project from sidebar
@@ -191,7 +191,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** «No project» group, link select ("link…" placeholder + project names)
 - **States covered:** success, error
 - **Errors & recovery:** attach rejects → toast describeOrchdError, selection resets
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/WorkspaceSidebar.tsx:127-130,273-313, src/strings.ts:96-97
 
 ## projects
@@ -210,7 +210,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "New project" dialog, Name input, Description textarea, workspace checkbox list, "no available workspaces" note, "+ create workspace" button, blocked alert "at least one workspace is required", inline error line, "Cancel" / "Create" buttons
 - **States covered:** empty, error, success
 - **Errors & recovery:** 0 workspaces selected → blocked alert, Create disabled; empty name → Create disabled; create rejects → dialog stays open, inline error + toast; inline workspace-create failure → same error line via describeCommandError, fallback "failed to create workspace"; folder pick cancelled → silent no-op; double-submit guarded; Escape = Cancel
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/CreateProjectDialog.tsx:209-380, src/components/WorkspaceSidebar.tsx:378-395,453, src/strings.ts:198-207
 
 ### SCN-010: Project overview & workspace management
@@ -242,7 +242,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "Copy JSON", "Save to file…", "Import from file…" buttons, .json file buttons, "No .json files in the selected folder" note
 - **States covered:** empty, error, success
 - **Errors & recovery:** folder pick cancelled → no-op; no .json files → honest empty note; any step rejects → toast describeOrchdError
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/ProjectPanel.tsx:198-242,413-467, src/strings.ts:218-221,227-231
 
 ### SCN-012: Archive and un-archive project
@@ -258,7 +258,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "Archive project" danger button, window.confirm, archived role=status banner, "Un-archive" button
 - **States covered:** success, error
 - **Errors & recovery:** confirm cancelled → no-op; archive/unarchive reject → toast; orchd down → both buttons disabled; double-submit guarded
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/ProjectPanel.tsx:248-268,312-342,469-482, src/strings.ts:233-239
 
 ## terminals
@@ -274,7 +274,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "+ New terminal" button, session tab (StatusDot + title + ×), terminal pane
 - **States covered:** empty, error, success
 - **Errors & recovery:** no active workspace → button disabled (not-allowed cursor); create_session rejects → toast "Failed to open a new terminal: {msg}", no tab; zero sessions → pane placeholder "No terminals yet — pick a workspace and press + New terminal."
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/TerminalTabs.tsx:57-81,166-181, src/App.tsx:132-137,522-541, src/strings.ts:188,191
 
 ### SCN-014: Switch terminal tabs (keep-alive)
@@ -288,7 +288,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** session tabs (role=tab, aria-selected), terminal pane
 - **States covered:** success
 - **Errors & recovery:** sessions exist but none active → "Select a terminal tab." placeholder; nothing else can fail (switch is local)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/TerminalTabs.tsx:109-137, src/components/TerminalPane.tsx:5-59, src/terminal/terminal-manager.ts:113-122,531-536
 
 ### SCN-015: Close a terminal
@@ -302,7 +302,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** tab × close button
 - **States covered:** success, error
 - **Errors & recovery:** kill_session rejects → toast "Failed to close the terminal: {msg}", but tab is still removed and xterm disposed (no zombie tab)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/TerminalTabs.tsx:83-97,142-161, src/terminal/terminal-manager.ts:570-585, src/store/store.ts:505-513, src/strings.ts:192
 
 ### SCN-016: Session lifecycle indicators
@@ -316,7 +316,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** StatusDot (aria labels idle/running/exited/"waiting for input"), session tab, Home rows
 - **States covered:** success
 - **Errors & recovery:** nothing can fail (display of pushed state); exited always wins over stale updates
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/StatusDot.tsx:13-57, src/store/store.ts:515-556, src/App.tsx:138-139
 
 ### SCN-017: Command history strip
@@ -330,7 +330,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** command strip (role=list "Command history"), chips, "[Retry]" button
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** loading → "Loading command history…"; fetch fails → "Failed to load command history" + Retry + toast; no events → "No commands yet"
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/CommandStrip.tsx:114-266, src/strings.ts:177-184
 
 ### SCN-018: Click a link in terminal output
@@ -344,7 +344,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** underlined links in terminal, FilesRail preview
 - **States covered:** success, error
 - **Errors & recovery:** file:// outside roots → toast "file is outside the workspace or not found"; non-existent lexical path → honest "not found" from the preview read; other schemes ignored
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/terminal/terminal-manager.ts:201-271, src/terminal/link-provider.ts:15-70,159, src/strings.ts:176
 
 ### SCN-019: Daemon restart reconnect
@@ -358,7 +358,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** session tabs, terminal pane
 - **States covered:** loading, success
 - **Errors & recovery:** while disconnected → red DaemonBanner (SCN-037); hydrate retries on backoff until success
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/App.tsx:161-181,334-344, src/terminal/terminal-manager.ts:331-333,456-467
 
 ## files
@@ -376,7 +376,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** rail header (⟩ collapse, "Files", "show ignored"), tree rows (role=treeitem), "Loading…" row, "empty folder" row, failed row + Retry, "+ Add root" button, ⟨ reopen strip
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** listDir fails → danger row "Failed to read folder: {msg}" + inline Retry (no auto-retry loop) + toast; add-root fails → toast "Failed to add root: {msg}"; no workspace → rail renders nothing
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/FileTree.tsx:111-168,298-415,658-700, src/components/FilesRail.tsx:22-192,482-491, src/strings.ts:134-146,155
 
 ### SCN-021: Preview a file
@@ -390,7 +390,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** preview pane, "Select a file to preview" placeholder, "Loading…", truncation banner, error card
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** read fails → danger card + toast "Failed to open file: {msg}" (not found / access denied / outside root / too large / io); stale responses dropped by token guard
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/FilePreview.tsx:10-26,60-160, src/ipc/fs.ts:30-45, src-tauri/src/fs_explorer.rs:37-41,294-309,781-789, src/strings.ts:50-57,166-171
 
 ### SCN-022: Create / rename files and folders
@@ -405,7 +405,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** row menu (New file, New folder, Rename, Delete, Show in Finder, Open in external app), inline form popover with autofocus input
 - **States covered:** success, error
 - **Errors & recovery:** blank name → silent cancel; create fails → toast "Failed to create file|folder: {msg}" (incl. "a file with this name already exists"); rename fails → toast "Failed to rename: {msg}"; outside-click closes the popover
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/FileTree.tsx:380-389,422-448,514-656, src/strings.ts:148-149,158-162
 
 ### SCN-023: Delete a file or folder
@@ -420,7 +420,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** Delete menu item, window.confirm
 - **States covered:** success, error
 - **Errors & recovery:** confirm cancelled → no-op; delete fails → toast "Failed to delete: {msg}"
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/FileTree.tsx:451-464, src/strings.ts:150-152
 
 ### SCN-024: Live watch degradation and refresh
@@ -435,7 +435,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "live updates paused — refresh" amber button
 - **States covered:** error, success
 - **Errors & recovery:** restart rejects → paused flag re-set (never falsely "live"); switching to a healthy workspace clears a stale flag
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/FilesRail.tsx:87-95,159-179, src/App.tsx:436-461, src/strings.ts:138
 
 ## ideas
@@ -454,7 +454,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** create form, idea rows, inline title input, body textarea, lifecycle select, "Delete" danger button, "Research" button, "research (N)"/"hide research" toggle
 - **States covered:** empty, error, success
 - **Errors & recovery:** empty title → "+ idea" disabled; blank/unchanged edit → silent revert; rejected save → revert to store value + toast; delete confirm cancelled → no-op; orchd down → all mutating controls disabled, reads stay live; empty list → "No ideas in this project yet."
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/IdeasList.tsx:21-28,155-315,334-481
 
 ### SCN-028: Orphan idea flows (spawn project, link)
@@ -488,7 +488,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** ResearchRunDialog (server select, tool select, args textarea, preflight rows, "Run"), ResearchPane run rows, status badges, "show artifact" / "Form insight" / "form insight without research" buttons
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** invalid JSON → inline "arguments must be valid JSON"; start rejects → inline alert + toast, dialog stays open; failed run shows errorKind (or "unknown error") and still offers insight-forming; no runs → "no research for this idea yet"
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/idea/ResearchRunDialog.tsx:108-308, src/components/idea/ResearchPane.tsx:110-151
 
 ### SCN-027: Form an insight from research
@@ -505,7 +505,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** FormInsightDialog (name, description, verdict select, reasoning), fit-context panel ("Project goals", "Related graph", orphan note), "Create"/"Accept"/"To backlog" buttons, inline alert line
 - **States covered:** empty, error, success
 - **Errors & recovery:** orphan idea → context note "the idea is not linked to a project — context unavailable" + "To backlog" blocked; any step rejects → inline + toast, dialog stays open; partial backlog failure → resume message, retry never duplicates (createdTaskId/createdInsightId)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/idea/FormInsightDialog.tsx (three-stage flow with resume state)
 
 ## insights
@@ -523,7 +523,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** insight rows, status select, archive reason input, "confirm archival" button, verdict select, reasoning input, "apply verdict" button, source caption
 - **States covered:** empty, error, success
 - **Errors & recovery:** empty archive reason → inline "an archive reason is required"; mutations reject → toast; orchd down → status/archival/apply disabled; empty list → "No insights in this project yet."
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/InsightsList.tsx:118-282,342-352
 
 ## tasks
@@ -542,7 +542,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** create form, group headers "{label} ({count})", "no tasks" note, task rows (source badge), status select, ▲/▼ buttons, "Delete" button, window.confirm
 - **States covered:** empty, error, success
 - **Errors & recovery:** empty title → "+ task" disabled; ▲ disabled on first, ▼ on last row; confirm cancelled → no-op; mutations reject → toast; orchd down → mutating controls disabled
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/TasksList.tsx:52-73,202-264,296-355,461-492
 
 ## goals
@@ -562,7 +562,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "Goals" panel + count badge, tree rows (role=treeitem), title input, status select, ▲/▼, "+ subgoal", Delete, metric chip editor, window.confirm
 - **States covered:** empty, error, success
 - **Errors & recovery:** blank/unchanged rename → revert; rejected save → revert + toast; confirm cancelled → no-op; orchd down → all row controls disabled; empty tree → "The goal tree is empty."
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/GoalTree.tsx:36-61,192-371,404-536, src/components/HomeGoals.tsx:141-201
 
 ## graph
@@ -583,7 +583,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** add-node form, canvas nodes/edges, rename bar, edge-kind select, "Delete selection" danger button, search input, empty overlay
 - **States covered:** empty, error, success
 - **Errors & recovery:** rejected edge add (self-loop/duplicate/failure) → optimistic edge rolled back + toast; deletes reconcile via refresh even on partial failure; stale search responses dropped; orchd down → mutating controls disabled, move/connect early-return; empty graph → "empty" overlay
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/graph/GraphCanvas.tsx:59-71,212-332,382-490,499-592,755-759, src/components/graph/graphMapping.ts
 
 ## extensions
@@ -602,7 +602,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** Servers tab, add/edit forms, connect/disconnect/enable/disable/delete buttons, ConnectDialog (confirm/cancel)
 - **States covered:** empty, error, success
 - **Errors & recovery:** consent-kind rejection routes to ConnectDialog; dialog errors inline + toast; consent-denial toasts append "To reconnect, open Extensions → Servers → Connect."; orchd down → OrchdDownBanner above tabs, controls disabled
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/ext/ServersTab.tsx, src/components/ext/ConnectDialog.tsx:110-113, src/strings.ts:45,479-481,522
 
 ### SCN-034: Invoke tools and connectors
@@ -617,7 +617,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** tool list, allowlist toggles, invoke forms, result panes with unverified banner, connector account forms, OAuth provider dropdown
 - **States covered:** empty, error, success
 - **Errors & recovery:** no OAuth providers → "No OAuth providers configured — add one in oauth_providers.json (see runbook)."; invocation errors surfaced honestly; orchd down → controls disabled
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/ext/ToolsBrowser.tsx:81, src/components/ext/ConnectorsTab.tsx:130, src/strings.ts:460,518-519,550
 
 ### SCN-035: Limits, call log, artifacts, skills
@@ -633,7 +633,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** limits editor, Calls table, Audit table, artifact rows + unverified banners, skills list, plumbing note "Skills are a registry; they run once an orchestrator agent exists (S6b)."
 - **States covered:** empty, error, success
 - **Errors & recovery:** "no limits set" / "no artifacts" honest empty states; mutations reject → toast; orchd down → controls disabled
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/ext/InvocationLog.tsx, src/components/ext/ArtifactsTab.tsx, src/components/ext/SkillsTab.tsx, src/strings.ts:555,564-593
 
 ## rules
@@ -652,7 +652,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "Loading rules…" line, mdPath row + "reveal file", "file changed externally" + Accept, "file lost" + Recreate, markdown textarea + Save, policy form (number input, chip lists, "+ add", ×), "Save policy"
 - **States covered:** loading, error, success
 - **Errors & recovery:** inline validation "spend cap must be a number" / "spend cap cannot be negative" / "empty entries are not allowed"; mutations reject → toast; orchd down → Save/Accept/Recreate disabled ("reveal file" stays live)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/RulesetPanel.tsx:36-57, src/strings.ts:273-293
 
 ## system-status
@@ -668,7 +668,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** DaemonBanner (red, role=alert, no dismiss)
 - **States covered:** error, success
 - **Errors & recovery:** self-healing; nothing to click
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/DaemonBanner.tsx:61-77, src/App.tsx:160,359
 
 ### SCN-038: Sessiond upgrade required
@@ -683,7 +683,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** UpgradeDialog (title, body, "Cancel"/"Update"), amber DaemonBanner + "Update" button, inline dialog error line
 - **States covered:** error, success
 - **Errors & recovery:** upgrade fails → inline "Failed to restart the background service: {err}. Check permissions (launchctl) and try again."; retry clears prior error; flag is fatal until app restart
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/UpgradeDialog.tsx:141-225, src/components/DaemonBanner.tsx:25-59, src/App.tsx:183-192,364-377, src/strings.ts:77,81-87
 
 ### SCN-039: Orchd down degradation
@@ -698,7 +698,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** OrchdDownBanner + "Retry" button, disabled mutating controls everywhere
 - **States covered:** error, success
 - **Errors & recovery:** capture and dialogs show inline "orchestrator unavailable" instead of doomed round-trips; lost cold-boot race self-heals on orchd://up
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/OrchdDownBanner.tsx:45-54, src/App.tsx:248-303,486, src/components/ProjectPanel.tsx:281
 
 ### SCN-040: Orchd upgrade and cancel re-entry
@@ -713,7 +713,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** UpgradeDialog orchd variant, OrchdUpgradeBanner + "Update"
 - **States covered:** error, success
 - **Errors & recovery:** upgrade fails → inline "Failed to restart the orchestrator background service: {err}. Check permissions (launchctl) and try again."
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/UpgradeDialog.tsx:141-143,230-267, src/components/OrchdUpgradeBanner.tsx:48-56, src/App.tsx:311-315, src/strings.ts:78,88-90
 
 ### SCN-041: Storage degradation banners
@@ -727,7 +727,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** StorageBanner (red, role=alert)
 - **States covered:** error
 - **Errors & recovery:** honest permanent warning; recovery is external (restart daemon healthy)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/StorageBanner.tsx:28-39, src/App.tsx:301,401, src/strings.ts:598-600
 
 ## diagnostics
@@ -745,7 +745,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** "Diagnostics" button + count badge, panel rows, "Copy support bundle", "Clear" (danger), empty state "No errors recorded" + hint
 - **States covered:** empty, success
 - **Errors & recovery:** secrets/home paths scrubbed at record time; every toast-surfaced failure also lands here so causes survive the 4s toast
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/DiagnosticsPanel.tsx:20-86, src/ipc/diag.ts:28,62-103, src/components/WorkspaceSidebar.tsx:413-451, src/store/store.ts:642-678
 
 ## error-recovery
@@ -762,7 +762,7 @@ projects, and scrollback that must reappear intact.
 - **UI elements:** ErrorBoundary card, "Reload app" primary button, "Copy details" ghost button
 - **States covered:** error, success
 - **Errors & recovery:** crash auto-recorded as render-kind DiagEvent (scrubbed, 6-line stack cap); copy puts name/message/component stack on clipboard
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/ErrorBoundary.tsx:28-86, src/main.tsx:17-19, src/store/store.ts:667-678
 
 ## terminals (gaps)
