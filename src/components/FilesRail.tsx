@@ -85,7 +85,9 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
   // a later task's concern) and drop every cached dir so the visible tree re-pulls honestly
   // rather than keep showing whatever was last seen before the watch died.
   function onRefreshWatch(): void {
-    void startWorkspaceWatch(roots, showIgnored);
+    // Optimistically clear the paused flag, but re-set it if the restart itself rejects (C2) so
+    // the tree never falsely reads "live" — and the rejection never escapes as unhandled.
+    void startWorkspaceWatch(roots, showIgnored).catch(() => setWatchPaused(true));
     for (const root of roots) {
       invalidateDirs(root, ["*"]);
     }

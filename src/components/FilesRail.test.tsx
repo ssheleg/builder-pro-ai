@@ -135,4 +135,16 @@ describe("FilesRail", () => {
     expect(useAppStore.getState().expanded["/proj\t"]).toBe(true);
     expect(listDirMock).toHaveBeenCalledWith("/proj", "", false);
   });
+
+  it("re-flags the watch as paused when restarting it rejects, so the tree never falsely reads 'live' (C2)", async () => {
+    startWorkspaceWatchMock.mockReset().mockRejectedValue(new Error("daemon down"));
+    useAppStore.setState({ filesRailOpen: true, watchPaused: true, expanded: {}, treeCache: {} }, false);
+    render(<FilesRail workspace={ws} />);
+    await act(async () => {
+      fireEvent.click(screen.getByText(strings.files.liveUpdatesPaused));
+    });
+    expect(startWorkspaceWatchMock).toHaveBeenCalled();
+    // The optimistic setWatchPaused(false) is corrected back to true by the rejection handler.
+    expect(useAppStore.getState().watchPaused).toBe(true);
+  });
 });
