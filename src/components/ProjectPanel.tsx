@@ -380,6 +380,9 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                         size="sm"
                         data-testid={`project-workspace-detach-${wsId}`}
                         onClick={() => void handleDetachWorkspace(wsId)}
+                        // Honest degradation + archived read-only (AUD-2026-07-19-03/-04):
+                        // orchd down → doomed round-trip; archived → banner promises read-only.
+                        disabled={orchdDown || submitting || isArchived}
                         style={{ flexShrink: 0 }}
                       >
                         {strings.project.unlink}
@@ -392,6 +395,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                 <select
                   data-testid="project-add-workspace-select"
                   aria-label={strings.project.addWorkspaceAria}
+                  disabled={orchdDown || submitting || isArchived}
                   value={addWorkspaceSelection}
                   onChange={(e) => {
                     const wsId = e.target.value;
@@ -440,6 +444,9 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                 size="sm"
                 data-testid="project-import-browse"
                 onClick={() => void handleBrowseImport()}
+                // Import mutates the project — gated the same way as workspace management
+                // (AUD-2026-07-19-04): an archived project's banner promises read-only.
+                disabled={orchdDown || isArchived}
               >
                 {strings.project.importFromFile}
               </Button>
@@ -456,6 +463,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                         size="sm"
                         data-testid={`project-import-file-${f.name}`}
                         onClick={() => void handleImportFile(f)}
+                        disabled={orchdDown || isArchived}
                         style={{ alignSelf: "flex-start" }}
                       >
                         {f.name}

@@ -892,3 +892,51 @@ describe("TerminalManager — file links (spec §6.5/D9)", () => {
     expect(s.toast).toBeNull();
   });
 });
+
+describe("attach error surface (AUD-2026-07-19-01)", () => {
+  it("records a mapped failure, notifies subscribers, and clears the moment a retry starts", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    const seen: Array<string | undefined> = [];
+    const unsub = m.subscribeAttachErrors(() => seen.push(m.getAttachError("s1")));
+
+    attachSessionMock.mockRejectedValueOnce({ kind: "disconnected" });
+    await expect(m.attach("s1")).rejects.toBeTruthy();
+    expect(m.getAttachError("s1")).toBe(strings.errors.command.disconnected);
+    expect(seen).toContain(strings.errors.command.disconnected);
+
+    // Retry: a fresh attempt clears the error synchronously at start, then succeeds.
+    attachSessionMock.mockResolvedValueOnce(undefined);
+    const retry = m.attach("s1");
+    expect(m.getAttachError("s1")).toBeUndefined();
+    await retry;
+    expect(m.getAttachError("s1")).toBeUndefined();
+    unsub();
+  });
+
+  it("maps a plain Error through the fallback branch", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    attachSessionMock.mockRejectedValueOnce(new Error("boom"));
+    await expect(m.attach("s1")).rejects.toBeTruthy();
+    expect(m.getAttachError("s1")).toBe("boom");
+  });
+
+  it("dispose() drops the error and wakes subscribers; unknown sessions read undefined", async () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    attachSessionMock.mockRejectedValueOnce({ kind: "internal" });
+    await expect(m.attach("s1")).rejects.toBeTruthy();
+    expect(m.getAttachError("s1")).toBe(strings.errors.command.internal);
+
+    let notified = 0;
+    const unsub = m.subscribeAttachErrors(() => {
+      notified += 1;
+    });
+    m.dispose("s1");
+    expect(notified).toBeGreaterThan(0);
+    expect(m.getAttachError("s1")).toBeUndefined();
+    expect(m.getAttachError("nope")).toBeUndefined();
+    unsub();
+  });
+});

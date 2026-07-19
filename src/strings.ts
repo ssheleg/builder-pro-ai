@@ -75,6 +75,8 @@ export const strings = {
       toggleAria: (current: string) => `Theme: ${current}. Click to switch.`,
     },
     daemonOutdated: "Background service is outdated — update required",
+    /** Red auto-reconnect banner (AUD-2026-07-19-05 — was an inline literal in DaemonBanner). */
+    daemonDisconnected: "Daemon disconnected — reconnecting…",
     orchdOutdated: "Orchestrator service is outdated — update required",
     orchdUnavailable: "Orchestrator unavailable",
     upgrade: {
@@ -92,6 +94,10 @@ export const strings = {
     sidebar: {
       extensions: "Extensions",
       extensionsNav: "⚙ Extensions",
+      /** Orphan-idea inbox nav (AUD-2026-07-19-11): the surface for ⌘K captures with "no
+       * project". Count badge = orphan ideas + orphan insights, shown only when > 0. */
+      inbox: "Inbox",
+      inboxNav: "✉ Inbox",
       noProject: "No project",
       linkToProject: (name: string) => `Link ${name} to a project`,
       linkPlaceholder: "link…",
@@ -174,6 +180,10 @@ export const strings = {
   // ── terminal + command-history strip ─────────────────────────────────────────────────────────
   terminal: {
     fileOutsideWorkspace: "file is outside the workspace or not found",
+    /** Pane-level honest surface for a rejected `attach_session` (AUD-2026-07-19-01) — without
+     * it a failed attach was a silently blank terminal (both call sites `void` the promise). */
+    attachFailed: (msg: string) => `Terminal could not attach: ${msg}`,
+    attachRetry: "Retry",
     commandHistory: "Command history",
     noCommands: "No commands yet",
     /** In-flight placeholder while the first `getCommandEvents` is still resolving (P-13) — kept
@@ -266,6 +276,15 @@ export const strings = {
     descriptionAria: "Idea description",
     projectAria: "Project",
     noProject: "no project",
+  },
+
+  // ── Inbox: orphan ideas/insights captured with "no project" (AUD-2026-07-19-11) ─────────────
+  inbox: {
+    title: "Inbox",
+    /** One-line explainer so the surface is self-describing on first visit. */
+    subtitle: "Ideas and insights captured without a project. Link them or spawn a project.",
+    ideasSection: "Ideas",
+    insightsSection: "Insights",
   },
 
   // ── ruleset panel ────────────────────────────────────────────────────────────────────────────

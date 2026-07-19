@@ -148,3 +148,17 @@ describe("FilesRail", () => {
     expect(useAppStore.getState().watchPaused).toBe(true);
   });
 });
+
+describe("collapsed-rail watch-paused cue (AUD-2026-07-19-08)", () => {
+  it("shows a warn dot on the collapsed strip while watchPaused", () => {
+    useAppStore.setState({ filesRailOpen: false, watchPaused: true }, false);
+    render(<FilesRail workspace={ws} />);
+    expect(screen.getByTestId("files-rail-collapsed-paused")).toBeTruthy();
+  });
+
+  it("no dot on the collapsed strip while the watch is healthy", () => {
+    useAppStore.setState({ filesRailOpen: false, watchPaused: false }, false);
+    render(<FilesRail workspace={ws} />);
+    expect(screen.queryByTestId("files-rail-collapsed-paused")).toBeNull();
+  });
+});

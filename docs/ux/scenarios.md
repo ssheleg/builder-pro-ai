@@ -15,7 +15,7 @@
 | SCN-007 | Sidebar navigation | chrome | owner | implemented | 2026-07-19 PASS |
 | SCN-008 | Link workspace to project from sidebar | chrome | owner | implemented | 2026-07-19 PASS |
 | SCN-009 | Create project | projects | owner | implemented | 2026-07-19 PASS |
-| SCN-010 | Project overview & workspace management | projects | owner | validated | 2026-07-19 PARTIAL |
+| SCN-010 | Project overview & workspace management | projects | owner | implemented | 2026-07-19 PASS |
 | SCN-011 | Export / import project | projects | owner | implemented | 2026-07-19 PASS |
 | SCN-012 | Archive and un-archive project | projects | owner | implemented | 2026-07-19 PASS |
 | SCN-013 | Open a new terminal | terminals | owner | implemented | 2026-07-19 PASS |
@@ -33,7 +33,7 @@
 | SCN-025 | Manage ideas in a project | ideas | owner | implemented | 2026-07-19 PASS |
 | SCN-026 | Run research on an idea | research | owner | implemented | 2026-07-19 PASS |
 | SCN-027 | Form an insight from research | research | owner | implemented | 2026-07-19 PASS |
-| SCN-028 | Orphan idea flows (spawn project, link) | ideas | owner | validated | 2026-07-19 FAIL |
+| SCN-028 | Orphan idea flows (Inbox: spawn project, link) | ideas | owner | implemented | 2026-07-19 PASS |
 | SCN-029 | Manage insights | insights | owner | implemented | 2026-07-19 PASS |
 | SCN-030 | Manage tasks | tasks | owner | implemented | 2026-07-19 PASS |
 | SCN-031 | Manage the goal tree | goals | owner | implemented | 2026-07-19 PASS |
@@ -49,7 +49,7 @@
 | SCN-041 | Storage degradation banners | system-status | owner | implemented | 2026-07-19 PASS |
 | SCN-042 | Diagnostics panel | diagnostics | owner | implemented | 2026-07-19 PASS |
 | SCN-043 | Render crash recovery | error-recovery | owner | implemented | 2026-07-19 PASS |
-| SCN-044 | Terminal attach failure surfaced | terminals | owner | validated | 2026-07-19 FAIL |
+| SCN-044 | Terminal attach failure surfaced | terminals | owner | implemented | 2026-07-19 PASS |
 
 ## Personas
 
@@ -173,7 +173,7 @@ projects, and scrollback that must reappear intact.
   1. User clicks "⌂ Home" / "⚙ Extensions" / a project header / a workspace row
   2. User expands "Archived (N)" and opens an archived project
 - **Expected result:** view switches accordingly; project header opens the project panel; workspace row activates the workspace and shows terminals; archived group is collapsed by default and toggles with ▸/▾
-- **UI elements:** "⌂ Home", "⚙ Extensions", project group headers, workspace rows, "Archived (N)" toggle, archived project rows
+- **UI elements:** "⌂ Home", "⚙ Extensions", "✉ Inbox" (+ orphan count badge), project group headers, workspace rows, "Archived (N)" toggle, archived project rows
 - **States covered:** empty, success
 - **Errors & recovery:** zero projects and workspaces → empty-state sentence (SCN-001); nothing else can fail (navigation is local)
 - **Status:** implemented
@@ -225,9 +225,9 @@ projects, and scrollback that must reappear intact.
 - **Expected result:** counters populate after eager refresh; unlink/attach update the list after refreshProjects
 - **UI elements:** header (name + description), tab bar, counter tiles, workspaces panel, "Unlink" buttons, "+ add workspace…" select, "workspace unavailable" badge
 - **States covered:** loading, error, success
-- **Errors & recovery:** unknown/loading id → "Loading project…"; unresolved workspace id → danger badge "workspace unavailable" instead of dropped row; mutations reject → toast describeOrchdError; orchd down → OrchdDownBanner above tabs, mutating buttons disabled
-- **Status:** validated
-- **Coverage:** src/components/ProjectPanel.tsx:118-196,274-410,486-491, src/strings.ts:208-225
+- **Errors & recovery:** unknown/loading id → "Loading project…"; unresolved workspace id → danger badge "workspace unavailable" instead of dropped row; mutations reject → toast describeOrchdError; orchd down → OrchdDownBanner above tabs, Unlink/add-workspace/import disabled
+- **Status:** implemented
+- **Coverage:** src/components/ProjectPanel.tsx:118-205,274-475, src/strings.ts:208-225
 
 ### SCN-011: Export / import project
 - **Persona:** owner
@@ -254,7 +254,7 @@ projects, and scrollback that must reappear intact.
   1. User clicks "Archive project"
   2. User confirms "Archive this project? It becomes read-only until you un-archive it."
   3. Later, from the archived banner, user clicks "Un-archive"
-- **Expected result:** on archive: toast "Project archived", project moves to sidebar "Archived (N)" group, panel shows read-only banner; un-archive restores it (no confirm — non-destructive)
+- **Expected result:** on archive: toast "Project archived", project moves to sidebar "Archived (N)" group, panel shows read-only banner and disables Unlink/add-workspace/import (export stays live — it is a read); un-archive restores it (no confirm — non-destructive)
 - **UI elements:** "Archive project" danger button, window.confirm, archived role=status banner, "Un-archive" button
 - **States covered:** success, error
 - **Errors & recovery:** confirm cancelled → no-op; archive/unarchive reject → toast; orchd down → both buttons disabled; double-submit guarded
@@ -331,7 +331,7 @@ projects, and scrollback that must reappear intact.
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** loading → "Loading command history…"; fetch fails → "Failed to load command history" + Retry + toast; no events → "No commands yet"
 - **Status:** implemented
-- **Coverage:** src/components/CommandStrip.tsx:114-266, src/strings.ts:177-184
+- **Coverage:** src/components/CommandStrip.tsx:114-270, src/strings.ts:177-184
 
 ### SCN-018: Click a link in terminal output
 - **Persona:** owner
@@ -377,7 +377,7 @@ projects, and scrollback that must reappear intact.
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** listDir fails → danger row "Failed to read folder: {msg}" + inline Retry (no auto-retry loop) + toast; add-root fails → toast "Failed to add root: {msg}"; no workspace → rail renders nothing
 - **Status:** implemented
-- **Coverage:** src/components/FileTree.tsx:111-168,298-415,658-700, src/components/FilesRail.tsx:22-192,482-491, src/strings.ts:134-146,155
+- **Coverage:** src/components/FileTree.tsx:111-168,298-415,482-491,658-700,796-805, src/components/FilesRail.tsx:22-157, src/strings.ts:134-146,155
 
 ### SCN-021: Preview a file
 - **Persona:** owner
@@ -391,7 +391,7 @@ projects, and scrollback that must reappear intact.
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** read fails → danger card + toast "Failed to open file: {msg}" (not found / access denied / outside root / too large / io); stale responses dropped by token guard
 - **Status:** implemented
-- **Coverage:** src/components/FilePreview.tsx:10-26,60-160, src/ipc/fs.ts:30-45, src-tauri/src/fs_explorer.rs:37-41,294-309,781-789, src/strings.ts:50-57,166-171
+- **Coverage:** src/components/FilePreview.tsx:10-26,60-160, src/ipc/fs.ts:30-45, src-tauri/src/fs_explorer.rs:37-41,294-359,482-485, src/strings.ts:50-57,166-171
 
 ### SCN-022: Create / rename files and folders
 - **Persona:** owner
@@ -434,9 +434,9 @@ projects, and scrollback that must reappear intact.
 - **Expected result:** watch restarts, every cached dir dropped so the tree re-pulls honestly; banner clears on success
 - **UI elements:** "live updates paused — refresh" amber button
 - **States covered:** error, success
-- **Errors & recovery:** restart rejects → paused flag re-set (never falsely "live"); switching to a healthy workspace clears a stale flag
+- **Errors & recovery:** restart rejects → paused flag re-set (never falsely "live"); switching to a healthy workspace clears a stale flag; collapsed rail shows a warn dot on the ⟨ strip so degradation stays visible
 - **Status:** implemented
-- **Coverage:** src/components/FilesRail.tsx:87-95,159-179, src/App.tsx:436-461, src/strings.ts:138
+- **Coverage:** src/components/FilesRail.tsx:87-95,159-199, src/App.tsx:436-461, src/strings.ts:138
 
 ## ideas
 
@@ -455,22 +455,22 @@ projects, and scrollback that must reappear intact.
 - **States covered:** empty, error, success
 - **Errors & recovery:** empty title → "+ idea" disabled; blank/unchanged edit → silent revert; rejected save → revert to store value + toast; delete confirm cancelled → no-op; orchd down → all mutating controls disabled, reads stay live; empty list → "No ideas in this project yet."
 - **Status:** implemented
-- **Coverage:** src/components/IdeasList.tsx:21-28,155-315,334-481
+- **Coverage:** src/components/IdeasList.tsx:21-28,155-315,334-493
 
-### SCN-028: Orphan idea flows (spawn project, link)
+### SCN-028: Orphan idea flows (Inbox: spawn project, link)
 - **Persona:** owner
 - **Feature:** ideas
-- **Entry point:** none reachable — orphan bucket (`projectId=null` IdeasList/InsightsList) is not wired into any production surface
+- **Entry point:** sidebar "✉ Inbox" nav (orphan count badge when > 0) → Inbox panel
 - **Preconditions:** an idea captured with "no project"
 - **Steps:**
-  1. User opens the orphan ideas bucket
+  1. User clicks "✉ Inbox" in the sidebar and sees the orphan Ideas/Insights sections
   2. User either links the idea to a project (select + "link to project") or clicks "Create project" (folder pick → workspace → project → link, resumable on partial failure without duplicates)
-- **Expected result:** orphan idea becomes part of a project; partial failure shows honest resume message and "Retry linking"
-- **UI elements:** orphan idea rows, project select, "link to project" button, SpawnProjectFromIdea button, inline spawn error
+- **Expected result:** orphan idea becomes part of a project; partial failure shows honest resume message and "Retry linking"; Inbox badge count drops
+- **UI elements:** "✉ Inbox" nav button, orphan count badge, Inbox panel (title, subtitle, Ideas/Insights sections), orphan idea rows, project select, "link to project" button, SpawnProjectFromIdea button, inline spawn error
 - **States covered:** empty, error, success
-- **Errors & recovery:** folder cancel → no-op; picker/workspace/link failures → inline + toast with exact resume semantics
-- **Status:** validated
-- **Coverage:** none yet — components exist (src/components/IdeasList.tsx:280-307, src/components/idea/SpawnProjectFromIdea.tsx:62-124) but no production surface renders the orphan view; ideas captured with "no project" are currently unreachable in the UI
+- **Errors & recovery:** folder cancel → no-op; picker/workspace/link failures → inline + toast with exact resume semantics; orchd down → OrchdDownBanner in the panel, mutating controls disabled; empty → "No ideas without a project." / "No insights without a project."
+- **Status:** implemented
+- **Coverage:** src/components/InboxPanel.tsx, src/components/WorkspaceSidebar.tsx:229-269, src/App.tsx:511-514, src/components/IdeasList.tsx:280-307, src/components/idea/SpawnProjectFromIdea.tsx:62-124, src/strings.ts:98-100,282-289
 
 ## research
 
@@ -489,7 +489,7 @@ projects, and scrollback that must reappear intact.
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** invalid JSON → inline "arguments must be valid JSON"; start rejects → inline alert + toast, dialog stays open; failed run shows errorKind (or "unknown error") and still offers insight-forming; no runs → "no research for this idea yet"
 - **Status:** implemented
-- **Coverage:** src/components/idea/ResearchRunDialog.tsx:108-308, src/components/idea/ResearchPane.tsx:110-151
+- **Coverage:** src/components/idea/ResearchRunDialog.tsx:108-334, src/components/idea/ResearchPane.tsx:110-221
 
 ### SCN-027: Form an insight from research
 - **Persona:** owner
@@ -594,12 +594,12 @@ projects, and scrollback that must reappear intact.
 - **Entry point:** sidebar "⚙ Extensions" → Servers tab
 - **Preconditions:** orchd up
 - **Steps:**
-  1. User adds an MCP server (endpoint, auth: no authorization / bearer token; "OAuth (soon)" and "stdio (soon)" disabled)
+  1. User adds an MCP server via the add form (endpoint, auth: no authorization / bearer token; "OAuth (soon)" and "stdio (soon)" disabled)
   2. User clicks "connect" → consent gate: ConnectDialog "Connect to server "{name}"" showing the endpoint and access note
   3. User confirms → consent granted, connection established
   4. User sets a bearer token ("Token saved"), disconnects, disables, or deletes the server
 - **Expected result:** server states update; connected servers become available in research/tools
-- **UI elements:** Servers tab, add/edit forms, connect/disconnect/enable/disable/delete buttons, ConnectDialog (confirm/cancel)
+- **UI elements:** Servers tab, add form, per-row set-bearer input, connect/disconnect/enable/disable/delete buttons, ConnectDialog (confirm/cancel)
 - **States covered:** empty, error, success
 - **Errors & recovery:** consent-kind rejection routes to ConnectDialog; dialog errors inline + toast; consent-denial toasts append "To reconnect, open Extensions → Servers → Connect."; orchd down → OrchdDownBanner above tabs, controls disabled
 - **Status:** implemented
@@ -774,9 +774,10 @@ projects, and scrollback that must reappear intact.
 - **Preconditions:** session exists, attach fails
 - **Steps:**
   1. Attach fails while opening/re-attaching a terminal
-- **Expected result:** user sees an honest indication in the pane (message + retry), not a silently blank terminal
-- **UI elements:** none yet — desired: pane-level error note + retry
-- **States covered:** error
-- **Errors & recovery:** today the session returns to detached and both call sites `void` the promise — no user-visible error (documented gap at src/terminal/terminal-manager.ts:413-429)
-- **Status:** validated
-- **Coverage:** none yet
+  2. User clicks "Retry" in the pane overlay
+- **Expected result:** overlay note "Terminal could not attach: {msg}" (role=alert) appears over the pane; Retry re-attaches; overlay clears the moment the fresh attempt starts
+- **UI elements:** pane error overlay, "Retry" button
+- **States covered:** error, success
+- **Errors & recovery:** manager records the mapped failure per session (describeAttachError → strings.errors.command.*) and notifies subscribers; a fresh attach clears it; dispose drops it
+- **Status:** implemented
+- **Coverage:** src/terminal/terminal-manager.ts:51-74,133,427-431,470-483,644-668, src/components/TerminalPane.tsx:43-49,80-118, src/strings.ts:183-186

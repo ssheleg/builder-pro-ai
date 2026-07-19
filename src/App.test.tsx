@@ -254,6 +254,9 @@ const fakeManager = {
   focus: focusMock,
   dispose: disposeMock,
   disposeAll: vi.fn(),
+  // Attach-error surface (AUD-2026-07-19-01): TerminalPane subscribes on mount.
+  getAttachError: vi.fn(() => undefined),
+  subscribeAttachErrors: vi.fn(() => () => {}),
 } as unknown as import("./terminal/terminal-manager").TerminalManager;
 
 import { App, changedPathsToParentDirs } from "./App";

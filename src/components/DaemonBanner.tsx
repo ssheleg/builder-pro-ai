@@ -72,7 +72,7 @@ export function DaemonBanner(): JSX.Element | null {
         textAlign: "center",
       }}
     >
-      Daemon disconnected — reconnecting…
+      {strings.chrome.daemonDisconnected}
     </div>
   );
 }

@@ -415,3 +415,31 @@ describe("ProjectPanel", () => {
     expect((screen.getByTestId("project-unarchive") as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe("workspace-management + import gating (AUD-2026-07-19-03/-04)", () => {
+  it("while orchdDown: Unlink, add-workspace select and import browse are disabled", () => {
+    useAppStore.setState({ orchdDown: true }, false);
+    render(<ProjectPanel projectId="p1" />);
+    expect((screen.getByTestId("project-workspace-detach-w1") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("project-add-workspace-select") as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByTestId("project-import-browse") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("archived project: read-only banner is honored — Unlink/attach/import disabled, export stays live", () => {
+    useAppStore.setState({ projects: [makeProject({ status: "archived" })] }, false);
+    render(<ProjectPanel projectId="p1" />);
+    expect((screen.getByTestId("project-workspace-detach-w1") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("project-add-workspace-select") as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByTestId("project-import-browse") as HTMLButtonElement).disabled).toBe(true);
+    // Export is a read — an archived project must still be exportable.
+    expect((screen.getByTestId("project-export-copy") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("project-export-file") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("active project + orchd up: the same controls are enabled", () => {
+    render(<ProjectPanel projectId="p1" />);
+    expect((screen.getByTestId("project-workspace-detach-w1") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("project-add-workspace-select") as HTMLSelectElement).disabled).toBe(false);
+    expect((screen.getByTestId("project-import-browse") as HTMLButtonElement).disabled).toBe(false);
+  });
+});

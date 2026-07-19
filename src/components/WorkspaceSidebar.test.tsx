@@ -262,3 +262,34 @@ describe("WorkspaceSidebar", () => {
     expect(useAppStore.getState().view).toBe("ext");
   });
 });
+
+describe("Inbox nav (SCN-028 / AUD-2026-07-19-11)", () => {
+  it("renders the Inbox nav and switches view on click", () => {
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    const btn = screen.getByTestId("inbox-nav-button");
+    expect(btn.textContent).toContain(strings.chrome.sidebar.inboxNav);
+    fireEvent.click(btn);
+    expect(useAppStore.getState().view).toBe("inbox");
+  });
+
+  it("shows the orphan count badge only when orphan ideas/insights exist", () => {
+    useAppStore.setState({
+      ideas: [
+        { id: "i1", projectId: null, title: "a", body: "", lifecycle: "captured", createdAt: 1, updatedAt: 1 },
+        { id: "i2", projectId: "p1", title: "b", body: "", lifecycle: "captured", createdAt: 2, updatedAt: 2 },
+      ],
+      insights: [
+        { id: "n1", projectId: null, source: "", title: "c", body: "", fitVerdict: null, fitReasoning: "", status: "new", resolutionReasoning: "", createdAt: 3, updatedAt: 3 },
+      ],
+    });
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    // 1 orphan idea + 1 orphan insight; the project-linked idea does not count.
+    expect(screen.getByTestId("inbox-count").textContent).toBe("2");
+  });
+
+  it("hides the badge with zero orphans", () => {
+    useAppStore.setState({ ideas: [], insights: [] });
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(screen.queryByTestId("inbox-count")).toBeNull();
+  });
+});
