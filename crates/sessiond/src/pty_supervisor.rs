@@ -70,6 +70,44 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 /// case, spec §10.4).
 const TICK: Duration = Duration::from_millis(200);
 
+/// Max attempts to acquire a PTY (`openpty`) before giving up (A1 / BL-40). `openpty` can
+/// transiently fail with an OS resource-exhaustion error (EAGAIN/ENFILE/EMFILE) when many PTYs
+/// open at once — a user spawning many terminals near the system pty limit, or the parallel test
+/// suite under oversubscription. A short bounded retry recovers instead of hard-failing session
+/// creation; a persistent failure still surfaces as `SupervisorError::Pty`.
+const OPENPTY_MAX_ATTEMPTS: u32 = 6;
+/// Base linear backoff between `openpty` attempts: the Nth retry sleeps `OPENPTY_RETRY_BACKOFF * N`
+/// (≈375 ms cumulative across 5 retries) — enough for other processes/tests to release ptys, and
+/// zero cost on the happy path (first attempt succeeds, no sleep).
+const OPENPTY_RETRY_BACKOFF: Duration = Duration::from_millis(25);
+
+/// Retry a fallible operation up to `max_attempts`, sleeping `backoff * attempt` (linear) between
+/// tries. Returns the first `Ok`, or the LAST `Err` once attempts are exhausted. Used for
+/// `openpty` (see `OPENPTY_MAX_ATTEMPTS`): a transient OS resource failure is retried, a persistent
+/// one still surfaces. Backoff is a parameter (not a hard-coded sleep) so the retry/give-up
+/// semantics are unit-tested deterministically with `Duration::ZERO` — no real fd exhaustion.
+fn retry_transient<T, E>(
+    max_attempts: u32,
+    backoff: Duration,
+    mut op: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
+    let mut attempt = 1u32;
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt >= max_attempts {
+                    return Err(e);
+                }
+                if !backoff.is_zero() {
+                    std::thread::sleep(backoff * attempt);
+                }
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Errors surfaced by the supervisor. Typed (no `anyhow`) so the broker can map them to
 /// `Response::Error { code, message }` (spec §13). Never panics on external failure.
 #[derive(Debug, thiserror::Error)]
@@ -257,17 +295,19 @@ impl Supervisor {
     /// Open one session: `openpty` → `spawn_command` → capture `pgid` → **drop slave** → wire the
     /// reader/wait/ticker threads (spec §9.2–§9.6). Returns the new [`SessionId`].
     pub fn create(&self, spec: SessionSpec) -> Result<SessionId, SupervisorError> {
-        let pair = self
-            .pty_system
-            .lock()
-            .unwrap()
-            .openpty(PtySize {
+        // `openpty` under transient OS resource exhaustion (EAGAIN/ENFILE/EMFILE) is retried with
+        // bounded linear backoff (A1 / BL-40). The lock is re-acquired and dropped INSIDE each
+        // attempt, so the backoff sleep never holds the global `pty_system` mutex (other creates
+        // are not blocked while this one waits for ptys to free up).
+        let pair = retry_transient(OPENPTY_MAX_ATTEMPTS, OPENPTY_RETRY_BACKOFF, || {
+            self.pty_system.lock().unwrap().openpty(PtySize {
                 rows: spec.rows,
                 cols: spec.cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| SupervisorError::Pty(format!("openpty: {e}")))?;
+        })
+        .map_err(|e| SupervisorError::Pty(format!("openpty: {e}")))?;
 
         // §9.3 env hygiene: clear everything, then set ONLY the caller's allowlist.
         let mut cmd = CommandBuilder::new(&spec.shell);
@@ -894,6 +934,57 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    // ---- A1 (BL-40): `openpty` transient-resource retry. `openpty` can fail with an OS
+    // resource-exhaustion error (EAGAIN/ENFILE/EMFILE) when many PTYs open at once — a user
+    // spawning many terminals near the pty limit, or the parallel test suite under
+    // oversubscription. `retry_transient` recovers from a transient failure instead of hard-
+    // failing session creation; these tests pin its retry/give-up semantics deterministically
+    // (zero backoff, no real fds) so the behavior can't regress. ----
+    #[test]
+    fn retry_transient_first_success_does_not_retry() {
+        let mut calls = 0u32;
+        let r: Result<u32, ()> = retry_transient(5, Duration::ZERO, || {
+            calls += 1;
+            Ok(7)
+        });
+        assert_eq!(r, Ok(7));
+        assert_eq!(calls, 1, "a first-attempt success must not retry");
+    }
+
+    #[test]
+    fn retry_transient_recovers_after_transient_failures() {
+        let mut calls = 0u32;
+        // Fail twice (transient), then succeed on the 3rd attempt.
+        let r: Result<&str, &str> = retry_transient(5, Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                Err("EAGAIN")
+            } else {
+                Ok("ok")
+            }
+        });
+        assert_eq!(r, Ok("ok"));
+        assert_eq!(calls, 3, "retries until the operation succeeds");
+    }
+
+    #[test]
+    fn retry_transient_gives_up_after_max_attempts_and_returns_last_error() {
+        let mut calls = 0u32;
+        let r: Result<(), u32> = retry_transient(4, Duration::ZERO, || {
+            calls += 1;
+            Err(calls)
+        });
+        assert_eq!(
+            r,
+            Err(4),
+            "returns the LAST error once attempts are exhausted"
+        );
+        assert_eq!(
+            calls, 4,
+            "calls the op exactly max_attempts times, never more"
+        );
+    }
 
     fn base_env() -> Vec<(String, String)> {
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
