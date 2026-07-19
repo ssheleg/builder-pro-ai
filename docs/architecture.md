@@ -783,6 +783,38 @@ the row's full next `metric_refs` array through the existing `orchd_update_goal`
 schema change, no new verb, no backend change at all. Detail is in
 `docs/frontend-conventions.md`.
 
+## Frontend design system + diagnostics — SHIPPED in S-UXR / S-DIAG / S-DESIGN (`[0.9.x]`)
+
+Frontend-only slices — no wire verb, no schema migration (orchd stays `[1,1]`); the ~925 vitest
+tests are the behavior-preservation guarantee.
+
+- **Design tokens + primitives (`src/ui/`, `[0.9.0]`).** A single CSS-variable layer
+  (`tokens.css`) defines a light **and** dark palette (neutral slate, one calm-blue accent, `ok`/
+  `warn`/`danger`/`info` tones + `-weak` fills) plus space/radius/type/shadow scales; `theme.ts`
+  resolves `light`/`dark`/`system` and stamps `data-theme` on the root (FOUC-free at boot).
+  `primitives.tsx` is a token-only kit (Panel/Stat/Sparkline/Badge/Button/Field/EmptyState/Dialog)
+  every view consumes — no raw hex in the component tree. The legacy static dark-only palette was
+  retired. Palette legibility is a VERIFIED invariant: `contrast.ts` + `contrast.test.ts` assert
+  every ink/tone/on-accent text pair clears WCAG AA in both themes (`[0.9.1]`, S-DESIGN).
+- **UX-scenario base (`docs/qa/`, `[0.9.0]`).** 181 first-session scenarios across 15 epics, a
+  maintenance rule (CONTRIBUTING), an advisory CI gate (`check-ux-scenarios.sh`), and a code-traced
+  audit-results file — the regression map the redesign was checked against.
+- **Diagnostics — reconstructable failures (`src/ipc/diag.ts` + store, `[0.9.1]`, S-DIAG).** Errors
+  were previously a 4 s toast and then lost, and a render crash was a white screen. Now
+  `store.reportError(op, e)` classifies the error, scrubs secrets (Bearer/token/key/app-password/
+  home-dir), records a bounded (200) newest-first ring, `console.error`s a breadcrumb, and toasts —
+  every `refresh*` failure routes through it. An `ErrorBoundary` around `<App/>` records render
+  crashes and shows a recovery card; a `DiagnosticsPanel` (sidebar footer, with an error-count
+  badge) lists the ring and copies a secret-scrubbed support bundle.
+- **Boot-race fix (`setup()`, `[0.9.2]`, BL-101).** `AppState` is now `manage`d SYNCHRONOUSLY in
+  the Tauri `setup()` closure — the client/status slots + write-lock map are pre-created, both
+  launchd agents resolved, and `AppState` registered BEFORE either async bring-up task is spawned.
+  Previously the happy-path `manage()` ran inside `bring_up_daemon`, *after* an up-to-~4 s bounded
+  connect, so a command fired from the first webview frame hit an unmanaged state and returned the
+  raw Tauri "state not managed" error. Now such a command extracts a managed `AppState` and returns
+  an honest `Disconnected` (→ the orchestrator-unavailable banner + reconnect, self-healing on
+  `orchd://up`). The diagnostics log above is what surfaced this on a live install.
+
 ## Resource envelope (per session)
 
 Each live session costs **3 OS threads** (reader / wait / ticker) + **1 forwarder thread per live

@@ -1,7 +1,7 @@
 # Builder Pro AI
 
 [![ci](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-0.8.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.9.2-blue)](CHANGELOG.md)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](docs/build-macos.md)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
 [![built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
@@ -24,10 +24,12 @@ Built with **Tauri 2** (Rust core + React 19 / TypeScript UI). Ships as a univer
   <em>Placeholder — a real screenshot lands here before the first public release.</em>
 </p>
 
-> **Status: `0.8.0`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
+> **Status: `0.9.2`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
 > below the "Shipped" line is implemented, tested, and documented; everything under "Planned" is
-> not built yet and is labelled as such. No pre-built binary is published yet — you build from
-> source (see [Getting started](#getting-started)). The app UI is **English**.
+> not built yet and is labelled as such. **Signed + notarized universal binaries are published on
+> [Releases](https://github.com/ssheleg/builder-pro-ai/releases)** (or build from source — see
+> [Getting started](#getting-started)). The UI is **English**, **light + dark** (system-default with
+> a manual toggle).
 
 ---
 
@@ -69,7 +71,7 @@ Design tenets the whole codebase is held to:
 
 ## Highlights
 
-What works today (`0.8.0`):
+What works today (`0.9.2`):
 
 - 🖥️ **Daemon-owned terminals** — real PTYs supervised by `launchd`, so live shells survive the GUI
   closing, crashing, or restarting (tmux-style reattach + sanitized scrollback replay). OSC-133/OSC-7
@@ -94,9 +96,14 @@ What works today (`0.8.0`):
   agent org.
 - 🧭 **Attention-first Home** — sessions waiting for input pinned first with one-click jump, then
   running, then recently exited, across every workspace, with no polling.
+- 🎨 **Calm, metrics-forward UI, light + dark** — a design-token system (one accent, tabular-nums
+  numbers, WCAG-AA contrast verified by a test) with a system-default theme and a manual toggle; a
+  small primitives kit (Panel/Stat/Badge/Button/Dialog) every view is built from.
 - 🛡️ **Reliability + honesty baked in** — timeout-bounded external calls (no single hung endpoint
   wedges the daemon), honest storage-degradation banners, double-submit guards on every mutation, a
-  toast queue, reconnect that rehydrates every view, and per-verb structured tracing.
+  toast queue, reconnect that rehydrates every view, per-verb structured tracing, and a **diagnostics
+  log** (secret-scrubbed, copyable support bundle) plus an error boundary, so a failure's cause is
+  reconstructable instead of a vanished toast or a white screen.
 
 The full feature log (every slice, contract, and scope line) lives in
 [`docs/architecture.md`](docs/architecture.md) and the [Roadmap](#roadmap) below; the
@@ -170,8 +177,8 @@ bash scripts/final-suite.sh   # → "ALL GATES PASSED"
 
 | Suite | Command | Covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1062 tests** (`0.8.0`) |
-| TypeScript | `npx vitest run` | store, IPC, hooks, and every UI component — **870 tests, 51 files** (`0.8.0`) |
+| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1062 tests** (`0.9.2`) |
+| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **925 tests, 57 files** (`0.9.2`) |
 | e2e (terminals) | `npm run e2e:survive` | create → run → status → quit client → daemon+shell survive → reattach + scrollback |
 | e2e (app domain) | `npm run e2e:orchd` | create → drain-restart → data intact → export → wipe → re-import → graph/MCP/research survival |
 | Coverage gate | `bash scripts/coverage-gate.sh` | ≥80% line coverage on both daemon crates (needs `cargo install cargo-llvm-cov`) |
@@ -230,6 +237,9 @@ next starts. Versions are the git tags in [`CHANGELOG.md`](CHANGELOG.md).
 | `0.6.0` | Extensions (S-EXT) | MCP client (HTTP + stdio), OAuth/api-key connectors, skills registry, trust layer, Keychain |
 | `0.7.0` | Research pipeline (S-IDEA) | `research_run` + async run driver + boot-reconcile, idea→research→insight→task UI |
 | `0.8.0` | Reliability + English + Tier-2 (S-POLISH) | timeouts, storage-degradation honesty, per-verb tracing, full English-only sweep + CI gate, project un-archive, `metric_refs` editor, editable graph, OAuth registry |
+| `0.9.0` | UX-scenario base + redesign (S-UXR) | a maintained 181-scenario UX catalog + code-traced audit; a design-token system and primitives kit; every view restyled metrics-forward in **light + dark** |
+| `0.9.1` | Diagnostics + contrast (S-DIAG / S-DESIGN) | a secret-scrubbed error log + error boundary + copyable support bundle; a measured WCAG-AA contrast pass with a regression test |
+| `0.9.2` | Boot-race fix (BL-101) | `AppState` managed synchronously in `setup()` so a first-frame command returns an honest `Disconnected`, never the raw Tauri "state not managed" error — caught by the new diagnostics log on a live install |
 
 ### Planned (not built yet)
 
