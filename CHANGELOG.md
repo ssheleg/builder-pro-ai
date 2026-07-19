@@ -2,6 +2,47 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [Unreleased] — QA audit + test-hardening pass (2026-07-19)
+
+Full-tree QA audit (five parallel surface auditors) + a TDD fix loop. Plan and finding disposition:
+[`docs/qa/2026-07-19-code-audit-test-plan.md`](docs/qa/2026-07-19-code-audit-test-plan.md).
+Baseline was green except a non-deterministic PTY flake; frontend suite 925 → 932 tests.
+
+### Fixed
+- **Test-gate determinism (A1, BL-40):** `Supervisor::create` retries `openpty` on transient OS
+  resource exhaustion (EAGAIN/ENFILE/EMFILE) with bounded linear backoff. The `openpty code -6`
+  panic that broke `cargo test --workspace` and the coverage gate under parallel oversubscription
+  no longer occurs.
+- **Diagnostics secret leak (C1, P1):** `reportError` now scrubs the human message (not just
+  `detail`), so a raw daemon `Io` message carrying a `/Users/<name>` home path or an embedded key
+  can no longer reach the copyable support bundle.
+- **False "live" file tree (C2):** `App.tsx` + `FilesRail` handle a rejected `startWorkspaceWatch`
+  (`.catch` → `watchPaused=true`) instead of an unhandled rejection + a tree that reads "live".
+- **Duplicate insight on retry (C3, P1):** `FormInsightDialog` tracks the created insight id and
+  resumes a verdict-failure retry from the verdict step — no duplicate insight.
+- **Zombie session resurrection (C4):** `setLifecycle` is a no-op once a session has `exited`
+  (exited-always-wins), so a late/out-of-order `state-changed` can't un-exit it.
+- **Connector OOM (B1):** connector response bodies are read with an 8 MiB streamed cap — an
+  untrusted-class body can no longer OOM the orchd process.
+- **Bricked MCP server (B2):** a non-positive `timeout_ms` now uses the default instead of
+  `timeout(ZERO)` (which failed every call instantly).
+- **Token-expiry overflow (B3):** `expires_at = now + ttl` saturates instead of wrapping i64.
+- **Graph search wildcards (B4):** `GraphSearch` escapes LIKE metacharacters (`%`/`_` literal).
+- **MCP auth misclassification (B6):** HTTP `401`/`403` are matched only as standalone status
+  codes, not any incidental digit run.
+
+### Added (tests / guards)
+- `retry_transient` semantics; connector oversized-body; `effective_timeout` default-on-nonpositive;
+  `expires_at_from` saturation; LIKE-metacharacter literalness; MCP status-code boundary; CBOR
+  nested-body + max-frame-length boundary; `onDaemonIncompatible` subscription; `reportError`/
+  `toSupportBundle` no-secret; and a frontend **HTML-injection-sink regression guard** (locks the
+  no-`dangerouslySetInnerHTML` property that keeps the fs surface non-exploitable under BL-2).
+
+### Deferred (honest backlog)
+- CSP (BL-2, needs a real-app GUI smoke), fs-root allowlist (BL-103), bridge-crate coverage gate
+  (BL-104), release signature verify (BL-105), e2e phase7 skip-assertion (BL-106), a11y focus-trap
+  epic (extends BL-29). See `docs/backlog.md`.
+
 ## [0.9.2] — 2026-07-19
 
 **Boot-race fix (BL-101) — surfaced by the new diagnostics log.** The `[0.9.1]` diagnostics panel
