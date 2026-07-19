@@ -2,6 +2,26 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.9.2] — 2026-07-19
+
+**Boot-race fix (BL-101) — surfaced by the new diagnostics log.** The `[0.9.1]` diagnostics panel
+immediately caught two real boot errors on a live install: `refreshProjects` and
+`refreshStorageStatus` failed with the raw Tauri *"state not managed for field `state`… you must
+call `.manage()`"*.
+
+### Fixed
+- **`AppState` is now `manage`d synchronously in `setup()`, before either daemon bring-up task is
+  spawned (BL-101).** Previously the happy-path `app.manage(AppState { .. })` ran inside the async
+  `bring_up_daemon`, *after* an up-to-~4 s bounded connect — but the webview loads concurrently and
+  fires its first `refresh*` commands from frame one, so every `orchd_*`/sessiond command in that
+  window hit an unmanaged state and returned the raw "state not managed" error (mapped to an
+  "unknown orchestrator error" toast). Now `setup()` pre-creates both daemons' client/status slots +
+  the write-lock map, resolves both launchd agents, and registers `AppState` up front; the bring-up
+  tasks only *populate* those shared `Arc`s. A command from the first frame now extracts a managed
+  state and returns an honest `Disconnected` (→ the orchestrator-unavailable banner + reconnect,
+  self-healing on `orchd://up`) instead of a raw framework error. Behavior otherwise unchanged; the
+  crate's 242 boot-path tests pass.
+
 ## [0.9.1] — 2026-07-19
 
 **S-DIAG + S-DESIGN — reconstructable error logs and a WCAG-AA contrast pass.** A follow-up to the

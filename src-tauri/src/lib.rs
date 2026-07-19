@@ -45,14 +45,14 @@
 //! three-outcome shape (connected / `IncompatibleOrchd` / other-error), same honest-degradation
 //! discipline (`orchd://down` / `orchd://incompatible` rather than a silent hang). It is spawned
 //! as its own `tauri::async_runtime` task alongside `bring_up_daemon`, not nested inside it — the
-//! two daemons come up concurrently and independently. Because only `bring_up_daemon` calls
-//! `app.manage(AppState { .. })`, `setup()` pre-creates the orchd client/status slots (and
-//! resolves the orchd launchd agent) BEFORE spawning either task and hands the SAME `Arc`s to
-//! both: `bring_up_daemon` embeds them into `AppState` unconditionally (so `AppState.orchd`/
-//! `orchd_status` exist and are valid from the instant `AppState` becomes managed), and
-//! `bring_up_orchd` only ever writes into those same `Arc`s — it never fetches `State<AppState>`
-//! itself, so it has no ordering dependency on which of the two tasks finishes its own bring-up
-//! first. On a successful connect it wires the SAME `Broker` `bring_up_daemon` uses into the
+//! two daemons come up concurrently and independently. `setup()` `manage`s `AppState`
+//! SYNCHRONOUSLY (BL-101) — it pre-creates BOTH daemons' client/status slots + write-lock map (and
+//! resolves both launchd agents), embeds them into `AppState`, and registers it BEFORE spawning
+//! either bring-up task, so every command is callable from the very first webview frame (returning
+//! an honest `Disconnected` until a connect completes, never the raw Tauri "state not managed"
+//! error). Each bring-up task then only ever WRITES into those same `Arc`s — neither fetches
+//! `State<AppState>` itself, so there is no ordering dependency on which task finishes its own
+//! bring-up first. On a successful connect it wires the SAME `Broker` `bring_up_daemon` uses into the
 //! `OrchdClient` via `broker::register_orchd` (T12) — every `OrchdPush` is fanned out through
 //! `broker::map_orchd_push` to an `orchd://…-changed` event, and every `ConnState` transition
 //! fans out through `broker::map_orchd_conn_state` to `orchd://down|up|incompatible`, superseding
@@ -383,68 +383,32 @@ fn status_for_orchd_conn_state(state: OrchdConnState) -> OrchdStatus {
 /// live inside a non-`async` closure body: `setup()` spawns this on `tauri::async_runtime` and
 /// returns `Ok(())` immediately so the window still opens while this runs in the background.
 ///
-/// `orchd_slot`/`orchd_launchd`/`orchd_status` (S3 T11, spec §9) are pre-built by `setup()` and
-/// simply MOVED into whichever of the three `app.manage(AppState { .. })` calls below actually
-/// executes — this function never reads from or writes into them itself; [`bring_up_orchd`]
-/// (spawned independently, alongside this function) owns writing into the SAME underlying `Arc`s.
-/// See the module doc's "`bpa-orchd` bring-up" section for why they are threaded through as params
-/// rather than fetched via `State<AppState>` from inside `bring_up_orchd`.
+/// `AppState` itself is `manage`d SYNCHRONOUSLY in `setup()` before this task is spawned (BL-101),
+/// so the `client`/`status`/`write_stdin_locks` `Arc`s this function needs are created there and
+/// handed in as params; this task only WRITES into them (kickstart, connect, register). It no longer
+/// calls `app.manage(..)` at all — a boot command therefore extracts a managed `AppState` from the
+/// first frame and gets an honest `Disconnected` until the connect below completes, never the raw
+/// Tauri "state not managed" error a post-connect `manage()` produced. [`bring_up_orchd`] (spawned
+/// independently) writes into the orchd `Arc`s the same way.
 async fn bring_up_daemon(
     app: tauri::AppHandle,
     broker: Arc<Broker>,
-    orchd_slot: OrchdClientSlot,
-    orchd_launchd: Arc<LaunchdAgent<'static>>,
-    orchd_status: OrchdStatusSlot,
+    agent: Arc<LaunchdAgent<'static>>,
+    slot: commands::ClientSlot,
+    status: StatusSlot,
+    write_stdin_locks: Arc<commands::WriteStdinLocks>,
 ) {
-    let slot: commands::ClientSlot = Arc::new(std::sync::RwLock::new(None));
-    // Created BEFORE any `app.manage(...)` call (finding [12]): every branch below needs to write
-    // into this same slot, and the mid-session `on_conn` callback registered after a successful
-    // connect needs to close over a clone of it — cloning an `Arc` created up front is simpler and
-    // less error-prone than trying to pull it back out of `AppState` after `manage()`.
-    let status: StatusSlot = Arc::new(std::sync::Mutex::new(DaemonStatus::Disconnected));
-    // Round-2 regression R3: one lock map per app process, shared across every `AppState` branch
-    // below exactly like `status` — `write_stdin`'s per-session serialization must hold regardless
-    // of which of `bring_up_daemon`'s three outcomes this connect attempt lands on.
-    let write_stdin_locks = Arc::new(commands::WriteStdinLocks::new());
-
-    let agent = match build_launchd_agent(&app) {
-        Ok(agent) => Arc::new(agent),
-        Err(e) => {
-            error!(error = %e, "failed to resolve the launchd agent (bundled daemon path/dirs)");
-            app.manage(AppState {
-                client: slot,
-                broker,
-                // A zero-arg, always-`Err` agent so `AppState.launchd` can still be `manage`d:
-                // there is no daemon path to kickstart if `build_launchd_agent` itself failed
-                // (e.g. `bpa-sessiond` missing from the bundle in dev), so `upgrade_daemon` would
-                // surface an honest `UpgradeFailed` if invoked in this state, rather than the app
-                // never managing `AppState` at all.
-                launchd: Arc::new(unreachable_launchd_agent(crate::launchd::LABEL)),
-                status,
-                write_stdin_locks,
-                orchd: orchd_slot,
-                orchd_launchd,
-                orchd_status,
-            });
-            emit_disconnected(&app, "could not resolve the background service binary");
-            return;
-        }
-    };
-
+    // AppState is already `manage`d SYNCHRONOUSLY in `setup()`, BEFORE this task is spawned — so
+    // every command is callable from the very first webview frame. A boot-time command therefore
+    // returns an honest `Disconnected` (mapped to the orchd-down banner + reconnect) until we
+    // connect below, never the raw Tauri "state not managed" error a late `manage()` produced
+    // (BL-101). This task only POPULATES the shared `Arc`s `AppState` already holds: it kickstarts
+    // the launchd daemon, connects with bounded retry, and on success registers the client and
+    // keeps `status` live. `slot`/`status`/`write_stdin_locks` are the very `Arc`s inside AppState.
     if let Err(e) = ensure_daemon_running(&agent) {
         error!(error = %e, "failed to bring up the launchd-managed daemon");
-        app.manage(AppState {
-            client: slot,
-            broker,
-            launchd: agent,
-            status,
-            write_stdin_locks,
-            orchd: orchd_slot,
-            orchd_launchd,
-            orchd_status,
-        });
         emit_disconnected(&app, "could not start background service");
-        return;
+        return; // `status` stays `Disconnected`, seeded at manage time in setup()
     }
 
     // Kickstart is asynchronous: give the daemon a moment to fork and bind its socket.
@@ -461,20 +425,6 @@ async fn bring_up_daemon(
     )
     .await;
     commands::write_status(&status, status_for_connect_result(&connect_result));
-
-    // manage() UNCONDITIONALLY, before inspecting the outcome (locked contract): every branch
-    // below needs `AppState` to already be registered so a later `upgrade_daemon` invocation can
-    // extract it regardless of which of the three outcomes happened here.
-    app.manage(AppState {
-        client: slot.clone(),
-        broker: broker.clone(),
-        launchd: agent,
-        status: status.clone(),
-        write_stdin_locks: write_stdin_locks.clone(),
-        orchd: orchd_slot,
-        orchd_launchd,
-        orchd_status,
-    });
 
     match connect_result {
         Ok(client) => {
@@ -641,9 +591,9 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         // fs_watcher's `WatchSlot` never depends on daemon connectivity (spec §5: core-local,
-        // GUI-lifetime), so it's `manage`d immediately here — unlike `AppState`, which is only
-        // `manage`d once `bring_up_daemon` resolves (see that function's docs) — so
-        // `start_workspace_watch`/`stop_workspace_watch` are callable from the very first frame.
+        // GUI-lifetime), so it's `manage`d immediately here on the builder. (`AppState` is likewise
+        // `manage`d synchronously — inside `setup()` below, before either bring-up task is spawned,
+        // BL-101 — so ALL commands are callable from the very first frame.)
         .manage(fs_watcher::new_watch_slot())
         .invoke_handler(tauri::generate_handler![
             ping,
@@ -768,14 +718,14 @@ pub fn run() {
             // the async daemon-connect task below needs it.
             let broker = Arc::new(Broker::new(handle.clone()));
 
-            // Pre-create the orchd client/status slots + resolve its launchd agent BEFORE
-            // spawning either bring-up task (spec §9, S3 T11) — see the module doc's "`bpa-orchd`
-            // bring-up" section: `bring_up_daemon` is the only one of the two that calls
-            // `app.manage(AppState { .. })`, so these same `Arc`s must already exist and be
-            // handed to BOTH tasks up front, rather than `bring_up_orchd` trying to fetch
-            // `State<AppState>` itself (which would race whichever of the two tasks reaches its
-            // own connect attempt first). Resolving the agent here is cheap/synchronous (path
-            // resolution only — no launchctl/network I/O yet), so it doesn't block `setup()`.
+            // Pre-create BOTH daemons' client/status slots + resolve their launchd agents, then
+            // `manage(AppState { .. })` SYNCHRONOUSLY here — BEFORE spawning either bring-up task and
+            // before the webview can invoke a command. This is the boot-race fix (BL-101): a command
+            // fired from the very first frame extracts a managed `AppState` and returns an honest
+            // `Disconnected` until the async connect completes, instead of the raw Tauri "state not
+            // managed" error a late `manage()` (inside `bring_up_daemon`, after the ~4s connect)
+            // produced. The bring-up tasks only WRITE into these shared `Arc`s afterwards. Resolving
+            // the agents here is cheap/synchronous (path resolution only — no launchctl/network I/O).
             let orchd_slot: OrchdClientSlot = Arc::new(std::sync::RwLock::new(None));
             let orchd_status: OrchdStatusSlot =
                 Arc::new(std::sync::Mutex::new(OrchdStatus::Disconnected));
@@ -790,19 +740,49 @@ pub fn run() {
                 }
             });
 
-            // Never block `setup()` on launchd/network I/O: spawn the whole bring-up sequence and
-            // return Ok(()) immediately so the window opens right away. Honest degradation (spec
-            // §13) happens inside `bring_up_daemon`/`bring_up_orchd` via `daemon://disconnected`/
-            // `orchd://down`; nothing here can panic the app. The two daemons come up
-            // concurrently and independently — spawned as two separate tasks, not one nested
-            // inside the other.
-            tauri::async_runtime::spawn(bring_up_daemon(
-                handle.clone(),
-                broker.clone(),
-                orchd_slot.clone(),
-                orchd_agent.clone(),
-                orchd_status.clone(),
-            ));
+            let sessiond_slot: commands::ClientSlot = Arc::new(std::sync::RwLock::new(None));
+            let sessiond_status: StatusSlot =
+                Arc::new(std::sync::Mutex::new(DaemonStatus::Disconnected));
+            let write_stdin_locks = Arc::new(commands::WriteStdinLocks::new());
+            // `false` when the sessiond binary path couldn't be resolved (e.g. missing from a dev
+            // bundle): AppState is still managed (with an always-`Err` stub agent, so `upgrade_daemon`
+            // fails honestly rather than the app never managing state), but there is nothing to
+            // kickstart, so we emit `daemon://disconnected` instead of spawning `bring_up_daemon`.
+            let (sessiond_agent, sessiond_ok) = match build_launchd_agent(&handle) {
+                Ok(agent) => (Arc::new(agent), true),
+                Err(e) => {
+                    error!(error = %e, "failed to resolve the launchd agent (bundled daemon path/dirs)");
+                    (Arc::new(unreachable_launchd_agent(crate::launchd::LABEL)), false)
+                }
+            };
+
+            app.manage(AppState {
+                client: sessiond_slot.clone(),
+                broker: broker.clone(),
+                launchd: sessiond_agent.clone(),
+                status: sessiond_status.clone(),
+                write_stdin_locks: write_stdin_locks.clone(),
+                orchd: orchd_slot.clone(),
+                orchd_launchd: orchd_agent.clone(),
+                orchd_status: orchd_status.clone(),
+            });
+
+            // Never block `setup()` on launchd/network I/O: spawn the bring-up sequence and return
+            // Ok(()) immediately so the window opens right away. Honest degradation (spec §13) happens
+            // inside `bring_up_daemon`/`bring_up_orchd` via `daemon://disconnected`/`orchd://down`;
+            // nothing here can panic the app. The two daemons come up concurrently and independently.
+            if sessiond_ok {
+                tauri::async_runtime::spawn(bring_up_daemon(
+                    handle.clone(),
+                    broker.clone(),
+                    sessiond_agent,
+                    sessiond_slot,
+                    sessiond_status,
+                    write_stdin_locks,
+                ));
+            } else {
+                emit_disconnected(&handle, "could not resolve the background service binary");
+            }
             tauri::async_runtime::spawn(bring_up_orchd(
                 handle,
                 orchd_agent,
