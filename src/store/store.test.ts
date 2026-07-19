@@ -60,6 +60,7 @@ vi.mock("../ipc/orchd", () => ({
 }));
 
 import { useAppStore } from "./store";
+import { toSupportBundle } from "../ipc/diag";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: "s1",
@@ -1196,6 +1197,27 @@ describe("useAppStore", () => {
     expect(ev.op).toBe("createWorkspace");
     expect(ev.kind).toBe("Invariant");
     expect(ev.detail).toBe("last workspace");
+  });
+
+  it("reportError scrubs secrets/home-path from the stored message so the support bundle can't leak them (C1)", () => {
+    useAppStore.setState({ diagEvents: [], toast: null, toastQueue: [] });
+    // An unmapped/Io daemon error whose raw message carries the operator's home path AND a live
+    // key — describeOrchdError passes such text through verbatim, so it must be scrubbed before it
+    // is persisted into the (copyable) diagnostics ring.
+    const err = {
+      kind: "daemon",
+      code: "Io",
+      message: "read failed at /Users/alice/secret.txt key=lin_api_ABCDEF123456",
+    };
+    useAppStore.getState().reportError("refreshProjects", err);
+    const [ev] = useAppStore.getState().diagEvents;
+    expect(ev.message).not.toContain("/Users/alice");
+    expect(ev.message).toContain("/Users/«user»");
+    expect(ev.message).not.toContain("lin_api_ABCDEF123456");
+    // The whole copyable bundle must be free of the leaked secrets.
+    const bundle = toSupportBundle(useAppStore.getState().diagEvents);
+    expect(bundle).not.toContain("/Users/alice");
+    expect(bundle).not.toContain("lin_api_ABCDEF123456");
   });
 
   it("clearDiag empties the diagnostics ring", () => {

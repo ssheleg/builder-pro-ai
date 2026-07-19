@@ -636,7 +636,12 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     reportError: (op, e) => {
-      const message = describeOrchdError(e);
+      // Scrub the human message too, not just `detail` (C1): describeOrchdError passes an
+      // unmapped/Io daemon message through verbatim, so a raw `/Users/<name>` path or an embedded
+      // key would otherwise reach the toast, the console, and — the real leak — the copyable
+      // support bundle (toSupportBundle assumes every stored event is already scrubbed, as
+      // recordRenderCrash's message is).
+      const message = scrubSecrets(describeOrchdError(e));
       const { kind, detail } = classifyError(e);
       const event: DiagEvent = {
         id: ++diagSeq,
