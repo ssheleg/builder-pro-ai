@@ -47,13 +47,41 @@ feature / worktree ──merge──▶ nightbuild ──(local test builds + fi
    it elsewhere, by design). **Release build** = universal + signed + notarized, from `main` only
    (`scripts/build-universal.sh` via `release.yml`).
 
-## Recommended branch protection (set once on GitHub)
+## Protecting `main`
 
-These make the rules mechanical rather than by-convention (configure under Settings → Branches):
+Three layers keep `main` release-quality; the first two are active now, the third is a paid/visibility opt-in.
 
-- Protect `main`: require a PR, require the `ci / gates` check to pass, disallow direct pushes.
-- Optionally protect `nightbuild`: require the `ci` check on PRs into it (only if you opt into
-  running CI for feature→nightbuild PRs; by default the local `final-suite` is the gate there).
+1. **Release path (active, plan-independent).** `release.yml` refuses to run on any ref other than
+   `main` (rule 4). So even if something lands on `main`, a *release* can only be cut from `main`.
+2. **Local pre-push hook (active).** `scripts/git-hooks/pre-push` refuses a **force-push** or a
+   **deletion** of `main` from this clone (the two irreversible mistakes). A normal fast-forward
+   `nightbuild → main` push is allowed. Install per clone:
+
+   ```bash
+   bash scripts/setup-git-hooks.sh      # installs .git/hooks/pre-push
+   ```
+
+   (Hooks live per-clone under `.git/hooks`, so this runs once after cloning. The committed source
+   is `scripts/git-hooks/pre-push`.)
+3. **Server-side GitHub protection (opt-in).** Classic branch protection AND repository rulesets
+   both require **GitHub Pro or a public repo** — on this private free-plan repo the API returns
+   `403 "Upgrade to GitHub Pro or make this repository public"`. To enable it, either upgrade the
+   plan or make the repo public (the signing `*.p12` files are gitignored, so nothing secret is in
+   history — but review before publishing), then create the ruleset:
+
+   ```bash
+   gh api -X POST repos/ssheleg/builder-pro-ai/rulesets --input - <<'JSON'
+   { "name": "main-protection", "target": "branch", "enforcement": "active",
+     "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+     "rules": [
+       { "type": "deletion" }, { "type": "non_fast_forward" },
+       { "type": "pull_request", "parameters": { "required_approving_review_count": 0 } },
+       { "type": "required_status_checks", "parameters": {
+           "strict_required_status_checks_policy": true,
+           "required_status_checks": [ {"context":"gates"}, {"context":"coverage"} ] } }
+     ] }
+   JSON
+   ```
 
 ## Bootstrap note
 
