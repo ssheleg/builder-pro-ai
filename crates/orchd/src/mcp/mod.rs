@@ -410,6 +410,22 @@ pub(crate) fn build_stdio_env(
 /// [`crate::trust::stdio_exec_fingerprint`]'s fingerprint over the CURRENT `command`/`args` —
 /// see [`fingerprint_for`], which both this function and `TrustGrantConsent`'s dispatch handler
 /// (grant time) call, so a grant and a later authorize check are always computed identically.
+/// Default per-call MCP timeout used when a server's `timeout_ms` is non-positive (B2).
+pub(crate) const DEFAULT_MCP_TIMEOUT_MS: u64 = 30_000;
+
+/// The effective per-call timeout for an MCP server (B2). A non-positive `timeout_ms` — 0, or a
+/// negative value that reached the row (the wire type is a signed i64 and `validate_new_server`
+/// never floored it) — would make `tokio::time::timeout(ZERO, …)` elapse immediately, bricking
+/// EVERY connect and tool-call on that server with a misleading `Timeout`. Treat non-positive as
+/// the default; a positive value (however small — the tests deliberately use 50 ms) passes through.
+pub(crate) fn effective_timeout(timeout_ms: i64) -> std::time::Duration {
+    if timeout_ms <= 0 {
+        std::time::Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS)
+    } else {
+        std::time::Duration::from_millis(timeout_ms as u64)
+    }
+}
+
 pub(crate) fn connect_action(server: &McpServerRow) -> crate::trust::Action {
     match server.transport {
         McpTransport::Http => crate::trust::Action::Connect {
@@ -581,6 +597,24 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::trust::Action;
+
+    #[test]
+    fn effective_timeout_defaults_nonpositive_but_passes_small_positive() {
+        use std::time::Duration;
+        // A 0 (or clamped-negative) timeout_ms would make timeout(ZERO) fire instantly and brick
+        // every call on the server — it must become the default, not zero (B2).
+        assert_eq!(
+            effective_timeout(0),
+            Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS)
+        );
+        assert_eq!(
+            effective_timeout(-5),
+            Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS)
+        );
+        // A legitimate small-but-positive value passes through unchanged (tests use 50 ms).
+        assert_eq!(effective_timeout(50), Duration::from_millis(50));
+        assert_eq!(effective_timeout(5_000), Duration::from_millis(5_000));
+    }
 
     fn stdio_server(command: &str, env: BTreeMap<String, String>) -> McpServerRow {
         McpServerRow {

@@ -113,7 +113,7 @@ where
     })?;
     let request_hash = sha256_hex(args_json.as_bytes());
 
-    let timeout = Duration::from_millis(server.timeout_ms.max(0) as u64);
+    let timeout = super::effective_timeout(server.timeout_ms);
     let max_retries = server.max_retries.max(0) as u32;
     let server_id_owned = server.id.clone();
 

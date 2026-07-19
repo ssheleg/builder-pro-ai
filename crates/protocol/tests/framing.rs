@@ -98,6 +98,35 @@ fn garbage_body_of_valid_length_is_a_decode_error() {
 }
 
 #[test]
+fn deeply_nested_cbor_body_is_a_graceful_decode_error() {
+    // A hostile ≤16 MiB frame body of nested CBOR containers must decode-error gracefully, never
+    // crash the daemon (B5). `Frame` is a concrete enum, so a bare nested-array body is rejected
+    // rather than walked — this pins that a moderately deep body stays a clean Decode error.
+    let body: Vec<u8> = vec![0x9f; 2_000]; // 2000 indefinite-array-start bytes (well under MAX)
+    let mut dec = FrameDecoder::new();
+    dec.push(&(body.len() as u32).to_le_bytes());
+    dec.push(&body);
+    match dec.decode() {
+        Err(FrameError::Decode(_)) => {}
+        other => panic!("expected a graceful Decode error, got {other:?}"),
+    }
+}
+
+#[test]
+fn length_equal_to_max_frame_len_is_not_oversized() {
+    // The guard is `len > MAX_FRAME_LEN`, so a declared length of exactly MAX_FRAME_LEN must be
+    // ACCEPTED (buffered until the body arrives), not rejected as Oversized — boundary coverage.
+    let mut dec = FrameDecoder::new();
+    dec.push(&MAX_FRAME_LEN.to_le_bytes());
+    assert_eq!(
+        dec.decode()
+            .expect("len == MAX_FRAME_LEN must buffer, not error"),
+        vec![],
+        "an exactly-max length with no body yet buffers rather than erroring"
+    );
+}
+
+#[test]
 fn encode_matches_manual_prefix() {
     let f = frame();
     let full = encode_frame(&f).expect("encode");

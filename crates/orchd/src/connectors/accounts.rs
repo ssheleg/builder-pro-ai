@@ -163,6 +163,12 @@ pub enum ConnectorError {
     /// never the response body (spec §6: never log tool/op result content).
     #[error("connector upstream returned status {0}")]
     UpstreamStatus(u16),
+    /// (B1) The remote API's response body exceeded the bounded read cap. A connector result is
+    /// untrusted-class (`is_untrusted=1`): an arbitrarily large / chunked (no Content-Length) body
+    /// must never be buffered wholesale, or a single hostile response OOM-crashes all of orchd.
+    /// Carries only the cap (bytes) — never any body content.
+    #[error("connector response body exceeded {0} bytes")]
+    OversizedBody(usize),
     #[error(transparent)]
     Persist(#[from] OrchdPersistError),
     #[error(transparent)]
@@ -345,7 +351,7 @@ impl ConnectorsState {
             }
             None => None,
         };
-        let expires_at = token.expires_in().map(|d| now_ms() + duration_to_ms(d));
+        let expires_at = token.expires_in().map(|d| expires_at_from(now_ms(), d));
 
         let new_account = NewAccount {
             id: account_id.clone(),
@@ -460,7 +466,7 @@ impl ConnectorsState {
             )?;
             has_refresh = true;
         }
-        let new_expires_at = token.expires_in().map(|d| now_ms() + duration_to_ms(d));
+        let new_expires_at = token.expires_in().map(|d| expires_at_from(now_ms(), d));
 
         // ---- DB phase (lock held only for the update itself) ----
         {
@@ -483,6 +489,13 @@ impl ConnectorsState {
 
 fn duration_to_ms(d: Duration) -> i64 {
     d.as_millis().min(i64::MAX as u128) as i64
+}
+
+/// Absolute expiry (epoch ms) = `now + ttl`, saturating instead of overflowing i64 (B3).
+/// `duration_to_ms` already clamps a huge `expires_in` to `i64::MAX`; `now + i64::MAX` would then
+/// wrap to a NEGATIVE `expires_at` (so the token reads as permanently expired) or debug-panic.
+fn expires_at_from(now: i64, d: Duration) -> i64 {
+    now.saturating_add(duration_to_ms(d))
 }
 
 fn bytes_to_string(bytes: Vec<u8>) -> Result<String, ConnectorError> {
@@ -770,6 +783,24 @@ impl Db {
 mod tests {
     use super::*;
     use std::sync::Arc as StdArc;
+
+    #[test]
+    fn expires_at_from_saturates_instead_of_overflowing() {
+        // A normal ttl adds cleanly.
+        assert_eq!(
+            expires_at_from(1_000, Duration::from_secs(60)),
+            1_000 + 60_000
+        );
+        // An absurd expires_in (duration_to_ms already clamps to i64::MAX) must NOT wrap `now +
+        // i64::MAX` to a negative expiry (permanently-expired) or debug-panic — it saturates (B3).
+        let got = expires_at_from(now_ms(), Duration::from_secs(u64::MAX));
+        assert_eq!(
+            got,
+            i64::MAX,
+            "a huge ttl saturates to i64::MAX, never negative"
+        );
+        assert!(got > now_ms(), "a saturated expiry is still in the future");
+    }
 
     fn new_db() -> Db {
         Db::open_in_memory().unwrap()

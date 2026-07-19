@@ -858,14 +858,21 @@ impl Db {
         project_id: Option<&str>,
     ) -> Result<Vec<GraphNode>, OrchdPersistError> {
         let conn = self.conn();
-        let pattern = format!("%{query}%");
+        // Escape LIKE metacharacters so a query containing `%` or `_` is matched literally as a
+        // substring, not as a wildcard (B4): without this, "a_b" matches "axb" and "50%" matches
+        // anything starting "50". `\` is the escape char, declared via `ESCAPE '\'` on each LIKE.
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
         let rows: Vec<GraphNodeRow> = match project_id {
             Some(pid) => {
                 let mut stmt = conn.prepare(
                     "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x,
                             pos_y, created_at, updated_at
                      FROM graph_node
-                     WHERE (label LIKE ?1 OR body LIKE ?1) AND project_id = ?2
+                     WHERE (label LIKE ?1 ESCAPE '\\' OR body LIKE ?1 ESCAPE '\\') AND project_id = ?2
                      ORDER BY updated_at DESC, id
                      LIMIT 200",
                 )?;
@@ -879,7 +886,7 @@ impl Db {
                     "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x,
                             pos_y, created_at, updated_at
                      FROM graph_node
-                     WHERE (label LIKE ?1 OR body LIKE ?1)
+                     WHERE (label LIKE ?1 ESCAPE '\\' OR body LIKE ?1 ESCAPE '\\')
                      ORDER BY updated_at DESC, id
                      LIMIT 200",
                 )?;
@@ -2254,6 +2261,57 @@ mod tests {
 
         let results = db.search_nodes("WIDGET", None).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_nodes_treats_like_metacharacters_literally() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        // "a_b" (literal) vs "axb": `_` is a LIKE single-char wildcard, so an unescaped "a_b" query
+        // would wrongly also match "axb" (B4).
+        db.add_node(
+            &project_id,
+            GraphNodeKind::Concept,
+            "has a_b literal",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        db.add_node(
+            &project_id,
+            GraphNodeKind::Concept,
+            "has axb other",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        let underscore = db.search_nodes("a_b", None).unwrap();
+        assert_eq!(
+            underscore.len(),
+            1,
+            "`_` must match a literal underscore, not any char"
+        );
+        assert!(underscore[0].label.contains("a_b"));
+
+        // "%" must be a literal percent, not a match-all wildcard.
+        db.add_node(
+            &project_id,
+            GraphNodeKind::Concept,
+            "discount 50% off",
+            "",
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        let percent = db.search_nodes("50%", None).unwrap();
+        assert_eq!(
+            percent.len(),
+            1,
+            "`%` must match a literal percent, not everything"
+        );
+        assert!(percent[0].label.contains("50%"));
     }
 
     #[test]

@@ -39,6 +39,13 @@ use crate::trust::{self, Action, Decision};
 /// adapter needs different bounds.
 const GENERIC_REST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Hard cap on a connector response body (B1): 8 MiB. A connector result is untrusted-class
+/// (`is_untrusted=1`), and `reqwest` imposes no default body limit, so `.json()` on an arbitrarily
+/// large / chunked response would OOM the whole orchd process. The body is streamed and rejected
+/// (`ConnectorError::OversizedBody`) the instant it crosses this cap — generous for real JSON API
+/// responses, small enough that a hostile endpoint can't exhaust memory.
+const MAX_CONNECTOR_BODY: usize = 8 * 1024 * 1024;
+
 // ================================================================================
 // ---- ConnectorAdapter trait (spec §7) ----
 // ================================================================================
@@ -173,9 +180,23 @@ impl ConnectorAdapter for GenericRestAdapter {
             // attacker-influenced content this layer must not echo further than necessary).
             return Err(ConnectorError::UpstreamStatus(status.as_u16()));
         }
-        response
-            .json::<serde_json::Value>()
+        // Read the body with a hard byte cap (B1): a connector result is untrusted-class, and
+        // `reqwest` imposes no default limit — `.json()` would buffer an arbitrarily large (or
+        // chunked, no Content-Length) body wholesale and OOM the whole orchd process. Stream chunks
+        // and fail fast the instant the accumulated size crosses the cap; never allocate the body.
+        let mut response = response;
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
+            .map_err(|e| ConnectorError::Request(e.to_string()))?
+        {
+            if buf.len() + chunk.len() > MAX_CONNECTOR_BODY {
+                return Err(ConnectorError::OversizedBody(MAX_CONNECTOR_BODY));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice::<serde_json::Value>(&buf)
             .map_err(|e| ConnectorError::Request(e.to_string()))
     }
 }
@@ -432,6 +453,7 @@ fn connector_error_kind(err: &ConnectorError) -> &'static str {
         ConnectorError::Request(_) => "request",
         ConnectorError::Timeout => "timeout",
         ConnectorError::UpstreamStatus(_) => "upstream_status",
+        ConnectorError::OversizedBody(_) => "oversized_body",
         ConnectorError::SecretNotUtf8 => "secret",
         ConnectorError::Secret(_) => "secret",
         ConnectorError::TokenExchange(_) => "token_exchange",
@@ -553,12 +575,19 @@ mod tests {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
 
+    /// Returns a 200 body larger than `MAX_CONNECTOR_BODY` so the adapter's capped read must reject
+    /// it (B1) rather than buffer it whole.
+    async fn big_handler() -> String {
+        "a".repeat(MAX_CONNECTOR_BODY + 1024)
+    }
+
     async fn spawn_rest_stub() -> (String, StdArc<StdMutex<CapturedRequest>>) {
         let captured = StdArc::new(StdMutex::new(CapturedRequest::default()));
         let router = axum::Router::new()
             .route("/get", axum::routing::get(get_handler))
             .route("/post", axum::routing::post(post_handler))
             .route("/error", axum::routing::get(error_handler))
+            .route("/big", axum::routing::get(big_handler))
             .with_state(captured.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -601,6 +630,25 @@ mod tests {
             captured.lock().unwrap().auth_header.as_deref(),
             Some("Bearer test-bearer-abc123"),
             "GenericRestAdapter must send the account bearer as Authorization: Bearer <token>"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_rest_adapter_rejects_oversized_body_without_buffering_it() {
+        let (base, _captured) = spawn_rest_stub().await;
+        let adapter = GenericRestAdapter::new().unwrap();
+
+        let err = adapter
+            .invoke(
+                &token("test-bearer"),
+                "get",
+                json!({"url": format!("{base}/big")}),
+            )
+            .await
+            .expect_err("an over-cap response body must be a typed error, not buffered");
+        assert!(
+            matches!(err, ConnectorError::OversizedBody(cap) if cap == MAX_CONNECTOR_BODY),
+            "expected OversizedBody(MAX_CONNECTOR_BODY), got {err:?}"
         );
     }
 

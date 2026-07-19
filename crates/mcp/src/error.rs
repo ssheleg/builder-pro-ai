@@ -43,18 +43,45 @@ pub enum McpError {
 /// from outside `rmcp`'s transport internals — this classifies by the rendered `Display` text
 /// instead. Every one of these strings comes from the *server's* own HTTP status line or
 /// `WWW-Authenticate` response header, never from the bearer this crate sent.
-const AUTH_MARKERS: [&str; 6] = [
+/// Word/phrase markers matched as plain substrings (unambiguous — they don't collide with
+/// incidental content the way a bare status number does).
+const AUTH_TEXT_MARKERS: [&str; 4] = [
     "Auth required",
     "Insufficient scope",
-    "401",
-    "403",
     "Unauthorized",
     "Forbidden",
 ];
 
+/// HTTP status codes matched only as a STANDALONE number (B6). A bare `text.contains("401")`
+/// misfired on any incidental digit run — a byte count ("read 1401 bytes"), a request id
+/// ("req-4031"), a port — misclassifying a generic connectivity failure as an auth error and
+/// driving a spurious re-auth/consent prompt.
+const AUTH_CODE_MARKERS: [&str; 2] = ["401", "403"];
+
+/// True if `code` appears in `text` as a standalone number — not part of a longer digit run.
+fn contains_status_code(text: &str, code: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(code) {
+        let i = from + rel;
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
+        let after = i + code.len();
+        let after_ok = after >= bytes.len() || !bytes[after].is_ascii_digit();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = i + 1;
+    }
+    false
+}
+
 fn classify_dynamic_transport_error(err: &DynamicTransportError) -> McpError {
     let text = err.to_string();
-    if AUTH_MARKERS.iter().any(|marker| text.contains(marker)) {
+    let is_auth = AUTH_TEXT_MARKERS.iter().any(|m| text.contains(m))
+        || AUTH_CODE_MARKERS
+            .iter()
+            .any(|c| contains_status_code(&text, c));
+    if is_auth {
         McpError::Auth(text)
     } else {
         McpError::Transport(text)
@@ -125,6 +152,20 @@ mod tests {
             timeout: Duration::from_secs(5),
         });
         assert_eq!(mapped, McpError::Timeout);
+    }
+
+    #[test]
+    fn contains_status_code_only_matches_standalone_codes() {
+        // Real status lines: matched.
+        assert!(contains_status_code("HTTP 401 Unauthorized", "401"));
+        assert!(contains_status_code("status: 403", "403"));
+        assert!(contains_status_code("got 401", "401"));
+        assert!(contains_status_code("401", "401"));
+        // Incidental digit runs: NOT matched (B6 — no spurious auth classification).
+        assert!(!contains_status_code("read 1401 bytes", "401"));
+        assert!(!contains_status_code("request id req-4031", "403"));
+        assert!(!contains_status_code("connected on port 4015", "401"));
+        assert!(!contains_status_code("elapsed 24010ms", "401"));
     }
 
     #[test]
