@@ -48,8 +48,13 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
         <button
           type="button"
           aria-label={strings.files.openPanel}
+          title={watchPaused ? strings.files.liveUpdatesPaused : undefined}
           onClick={() => setFilesRailOpen(true)}
           style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "var(--sp-1)",
             border: "none",
             background: "transparent",
             color: "var(--muted)",
@@ -57,7 +62,21 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
             fontSize: "var(--fs-md)",
           }}
         >
-          ⟨
+          <span>⟨</span>
+          {watchPaused && (
+            // Degradation cue survives the collapsed rail (AUD-2026-07-19-08): without it a
+            // dead watcher was invisible until the owner happened to reopen the panel.
+            <span
+              data-testid="files-rail-collapsed-paused"
+              aria-label={strings.files.liveUpdatesPaused}
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: "var(--warn)",
+              }}
+            />
+          )}
         </button>
       </div>
     );

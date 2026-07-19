@@ -2,6 +2,31 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [Unreleased] — UX scenario base + audit fix pass (2026-07-19)
+
+super-ux adopted: [`docs/ux/scenarios.md`](docs/ux/scenarios.md) is now the source of truth for
+user-facing behavior (44 scenarios, all `implemented`). First full audit
+([`docs/ux/audits/2026-07-19.md`](docs/ux/audits/2026-07-19.md)) found 12 issues — all fixed the
+same day. Frontend suite 932 → 949 tests.
+
+### Added
+- **Inbox for orphan ideas (AUD-11, critical):** new sidebar "✉ Inbox" nav (orphan count badge)
+  and `InboxPanel` — the first reachable surface for ⌘K captures saved with "no project"; the
+  long-implemented "link to project" and spawn-project-from-idea flows are now usable.
+- **Terminal attach-failure surface (AUD-01):** a rejected `attach_session` now shows a pane-level
+  `role=alert` note ("Terminal could not attach: …") with Retry, via a new per-session
+  attach-error channel in `TerminalManager` — no more silently blank terminals.
+- **Collapsed-rail watch cue (AUD-08):** the collapsed Files strip shows a warn dot while live
+  updates are paused.
+
+### Fixed
+- **Honest degradation in ProjectPanel (AUD-03):** Unlink and "+ add workspace…" are disabled
+  while orchd is down (previously clickable → doomed round-trip).
+- **Archived really means read-only (AUD-04):** Unlink / attach-workspace / import are disabled on
+  an archived project; export stays live (it is a read).
+- **Strings doctrine (AUD-05):** the "Daemon disconnected — reconnecting…" banner copy moved from
+  an inline literal into `strings.chrome.daemonDisconnected`.
+
 ## [Unreleased] — QA audit + test-hardening pass (2026-07-19)
 
 Full-tree QA audit (five parallel surface auditors) + a TDD fix loop. Plan and finding disposition:

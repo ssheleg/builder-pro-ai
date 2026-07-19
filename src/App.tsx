@@ -49,6 +49,7 @@ import { FilesRail } from "./components/FilesRail";
 import { HomeView } from "./components/HomeView";
 import { ProjectPanel } from "./components/ProjectPanel";
 import { ExtPanel } from "./components/ext/ExtPanel";
+import { InboxPanel } from "./components/InboxPanel";
 import { Toast } from "./components/Toast";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -507,6 +508,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         ) : view === "ext" ? (
           // S-EXT «Extensions» panel (spec §8, T8): MCP servers/tools/connectors/skills.
           <ExtPanel />
+        ) : view === "inbox" ? (
+          // Orphan-idea Inbox (AUD-2026-07-19-11 / SCN-028): the only surface mounting the
+          // ideas/insights lists with projectId={null} — ⌘K "no project" captures land here.
+          <InboxPanel />
         ) : (
           <>
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>

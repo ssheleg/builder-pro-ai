@@ -283,7 +283,7 @@ such above). This completeness sweep now extends through `[0.9.2]`.
   version bump (orchd stays `[1,1]`); no schema migration. Re-run
   `cargo test --workspace -- --list | grep -c ': test$'` yourself for the current per-crate
   breakdown.
-- TypeScript (`npx vitest run`): **932 tests**, **57 test files**, 0 failed (freshly re-measured this
+- TypeScript (`npx vitest run`): **949 tests**, **59 test files**, 0 failed (freshly re-measured this
   pass). Delta vs. the prior S-POLISH pass (870, 51 files): **+62 tests, +6 net files** — eight
   new frontend/diagnostics test files, offset by two legacy suites (`src/index.css.test.ts` and the
   old `src/theme.test.ts`) retired in the S-UXR restyle. `[0.9.0]` S-UXR (→886) added the

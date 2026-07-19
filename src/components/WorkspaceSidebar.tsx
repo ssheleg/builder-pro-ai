@@ -84,6 +84,14 @@ export function WorkspaceSidebar(props: {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showDiag, setShowDiag] = useState(false);
   const diagCount = useAppStore((s) => s.diagEvents.length);
+  // Orphan (`projectId === null`) ideas + insights — the Inbox nav badge (AUD-2026-07-19-11).
+  // Select the two stable arrays and derive the count outside the selector: a computed-number
+  // selector would be fine, but this mirrors the "select stable slices" convention used above.
+  const ideas = useAppStore((s) => s.ideas);
+  const insights = useAppStore((s) => s.insights);
+  const orphanCount =
+    ideas.filter((i) => i.projectId === null).length +
+    insights.filter((i) => i.projectId === null).length;
   const [attachSelection, setAttachSelection] = useState<Record<WorkspaceId, string>>({});
   // Archived projects live in a collapsed, dimmed group (O-3, spec D7) — collapsed by default so
   // the active-project navigation stays uncluttered.
@@ -217,6 +225,47 @@ export function WorkspaceSidebar(props: {
           }}
         >
           {strings.chrome.sidebar.extensionsNav}
+        </button>
+
+        <button
+          type="button"
+          data-testid="inbox-nav-button"
+          aria-label={strings.chrome.sidebar.inbox}
+          aria-current={view === "inbox" ? "true" : undefined}
+          onClick={() => setView("inbox")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--sp-2)",
+            width: "100%",
+            textAlign: "left",
+            padding: "var(--sp-2) var(--sp-3)",
+            fontSize: "var(--fs-md)",
+            fontWeight: 600,
+            border: "none",
+            borderBottom: "1px solid var(--border)",
+            cursor: "pointer",
+            color: view === "inbox" ? "var(--accent)" : "var(--muted)",
+            background: view === "inbox" ? "var(--accent-weak)" : "transparent",
+          }}
+        >
+          <span style={{ flex: 1 }}>{strings.chrome.sidebar.inboxNav}</span>
+          {orphanCount > 0 && (
+            <span
+              data-testid="inbox-count"
+              style={{
+                fontSize: "var(--fs-xs)",
+                fontWeight: 700,
+                color: "var(--on-accent)",
+                background: "var(--accent)",
+                borderRadius: 999,
+                padding: "0 var(--sp-2)",
+                lineHeight: 1.6,
+              }}
+            >
+              {orphanCount}
+            </span>
+          )}
         </button>
 
         <div style={{ flex: 1, overflowY: "auto" }}>

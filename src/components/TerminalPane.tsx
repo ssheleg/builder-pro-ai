@@ -1,6 +1,7 @@
-import { useEffect, useRef, type JSX } from "react";
+import { useEffect, useRef, useSyncExternalStore, type JSX } from "react";
 import type { SessionId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
+import { strings } from "../strings";
 
 /**
  * Hosts one session's xterm Terminal. App mounts exactly one `TerminalPane` — the ACTIVE
@@ -40,6 +41,13 @@ export function TerminalPane(props: {
   const { sessionId, manager } = props;
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Honest attach-failure surface (AUD-2026-07-19-01): the manager records the last failed
+  // `attach_session` per session; this subscription re-renders ONLY on error/clear transitions
+  // (never per byte). Non-null → the overlay note + Retry below.
+  const attachError = useSyncExternalStore(manager.subscribeAttachErrors, () =>
+    manager.getAttachError(sessionId),
+  );
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -59,14 +67,57 @@ export function TerminalPane(props: {
   }, [sessionId, manager]);
 
   return (
-    <div
-      data-testid={`terminal-pane-${sessionId}`}
-      ref={containerRef}
-      style={{
-        width: "100%",
-        height: "100%",
-        background: "var(--bg)",
-      }}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <div
+        data-testid={`terminal-pane-${sessionId}`}
+        ref={containerRef}
+        style={{
+          width: "100%",
+          height: "100%",
+          background: "var(--bg)",
+        }}
+      />
+      {attachError !== undefined && (
+        <div
+          role="alert"
+          data-testid="terminal-attach-error"
+          style={{
+            position: "absolute",
+            top: "var(--sp-3)",
+            left: "50%",
+            transform: "translateX(-50%)",
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--sp-3)",
+            padding: "var(--sp-2) var(--sp-3)",
+            borderLeft: "3px solid var(--danger)",
+            borderRadius: "var(--radius-sm, 4px)",
+            background: "var(--danger-weak)",
+            color: "var(--danger)",
+            fontSize: "var(--fs-sm)",
+            maxWidth: "90%",
+          }}
+        >
+          <span>{strings.terminal.attachFailed(attachError)}</span>
+          <button
+            type="button"
+            data-testid="terminal-attach-retry"
+            onClick={() => void manager.attach(sessionId)}
+            style={{
+              border: "1px solid var(--danger)",
+              borderRadius: "var(--radius-sm, 4px)",
+              background: "transparent",
+              color: "var(--danger)",
+              cursor: "pointer",
+              fontSize: "var(--fs-sm)",
+              padding: "0 var(--sp-2)",
+              flexShrink: 0,
+            }}
+          >
+            {strings.terminal.attachRetry}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

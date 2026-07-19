@@ -98,7 +98,7 @@ export interface AppState {
    * S-EXT Extensions panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management.
    * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
    */
-  view: "home" | "workspace" | "project" | "ext";
+  view: "home" | "workspace" | "project" | "ext" | "inbox";
 
   /**
    * File-explorer slice (spec §6.6/§6.4). Every keyed map here uses the SAME key format:
@@ -274,7 +274,7 @@ export interface AppState {
   setActiveSession: (id: SessionId | null) => void;
 
   /** Switch the top-level view. See `view`'s doc above. */
-  setView: (v: "home" | "workspace" | "project" | "ext") => void;
+  setView: (v: "home" | "workspace" | "project" | "ext" | "inbox") => void;
   /** Set (`open=true`) or clear (`open=false`) one directory's expanded flag. */
   setExpanded: (root: string, rel: string, open: boolean) => void;
   /** Insert or replace one directory's cached listing. */

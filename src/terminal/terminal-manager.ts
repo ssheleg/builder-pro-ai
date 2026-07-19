@@ -43,6 +43,31 @@ function fileUrlToPath(url: string): string {
   }
 }
 
+/**
+ * Map a rejected `attach_session`'s `CommandError` to the human message shown in the pane
+ * overlay (AUD-2026-07-19-01). Mirrors the `describeCommandError` shape used by
+ * `TerminalTabs`/`CreateProjectDialog` — same daemon error kinds, same honest fallbacks.
+ */
+function describeAttachError(err: unknown): string {
+  const e = err as { kind?: string; message?: string; code?: string; reason?: string } | undefined;
+  switch (e?.kind) {
+    case "daemon":
+      return e.message ?? e.code ?? strings.errors.command.daemon;
+    case "disconnected":
+      return strings.errors.command.disconnected;
+    case "internal":
+      return e.message ?? strings.errors.command.internal;
+    case "incompatibleDaemon":
+      return strings.errors.command.incompatible;
+    case "upgradeFailed":
+      return e.reason ?? strings.errors.command.failed;
+    case "tooLarge":
+      return strings.errors.command.tooLarge;
+    default:
+      return err instanceof Error ? err.message : String(err);
+  }
+}
+
 const TERMINAL_OPTIONS: ITerminalOptions = {
   convertEol: false, // real PTY (termios) handles \n -> \r\n; do not double it up
   scrollback: 10_000,
@@ -98,6 +123,14 @@ interface TerminalEntry {
    * `resetAllAttachments()` during an in-flight attach would record a stale attachment.
    */
   attachGeneration: number;
+  /**
+   * Human-readable message of the LAST failed `attach_session` for this session, or
+   * `undefined` while healthy (AUD-2026-07-19-01). Set on a rejected attach, cleared when the
+   * next attach attempt STARTS (so the overlay disappears the moment Retry fires), and
+   * surfaced to React via `getAttachError`/`subscribeAttachErrors` — `TerminalPane` renders
+   * the pane-level error note + Retry from this field instead of leaving a blank terminal.
+   */
+  attachError: string | undefined;
   /** Bytes handed to `term.write()` whose flush callback has not fired yet. */
   pendingBytes: number;
   /** Latched true once pendingBytes crosses HIGH, cleared once it drops back below LOW. */
@@ -122,6 +155,13 @@ interface TerminalEntry {
  */
 export class TerminalManager {
   private entries = new Map<SessionId, TerminalEntry>();
+  /**
+   * Subscribers to attach-error changes (AUD-2026-07-19-01). `TerminalPane` wires this into
+   * `useSyncExternalStore(subscribeAttachErrors, () => getAttachError(sessionId))`; the
+   * manager stays non-reactive — no Zustand, no per-byte churn — and notifies only on the
+   * rare error/clear transitions.
+   */
+  private attachErrorListeners = new Set<() => void>();
 
   /**
    * Create (or return the existing) Terminal for `sessionId`. Idempotent — calling
@@ -162,6 +202,7 @@ export class TerminalManager {
       attach: "detached",
       attachInFlight: undefined,
       attachGeneration: 0,
+      attachError: undefined,
       pendingBytes: 0,
       overWatermark: false,
       linkProviderDisposable,
@@ -381,6 +422,12 @@ export class TerminalManager {
     // this specific attempt.
     const generation = entry.attachGeneration;
     entry.attach = "attaching";
+    // A fresh attempt clears the previous failure the moment it STARTS — the pane's error
+    // overlay disappears on Retry instead of lingering over a live reconnect.
+    if (entry.attachError !== undefined) {
+      entry.attachError = undefined;
+      this.notifyAttachErrorListeners();
+    }
 
     const channel = newTerminalChannel((e: TerminalEvent) => {
       if (e.event === "replay") {
@@ -422,10 +469,16 @@ export class TerminalManager {
           live.attach = "detached";
           live.attachInFlight = undefined;
         }
-        // Propagate so callers CAN handle. NOTE: both production call sites currently `void`
-        // this promise (TerminalPane effect, App reconnect), so a failed attach surfaces only
-        // as an unhandledrejection warning and a detached-but-retryable pane; the user-visible
-        // error surface is a known gap tracked in the backlog (error-surfacing contract).
+        // Record the failure for the pane-level error surface (AUD-2026-07-19-01): even when a
+        // stale generation refuses to touch the attach state, the message is still worth
+        // showing — the session IS detached and the user deserves to know why. `TerminalPane`
+        // subscribes and renders the note + Retry; production call sites may keep `void`-ing
+        // the promise because the error now travels through this side channel.
+        if (live === entry) {
+          live.attachError = describeAttachError(err);
+          this.notifyAttachErrorListeners();
+        }
+        // Propagate so callers that DO await can still handle/log.
         throw err;
       },
     );
@@ -582,6 +635,29 @@ export class TerminalManager {
     entry.linkProviderDisposable.dispose();
     entry.term.dispose();
     this.entries.delete(sessionId);
+    // A disposed session has no error to show — wake subscribers so a pane still pointed at
+    // this id (unmount race) re-reads `undefined` and drops its overlay.
+    this.notifyAttachErrorListeners();
+  }
+
+  /** The last failed attach's human message for this session, or `undefined` while healthy. */
+  getAttachError(sessionId: SessionId): string | undefined {
+    return this.entries.get(sessionId)?.attachError;
+  }
+
+  /**
+   * Subscribe to attach-error transitions (any session). Returns the unsubscribe function —
+   * the exact `useSyncExternalStore` contract.
+   */
+  subscribeAttachErrors = (cb: () => void): (() => void) => {
+    this.attachErrorListeners.add(cb);
+    return () => {
+      this.attachErrorListeners.delete(cb);
+    };
+  };
+
+  private notifyAttachErrorListeners(): void {
+    for (const cb of this.attachErrorListeners) cb();
   }
 
   disposeAll(): void {
