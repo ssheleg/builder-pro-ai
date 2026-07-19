@@ -516,6 +516,10 @@ export const useAppStore = create<AppState>((set, get) => {
       set((s) => {
         const existing = s.sessions[p.sessionId];
         if (!existing) return {};
+        // Exited always wins (C4): a late/out-of-order `session://state-changed` that arrives after
+        // `session://exited` must not resurrect a dead session to a running lifecycle or re-set
+        // waitingForInput — the same honest-state invariant markExited enforces.
+        if (existing.lifecycle.kind === "exited") return {};
         return {
           sessions: {
             ...s.sessions,
@@ -636,7 +640,12 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     reportError: (op, e) => {
-      const message = describeOrchdError(e);
+      // Scrub the human message too, not just `detail` (C1): describeOrchdError passes an
+      // unmapped/Io daemon message through verbatim, so a raw `/Users/<name>` path or an embedded
+      // key would otherwise reach the toast, the console, and — the real leak — the copyable
+      // support bundle (toSupportBundle assumes every stored event is already scrubbed, as
+      // recordRenderCrash's message is).
+      const message = scrubSecrets(describeOrchdError(e));
       const { kind, detail } = classifyError(e);
       const event: DiagEvent = {
         id: ++diagSeq,

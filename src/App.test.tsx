@@ -841,6 +841,27 @@ describe("T11: attention-first Home, view switch, watch + fs/workspace event wir
     expect(stopWorkspaceWatchMock).toHaveBeenCalled();
   });
 
+  it("marks the watch paused if starting it for the active workspace rejects (C2 — no false 'live')", async () => {
+    startWorkspaceWatchMock.mockReset().mockRejectedValue(new Error("daemon down"));
+    useAppStore.setState({
+      sessions: {},
+      workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } },
+      activeSessionId: null,
+      daemonConnected: true,
+      watchPaused: false,
+    });
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click();
+    });
+    // Flush the rejection handler's microtask.
+    await act(async () => {});
+    expect(startWorkspaceWatchMock).toHaveBeenCalled();
+    expect(useAppStore.getState().watchPaused).toBe(true);
+  });
+
   it("never starts the watch on Home; switching to Home stops an active watch", async () => {
     useAppStore.setState({
       sessions: {},

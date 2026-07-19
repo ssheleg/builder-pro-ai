@@ -60,6 +60,7 @@ vi.mock("../ipc/orchd", () => ({
 }));
 
 import { useAppStore } from "./store";
+import { toSupportBundle } from "../ipc/diag";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: "s1",
@@ -425,6 +426,23 @@ describe("useAppStore", () => {
     const p: ExitedPayload = { sessionId: "ghost", code: 0, signal: null };
     useAppStore.getState().markExited(p);
     expect(useAppStore.getState().sessions["ghost"]).toBeUndefined();
+  });
+
+  it("setLifecycle never resurrects an already-exited session (C4 — exited always wins)", () => {
+    useAppStore.getState().upsertSession(meta());
+    useAppStore.getState().markExited({ sessionId: "s1", code: 0, signal: null });
+    // A late / out-of-order state-changed push arriving AFTER exited must not un-exit the session
+    // nor re-set waitingForInput (mirrors markExited's honest-state invariant).
+    useAppStore.getState().setLifecycle({
+      sessionId: "s1",
+      lifecycle: { kind: "running" },
+      waitingForInput: true,
+      cwd: "/work",
+    });
+    const s = useAppStore.getState().sessions["s1"];
+    expect(s.lifecycle).toEqual({ kind: "exited", code: 0, signal: null });
+    expect(s.waitingForInput).toBe(false);
+    expect(s.isActive).toBe(false);
   });
 
   it("markExited clears waitingForInput — a finished process is not waiting for input, the honest state for every consumer (stats/StatusDot/HomeView) per review finding F1", () => {
@@ -1196,6 +1214,27 @@ describe("useAppStore", () => {
     expect(ev.op).toBe("createWorkspace");
     expect(ev.kind).toBe("Invariant");
     expect(ev.detail).toBe("last workspace");
+  });
+
+  it("reportError scrubs secrets/home-path from the stored message so the support bundle can't leak them (C1)", () => {
+    useAppStore.setState({ diagEvents: [], toast: null, toastQueue: [] });
+    // An unmapped/Io daemon error whose raw message carries the operator's home path AND a live
+    // key — describeOrchdError passes such text through verbatim, so it must be scrubbed before it
+    // is persisted into the (copyable) diagnostics ring.
+    const err = {
+      kind: "daemon",
+      code: "Io",
+      message: "read failed at /Users/alice/secret.txt key=lin_api_ABCDEF123456",
+    };
+    useAppStore.getState().reportError("refreshProjects", err);
+    const [ev] = useAppStore.getState().diagEvents;
+    expect(ev.message).not.toContain("/Users/alice");
+    expect(ev.message).toContain("/Users/«user»");
+    expect(ev.message).not.toContain("lin_api_ABCDEF123456");
+    // The whole copyable bundle must be free of the leaked secrets.
+    const bundle = toSupportBundle(useAppStore.getState().diagEvents);
+    expect(bundle).not.toContain("/Users/alice");
+    expect(bundle).not.toContain("lin_api_ABCDEF123456");
   });
 
   it("clearDiag empties the diagnostics ring", () => {

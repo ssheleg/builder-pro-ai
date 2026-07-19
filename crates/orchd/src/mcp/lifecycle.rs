@@ -71,7 +71,7 @@ where
     // child), and since the app holds a single shared orchd connection that would wedge the whole
     // pipeline. An elapsed handshake maps to the SAME `McpError::Timeout` the `tools/call` path
     // produces.
-    let timeout = std::time::Duration::from_millis(server.timeout_ms.max(0) as u64);
+    let timeout = super::effective_timeout(server.timeout_ms);
 
     // ---- Phase 2: network. NO `Db`/`MutexGuard` reference is alive here. ----
     let session = match tokio::time::timeout(timeout, connect_fn(server, bearer)).await {

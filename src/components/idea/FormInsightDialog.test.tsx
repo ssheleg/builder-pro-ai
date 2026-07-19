@@ -268,6 +268,36 @@ describe("FormInsightDialog", () => {
     });
   });
 
+  it("a verdict-failure retry resumes from the verdict step — never a duplicate insight (C3)", async () => {
+    orchdCreateInsightMock.mockReset().mockResolvedValue(makeInsight()); // id "in1"
+    // Verdict rejects the first time, succeeds on the retry.
+    orchdSetInsightFitVerdictMock
+      .mockReset()
+      .mockRejectedValueOnce(new Error("verdict boom"))
+      .mockResolvedValueOnce(makeInsight());
+    render(
+      <FormInsightDialog
+        idea={ideaWithProject}
+        runId="r1"
+        artifact={makeArtifact()}
+        onClose={() => {}}
+      />,
+    );
+    const create = screen.getByTestId("form-insight-create");
+    await act(async () => {
+      fireEvent.click(create); // attempt 1: create OK, verdict rejects
+    });
+    await waitFor(() => expect(orchdSetInsightFitVerdictMock).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      fireEvent.click(create); // retry
+    });
+    await waitFor(() => expect(orchdSetInsightFitVerdictMock).toHaveBeenCalledTimes(2));
+    // The insight was created exactly ONCE across both attempts — no duplicate.
+    expect(orchdCreateInsightMock).toHaveBeenCalledTimes(1);
+    // The retry reuses the already-created insight's id.
+    expect(orchdSetInsightFitVerdictMock.mock.lastCall?.[0]).toBe("in1");
+  });
+
   it('once created, "Accept" fires orchdSetInsightStatus(id, accepted, null)', async () => {
     render(
       <FormInsightDialog idea={ideaWithProject} runId="r1" artifact={null} onClose={() => {}} />,

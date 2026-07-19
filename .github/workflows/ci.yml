@@ -1,8 +1,13 @@
 name: ci
+# GitHub runs the gate only on the PATH TO STABLE: pushes to `main` and PRs whose TARGET is `main`
+# (i.e. the nightbuild -> main merge). The working branch (`nightbuild`) and feature/worktree
+# branches are validated LOCALLY via `bash scripts/final-suite.sh` — GitHub does not auto-build them
+# (keeps the 10x-billed macOS runners for the release path). See docs/branching.md.
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
   gates:

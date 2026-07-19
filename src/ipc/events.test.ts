@@ -32,6 +32,7 @@ import {
   onOrchdDown,
   onOrchdUp,
   onOrchdIncompatible,
+  onDaemonIncompatible,
   onOrchdMcpServersChanged,
   onOrchdMcpToolsChanged,
   onOrchdMcpArtifactsChanged,
@@ -264,6 +265,15 @@ describe("ipc/events", () => {
     await onOrchdIncompatible(cb);
     expect(listenMock).toHaveBeenCalledWith("orchd://incompatible", expect.any(Function));
     registered.get("orchd://incompatible")!({ payload: null });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("onDaemonIncompatible subscribes to daemon://incompatible and calls cb (no payload) (D3)", async () => {
+    const cb = vi.fn();
+    await onDaemonIncompatible(cb);
+    // This FATAL event drives the daemon-upgrade flow; its orchd twin was tested, this one wasn't.
+    expect(listenMock).toHaveBeenCalledWith("daemon://incompatible", expect.any(Function));
+    registered.get("daemon://incompatible")!({ payload: null });
     expect(cb).toHaveBeenCalledTimes(1);
   });
 

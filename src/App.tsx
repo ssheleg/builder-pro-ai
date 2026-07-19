@@ -445,9 +445,15 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     if (view !== "workspace" || !activeWorkspace) return;
     let cancelled = false;
     const showIgnored = useAppStore.getState().showIgnored;
-    void startWorkspaceWatch(activeWorkspace.roots, showIgnored).then(() => {
-      if (!cancelled) useAppStore.getState().setWatchPaused(false);
-    });
+    void startWorkspaceWatch(activeWorkspace.roots, showIgnored)
+      .then(() => {
+        if (!cancelled) useAppStore.getState().setWatchPaused(false);
+      })
+      .catch(() => {
+        // A failed watch-start must surface as paused, never leave the tree falsely reading
+        // "live" (C2) — and it must not escape as an unhandledrejection.
+        if (!cancelled) useAppStore.getState().setWatchPaused(true);
+      });
     return () => {
       cancelled = true;
       void stopWorkspaceWatch();
