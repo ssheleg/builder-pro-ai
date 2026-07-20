@@ -1,40 +1,49 @@
 /*
- * src/theme/tokens.css — S-UXR design tokens (spec B1, direction A "Calm Control Room").
+ * src/ui/tokens.css — «Soft Control Room» design tokens (spec 2026-07-20).
  *
- * A single CSS-variable layer. Light values live on :root; dark overrides on
- * :root[data-theme="dark"]. src/theme/theme.ts stamps data-theme onto the root (resolving the
- * "system" preference via matchMedia). Components read ONLY these variables — never inline hex —
- * so a theme flip is one attribute change with no re-render.
+ * Warm paper neutrality: depth = three fill steps (--bg → --panel → --panel-2), NOT borders or
+ * shadows. --hairline separates dense rows INSIDE containers only; --border/--border-strong are
+ * legacy aliases of it so unmigrated views degrade gracefully. --accent (terracotta) = actions;
+ * --data (blue) = charts/heatmap — data is never terracotta. Every text pairing below is verified
+ * AA by contrast.test.ts. Light values live on :root; dark overrides on :root[data-theme="dark"].
+ * src/ui/theme.ts stamps data-theme onto the root (resolving the "system" preference via
+ * matchMedia). Components read ONLY these variables — never inline hex — so a theme flip is one
+ * attribute change with no re-render.
  */
 
 :root {
   color-scheme: light;
 
-  /* Surfaces + ink */
-  --bg: #f7f8fa;
-  --panel: #ffffff;
-  --panel-2: #f7f8fa;
-  --ink: #1a1f2b;
-  --muted: #5b6472;
-  --border: #e6e9ef;
-  --border-strong: #d7dce4;
+  /* Surfaces + ink — fill steps ARE the borders */
+  --bg: #faf9f5;
+  --panel: #f1efe9;
+  --panel-2: #e7e4dc;
+  --ink: #1f1e1c;
+  --muted: #625e55;
+  --hairline: #dcd9d1;
+  --border: #dcd9d1; /* legacy alias = hairline (migration bridge) */
+  --border-strong: #cfccc2; /* legacy alias */
 
-  /* Accent + semantic tones (each has a strong fg + a weak bg). Foreground tones are tuned so each
-   * clears WCAG AA (4.5:1) as text on its own `-weak` background — the tightest pairing — verified
-   * by tokens.contrast.test.ts. `--on-accent` is the label color ON an `--accent`-filled control. */
-  --accent: #2b66d8;
-  --accent-weak: #eaf0fe;
+  /* Brand accent (terracotta) — actions, active states, focus */
+  --accent: #944527;
+  --accent-weak: #f3ddd2;
   --on-accent: #ffffff;
-  --ok: #187c43;
-  --ok-weak: #e4f5ec;
-  --warn: #906109;
-  --warn-weak: #fbecd2;
-  --danger: #bf3636;
-  --danger-weak: #fbe6e6;
+
+  /* Data voice (blue) — charts, heatmap, sparklines */
+  --data: #2b66d8;
+  --data-weak: #eaf0fe;
+
+  /* Semantic tones (meanings unchanged; warm-shifted weaks) */
+  --ok: #157239;
+  --ok-weak: #e3f1e6;
+  --warn: #8a5d08;
+  --warn-weak: #f7ead0;
+  --danger: #b83232;
+  --danger-weak: #f9e4e0;
   --info: #2b66d8;
   --info-weak: #eaf0fe;
 
-  /* Spacing scale */
+  /* Spacing scale (4px grid) */
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
@@ -42,13 +51,15 @@
   --sp-5: 24px;
   --sp-6: 32px;
 
-  /* Radius */
-  --r-sm: 5px;
-  --r-md: 7px;
-  --r-lg: 10px;
+  /* Radius — the soft signature */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
 
   /* Type */
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
   --fs-xs: 11px;
   --fs-sm: 12px;
@@ -56,36 +67,42 @@
   --fs-lg: 15px;
   --fs-xl: 19px;
   --fs-2xl: 26px;
+  --fs-3xl: 28px;
 
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-1: 0 1px 2px rgba(31, 30, 28, 0.06);
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: #0f1218;
-  --panel: #161b24;
-  --panel-2: #1b212c;
-  --ink: #e8ecf3;
-  --muted: #8a93a6;
-  --border: #232a36;
-  --border-strong: #2c3441;
+  --bg: #1b1a18;
+  --panel: #242220;
+  --panel-2: #2e2b28;
+  --ink: #ece9e2;
+  --muted: #a39d92;
+  --hairline: #3a3733;
+  --border: #3a3733;
+  --border-strong: #46423d;
 
-  --accent: #4b8bff;
-  --accent-weak: #1b2740;
-  /* Dark keeps a light-blue accent (legible as link text on the dark panel), so the label on an
-   * accent-filled control must be DARK to clear AA — a single accent can't satisfy both. */
-  --on-accent: #0d1420;
+  --accent: #e0805c;
+  --accent-weak: #3b271e;
+  /* Light coral accent (legible on the dark panel) → the label ON an accent fill must be DARK to
+   * clear AA — a single accent can't satisfy both. */
+  --on-accent: #201310;
+
+  --data: #6f9dff;
+  --data-weak: #1e2a44;
+
   --ok: #48c98a;
-  --ok-weak: #123425;
+  --ok-weak: #14311f;
   --warn: #e0a83a;
-  --warn-weak: #3a2c0e;
+  --warn-weak: #382a10;
   --danger: #f06b6b;
-  --danger-weak: #3a1e1e;
-  --info: #4b8bff;
-  --info-weak: #1b2740;
+  --danger-weak: #3a1d1a;
+  --info: #6f9dff;
+  --info-weak: #1e2a44;
 
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
 /* App baseline so the chrome flips with the theme even before every view is migrated. */
@@ -100,7 +117,7 @@ body,
   font-size: var(--fs-md);
 }
 
-/* App-wide accessible focus ring (BL-29; design-system.md §6.8 "Focus visible" UX law): a 2px
+/* App-wide accessible focus ring (BL-29; design-system.md "Focus visible" UX law): a 2px
    accent outline, offset 2px, on every interactive element. Themed to the accent token so it
    recolours in light and dark. This is the single source — there is no other global stylesheet. */
 :focus-visible {

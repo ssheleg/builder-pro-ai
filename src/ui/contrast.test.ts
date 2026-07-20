@@ -42,12 +42,14 @@ const THEMES: Array<[string, Record<string, string>]> = [
   ["light", tokenBlock(css, ":root")],
   ["dark", tokenBlock(css, ':root[data-theme="dark"]')],
 ];
-const TONES = ["ok", "warn", "danger", "info", "accent"] as const;
+const TONES = ["ok", "warn", "danger", "info", "accent", "data"] as const;
 
 describe.each(THEMES)("tokens.css AA legibility — %s theme", (_name, t) => {
   it("primary + secondary ink clear AA on their surfaces", () => {
     expect(contrastRatio(t["--ink"], t["--bg"])).toBeGreaterThanOrEqual(AA_TEXT);
     expect(contrastRatio(t["--ink"], t["--panel"])).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio(t["--ink"], t["--panel-2"])).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio(t["--muted"], t["--bg"])).toBeGreaterThanOrEqual(AA_TEXT);
     expect(contrastRatio(t["--muted"], t["--panel"])).toBeGreaterThanOrEqual(AA_TEXT);
     expect(contrastRatio(t["--muted"], t["--panel-2"])).toBeGreaterThanOrEqual(AA_TEXT);
   });
@@ -59,5 +61,10 @@ describe.each(THEMES)("tokens.css AA legibility — %s theme", (_name, t) => {
 
   it("on-accent label clears AA on the accent fill", () => {
     expect(contrastRatio(t["--on-accent"], t["--accent"])).toBeGreaterThanOrEqual(AA_TEXT);
+  });
+
+  it("declares the Soft Control Room structural tokens", () => {
+    expect(t["--hairline"]).toBeTruthy();
+    expect(t["--border"]).toBe(t["--hairline"]); // legacy alias contract (spec 2026-07-20 §2.3)
   });
 });
