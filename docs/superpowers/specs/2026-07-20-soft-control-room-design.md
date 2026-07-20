@@ -26,6 +26,22 @@ Core rule of the language: **container = fill, rows inside = hairline.** Any sur
 groups content is a borderless fill one step deeper than its parent; any repeated dense row
 inside it (table row, tree row, list item) separates with a near-invisible hairline.
 
+### 1.1 Journey validation (against `docs/ux/scenarios.md`, 44 scenarios / 3 personas)
+
+The language was walked through the owner's day (glance → triage → project → terminal →
+files → degradation → navigation), the new-user first-launch path (SCN-001–003) and the
+returning-owner reconnect path (SCN-019/037). Every scenario surface maps to an atom in §4
+or a pattern below; the walk exposed two patterns the first draft missed, now locked:
+
+- **Banner** (SCN-024, SCN-037–041 — daemon/orchd/storage/file-state): tone `-weak` fill,
+  radius `--r-sm`, **no border**, 3px left-edge bar in the tone color, body text `--ink`,
+  actions as secondary buttons inline. Info banners use `--info-weak`; amber banners stay
+  reserved for "a human is needed".
+- **Nav item** (SCN-007/008 — sidebar): selected = `--panel-2` fill pill (radius `--r-sm`),
+  text `--ink`; unselected = transparent + `--muted`; hover = half-step fill
+  (`color-mix(in srgb, var(--panel-2) 50%, transparent)`). The accent is NOT used for
+  selection — it stays reserved for actions and focus.
+
 ## 2. Tokens — `src/ui/tokens.css` (locked contract)
 
 Same single CSS-variable layer, same `data-theme` mechanism (`src/ui/theme.ts` API
