@@ -121,7 +121,6 @@ const rowBaseStyle: CSSProperties = {
   padding: "var(--sp-2) var(--sp-3)",
   borderRadius: "var(--r-md)",
   background: "var(--panel)",
-  border: "1px solid var(--border)",
   textAlign: "left",
   color: "var(--ink)",
   font: "inherit",

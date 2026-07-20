@@ -103,7 +103,7 @@ export function TerminalTabs(props: {
         alignItems: "stretch",
         gap: "var(--sp-1)",
         background: "var(--panel)",
-        borderBottom: "1px solid var(--border)",
+        borderBottom: "1px solid var(--hairline)",
       }}
     >
       <div role="tablist" style={{ display: "flex", alignItems: "stretch", flex: 1, minWidth: 0 }}>
@@ -135,7 +135,7 @@ export function TerminalTabs(props: {
                 cursor: "pointer",
                 color: selected ? "var(--ink)" : "var(--muted)",
                 background: selected ? "var(--bg)" : "transparent",
-                borderRight: "1px solid var(--border)",
+                borderRight: "1px solid var(--hairline)",
                 fontSize: "var(--fs-md)",
               }}
             >

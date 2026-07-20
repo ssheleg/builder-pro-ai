@@ -49,7 +49,6 @@ export function DiagnosticsPanel({ open, onClose }: { open: boolean; onClose: ()
                 gap: "var(--sp-1)",
                 padding: "var(--sp-2) var(--sp-3)",
                 background: "var(--panel-2)",
-                border: "1px solid var(--border)",
                 borderRadius: "var(--r-md)",
               }}
             >

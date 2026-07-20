@@ -47,14 +47,14 @@ const panelStyle: CSSProperties = {
 
 const headerStyle: CSSProperties = {
   padding: "var(--sp-3) var(--sp-4)",
-  borderBottom: "1px solid var(--border)",
+  borderBottom: "1px solid var(--hairline)",
 };
 
 const tabBarStyle: CSSProperties = {
   display: "flex",
   gap: "var(--sp-1)",
   padding: "var(--sp-2) var(--sp-4)",
-  borderBottom: "1px solid var(--border)",
+  borderBottom: "1px solid var(--hairline)",
 };
 
 const contentStyle: CSSProperties = {
@@ -68,8 +68,8 @@ const selectStyle: CSSProperties = {
   fontFamily: "var(--font-ui)",
   fontSize: "var(--fs-sm)",
   color: "var(--ink)",
-  background: "var(--panel)",
-  border: "1px solid var(--border-strong)",
+  background: "var(--panel-2)",
+  border: "none",
   borderRadius: "var(--r-sm)",
   padding: "var(--sp-1) var(--sp-2)",
 };

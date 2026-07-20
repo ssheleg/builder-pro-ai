@@ -567,8 +567,7 @@ const statChipStyle: CSSProperties = {
   alignItems: "center",
   padding: "2px var(--sp-2)",
   borderRadius: 999,
-  border: "1px solid var(--border)",
-  background: "var(--panel)",
+  background: "var(--panel-2)",
   fontFamily: MONO_FONT,
   fontSize: "var(--fs-xs)",
   fontVariantNumeric: "tabular-nums",
@@ -615,7 +614,7 @@ function WorkspaceStatsChips(props: {
         flexDirection: "column",
         gap: "var(--sp-1)",
         padding: "var(--sp-2) var(--sp-3)",
-        borderBottom: "1px solid var(--border)",
+        borderBottom: "1px solid var(--hairline)",
         background: "var(--panel-2)",
       }}
     >
@@ -629,8 +628,8 @@ function WorkspaceStatsChips(props: {
             onClick={() => setOpen((cur) => (cur === chip.key ? null : chip.key))}
             style={{
               ...statChipStyle,
-              borderColor: open === chip.key ? "var(--accent)" : "var(--border)",
-              color: open === chip.key ? "var(--ink)" : "var(--muted)",
+              background: open === chip.key ? "var(--accent-weak)" : "var(--panel-2)",
+              color: open === chip.key ? "var(--accent)" : "var(--muted)",
             }}
           >
             {chip.label}

@@ -2,8 +2,9 @@
  * src/ui/tokens.css — «Soft Control Room» design tokens (spec 2026-07-20).
  *
  * Warm paper neutrality: depth = three fill steps (--bg → --panel → --panel-2), NOT borders or
- * shadows. --hairline separates dense rows INSIDE containers only; --border/--border-strong are
- * legacy aliases of it so unmigrated views degrade gracefully. --accent (terracotta) = actions;
+ * shadows. --hairline separates dense rows INSIDE containers only; there is deliberately no
+ * general-purpose border token — tokens.css.test.ts fails the build if one comes back.
+ * --accent (terracotta) = actions;
  * --data (blue) = charts/heatmap — data is never terracotta. Every text pairing below is verified
  * AA by contrast.test.ts. Light values live on :root; dark overrides on :root[data-theme="dark"].
  * src/ui/theme.ts stamps data-theme onto the root (resolving the "system" preference via
@@ -21,8 +22,6 @@
   --ink: #1f1e1c;
   --muted: #625e55;
   --hairline: #dcd9d1;
-  --border: #dcd9d1; /* legacy alias = hairline (migration bridge) */
-  --border-strong: #cfccc2; /* legacy alias */
 
   /* Brand accent (terracotta) — actions, active states, focus */
   --accent: #944527;
@@ -81,8 +80,6 @@
   --ink: #ece9e2;
   --muted: #a39d92;
   --hairline: #3a3733;
-  --border: #3a3733;
-  --border-strong: #46423d;
 
   --accent: #e0805c;
   --accent-weak: #3b271e;

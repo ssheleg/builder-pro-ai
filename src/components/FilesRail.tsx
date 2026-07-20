@@ -37,7 +37,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
         style={{
           width: 28,
           flexShrink: 0,
-          borderLeft: "1px solid var(--border)",
+          borderLeft: "1px solid var(--hairline)",
           background: "var(--panel)",
           display: "flex",
           alignItems: "flex-start",
@@ -122,7 +122,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
-        borderLeft: "1px solid var(--border)",
+        borderLeft: "1px solid var(--hairline)",
         background: "var(--panel)",
         color: "var(--ink)",
       }}
@@ -133,7 +133,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
           alignItems: "center",
           gap: "var(--sp-2)",
           padding: "var(--sp-2) var(--sp-2)",
-          borderBottom: "1px solid var(--border)",
+          borderBottom: "1px solid var(--hairline)",
         }}
       >
         <button
@@ -185,7 +185,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
             textAlign: "left",
             padding: "var(--sp-2)",
             border: "none",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "1px solid var(--hairline)",
             borderLeft: "3px solid var(--warn)",
             background: "var(--warn-weak)",
             color: "var(--ink)",
@@ -200,7 +200,7 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
         style={{
           flex: "1 1 60%",
           minHeight: 0,
-          borderBottom: "1px solid var(--border)",
+          borderBottom: "1px solid var(--hairline)",
           overflow: "hidden",
         }}
       >

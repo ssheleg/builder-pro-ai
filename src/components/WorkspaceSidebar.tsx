@@ -159,8 +159,8 @@ export function WorkspaceSidebar(props: {
           textOverflow: "ellipsis",
           border: "none",
           cursor: "pointer",
-          color: selected ? "var(--accent)" : "var(--muted)",
-          background: selected ? "var(--accent-weak)" : "transparent",
+          color: selected ? "var(--ink)" : "var(--muted)",
+          background: selected ? "var(--panel-2)" : "transparent",
         }}
       >
         {w.name}
@@ -176,7 +176,7 @@ export function WorkspaceSidebar(props: {
           width: 200,
           flexShrink: 0,
           background: "var(--panel)",
-          borderRight: "1px solid var(--border)",
+          borderRight: "1px solid var(--hairline)",
           color: "var(--ink)",
           display: "flex",
           flexDirection: "column",
@@ -195,10 +195,10 @@ export function WorkspaceSidebar(props: {
             fontSize: "var(--fs-md)",
             fontWeight: 600,
             border: "none",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "1px solid var(--hairline)",
             cursor: "pointer",
-            color: view === "home" ? "var(--accent)" : "var(--muted)",
-            background: view === "home" ? "var(--accent-weak)" : "transparent",
+            color: view === "home" ? "var(--ink)" : "var(--muted)",
+            background: view === "home" ? "var(--panel-2)" : "transparent",
           }}
         >
           ⌂ Home
@@ -218,10 +218,10 @@ export function WorkspaceSidebar(props: {
             fontSize: "var(--fs-md)",
             fontWeight: 600,
             border: "none",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "1px solid var(--hairline)",
             cursor: "pointer",
-            color: view === "ext" ? "var(--accent)" : "var(--muted)",
-            background: view === "ext" ? "var(--accent-weak)" : "transparent",
+            color: view === "ext" ? "var(--ink)" : "var(--muted)",
+            background: view === "ext" ? "var(--panel-2)" : "transparent",
           }}
         >
           {strings.chrome.sidebar.extensionsNav}
@@ -243,10 +243,10 @@ export function WorkspaceSidebar(props: {
             fontSize: "var(--fs-md)",
             fontWeight: 600,
             border: "none",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "1px solid var(--hairline)",
             cursor: "pointer",
-            color: view === "inbox" ? "var(--accent)" : "var(--muted)",
-            background: view === "inbox" ? "var(--accent-weak)" : "transparent",
+            color: view === "inbox" ? "var(--ink)" : "var(--muted)",
+            background: view === "inbox" ? "var(--panel-2)" : "transparent",
           }}
         >
           <span style={{ flex: 1 }}>{strings.chrome.sidebar.inboxNav}</span>
@@ -302,10 +302,10 @@ export function WorkspaceSidebar(props: {
                     fontSize: "var(--fs-md)",
                     fontWeight: 700,
                     border: "none",
-                    borderTop: "1px solid var(--border)",
+                    borderTop: "1px solid var(--hairline)",
                     cursor: "pointer",
-                    color: projectActive ? "var(--accent)" : "var(--ink)",
-                    background: projectActive ? "var(--accent-weak)" : "transparent",
+                    color: "var(--ink)",
+                    background: projectActive ? "var(--panel-2)" : "transparent",
                   }}
                 >
                   {project.name}
@@ -327,7 +327,7 @@ export function WorkspaceSidebar(props: {
                 textTransform: "uppercase",
                 color: "var(--muted)",
                 letterSpacing: 0.5,
-                borderTop: "1px solid var(--border)",
+                borderTop: "1px solid var(--hairline)",
               }}
             >
               {strings.chrome.sidebar.noProject}
@@ -378,7 +378,7 @@ export function WorkspaceSidebar(props: {
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
                   border: "none",
-                  borderTop: "1px solid var(--border)",
+                  borderTop: "1px solid var(--hairline)",
                   cursor: "pointer",
                   color: "var(--muted)",
                   background: "transparent",
@@ -408,8 +408,8 @@ export function WorkspaceSidebar(props: {
                             textOverflow: "ellipsis",
                             border: "none",
                             cursor: "pointer",
-                            color: projectActive ? "var(--accent)" : "var(--muted)",
-                            background: projectActive ? "var(--accent-weak)" : "transparent",
+                            color: projectActive ? "var(--ink)" : "var(--muted)",
+                            background: projectActive ? "var(--panel-2)" : "transparent",
                           }}
                         >
                           {project.name}
@@ -432,7 +432,7 @@ export function WorkspaceSidebar(props: {
             margin: "var(--sp-2)",
             marginBottom: 0,
             padding: "var(--sp-2) var(--sp-3)",
-            border: "1px solid var(--border-strong)",
+            border: "none",
             background: "var(--panel-2)",
             color: "var(--ink)",
             cursor: "pointer",
@@ -449,7 +449,7 @@ export function WorkspaceSidebar(props: {
           style={{
             margin: "var(--sp-2)",
             padding: "var(--sp-2) var(--sp-3)",
-            border: "1px solid var(--border-strong)",
+            border: "none",
             background: "var(--panel-2)",
             color: "var(--ink)",
             cursor: "pointer",
@@ -471,7 +471,7 @@ export function WorkspaceSidebar(props: {
             gap: "var(--sp-2)",
             margin: "var(--sp-2)",
             padding: "var(--sp-2) var(--sp-3)",
-            border: "1px solid var(--border-strong)",
+            border: "none",
             background: "var(--panel-2)",
             color: "var(--muted)",
             cursor: "pointer",

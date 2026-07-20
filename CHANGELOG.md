@@ -20,10 +20,22 @@ by fill steps instead of borders/shadows.
 - **Typography:** Space Grotesk 500/700 bundled (`@fontsource/space-grotesk`) as the
   display face for page titles, section headings and stat values.
 
+- **All 36 views migrated** off outlined containers onto the fill model: container depth is
+  the fill step, dense rows use `--hairline`, controls are `--panel-2` fills with no border,
+  and selection (sidebar nav, stat chips) is a fill rather than an accent outline. Banner
+  actions sit on a `--panel` fill so they read on the tint. Deliberate exceptions kept:
+  graph node cards (solid-vs-dashed carries local-vs-ghost meaning), graph edges (relationship
+  lines), dashed placeholders, and the `#010409` terminal ground.
+- **`--border` / `--border-strong` removed entirely** — the migration bridge is gone now that
+  nothing reads them.
+
 ### Added
 - **`SegmentedPill` atom** — pill view switcher with radiogroup semantics + arrow keys.
 - **`Heatmap` atom** — 5-level blue density grid on the `--data` voice (color-mix), safe on
   empty/zero/negative input.
+- **Structural regression guard** — `tokens.css.test.ts` walks the whole source tree and fails
+  the build on any reintroduced `var(--border…)` read, so outlined containers cannot creep
+  back one component at a time.
 
 ## [Unreleased] — UX scenario base + audit fix pass (2026-07-19)
 

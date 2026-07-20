@@ -122,13 +122,12 @@ interface GraphEdgeData extends Record<string, unknown> {
 type GraphFlowNode = Node<GraphNodeData>;
 type GraphFlowEdge = Edge<GraphEdgeData>;
 
-/** The flow canvas frame — a token-bordered surface so it flips with the theme (`--bg` inside a
- * `--border` frame, rounded to `--r-lg`). */
+/** The flow canvas frame — a token-filled surface so it flips with the theme (a recessed `--bg`
+ * well, rounded to `--r-lg`). */
 const flowWrapStyle: CSSProperties = {
   position: "relative",
   width: "100%",
   height: 520,
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-lg)",
   background: "var(--bg)",
   overflow: "hidden",
@@ -207,14 +206,14 @@ const nodeLabelStyle: CSSProperties = {
 };
 
 /** Base node card style, layered with per-state accents (external/orphan/match) below — mirrors
- * the primitives' "Card" surface (`--panel` fill + 1px `--border` + `--r-md`) shrunk to node
+ * the primitives' "Card" surface (`--panel` fill + 1px `--hairline` + `--r-md`) shrunk to node
  * scale, so every node stroke/fill resolves through `tokens.css` and reads in light AND dark. */
 function nodeCardStyle(data: GraphNodeData, selected: boolean | undefined): CSSProperties {
   const borderColor = data.isOrphan
     ? "var(--danger)"
     : selected
       ? "var(--accent)"
-      : "var(--border)";
+      : "var(--hairline)";
   return {
     display: "flex",
     flexDirection: "column",
@@ -280,9 +279,9 @@ const nodeTypes: NodeTypes = {
 
 /** Token-driven default edge/connection styling so an edge's stroke resolves through `tokens.css`
  * and stays legible in BOTH themes (xyflow's own default `.react-flow__edge-path` grey does not
- * flip with the theme). A calm `--border-strong` for resting edges; the one `--accent` for the
+ * flip with the theme). A calm dimmed `--muted` for resting edges; the one `--accent` for the
  * in-flight connection line the user is dragging. */
-const defaultEdgeOptions = { style: { stroke: "var(--border-strong)" } };
+const defaultEdgeOptions = { style: { stroke: "color-mix(in srgb, var(--muted) 40%, transparent)" } };
 const connectionLineStyle: CSSProperties = { stroke: "var(--accent)" };
 
 /**

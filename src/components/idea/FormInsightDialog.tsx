@@ -38,7 +38,6 @@ const cardStyle: CSSProperties = {
   maxHeight: "85vh",
   overflowY: "auto",
   background: "var(--panel)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-lg)",
   boxShadow: "var(--shadow-1)",
   padding: "var(--sp-4)",
@@ -75,7 +74,6 @@ const fitContextColumnStyle: CSSProperties = {
   gap: "var(--sp-2)",
   fontSize: "var(--fs-sm)",
   color: "var(--muted)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-md)",
   padding: "var(--sp-3)",
   background: "var(--panel-2)",
@@ -108,8 +106,8 @@ const inputStyle: CSSProperties = {
   letterSpacing: "normal",
   color: "var(--ink)",
   background: "var(--panel-2)",
-  border: "1px solid var(--border-strong)",
-  borderRadius: "var(--r-md)",
+  border: "none",
+  borderRadius: "var(--r-sm)",
   padding: "var(--sp-2) var(--sp-3)",
 };
 

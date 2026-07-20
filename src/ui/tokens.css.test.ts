@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -44,5 +44,29 @@ describe("tokens.css (BL-29 app-wide :focus-visible ring)", () => {
     expect(src).toMatch(/import\s+["']@fontsource\/space-grotesk\/500\.css["'];?/);
     expect(src).toMatch(/import\s+["']@fontsource\/space-grotesk\/700\.css["'];?/);
     expect(readCss()).toContain('--font-display: "Space Grotesk"');
+  });
+});
+
+/**
+ * «Soft Control Room» structural invariant (spec 2026-07-20 §1): depth is carried by fill steps,
+ * so the v1 border tokens were deleted once every view had migrated. This walks the real source
+ * tree and fails on any reintroduced read — the cheap guard that keeps outlined containers from
+ * creeping back one component at a time. `--hairline` (in-container row separators) and tone
+ * borders (`var(--danger)`, `var(--accent)`, …) remain legitimate and are not matched here.
+ */
+describe("design language — no general-purpose border token in src/", () => {
+  const SELF = fileURLToPath(import.meta.url); // this file states the pattern, so it always matches
+
+  function sourceFiles(): string[] {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    return readdirSync(root, { recursive: true, encoding: "utf-8" })
+      .filter((p) => /\.(tsx?|css)$/.test(p))
+      .map((p) => `${root}${p}`)
+      .filter((p) => p !== SELF);
+  }
+
+  it("no source file reads var(--border) or var(--border-strong)", () => {
+    const offenders = sourceFiles().filter((f) => /var\(--border/.test(readFileSync(f, "utf-8")));
+    expect(offenders).toEqual([]);
   });
 });

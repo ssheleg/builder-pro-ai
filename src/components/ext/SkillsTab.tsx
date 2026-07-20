@@ -50,7 +50,6 @@ const createFormStyle: CSSProperties = {
   gap: "var(--sp-2)",
   padding: "var(--sp-3)",
   marginBottom: "var(--sp-3)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-md)",
   background: "var(--panel-2)",
 };
@@ -72,7 +71,7 @@ const rowStyle: CSSProperties = {
   padding: "var(--sp-2)",
   fontFamily: "var(--font-mono)",
   fontSize: "var(--fs-sm)",
-  borderBottom: "1px solid var(--border)",
+  borderBottom: "1px solid var(--hairline)",
 };
 
 const titleTextStyle: CSSProperties = {
