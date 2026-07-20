@@ -11,6 +11,8 @@ import {
   Dialog,
   Field,
   Input,
+  SegmentedPill,
+  Heatmap,
 } from "./primitives";
 
 describe("primitives", () => {
@@ -112,5 +114,66 @@ describe("primitives", () => {
 
     fireEvent.click(screen.getByTestId("d")); // overlay click (target === currentTarget)
     expect(onClose).toHaveBeenCalledTimes(3);
+  });
+
+  it("SegmentedPill renders radiogroup semantics and switches on click", () => {
+    const onChange = vi.fn();
+    render(
+      <SegmentedPill
+        ariaLabel="Range"
+        options={[{ value: "all", label: "All" }, { value: "30d", label: "30d" }] as const}
+        value="all"
+        onChange={onChange}
+      />,
+    );
+    const group = screen.getByRole("radiogroup", { name: "Range" });
+    expect(group).toBeTruthy();
+    const radios = screen.getAllByRole("radio");
+    expect(radios).toHaveLength(2);
+    expect(radios[0].getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(radios[1]);
+    expect(onChange).toHaveBeenCalledWith("30d");
+  });
+
+  it("SegmentedPill moves selection with arrow keys", () => {
+    const onChange = vi.fn();
+    render(
+      <SegmentedPill
+        ariaLabel="Range"
+        options={[{ value: "all", label: "All" }, { value: "30d", label: "30d" }] as const}
+        value="all"
+        onChange={onChange}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("radiogroup", { name: "Range" }), { key: "ArrowRight" });
+    expect(onChange).toHaveBeenCalledWith("30d");
+  });
+
+  it("Heatmap renders one cell per value with 5-level buckets", () => {
+    render(<Heatmap values={[0, 1, 2, 3, 4]} columns={5} max={4} ariaLabel="Activity" data-testid="h" />);
+    const grid = screen.getByTestId("h");
+    expect(grid.getAttribute("aria-label")).toBe("Activity");
+    const cells = grid.querySelectorAll("[data-level]");
+    expect(cells).toHaveLength(5);
+    expect(Array.from(cells).map((c) => c.getAttribute("data-level"))).toEqual(["0", "1", "2", "3", "4"]);
+  });
+
+  it("Heatmap survives all-zero and empty inputs (no division by zero)", () => {
+    const { rerender } = render(<Heatmap values={[0, 0, 0]} columns={3} ariaLabel="A" data-testid="h" />);
+    expect(
+      Array.from(screen.getByTestId("h").querySelectorAll("[data-level]")).every(
+        (c) => c.getAttribute("data-level") === "0",
+      ),
+    ).toBe(true);
+    rerender(<Heatmap values={[]} columns={3} ariaLabel="A" data-testid="h" />);
+    expect(screen.getByTestId("h").querySelectorAll("[data-level]")).toHaveLength(0);
+  });
+
+  it("Heatmap clamps negatives to level 0 and overshoot to level 4", () => {
+    render(<Heatmap values={[-5, 99]} columns={2} max={4} ariaLabel="A" data-testid="h" />);
+    const levels = Array.from(screen.getByTestId("h").querySelectorAll("[data-level]")).map((c) =>
+      c.getAttribute("data-level"),
+    );
+    expect(levels).toEqual(["0", "4"]);
   });
 });

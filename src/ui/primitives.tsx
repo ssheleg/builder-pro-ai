@@ -431,3 +431,132 @@ export function Dialog({
     </div>
   );
 }
+
+// ---- SegmentedPill (view switcher — «Overview | Models», «All | 30d | 7d») -------------------
+
+export function SegmentedPill<T extends string>({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+  "data-testid": testId,
+}: {
+  options: readonly { value: T; label: string }[];
+  value: T;
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  "data-testid"?: string;
+}) {
+  const idx = options.findIndex((o) => o.value === value);
+  const move = (delta: number) => {
+    if (options.length === 0) return;
+    const next = options[(idx + delta + options.length) % options.length];
+    if (next.value !== value) onChange(next.value);
+  };
+  return (
+    <div
+      data-testid={testId}
+      role="radiogroup"
+      aria-label={ariaLabel}
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+          e.preventDefault();
+          move(1);
+        }
+        if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+          e.preventDefault();
+          move(-1);
+        }
+      }}
+      style={{
+        display: "inline-flex",
+        gap: 2,
+        padding: 2,
+        background: "var(--panel-2)",
+        borderRadius: 999,
+      }}
+    >
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            tabIndex={-1}
+            onClick={() => {
+              if (!active) onChange(o.value);
+            }}
+            style={{
+              border: "none",
+              cursor: active ? "default" : "pointer",
+              padding: "var(--sp-1) var(--sp-3)",
+              fontSize: "var(--fs-sm)",
+              fontFamily: "var(--font-ui)",
+              fontWeight: 600,
+              borderRadius: 999,
+              background: active ? "var(--panel)" : "transparent",
+              color: active ? "var(--ink)" : "var(--muted)",
+            }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---- Heatmap (blue density grid — the data voice) --------------------------------------------
+
+const HEATMAP_LEVEL_BG = [
+  "var(--panel-2)",
+  "color-mix(in srgb, var(--data) 25%, var(--panel-2))",
+  "color-mix(in srgb, var(--data) 50%, var(--panel-2))",
+  "color-mix(in srgb, var(--data) 75%, var(--panel-2))",
+  "var(--data)",
+] as const;
+
+export function Heatmap({
+  values,
+  columns,
+  max,
+  ariaLabel,
+  "data-testid": testId,
+}: {
+  values: readonly number[];
+  columns: number;
+  max?: number;
+  ariaLabel: string;
+  "data-testid"?: string;
+}) {
+  // Guard: an explicit max<=0 or an empty/all-zero series must never divide by zero.
+  const effectiveMax = max ?? Math.max(...values, 0);
+  return (
+    <div
+      data-testid={testId}
+      role="img"
+      aria-label={ariaLabel}
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${Math.max(1, columns)}, 12px)`,
+        gap: 4,
+        width: "fit-content",
+      }}
+    >
+      {values.map((v, i) => {
+        const level =
+          effectiveMax <= 0 || v <= 0 ? 0 : Math.min(4, Math.ceil((4 * v) / effectiveMax));
+        return (
+          <div
+            key={i}
+            data-level={level}
+            style={{ width: 12, height: 12, borderRadius: 4, background: HEATMAP_LEVEL_BG[level] }}
+          />
+        );
+      })}
+    </div>
+  );
+}
