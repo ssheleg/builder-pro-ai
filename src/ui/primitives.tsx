@@ -1,6 +1,7 @@
-// src/ui/primitives.tsx — S-UXR B2 primitives kit (direction A). Small, token-only building blocks
-// (every color/space/radius/type value is a var(--…) from tokens.css) so the whole UI reads as one
-// system in both light and dark. No external UI/icon/chart deps — sparklines are inline SVG.
+// src/ui/primitives.tsx — «Soft Control Room» primitives kit (spec 2026-07-20). Small, token-only
+// building blocks (every color/space/radius/type value is a var(--…) from tokens.css) so the whole
+// UI reads as one system in both light and dark. Depth = fill steps, not borders: containers are
+// borderless fills; only in-container separators use --hairline. No external UI/icon/chart deps.
 import {
   type CSSProperties,
   type ReactNode,
@@ -51,9 +52,7 @@ export function Panel({
       {...rest}
       style={{
         background: "var(--panel)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--r-lg)",
-        boxShadow: "var(--shadow-1)",
+        borderRadius: "var(--r-md)",
         overflow: "hidden",
         ...style,
       }}
@@ -66,7 +65,7 @@ export function Panel({
             justifyContent: "space-between",
             gap: "var(--sp-3)",
             padding: "var(--sp-3) var(--sp-4)",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "1px solid var(--hairline)",
           }}
         >
           <div style={{ fontSize: "var(--fs-md)", fontWeight: 600, color: "var(--ink)" }}>
@@ -106,9 +105,8 @@ export function Stat({
         display: "flex",
         flexDirection: "column",
         gap: "var(--sp-1)",
-        padding: "var(--sp-3)",
-        background: "var(--panel)",
-        border: "1px solid var(--border)",
+        padding: "var(--sp-3) var(--sp-4)",
+        background: "var(--panel-2)",
         borderRadius: "var(--r-md)",
         minWidth: 96,
       }}
@@ -126,7 +124,8 @@ export function Stat({
       <div style={{ display: "flex", alignItems: "baseline", gap: "var(--sp-2)" }}>
         <span
           style={{
-            fontFamily: "var(--font-mono)",
+            fontFamily: "var(--font-display)",
+            fontWeight: 700,
             fontSize: "var(--fs-2xl)",
             fontVariantNumeric: "tabular-nums",
             lineHeight: 1,
@@ -142,7 +141,8 @@ export function Stat({
           </span>
         )}
       </div>
-      {spark && spark.length > 1 && <Sparkline points={spark} tone={tone === "ink" ? "accent" : tone} />}
+      {/* Default spark speaks the data voice (blue), never the terracotta action accent. */}
+      {spark && spark.length > 1 && <Sparkline points={spark} tone={tone === "ink" ? "info" : tone} />}
     </div>
   );
 }
@@ -233,14 +233,15 @@ export function Button({
     fontSize: size === "sm" ? "var(--fs-sm)" : "var(--fs-md)",
     fontFamily: "var(--font-ui)",
     fontWeight: 600,
-    borderRadius: "var(--r-md)",
+    borderRadius: "var(--r-sm)",
     cursor: disabled || loading ? "not-allowed" : "pointer",
     opacity: disabled || loading ? 0.55 : 1,
     border: "1px solid transparent",
   };
+  // Secondary is a FILL ghost (--panel-2), not an outline — borders are not part of the language.
   const variants: Record<string, CSSProperties> = {
-    primary: { background: "var(--accent)", color: "var(--on-accent)", borderColor: "var(--accent)" },
-    ghost: { background: "transparent", color: "var(--ink)", borderColor: "var(--border-strong)" },
+    primary: { background: "var(--accent)", color: "var(--on-accent)", borderColor: "transparent" },
+    ghost: { background: "var(--panel-2)", color: "var(--ink)", borderColor: "transparent" },
     danger: { background: "var(--danger-weak)", color: "var(--danger)", borderColor: "transparent" },
   };
   return (
@@ -278,14 +279,15 @@ export function Field({
   );
 }
 
+// Inputs sit on the inset fill (--panel-2), no border; focus is the global accent ring.
 const controlStyle: CSSProperties = {
   padding: "var(--sp-2) var(--sp-3)",
   fontSize: "var(--fs-md)",
   fontFamily: "var(--font-ui)",
   color: "var(--ink)",
-  background: "var(--panel)",
-  border: "1px solid var(--border-strong)",
-  borderRadius: "var(--r-md)",
+  background: "var(--panel-2)",
+  border: "1px solid transparent",
+  borderRadius: "var(--r-sm)",
 };
 
 export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
@@ -382,7 +384,6 @@ export function Dialog({
           maxHeight: "calc(100vh - 2 * var(--sp-5))",
           overflow: "auto",
           background: "var(--panel)",
-          border: "1px solid var(--border)",
           borderRadius: "var(--r-lg)",
           boxShadow: "var(--shadow-1)",
         }}
@@ -393,7 +394,7 @@ export function Dialog({
             alignItems: "center",
             justifyContent: "space-between",
             padding: "var(--sp-3) var(--sp-4)",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "1px solid var(--hairline)",
           }}
         >
           <div style={{ fontSize: "var(--fs-lg)", fontWeight: 600, color: "var(--ink)" }}>{title}</div>
@@ -420,7 +421,7 @@ export function Dialog({
               justifyContent: "flex-end",
               gap: "var(--sp-2)",
               padding: "var(--sp-3) var(--sp-4)",
-              borderTop: "1px solid var(--border)",
+              borderTop: "1px solid var(--hairline)",
             }}
           >
             {footer}
