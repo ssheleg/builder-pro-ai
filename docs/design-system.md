@@ -50,7 +50,6 @@ ground `#010409`, intentionally theme-independent (a window into the machine).
 | `--ink` | `#1f1e1c` | `#ece9e2` | primary text |
 | `--muted` | `#625e55` | `#a39d92` | secondary text, labels, metadata |
 | `--hairline` | `#dcd9d1` | `#3a3733` | 1px separators INSIDE dense containers only |
-| `--border` / `--border-strong` | = hairline / `#cfccc2` | = hairline / `#46423d` | **deprecated aliases** — migration bridge for views not yet on the fill model; new code never uses them |
 | `--shadow-1` | subtle warm | subtle | true overlays ONLY (dialog, toast, popover) |
 
 **Two color voices**
@@ -71,6 +70,13 @@ Each tone has a `-weak` background for tinted fills (badges, banners).
 | `warn` (`--warn`) amber | `#8a5d08` | `#e0a83a` | needs a human / waiting / gate |
 | `danger` (`--danger`) red | `#b83232` | `#f06b6b` | failed / interrupted / error / incident |
 | `muted` (`--muted`) grey | `#625e55` | `#a39d92` | idle / at prompt / nothing happening |
+
+There is deliberately **no general-purpose border token.** v1's `--border`/`--border-strong`
+were deleted once every view had migrated; `src/ui/tokens.css.test.ts` walks the whole
+source tree and fails the build on any reintroduced `var(--border…)` read, so outlined
+containers cannot creep back one component at a time. Legitimate line colors are
+`--hairline` (in-container separators) and the tone tokens (a `--danger` error edge, a
+3px banner edge, an `--accent` match ring).
 
 Rules: semantic colors are STATE ONLY — never decoration; amber is reserved for «a human
 is needed»; a third color voice is a design defect. Every text pairing (each tone on its
@@ -162,11 +168,26 @@ which canonical atoms it reuses, which new atoms it introduces (new atom = this 
 row in the same change), and its keyboard path. A feature that invents a parallel visual
 language fails review.
 
-## 9. Migration status (v1 → v2)
+## 9. Migration status (v1 → v2) — complete
 
-Shipped on the new language: `tokens.css`, `theme.ts`, all `primitives.tsx` atoms.
-Everything in `src/components/` and `src/App.tsx` still renders legacy `--border`
-semantics (gracefully — the alias resolves to hairline values) until migrated view-by-view
-in the next cycle. Migration DoD per view: no `--border`/`--border-strong` reads, outer
-borders removed in favor of fill steps, dense rows on `--hairline`, view switchers on
-`SegmentedPill`.
+Every surface is on the new language: `tokens.css`, `theme.ts`, all `primitives.tsx` atoms,
+and all 36 view files under `src/` (App, chrome/rails, domain lists and panels, dialogs and
+banners, `ext/`, `idea/`, `graph/`). The v1 border tokens are deleted and guarded against
+reintroduction by `tokens.css.test.ts`.
+
+What each view now follows — the standing DoD for any new view:
+
+- No `var(--border…)` reads. Container depth comes from the fill step
+  (`--bg` → `--panel` → `--panel-2`); outer borders do not exist.
+- Dense in-container separators (list rows, table rules, pane edges, tab underlines) use
+  `--hairline`.
+- Controls (buttons, inputs, selects, textareas) are `--panel-2` fills with `border: none`
+  and radius `--r-sm`; primary actions are the `--accent` fill.
+- Selection is a fill, not an outline or the accent: nav and list rows select with
+  `--panel-2` + `--ink`. The accent stays reserved for actions and the focus ring.
+- Banners keep their tone `-weak` fill and 3px tone left-edge; their inline actions sit on
+  a `--panel` fill so they read on the tint.
+- Deliberate exceptions, all documented above: graph node cards keep a real border because
+  solid-vs-dashed carries the local-vs-ghost meaning; graph edges are relationship lines
+  (`color-mix(in srgb, var(--muted) 40%, transparent)`); dashed placeholders stay dashed on
+  `--hairline`; the terminal ground stays `#010409` in both themes.

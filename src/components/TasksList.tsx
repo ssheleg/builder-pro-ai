@@ -125,7 +125,7 @@ function rowStyle(depth: number): CSSProperties {
     height: 32,
     fontFamily: "var(--font-mono)",
     fontSize: "var(--fs-sm)",
-    borderBottom: "1px solid var(--border)",
+    borderBottom: "1px solid var(--hairline)",
   };
 }
 
@@ -142,8 +142,8 @@ const selectStyle: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: "var(--fs-xs)",
   color: "var(--ink)",
-  background: "var(--panel)",
-  border: "1px solid var(--border-strong)",
+  background: "var(--panel-2)",
+  border: "none",
   borderRadius: "var(--r-sm)",
   padding: "2px 4px",
   flexShrink: 0,
@@ -166,7 +166,7 @@ const createFormStyle: CSSProperties = {
   gap: "var(--sp-2)",
   padding: "var(--sp-2) var(--sp-3)",
   marginBottom: "var(--sp-3)",
-  border: "1px dashed var(--border-strong)",
+  border: "1px dashed var(--hairline)",
   borderRadius: "var(--r-lg)",
   background: "var(--panel-2)",
 };
@@ -177,8 +177,8 @@ const createInputStyle: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: "var(--fs-sm)",
   color: "var(--ink)",
-  background: "var(--panel)",
-  border: "1px solid var(--border-strong)",
+  background: "var(--panel-2)",
+  border: "none",
   borderRadius: "var(--r-sm)",
   padding: "3px 6px",
 };

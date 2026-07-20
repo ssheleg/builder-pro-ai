@@ -42,7 +42,6 @@ const overlayStyle: CSSProperties = {
 const cardStyle: CSSProperties = {
   width: 480,
   background: "var(--panel)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-lg)",
   boxShadow: "var(--shadow-1)",
   padding: "var(--sp-4)",
@@ -62,8 +61,8 @@ const inputStyle: CSSProperties = {
   fontSize: "var(--fs-md)",
   color: "var(--ink)",
   background: "var(--panel-2)",
-  border: "1px solid var(--border-strong)",
-  borderRadius: "var(--r-md)",
+  border: "none",
+  borderRadius: "var(--r-sm)",
   padding: "var(--sp-2) var(--sp-3)",
 };
 
@@ -79,8 +78,8 @@ const selectStyle: CSSProperties = {
   fontSize: "var(--fs-sm)",
   color: "var(--ink)",
   background: "var(--panel-2)",
-  border: "1px solid var(--border-strong)",
-  borderRadius: "var(--r-md)",
+  border: "none",
+  borderRadius: "var(--r-sm)",
   padding: "var(--sp-2) var(--sp-2)",
   alignSelf: "flex-start",
 };

@@ -16,9 +16,9 @@ const bannerStyle: CSSProperties = {
 
 const buttonStyle: CSSProperties = {
   padding: "var(--sp-1) var(--sp-3)",
-  borderRadius: "var(--r-md)",
-  border: "1px solid var(--border-strong)",
-  background: "transparent",
+  borderRadius: "var(--r-sm)",
+  border: "none",
+  background: "var(--panel)",
   color: "var(--ink)",
   fontSize: "var(--fs-sm)",
   cursor: "pointer",

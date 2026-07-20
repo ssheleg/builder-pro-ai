@@ -31,7 +31,7 @@ const paneStyle: CSSProperties = {
   gap: "var(--sp-2)",
   marginTop: "var(--sp-1)",
   padding: "var(--sp-2) var(--sp-3)",
-  border: "1px dashed var(--border-strong)",
+  border: "1px dashed var(--hairline)",
   borderRadius: "var(--r-md)",
 };
 

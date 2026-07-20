@@ -234,7 +234,6 @@ const popoverStyle: CSSProperties = {
   zIndex: 20,
   minWidth: 180,
   background: "var(--panel)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-md)",
   boxShadow: "var(--shadow-1)",
   padding: "var(--sp-1)",
@@ -257,8 +256,8 @@ const menuItemStyle: CSSProperties = {
 /** Compact inline Retry for a failed dir row (FI-02) — sized to sit inside the fixed ROW_HEIGHT
  * without breaking the windowing math (so it can't be the taller `Button` primitive). */
 const retryRowButtonStyle: CSSProperties = {
-  border: "1px solid var(--border-strong)",
-  background: "var(--panel)",
+  border: "none",
+  background: "var(--panel-2)",
   color: "var(--ink)",
   cursor: "pointer",
   fontFamily: "var(--font-mono)",

@@ -51,7 +51,6 @@ const rowStyle: CSSProperties = {
   padding: "var(--sp-2) var(--sp-3)",
   fontFamily: "var(--font-ui)",
   fontSize: "var(--fs-sm)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-md)",
   background: "var(--panel)",
 };
@@ -85,7 +84,7 @@ const selectStyle: CSSProperties = {
   fontSize: "var(--fs-xs)",
   color: "var(--ink)",
   background: "var(--panel-2)",
-  border: "1px solid var(--border-strong)",
+  border: "none",
   borderRadius: 999,
   padding: "var(--sp-1) var(--sp-2)",
   flexShrink: 0,
@@ -98,7 +97,7 @@ const inputStyle: CSSProperties = {
   fontSize: "var(--fs-sm)",
   color: "var(--ink)",
   background: "var(--panel-2)",
-  border: "1px solid var(--border-strong)",
+  border: "none",
   borderRadius: "var(--r-sm)",
   padding: "var(--sp-1) var(--sp-2)",
 };

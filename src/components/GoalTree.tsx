@@ -74,7 +74,7 @@ function rowContainerStyle(depth: number): CSSProperties {
     paddingLeft: 8 + depth * 16,
     fontFamily: "var(--font-mono)",
     fontSize: "var(--fs-sm)",
-    borderBottom: "1px solid var(--border)",
+    borderBottom: "1px solid var(--hairline)",
   };
 }
 
@@ -114,8 +114,8 @@ const metricInputStyle: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: "var(--fs-xs)",
   color: "var(--ink)",
-  background: "transparent",
-  border: "1px solid var(--border-strong)",
+  background: "var(--panel-2)",
+  border: "none",
   borderRadius: "var(--r-sm)",
   padding: "2px 6px",
   width: 100,
@@ -138,8 +138,8 @@ const selectStyle: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: "var(--fs-xs)",
   color: "var(--ink)",
-  background: "var(--panel)",
-  border: "1px solid var(--border-strong)",
+  background: "var(--panel-2)",
+  border: "none",
   borderRadius: "var(--r-sm)",
   padding: "2px 4px",
   flexShrink: 0,

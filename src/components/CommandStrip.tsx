@@ -95,7 +95,7 @@ const stripContainerStyle: CSSProperties = {
   gap: "var(--sp-2)",
   padding: "var(--sp-2) var(--sp-3)",
   overflowX: "auto",
-  borderTop: "1px solid var(--border)",
+  borderTop: "1px solid var(--hairline)",
   background: "var(--panel)",
 };
 
@@ -107,7 +107,7 @@ const emptyStyle: CSSProperties = {
   fontSize: "var(--fs-xs)",
   fontFamily: "var(--font-mono)",
   color: "var(--muted)",
-  borderTop: "1px solid var(--border)",
+  borderTop: "1px solid var(--hairline)",
   background: "var(--panel)",
 };
 

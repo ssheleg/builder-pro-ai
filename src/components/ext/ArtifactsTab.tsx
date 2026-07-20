@@ -10,7 +10,6 @@ const rowStyle: CSSProperties = {
   gap: "var(--sp-2)",
   padding: "var(--sp-3)",
   marginBottom: "var(--sp-2)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-md)",
   background: "var(--panel)",
 };
@@ -40,7 +39,6 @@ const preStyle: CSSProperties = {
   fontSize: "var(--fs-xs)",
   color: "var(--muted)",
   background: "var(--panel-2)",
-  border: "1px solid var(--border)",
   borderRadius: "var(--r-sm)",
   padding: "var(--sp-2)",
   margin: 0,

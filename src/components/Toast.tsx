@@ -37,7 +37,6 @@ export function Toast(): JSX.Element | null {
         gap: "var(--sp-3)",
         padding: "var(--sp-3) var(--sp-4)",
         borderRadius: "var(--r-md)",
-        border: "1px solid var(--border)",
         borderLeft: "3px solid var(--danger)",
         background: "var(--panel)",
         color: "var(--ink)",

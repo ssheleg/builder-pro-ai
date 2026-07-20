@@ -41,7 +41,6 @@ const projectBlockStyle: CSSProperties = {
   width: "100%",
   padding: "var(--sp-3)",
   borderRadius: "var(--r-lg)",
-  border: "1px solid var(--border)",
   background: "var(--panel)",
   cursor: "pointer",
   textAlign: "left",

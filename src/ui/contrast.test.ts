@@ -63,8 +63,11 @@ describe.each(THEMES)("tokens.css AA legibility — %s theme", (_name, t) => {
     expect(contrastRatio(t["--on-accent"], t["--accent"])).toBeGreaterThanOrEqual(AA_TEXT);
   });
 
-  it("declares the Soft Control Room structural tokens", () => {
+  it("declares --hairline and no general-purpose border token", () => {
     expect(t["--hairline"]).toBeTruthy();
-    expect(t["--border"]).toBe(t["--hairline"]); // legacy alias contract (spec 2026-07-20 §2.3)
+    // Depth is carried by fill steps. The v1 border tokens are gone for good — a reintroduced
+    // `--border` would quietly invite outlined containers back into the language.
+    expect(t["--border"]).toBeUndefined();
+    expect(t["--border-strong"]).toBeUndefined();
   });
 });

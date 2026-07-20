@@ -32,14 +32,14 @@ const panelStyle: CSSProperties = {
 
 const headerStyle: CSSProperties = {
   padding: "var(--sp-3) var(--sp-4)",
-  borderBottom: "1px solid var(--border)",
+  borderBottom: "1px solid var(--hairline)",
 };
 
 const tabBarStyle: CSSProperties = {
   display: "flex",
   gap: "var(--sp-1)",
   padding: "var(--sp-2) var(--sp-4)",
-  borderBottom: "1px solid var(--border)",
+  borderBottom: "1px solid var(--hairline)",
 };
 
 const contentStyle: CSSProperties = {

@@ -17,7 +17,7 @@ const tableStyle: CSSProperties = {
 const thStyle: CSSProperties = {
   textAlign: "left",
   padding: "var(--sp-1) var(--sp-2)",
-  borderBottom: "1px solid var(--border)",
+  borderBottom: "1px solid var(--hairline)",
   background: "var(--panel-2)",
   color: "var(--muted)",
   fontWeight: 600,
@@ -31,7 +31,7 @@ const thNumStyle: CSSProperties = {
 
 const tdStyle: CSSProperties = {
   padding: "var(--sp-1) var(--sp-2)",
-  borderBottom: "1px solid var(--border)",
+  borderBottom: "1px solid var(--hairline)",
   color: "var(--ink)",
   whiteSpace: "nowrap",
   overflow: "hidden",
