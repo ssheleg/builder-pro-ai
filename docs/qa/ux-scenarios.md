@@ -1,6 +1,10 @@
 # UX-scenario catalog — Builder Pro AI
 
-**synced @ ac581d4**
+**synced @ fdf1439**
+
+> Reviewed against the Soft Control Room design v2 migration (fdf1439): that change restyles
+> every view (fills replace outlined containers) without adding, changing, or removing a single
+> control, view, state, or wire verb, so no row below required an edit.
 
 This is the single, maintained source of truth for every user-facing scenario in the webview
 (React 19 + TypeScript over the Tauri host). It supersedes the frozen Russian first-session catalog
