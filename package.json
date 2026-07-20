@@ -18,6 +18,7 @@
     "e2e:orchd": "node tests/e2e/orchd-survive.mjs"
   },
   "dependencies": {
+    "@fontsource/space-grotesk": "^5.3.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-fs": "^2",

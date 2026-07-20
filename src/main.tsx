@@ -1,5 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import "@fontsource/space-grotesk/500.css";
+import "@fontsource/space-grotesk/700.css";
 import "./ui/tokens.css";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";

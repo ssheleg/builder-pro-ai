@@ -37,4 +37,12 @@ describe("tokens.css (BL-29 app-wide :focus-visible ring)", () => {
     const src = readFileSync(mainPath, "utf-8");
     expect(src).toMatch(/import\s+["']\.\/ui\/tokens\.css["'];?/);
   });
+
+  it("main.tsx bundles Space Grotesk 500/700 for --font-display (spec 2026-07-20 §3)", () => {
+    const mainPath = fileURLToPath(new URL("../main.tsx", import.meta.url));
+    const src = readFileSync(mainPath, "utf-8");
+    expect(src).toMatch(/import\s+["']@fontsource\/space-grotesk\/500\.css["'];?/);
+    expect(src).toMatch(/import\s+["']@fontsource\/space-grotesk\/700\.css["'];?/);
+    expect(readCss()).toContain('--font-display: "Space Grotesk"');
+  });
 });
