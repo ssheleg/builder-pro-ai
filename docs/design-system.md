@@ -1,156 +1,172 @@
-# Builder Pro AI — Design System
+# Builder Pro AI — Design System v2 «Soft Control Room»
 
-Written 2026-07-06 (vision v4 §4: «super minimalist, light, modern, pleasant font,
-compact»). **Binds every feature designed after this date.** Extends
-[`frontend-conventions.md`](frontend-conventions.md) (store/events/testing architecture); this doc
-owns the VISUAL and UX language. Since [0.9.0] (S-UXR) the tokens live in `src/ui/tokens.css` (the
-CSS-variable palette, light **and** dark), `src/ui/theme.ts` (the `Theme`/`Tone` types, theme
-resolve/apply, and `statusTone()`), and the reusable, token-only building blocks that consume them
-in `src/ui/primitives.tsx` (`Panel`/`Stat`/`Sparkline`/`Badge`/`Button`/`Field`/`EmptyState`/
-`Dialog`). This doc is their contract.
+Written 2026-07-20 (spec: `docs/superpowers/specs/2026-07-20-soft-control-room-design.md`).
+**Binds every feature designed after this date**; supersedes v1 «Calm Control Room»
+(2026-07-06). Extends [`frontend-conventions.md`](frontend-conventions.md) (store/events/
+testing architecture); this doc owns the VISUAL and UX language. Tokens live in
+`src/ui/tokens.css` (CSS-variable palette, light **and** dark), `src/ui/theme.ts`
+(`Theme`/`Tone` types, theme resolve/apply, `statusTone()`), and the token-only building
+blocks in `src/ui/primitives.tsx` (`Panel`/`Stat`/`Sparkline`/`Badge`/`Button`/`Field`/
+`EmptyState`/`Dialog`/`SegmentedPill`/`Heatmap`). This doc is their contract.
 
-## 1. Design principles (in priority order)
+## 1. Vision & principles (in priority order)
 
-1. **Density with air.** Compact layouts — the owner runs 5-6 projects on one screen — but never
-   cramped: whitespace comes from a consistent spacing scale, not from removing information.
+Warm paper neutrality fused with control-room density: the app reads as a calm printed
+dashboard, not an OS window. **Depth = fill, not lines:** three fill steps
+(`--bg` → `--panel` → `--panel-2`) replace borders and shadows entirely.
+
+The core structural rule: **container = fill, rows inside = hairline.** Any surface that
+groups content is a borderless fill one step deeper than its parent; repeated dense rows
+inside it (table rows, tree rows, list items) separate with the near-invisible `--hairline`.
+Outer borders on cards/panels/inputs are a design defect.
+
+1. **Density with air.** Compact layouts — the owner runs 5–6 projects on one screen — but
+   never cramped: whitespace from the spacing scale, not from removing information.
 2. **Glanceability beats completeness.** Every surface answers its question in one glance
-   (state → color chip; trend → sparkline; delta → one line). Detail is one drill-down away,
-   never on the first screen.
-3. **Honest state, always.** No fake "connected", no optimistic spinners, no silent failures.
-   Degraded = visibly degraded (dimmed pane, banner, chip). This is the §13 degradation contract
-   made visual.
-4. **The system pulls, the owner never polls.** Attention-worthy events surface as deltas and
-   inbox items — never as something the owner must go find. No badge without an action.
-5. **Minimal chrome.** No decorative containers, no gradients, no shadows-as-decoration, no icon
-   noise. One accent color. If an element doesn't inform or act, it doesn't exist.
-6. **Keyboard-first.** Every primary action reachable via keyboard (⌘K command palette is the
-   front door); mouse is the alternative, not the requirement.
+   (state → color chip; trend → sparkline; density → heatmap; delta → one line). Detail is
+   one drill-down away, never on the first screen.
+3. **Honest state, always.** No fake "connected", no optimistic spinners, no silent
+   failures. Degraded = visibly degraded (dimmed pane, banner, chip).
+4. **The system pulls, the owner never polls.** Attention-worthy events surface as deltas
+   and inbox items. No badge without an action.
+5. **Minimal chrome.** No decorative containers, no gradients, no shadows-as-decoration,
+   no icon noise. Two color voices only (accent = action, blue = data); if an element
+   doesn't inform or act, it doesn't exist.
+6. **Keyboard-first.** Every primary action reachable via keyboard (⌘K command palette is
+   the front door); mouse is the alternative, not the requirement.
 
 ## 2. Color (tokens — `src/ui/tokens.css` is the source of truth)
 
-Light **and** dark since [0.9.0] (S-UXR). The palette is defined as CSS variables on `:root`
-(light) and `:root[data-theme="dark"]` (dark) in `src/ui/tokens.css`; `src/ui/theme.ts` resolves
-`light`/`dark`/`system` and applies `data-theme`. Consume tokens as `var(--…)` — never a raw hex.
+Consume tokens as `var(--…)` — never a raw hex. The single exception: the terminal pane
+ground `#010409`, intentionally theme-independent (a window into the machine).
 
-**Surfaces & text**
+**Surfaces & structure**
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
-| `--bg` | `#f7f8fa` | `#0f1218` | app ground |
-| `--panel` | `#ffffff` | `#161b24` | cards, bars, dialogs, inputs |
-| `--panel-2` | `#f7f8fa` | `#1b212c` | inset / secondary / table headers |
-| `--ink` | `#1a1f2b` | `#e8ecf3` | primary text |
-| `--muted` | `#5b6472` | `#8a93a6` | secondary text, labels, metadata |
-| `--border` / `--border-strong` | `#e6e9ef` / `#d7dce4` | `#232a36` / `#2c3441` | 1px lines / stronger edges |
-| `--accent` (`--accent-weak`) | `#2f6feb` (`#eaf0fe`) | `#4b8bff` (`#1b2740`) | THE one accent + its tint |
-| `--shadow-1` | subtle | subtle | the ONE elevation shadow (dialogs/panels); elevation is otherwise `--border` |
+| `--bg` | `#faf9f5` | `#1b1a18` | app ground (ivory / warm charcoal) |
+| `--panel` | `#f1efe9` | `#242220` | cards, bars, dialogs — one fill step deeper than bg |
+| `--panel-2` | `#e7e4dc` | `#2e2b28` | nested tiles, insets, inputs, table headers |
+| `--ink` | `#1f1e1c` | `#ece9e2` | primary text |
+| `--muted` | `#625e55` | `#a39d92` | secondary text, labels, metadata |
+| `--hairline` | `#dcd9d1` | `#3a3733` | 1px separators INSIDE dense containers only |
+| `--border` / `--border-strong` | = hairline / `#cfccc2` | = hairline / `#46423d` | **deprecated aliases** — migration bridge for views not yet on the fill model; new code never uses them |
+| `--shadow-1` | subtle warm | subtle | true overlays ONLY (dialog, toast, popover) |
 
-**Status / semantic language (locked product vocabulary — reuse everywhere, never re-invent).**
-`statusTone(status)` in `theme.ts` maps an entity status to one of these tones; `Badge` and
-`StatusDot` render it. Each semantic tone also has a `-weak` background token (`--ok-weak`,
-`--warn-weak`, `--danger-weak`, `--info-weak`, `--accent-weak`) for tinted fills (badges, banners).
+**Two color voices**
 
-| Tone (token) | Meaning — everywhere in the product |
-|---|---|
-| `info` (`--info`) blue | running / working (`running`) |
-| `ok` (`--ok`) green | done / accepted / shipped / healthy / success |
-| `warn` (`--warn`) amber | needs a human / waiting / gate / warning (`waiting`) |
-| `danger` (`--danger`) red | failed / interrupted / error / prod incident |
-| `muted` (`--muted`) grey | idle / at prompt / nothing happening |
+| Token | Light | Dark | Use |
+|---|---|---|---|
+| `--accent` (`--accent-weak`, `--on-accent`) | `#944527` (`#f3ddd2`, `#ffffff`) | `#e0805c` (`#3b271e`, `#201310`) | THE action voice: primary buttons, active states, focus ring, logo. Never for data. |
+| `--data` (`--data-weak`) | `#2b66d8` (`#eaf0fe`) | `#6f9dff` (`#1e2a44`) | THE data voice: charts, sparklines, heatmap. Never for actions. |
 
-Rules: semantic colors are STATE ONLY — never decoration; amber is reserved for
-"a human is needed" (the hot-questions color); one accent — a second accent hue is a design
-defect. New tokens are added to `tokens.css` first, this doc second, usage third (via `var(--…)`
-or a primitive). (Legacy token names used elsewhere in this doc — `bgElevated`, `text`, `textDim`,
-`statusRunning`/`statusWaiting`/`statusExited`/`statusIdle`, `theme.shadow` — map to the new names
-above: `--panel`, `--ink`, `--muted`, the `info`/`warn`/`danger`/`muted` tones, and `--shadow-1`.)
+**Status / semantic language (locked product vocabulary — reuse everywhere).**
+`statusTone(status)` in `theme.ts` maps an entity status to a tone; `Badge` renders it.
+Each tone has a `-weak` background for tinted fills (badges, banners).
 
-## 3. Typography
+| Tone | Light | Dark | Meaning — everywhere in the product |
+|---|---|---|---|
+| `info` (`--info`) blue | `#2b66d8` | `#6f9dff` | running / working |
+| `ok` (`--ok`) green | `#157239` | `#48c98a` | done / accepted / shipped / healthy |
+| `warn` (`--warn`) amber | `#8a5d08` | `#e0a83a` | needs a human / waiting / gate |
+| `danger` (`--danger`) red | `#b83232` | `#f06b6b` | failed / interrupted / error / incident |
+| `muted` (`--muted`) grey | `#625e55` | `#a39d92` | idle / at prompt / nothing happening |
 
-- **UI face:** system stack (`-apple-system, "SF Pro Display/Text"`). Native to macOS, modern,
-  zero load cost. Weights: 400 body · 600 emphasis/labels · 700-800 headings only.
-- **Data face:** `ui-monospace / SF Mono` — ALL data: ids, metrics, timestamps, logs, terminal
-  content, counters, chips. `font-variant-numeric: tabular-nums` wherever digits align.
-- **Scale (compact):** 11px chips/meta · 12px labels (uppercase + `letter-spacing: .1em`) ·
-  13px body/dense-UI · 15px card titles · 20px section headings · 28px page titles. Line-height
-  1.4-1.55 body, 1.1-1.2 headings.
-- Running text ≤ 65ch. Headings get `text-wrap: balance`.
+Rules: semantic colors are STATE ONLY — never decoration; amber is reserved for «a human
+is needed»; a third color voice is a design defect. Every text pairing (each tone on its
+`-weak` and on `--panel`; ink/muted on all surfaces; on-accent on accent) is enforced ≥
+WCAG AA 4.5:1 by `src/ui/contrast.test.ts` — new tokens land in `tokens.css` + that test
+first, this doc second, usage third.
 
-## 4. Space, layout, shape
+## 3. Typography (three faces, strict roles)
 
-- **4px base grid.** Spacing steps: 4 / 8 / 12 / 16 / 24 / 32. Component padding defaults:
-  chips 2×8, dense rows 8×12, cards 12-16.
-- **Radii:** 6px controls · 8-10px cards/windows · 999px chips. Nothing else.
-- **Elevation = border, not shadow.** Layers are separated by `border` + `bgElevated`. Shadows
-  only for true overlays (dialogs, popovers) — one soft shadow token.
-- **Layout primitives:** flex/grid + `gap` only (no margin stacks — frontend-conventions rule).
-  Wide content (tables, timelines, terminals) scrolls inside its own `overflow-x: auto` container.
-- **Density modes:** default is compact; no "comfortable" mode in v0.x (YAGNI).
+- **Display: Space Grotesk** (`--font-display`, weights 500/700, bundled via
+  `@fontsource/space-grotesk` in `main.tsx` — offline-safe, falls back to the system stack
+  if the asset fails). ONLY page titles (28px `--fs-3xl`), section headings, and large
+  stat values. Body text in Space Grotesk is a defect.
+- **UI: system stack** (`--font-ui`): all controls, body, labels. 400 body · 600 emphasis.
+- **Data: mono** (`--font-mono` + `font-variant-numeric: tabular-nums`): ALL data — ids,
+  metrics, timestamps, logs, terminal, counters, chips.
+- **Scale:** 11px chips/meta · 12px labels (uppercase + `letter-spacing: .1em`) · 13px
+  body/dense-UI · 15px card titles · 19–26px section headings · 28px page titles.
+  Line-height 1.4–1.55 body, 1.1–1.2 headings. Running text ≤ 65ch; headings
+  `text-wrap: balance`.
+
+## 4. Surface, space, shape
+
+- **4px base grid.** Steps: 4 / 8 / 12 / 16 / 24 / 32. Padding defaults: chips 2×8, dense
+  rows 8×12, cards 16–20, stat tiles 12×16.
+- **Radii:** 10px (`--r-sm`) controls/inputs · 14px (`--r-md`) cards/tiles · 18px
+  (`--r-lg`) page-level containers/dialogs · 999px chips/pills. Nothing else.
+- **Elevation = fill step, not border, not shadow.** `--shadow-1` only on true overlays.
+- **Layout primitives:** flex/grid + `gap` only (no margin stacks). Wide content scrolls
+  inside its own `overflow-x: auto` container.
+- **Density modes:** compact only (YAGNI).
 
 ## 5. Component language (canonical atoms — build ONCE, reuse everywhere)
 
 | Atom | Contract |
 |---|---|
-| **Status dot** | 7-8px circle, status token; the smallest unit of "what state is this" |
-| **Chip** | mono 11px, 1px border, radius 999; optional status dot; counts use tabular-nums. **Debt (`docs/backlog.md` BL-41):** S2 shipped three independent inline implementations of this atom (`App.tsx`'s `statChipStyle`, `CommandStrip.tsx`'s `chipBaseStyle`, and the `MONO_FONT` constant redefined in 5 files) instead of one shared `Chip` component — the contract above is what any future extraction must match, not yet what the code reuses |
-| **Card** | `bgElevated` + 1px border + radius 9; title row = 13-15px/600 + right-aligned chip |
+| **Panel** | `--panel` fill, radius `--r-md`, no border/shadow; title row 13px/600 separated by `--hairline` |
+| **Stat tile** (`Stat`) | the canonical overview atom: `--panel-2` fill, radius `--r-md`; muted 11px uppercase label above a bold display-face value (tabular-nums); optional unit/delta/spark; default spark speaks the data voice |
+| **Sparkline** | inline SVG line in a tone color (default data-blue); extremes may use semantic tones; no axes |
+| **Heatmap** | 5-level blue density grid: level 0 = `--panel-2`, 1–3 = `color-mix` of `--data` at 25/50/75%, 4 = `--data`; 12px cells, 4px gap, radius 4; `role="img"` + label; guarded against empty/zero/negative input |
+| **SegmentedPill** | view switcher («Overview | Models», «All | 30d | 7d»): group on `--panel-2` radius 999, active segment = `--panel` fill + `--ink`, inactive = transparent + `--muted`; radiogroup semantics + arrow keys |
+| **Status dot** | 7–8px circle, status tone; the smallest unit of "what state is this" |
+| **Chip** | mono 11px, radius 999, `--panel-2` fill (no border); counts tabular-nums. Debt BL-41 (three inline implementations) unchanged — this contract is the extraction target |
+| **Card** | = Panel; title row = 13–15px/600 + right-aligned chip |
 | **Delta line** | one line under a card title: «what changed since you last looked»; bold the verb |
 | **Agent row** | status dot + mono agent name + plain-text current action |
 | **Inbox item** | amber left-edge, question text, action buttons inline; ONE inbox pattern app-wide |
-| **Progress bar** | 4-5px height, `border` track, `accent` fill; no percentage text unless asked |
-| **Sparkline** | bars/line, `border` color, highlight extremes with status colors; no axes |
-| **Step card** (flows) | kind label (mono uppercase) + name + tool-binding chip (agent=accent, terminal=green, MCP=purple `#bc8cff`) |
-| **Terminal pane** | `#010409` ground, xterm defaults, mono 11-12px chrome |
+| **Banner** | tone `-weak` fill, radius `--r-sm`, no border, 3px left-edge bar in the tone color, body `--ink`, inline secondary-button actions. Info banners = `--info-weak`; amber only for «needs you» (daemon/orchd/storage/file-state banners are info/danger, not amber) |
+| **Nav item** | selected = `--panel-2` fill pill (radius `--r-sm`) + `--ink`; unselected = transparent + `--muted`; hover = half-step fill (`color-mix(in srgb, var(--panel-2) 50%, transparent)`). Accent is NOT used for selection |
+| **Progress bar** | 4–5px height, `--panel-2` track, `--accent` fill; no percentage text unless asked |
+| **Button** | primary = `--accent` fill + `--on-accent` (one per view max); secondary/ghost = `--panel-2` fill (never an outline); destructive = `--danger-weak` fill + `--danger` text with confirm; radius `--r-sm` |
+| **Field / Input** | inputs on `--panel-2` fill, radius `--r-sm`, no border; focus = global accent ring; error line `role="alert"` in `--danger` |
 | **Empty state** | one dim sentence + one primary action; no illustrations |
-| **Dialog / modal overlay** | fixed full-viewport dim backdrop + centered `bgElevated` card, 1px `border`, radius 10, the ONE soft-shadow token (`--shadow-1`, introduced by this atom — the first true overlay in the app); amber top-edge accent marks "a human is needed" (never amber fill decoration elsewhere); one primary (accent-fill) + one secondary (1px-border ghost) button; `role="dialog"` + `aria-modal` + labelled title, focus the primary button on open, `Escape` = the secondary (cancel) action, visible 2px accent focus ring; an in-dialog failure (an action the user took just failed) renders as a `role="alert"` line with `statusExited` (red) text + left-edge, reason + actionable hint, below the body copy — distinct from the amber top-edge, which marks the dialog's own trigger condition, not an in-flight action's outcome; the dialog stays open so the primary button can be retried |
-| **Toast** | queue-of-ONE (`showToast` replaces, never queues — the "one inbox" spirit applied to transient notices), bottom-anchored fixed overlay, `role="alert"`, `statusExited` (red) left-edge accent as the DEFAULT (this atom exists to surface failures honestly, spec §7 error-surfacing contract — not console-only); auto-dismisses ~4s or `dismissToast()`; `--panel` + 1px `--border` + the shared `--shadow-1` token |
-| **Tree row** | indent level × 16px, inline title edit, status select; strategic root pinned, no delete/move |
-| **File tree** | lazy per-level fetch (`listDir` on expand, cached in the store until invalidated — re-expanding never re-fetches; a cache entry vanishing out from under a still-expanded dir auto-refetches with no click needed) + plain scroll-offset windowing over the flattened visible-node list (fixed row height, no virtualization dependency — stays smooth at 10k+ entries, DoD: <500 DOM rows rendered at any time); dirs-first sort then name; ignored entries hidden by default, dimmed (`textDim`) and shown only behind the "show ignored" toggle; per-row `⋯`/right-click context menu (new file/new folder → inline name input, rename, delete → Trash with `confirm`, reveal in Finder, open external); root nodes get New File/Folder only — no rename/delete on a workspace root (§9 "workspace deletion verb" out of scope) |
-| **Preview pane** | read-only mono text under the tree, no editing, no syntax highlighting (YAGNI v1, spec §9); `binary`/`tooLarge`/error each render an explicit placeholder card with a humanized size — never a truncated read presented as the whole file (spec §7); an error placeholder ALSO fires a toast, never console-only |
-| **Command strip** | horizontal row of Chip atoms under the active terminal, one per recent shell command (OSC-133 `command_events`, spec §6.3): a finished command renders ✓ (`statusRunning` green, `exitCode===0`) or ✗ + the code (`statusExited` red); a command still in flight (a `started` with no matching `finished` yet) renders a Status-dot atom + "running" instead of an outcome glyph; no events yet (or a session that predates the `command_events` table) is NOT an error — a calm dim one-liner, never a blank gap or a toast; a fetch failure fires a toast (spec §7 error-surfacing contract) and renders nothing |
-| **Lifecycle chip** | mono 11px `<select>` styled as a pill (999px radius, 1px `border`), cycling a LOCKED enum in its declared order only (`IdeaLifecycle`'s six values, `FitVerdict`'s three, `InsightStatus`'s three — spec §4.2); one accent on hover/focus, no amber (amber stays reserved for "needs you"); an archiving transition that has a server-side precondition (Insight `status → archived` requires non-empty `resolutionReasoning`) is never fired straight from the select — it opens an inline reasoning field + confirm button below the row instead, blocking with a `statusExited` inline message on an empty reasoning rather than round-tripping a doomed request (`IdeasList.tsx`/`InsightsList.tsx`, S3 §10) |
-| **Policy form** | numeric cap (empty=∞), chip inputs for classes/allowlist; client mirrors server validation |
-| **File-state banner** | info banner (not amber): ExternallyModified → [Accept]; Missing → [Recreate] |
-| **Project group row** | bold project header + nested workspace rows; «No project» group last |
-| **Quick-capture overlay** | ⌘K portal; title+body+project select; Enter submits; Esc closes |
-| **Graph node card** | `bgElevated` + 1px `border`, radius 6, mono-uppercase kind label above a 12px body-face title; an `entityRef` node reads «ref · {entityType}» instead of its own kind and shows «source deleted» in place of the label when orphaned (D3); an `isExternal` (cross-project ghost) node is dimmed (60% opacity) with a dashed border — read-only, click navigates to its own project (`openProject`), never mutated from the panel it's dimmed into; orphaned nodes get a `statusExited` border instead of the default; a search-matched node gets a 2px `accent` outer ring, never a fill change |
-| **Graph toolbar** | one row above the canvas: kind `<select>` (every `GraphNodeKind` except `entityRef` — never hand-created) + [Add] primary button; [Delete selected] secondary button acting on the canvas's own multi-select; a right-aligned search `<input>`, debounced, highlighting matches via the match-ring above — never a separate results list; every mutating control (kind select, [Add], [Delete selected]) is `disabled` while `orchdDown`, mirroring `RulesetPanel`'s degradation contract exactly — the search input stays live (it's a read) |
-
-Buttons: primary = accent fill (one per view maximum), secondary = 1px border ghost; destructive
-= red border ghost with confirm. Toggles, not checkboxes, for enable/disable.
+| **Dialog** | `--panel` fill, radius `--r-lg`, the ONE `--shadow-1`; amber top-edge marks «a human is needed» (never amber fill elsewhere); `role="dialog"` + `aria-modal` + labelled title; Escape = cancel; in-dialog failure = `role="alert"` red line below body (dialog stays open for retry) |
+| **Toast** | queue-of-ONE (`showToast` replaces, never queues), bottom-anchored, `role="alert"`, red left-edge default (exists to surface failures honestly); auto-dismiss ~4s; `--panel` fill + `--shadow-1` |
+| **Step card** (flows) | kind label (mono uppercase) + name + tool-binding chip (agent=accent, terminal=green, MCP=purple `#bc8cff`) |
+| **Terminal pane** | `#010409` ground in BOTH themes, xterm defaults, mono 11–12px chrome |
+| **Tree row / File tree / Preview pane / Command strip / Lifecycle chip / Policy form / Project group row / Quick-capture overlay / Graph node card / Graph toolbar** | behavior contracts unchanged from v1 (see git history of this doc for the full text); visual vocabulary migrates to fill/hairline: row separators = `--hairline`, dimming = `--muted`, error edges = `--danger`, match ring = 2px `--accent` |
 
 ## 6. UX laws
 
-1. **Delta-first:** every returning view leads with what changed («+4 tasks done · fix
-   deployed overnight»), then current state.
-2. **One inbox:** all human-needed decisions (escalations, gates, approvals) land in THE inbox —
-   never scattered as per-view dialogs. Badge count = actionable items only.
-3. **Drill-down, never pogo:** grid → project → artifact in place (panels/sheets), preserving
-   context; back is always one gesture.
-4. **Every async action shows its truth:** started (immediate optimistic chip) → running (live
-   status from events, not spinners) → result (delta line). Failures use the error-surfacing
-   contract (spec §13 table) — a toast with the mapped human message, never console-only.
-5. **Observability is a first-class screen, not a debug view:** flow-run history renders with the
-   same care as the home screen (step timeline, per-step I/O drill-down, cost/duration chips).
-6. **Quick capture from anywhere:** ⌘K palette — idea capture, project jump, run workflow. Zero
-   navigation cost for the highest-frequency action.
-7. **Reduced motion respected;** animation only where it carries meaning (state transition,
-   attention pull to a new inbox item) — 150-200ms ease-out, nothing looping.
-8. **Focus visible** on every interactive element (2px accent outline offset 2px); contrast ≥
-   WCAG AA against `bg`/`bgElevated`.
+1. **Delta-first:** every returning view leads with what changed, then current state.
+2. **One inbox:** all human-needed decisions land in THE inbox. Badge count = actionable
+   items only.
+3. **Drill-down, never pogo:** grid → project → artifact in place; back is one gesture.
+4. **Every async action shows its truth:** started → running (live status, not spinners) →
+   result (delta line). Failures use the error-surfacing contract — a toast with the
+   mapped human message, never console-only.
+5. **Observability is a first-class screen:** flow-run history renders with the same care
+   as the home screen.
+6. **Quick capture from anywhere:** ⌘K palette — idea capture, project jump, run workflow.
+7. **Reduced motion respected;** animation only where it carries meaning, 150–200ms
+   ease-out, nothing looping.
+8. **Focus visible** on every interactive element (2px accent outline offset 2px, global
+   `:focus-visible` rule in `tokens.css`); contrast ≥ WCAG AA enforced by test.
 
 ## 7. Writing rules (copy is design)
 
-- Name things by what the owner recognizes: «Hot questions», not «escalation queue»; «To backlog»,
-  not «accept insight». UI copy language: English everywhere — the owner-facing app, code, logs,
-  and ids are all English (O-2).
+- Name things by what the owner recognizes: «Hot questions», not «escalation queue». UI
+  copy language: English everywhere (O-2).
 - A control says what happens («Deploy», toast «Deployed»). Errors say what broke and what
   to do next — no apologies, no vagueness.
 - Numbers carry units and context («$1.87 · 42 min», «214 users affected»).
 
 ## 8. Process rule
 
-Every new feature spec includes a «Design» section that references THIS doc and lists: which
-canonical atoms it reuses, which new atoms it introduces (new atom = this doc gets a row in the
-same change), and its keyboard path. A feature that invents a parallel visual language fails
-review.
+Every new feature spec includes a «Design» section that references THIS doc and lists:
+which canonical atoms it reuses, which new atoms it introduces (new atom = this doc gets a
+row in the same change), and its keyboard path. A feature that invents a parallel visual
+language fails review.
+
+## 9. Migration status (v1 → v2)
+
+Shipped on the new language: `tokens.css`, `theme.ts`, all `primitives.tsx` atoms.
+Everything in `src/components/` and `src/App.tsx` still renders legacy `--border`
+semantics (gracefully — the alias resolves to hairline values) until migrated view-by-view
+in the next cycle. Migration DoD per view: no `--border`/`--border-strong` reads, outer
+borders removed in favor of fill steps, dense rows on `--hairline`, view switchers on
+`SegmentedPill`.

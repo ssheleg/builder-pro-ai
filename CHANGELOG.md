@@ -2,6 +2,29 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [Unreleased] — Soft Control Room design v2 (2026-07-20)
+
+New visual base (spec `docs/superpowers/specs/2026-07-20-soft-control-room-design.md`,
+guidebook [`docs/design-system.md`](docs/design-system.md)): warm paper neutrality — depth
+by fill steps instead of borders/shadows.
+
+### Changed
+- **Token palette rewritten** (`src/ui/tokens.css`, light + dark): ivory/charcoal surfaces,
+  terracotta `--accent` (actions) + blue `--data` voice (charts/heatmap), new `--hairline`
+  for in-container separators, soft radii 10/14/18, `--fs-3xl`. `--border`/`--border-strong`
+  are now deprecated aliases of hairline values (migration bridge for unmigrated views).
+  All text pairings AA-verified by the extended contrast test.
+- **Primitives restyled** (no API changes): Panel/Dialog drop outer borders; `Stat` is the
+  canonical stat tile (`--panel-2` fill, display-face value, data-voice spark); ghost
+  buttons and inputs become `--panel-2` fills instead of outlines.
+- **Typography:** Space Grotesk 500/700 bundled (`@fontsource/space-grotesk`) as the
+  display face for page titles, section headings and stat values.
+
+### Added
+- **`SegmentedPill` atom** — pill view switcher with radiogroup semantics + arrow keys.
+- **`Heatmap` atom** — 5-level blue density grid on the `--data` voice (color-mix), safe on
+  empty/zero/negative input.
+
 ## [Unreleased] — UX scenario base + audit fix pass (2026-07-19)
 
 super-ux adopted: [`docs/ux/scenarios.md`](docs/ux/scenarios.md) is now the source of truth for
