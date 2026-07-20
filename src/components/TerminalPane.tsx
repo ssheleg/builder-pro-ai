@@ -90,8 +90,9 @@ export function TerminalPane(props: {
             alignItems: "center",
             gap: "var(--sp-3)",
             padding: "var(--sp-2) var(--sp-3)",
-            borderLeft: "3px solid var(--danger)",
-            borderRadius: "var(--radius-sm, 4px)",
+            // Tone edge as an inset shadow — a border-left under a radius renders as a wedge.
+            boxShadow: "inset 3px 0 0 var(--danger)",
+            borderRadius: "var(--r-sm)",
             background: "var(--danger-weak)",
             color: "var(--danger)",
             fontSize: "var(--fs-sm)",
@@ -104,9 +105,9 @@ export function TerminalPane(props: {
             data-testid="terminal-attach-retry"
             onClick={() => void manager.attach(sessionId)}
             style={{
-              border: "1px solid var(--danger)",
-              borderRadius: "var(--radius-sm, 4px)",
-              background: "transparent",
+              border: "none",
+              borderRadius: "var(--r-sm)",
+              background: "var(--panel)",
               color: "var(--danger)",
               cursor: "pointer",
               fontSize: "var(--fs-sm)",

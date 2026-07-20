@@ -86,7 +86,8 @@ const bannerStyle: CSSProperties = {
   alignItems: "center",
   gap: "var(--sp-3)",
   padding: "var(--sp-2) var(--sp-3)",
-  borderLeft: "3px solid var(--info)",
+  // Tone edge as an inset shadow — a border-left under a radius renders as a curved wedge.
+  boxShadow: "inset 3px 0 0 var(--info)",
   background: "var(--info-weak)",
   color: "var(--ink)",
   fontSize: "var(--fs-md)",

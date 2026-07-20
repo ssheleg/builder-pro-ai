@@ -37,12 +37,13 @@ export function Toast(): JSX.Element | null {
         gap: "var(--sp-3)",
         padding: "var(--sp-3) var(--sp-4)",
         borderRadius: "var(--r-md)",
-        borderLeft: "3px solid var(--danger)",
         background: "var(--panel)",
         color: "var(--ink)",
         fontSize: "var(--fs-md)",
         lineHeight: 1.5,
-        boxShadow: "var(--shadow-1)",
+        // The tone edge is an inset shadow, not a border-left: a 3px border under a 14px radius
+        // renders as a curved wedge, while an inset shadow follows the corner cleanly.
+        boxShadow: "inset 3px 0 0 var(--danger), var(--shadow-1)",
         zIndex: 1100,
       }}
     >
