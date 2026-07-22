@@ -872,9 +872,10 @@ in different lifecycle states.
 - **Steps:**
   1. User enables the CEO for the project
   2. User selects which confirmation classes are delegated and reviews the effective caps (spend, calls/min) the CEO inherits from policy
-  3. User saves
-- **Expected result:** delegation scope persists with the project policy; a summary line states exactly what the CEO may decide ("CEO may: {classes} within {caps}"); disabled by default until explicitly enabled
-- **UI elements:** CEO enable toggle, delegated-class checkboxes, inherited-caps summary, "Save policy" (shared), scope summary line
+  3. User writes the CEO instruction text (free-form markdown the CEO must follow) and optional custom CEO rules
+  4. User saves
+- **Expected result:** delegation scope, instruction text, and custom rules persist with the project policy; an information-access summary states what the CEO reads ("CEO reads: project goals, tasks, ideas, insights, graph, rules + your instruction"); a scope summary states exactly what it may decide ("CEO may: {classes} within {caps}"); disabled by default until explicitly enabled
+- **UI elements:** CEO enable toggle, delegated-class checkboxes, inherited-caps summary, CEO instruction textarea, custom-rules editor, info-access summary line, scope summary line, "MCP tools for the CEO — soon" placeholder note, "Save policy" (shared)
 - **States covered:** success, error
 - **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → controls disabled; empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
 - **Status:** validated

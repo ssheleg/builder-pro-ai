@@ -644,11 +644,24 @@ Marked by risk dimension: **D**esirability / **V**iability / **F**easibility /
 - **A-6 (D/U) — RESOLVED 2026-07-22.** The operator confirmed a dedicated
   per-project documentation surface IS wanted (graph + rules + workspace
   files are not enough). Resolved into **ST-041 / SCN-054** under JTBD-06.
-- **A-7 (D/F) ⚠** — The CEO delegation boundary is definable: which
-  confirmation classes / question kinds are safely delegable, and how the CEO
-  grounds answers in project rules without hallucinating authority. Must be
-  specified (and probably narrowed) BEFORE building ST-034 — a wrong
-  autonomous decision is the single biggest trust risk in JTBD-10.
+- **A-7 (D/F) — RESOLVED 2026-07-22 (operator-stated).** The CEO's decision
+  model is defined. **Information sources, in priority order:**
+  1. **Configuration** — the delegation scope the operator sets (classes,
+     caps — SCN-046);
+  2. **Project data** — read access to the project's goals, tasks, ideas,
+     insights, graph, and rules;
+  3. **Custom CEO rules** — additional operator-defined rules specific to
+     the supervisor;
+  4. **Operator instruction text** — free-form text the operator writes;
+     the CEO must use it as given;
+  5. **(future)** MCP tools and other extensions.
+  **Decision rule:** for every agent question the CEO decides exactly one of
+  two things — *answer itself* (when the answer is grounded in sources 1–4)
+  or *delegate to the operator* (escalate). An answer it cannot ground in a
+  configured source is an escalation by definition — the CEO never invents
+  authority. Remaining build risk: grounding quality — covered by the
+  decision log (every answer cites its source) and SCN-047's
+  "never guesses" rule.
 - **A-8 (F)** — Token/cost data for terminal agents (ST-038) is obtainable:
   Claude Code exposes usage locally (session JSONL / OTel). Feasibility spike
   needed; if a source is unavailable, scope narrows to MCP-call costs
