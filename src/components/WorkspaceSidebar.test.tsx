@@ -4,9 +4,11 @@ import { render, screen, cleanup, act, fireEvent, within, waitFor } from "@testi
 
 const pickFolderMock = vi.fn();
 const createWorkspaceMock = vi.fn();
+const createSessionMock = vi.fn();
 vi.mock("../ipc/commands", () => ({
   pickFolder: (...a: unknown[]) => pickFolderMock(...a),
   createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
+  createSession: (...a: unknown[]) => createSessionMock(...a),
 }));
 
 const orchdAddProjectWorkspaceMock = vi.fn();
@@ -46,6 +48,7 @@ beforeEach(() => {
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
   createWorkspaceMock.mockResolvedValue({ id: "w3", name: "gamma", rootPath: "/p/gamma", roots: ["/p/gamma"] });
+  createSessionMock.mockReset().mockResolvedValue({ id: "s-auto" });
   orchdAddProjectWorkspaceMock.mockReset().mockResolvedValue(makeProject());
   orchdCreateProjectMock.mockReset().mockResolvedValue(makeProject());
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
@@ -144,6 +147,50 @@ describe("WorkspaceSidebar", () => {
     });
     expect(useAppStore.getState().toast).toBe(
       strings.chrome.sidebar.addWorkspaceFailed(strings.errors.command.disconnected),
+    );
+  });
+
+  // First-run fast-path (SCN-056 / IMP-01): cold start + add workspace => the first terminal is
+  // auto-spawned so the aha (a live terminal) needs no manual "+ New terminal" click.
+  it("SCN-056: cold start (zero sessions) — adding a workspace auto-spawns the first terminal", async () => {
+    pickFolderMock.mockResolvedValue("/Users/me/projects/my-app");
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+      await Promise.resolve();
+    });
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    expect(createSessionMock).toHaveBeenCalledWith("w3");
+    expect(useAppStore.getState().view).toBe("workspace");
+  });
+
+  it("SCN-056: steady state (sessions exist) — adding a workspace spawns NO surprise terminal", async () => {
+    useAppStore.setState(
+      { sessions: { s1: { id: "s1" } as unknown as never } },
+      false,
+    );
+    pickFolderMock.mockResolvedValue("/Users/me/projects/my-app");
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+      await Promise.resolve();
+    });
+    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().view).toBe("workspace");
+  });
+
+  it("SCN-056: a failed auto-spawn degrades to the manual path — workspace opens, honest toast, never a blocked first run", async () => {
+    pickFolderMock.mockResolvedValue("/Users/me/projects/my-app");
+    createSessionMock.mockReset().mockRejectedValueOnce({ kind: "disconnected" });
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+      await Promise.resolve();
+    });
+    // navigation already happened — the failure only costs the shortcut
+    expect(useAppStore.getState().view).toBe("workspace");
+    expect(useAppStore.getState().toast).toBe(
+      strings.terminal.tabs.newTerminalFailed(strings.errors.command.disconnected),
     );
   });
 

@@ -1041,4 +1041,4 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** workspace creation errors — as SCN-002; auto-spawn fails → workspace view still opens with "+ New terminal" available and an honest toast (degradation = today's manual path, never a blocked first run)
 - **Status:** validated
-- **Coverage:** none yet
+- **Coverage:** src/components/WorkspaceSidebar.tsx:115-146 (fast-path in onAdd), src/components/WorkspaceSidebar.test.tsx (3 SCN-056 tests), src/strings.ts:201

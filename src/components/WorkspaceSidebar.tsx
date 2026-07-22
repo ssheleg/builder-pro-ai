@@ -1,6 +1,6 @@
 import { useState, type JSX } from "react";
 import { useAppStore } from "../store/store";
-import { pickFolder, createWorkspace } from "../ipc/commands";
+import { pickFolder, createWorkspace, createSession } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";
 import { orchdAddProjectWorkspace, describeOrchdError } from "../ipc/orchd";
 import type { Project } from "../ipc/orchd-types";
@@ -116,11 +116,28 @@ export function WorkspaceSidebar(props: {
     // `pickFolder`/`createWorkspace` are sessiond round-trips — a rejection (daemon down, invalid
     // root) must surface an honest toast, never a silent no-op (BL-93 / P-03). A cancelled picker
     // (`null`) is NOT an error — it returns quietly before the catch.
+    //
+    // First-run fast-path (SCN-056 / IMP-01): when the app holds ZERO sessions anywhere, the only
+    // reason to add a workspace is to reach a terminal — so we auto-spawn the first one instead of
+    // demanding a manual "+ New terminal" click (peak-end: aha one step earlier, JRN-01/#4). The
+    // count is captured BEFORE the round-trips so a concurrently-pushed session cannot flip the
+    // decision mid-flight. Steady state (any session already exists) is untouched — no surprise
+    // terminals. The spawned session announces itself via session://created (App upserts +
+    // auto-activates); a failed spawn degrades to today's manual path: the workspace view is
+    // already open, we only surface the same honest toast "+ New terminal" would.
+    const hadSessions = Object.keys(useAppStore.getState().sessions).length > 0;
     try {
       const dir = await pickFolder();
       if (dir === null) return; // cancelled -> no-op
       const ws = await createWorkspace(basename(dir), dir);
       onSelectWorkspaceAndNavigate(ws.id);
+      if (!hadSessions) {
+        try {
+          await createSession(ws.id);
+        } catch (e) {
+          showToast(strings.terminal.tabs.newTerminalFailed(describeCommandError(e)));
+        }
+      }
     } catch (e) {
       showToast(strings.chrome.sidebar.addWorkspaceFailed(describeCommandError(e)));
     }
