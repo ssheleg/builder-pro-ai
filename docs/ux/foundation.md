@@ -154,10 +154,10 @@ Opportunity priority = Frequency × Severity × Solvability where scored.
 | # | Stage | User action | Touchpoint | Emotion | Pain | Opportunity |
 |---|-------|------------|------------|---------|------|-------------|
 | 1 | Before | Returns after time away; agents ran unattended | — | 2 | no idea which agent stalled | — |
-| 2 | Scan | Reads "Needs you / Running / Recently finished" | Home groups + stat tiles (SCN-004) | 4 | trust that "waiting" is live, not stale | tone-change tiles when live/waiting > 0 (done) |
+| 2 | Scan | Reads "Needs you / Running / Recently finished" | Home groups + stat tiles (SCN-004 → SCN-055) | 4 | the agent's QUESTION is invisible — must open each session to judge priority | question preview + escalation reason on the row (SCN-055) |
 | 3 | Confirm | Reads status dots per session | StatusDot (SCN-016) | 4 | a stale event could mislead | "exited always wins" guarantee (done) |
-| 4 | Act | Clicks "Go →" on a blocked row | Home row → workspace + focus terminal (SCN-004) | 5 | none | one-click jump lands focus in the PTY (done) |
-| 5 | After | Unblocks agent, returns to Home for the next | — | 4 | must re-scan manually | (assumption A-1: a persistent "needs you" count) |
+| 4 | Act | Clicks "Go →" on a blocked row | Home row → workspace + focus terminal (SCN-004 → SCN-055) | 5 | none | one-click jump lands focus in the PTY (done) |
+| 5 | After | Unblocks agent, returns to Home for the next | "since you left" digest + needs-you ranking (SCN-055) | 4 | must re-scan manually | digest + ranked escalations resolve A-1 fully (SCN-055, with SCN-048 badge) |
 
 ### JRN-03: Solo Builder — run agents in parallel (JTBD-02)
 | # | Stage | User action | Touchpoint | Emotion | Pain | Opportunity |
@@ -618,6 +618,18 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given orchd is down, when I view the tab, then mutations disable while reading stays live.
 - **Priority:** should
 - **Status:** validated *(SCN-054 draft — design awaiting operator review)*
+
+### ST-042: Triage the autonomous operation from Home *(stated 2026-07-23)*
+- **Story:** As P-01/P-03, I want Home to rank everything that needs me — escalations with the agent's actual question visible — and to summarize what happened while I was away, so that I act on the top blocker in seconds without opening each session.
+- **Traces:** JTBD-01, JTBD-10, JRN-02/#2, JRN-10/#6
+- **Acceptance criteria:**
+  - Given escalations exist, when I open Home, then each shows the agent's question text and the escalation reason (out-of-scope class / no next task) without navigating, ranked above running and finished.
+  - Given time away with CEO activity, when I open Home, then a "since you left" digest (decisions / hand-offs / open escalations) renders, links to the decision log, and clears once seen.
+  - Given running sessions, when I scan Home, then each row shows project · current task · elapsed time.
+  - Given a completed hand-off, when I scan Home, then it reads "done {task} → started {next} (CEO)", not just an exited terminal.
+  - Given nothing needs me, when I open Home, then an honest "nothing needs you" state shows.
+- **Priority:** must
+- **Status:** validated *(SCN-055 draft — supersedes SCN-004 on ship)*
 
 ---
 

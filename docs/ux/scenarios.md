@@ -60,6 +60,7 @@
 | SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | — |
 | SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | — |
 | SCN-054 | Project documentation | docs | P-01 | ST-041 | draft | — |
+| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | draft | — |
 
 ## Personas
 
@@ -999,5 +1000,27 @@ in different lifecycle states.
 - **UI elements:** Docs tab, document list, "+ doc" button, name input, markdown editor, edit/preview toggle, "Save" button, "Delete" + window.confirm, "reveal file" button, empty state "No documents in this project yet."
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** empty name → "+ doc" blocked; save rejects → inline + toast, editor content preserved; file changed externally → "file changed externally" + Accept banner; file lost → "file lost" + Recreate (SCN-036 pattern); orchd down → Save/Delete/Accept/Recreate disabled, reading and "reveal file" stay live
+- **Status:** draft
+- **Coverage:** none yet
+
+## home (v2)
+
+### SCN-055: Home v2 — attention hub
+- **Persona:** P-01
+- **Feature:** home
+- **Traces:** ST-042 (JTBD-01, JTBD-10, JRN-02/#2, JRN-10/#6)
+- **Entry point:** app launch or sidebar "⌂ Home"; supersedes SCN-004 on ship (SCN-004 → retired), SCN-005 goals glance folds in unchanged
+- **Preconditions:** sessions exist; CEO may be enabled (all blocks degrade honestly when it is not)
+- **Steps:**
+  1. User opens Home after time away and reads the "Since you left" strip (decisions / hand-offs / open escalations; "open log" link)
+  2. User scans "Needs you" — every escalation card shows the agent's question text and a reason badge ("out of scope: {class}" / "no next task" / "waiting for input")
+  3. User clicks "Go →" on the top card, answers in the terminal, returns
+  4. User scans "Running" — each row shows project · current task · elapsed
+  5. User scans "Continued by CEO" hand-offs ("done {task} → started {next}") and finished rows
+  6. User glances the Goals section (as SCN-005)
+- **Expected result:** attention is ranked: escalations first (question visible without navigation), then running with progress, then hand-offs/finished; stat tiles read needs-you / running / CEO answered today / spend today (tone shifts when needs-you > 0); the digest clears once seen; CEO-off degrades to plain waiting rows (SCN-004 behavior) with no dead chrome
+- **UI elements:** "Since you left" strip + "open log" link, escalation cards (question preview, reason badge, "Go →"), waiting rows, running rows (project · task · elapsed), hand-off rows, finished rows, stat tiles ×4, Goals section, empty state "Nothing needs you."
+- **States covered:** loading, empty, success
+- **Errors & recovery:** orchd down → digest/CEO/task data show "orchestrator unavailable" note while session rows (sessiond) stay live — degradation equals current Home; no CEO activity while away → digest suppressed entirely (no empty ceremony); stale session state impossible (exited-wins, SCN-016)
 - **Status:** draft
 - **Coverage:** none yet
