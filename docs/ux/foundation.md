@@ -264,7 +264,7 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given the sidebar, when I click "+ Add workspace" and pick a folder, then a workspace is created from the folder name and the app navigates into it.
   - Given the create fails, when it rejects, then a toast names the reason (disconnected / incompatible / too large / internal).
 - **Priority:** must
-- **Status:** delivered *(SCN-002; fast-path extension SCN-056 draft)*
+- **Status:** delivered *(SCN-002; fast-path extension SCN-056 validated)*
 
 ### ST-003: Capture an idea without breaking flow
 - **Story:** As P-01/P-02, I want a global one-keystroke capture, so that ideas don't interrupt my terminal work.
@@ -617,7 +617,7 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given a doc file changed or lost externally, when I open the tab, then Accept/Recreate banners surface it (the Rules-tab file pattern) — never silent divergence.
   - Given orchd is down, when I view the tab, then mutations disable while reading stays live.
 - **Priority:** should
-- **Status:** validated *(SCN-054 draft — design awaiting operator review)*
+- **Status:** validated *(SCN-054 validated 2026-07-23)*
 
 ### ST-042: Triage the autonomous operation from Home *(stated 2026-07-23)*
 - **Story:** As P-01/P-03, I want Home to rank everything that needs me — escalations with the agent's actual question visible — and to summarize what happened while I was away, so that I act on the top blocker in seconds without opening each session.
@@ -629,7 +629,7 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given a completed hand-off, when I scan Home, then it reads "done {task} → started {next} (CEO)", not just an exited terminal.
   - Given nothing needs me, when I open Home, then an honest "nothing needs you" state shows.
 - **Priority:** must
-- **Status:** validated *(SCN-055 draft — supersedes the current Home triage scenario on ship)*
+- **Status:** validated *(SCN-055 validated 2026-07-23 — supersedes the current Home triage scenario on ship)*
 
 ---
 

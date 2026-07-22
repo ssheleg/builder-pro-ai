@@ -59,9 +59,9 @@
 | SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | validated | — |
 | SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | — |
 | SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | — |
-| SCN-054 | Project documentation | docs | P-01 | ST-041 | draft | — |
-| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | draft | — |
-| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | draft | — |
+| SCN-054 | Project documentation | docs | P-01 | ST-041 | validated | — |
+| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | — |
+| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | — |
 
 ## Personas
 
@@ -1001,7 +1001,7 @@ in different lifecycle states.
 - **UI elements:** Docs tab, document list, "+ doc" button, name input, markdown editor, edit/preview toggle, "Save" button, "Delete" + window.confirm, "reveal file" button, empty state "No documents in this project yet."
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** empty name → "+ doc" blocked; save rejects → inline + toast, editor content preserved; file changed externally → "file changed externally" + Accept banner; file lost → "file lost" + Recreate (SCN-036 pattern); orchd down → Save/Delete/Accept/Recreate disabled, reading and "reveal file" stay live
-- **Status:** draft
+- **Status:** validated
 - **Coverage:** none yet
 
 ## home (v2)
@@ -1023,7 +1023,7 @@ in different lifecycle states.
 - **UI elements:** "Since you left" strip + "open log" link, escalation cards (question preview, reason badge, "Go →", "open backlog →" on no-next-task cards), waiting rows, running rows (project · task · elapsed), hand-off rows, finished rows, stat tiles ×4, Goals section, empty state "Nothing needs you."
 - **States covered:** loading, empty, success
 - **Errors & recovery:** orchd down → digest/CEO/task data show "orchestrator unavailable" note while session rows (sessiond) stay live — degradation equals current Home; no CEO activity while away → digest suppressed entirely (no empty ceremony); stale session state impossible (exited-wins, SCN-016)
-- **Status:** draft
+- **Status:** validated
 - **Coverage:** none yet
 
 ### SCN-056: First-run fast-path — terminal auto-spawn
@@ -1040,5 +1040,5 @@ in different lifecycle states.
 - **UI elements:** "+ Add workspace" button, OS folder picker, auto-created session tab, focused terminal pane
 - **States covered:** success, error
 - **Errors & recovery:** workspace creation errors — as SCN-002; auto-spawn fails → workspace view still opens with "+ New terminal" available and an honest toast (degradation = today's manual path, never a blocked first run)
-- **Status:** draft
+- **Status:** validated
 - **Coverage:** none yet
