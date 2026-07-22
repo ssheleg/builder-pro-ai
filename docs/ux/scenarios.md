@@ -61,6 +61,7 @@
 | SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | — |
 | SCN-054 | Project documentation | docs | P-01 | ST-041 | draft | — |
 | SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | draft | — |
+| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | draft | — |
 
 ## Personas
 
@@ -76,7 +77,7 @@ in different lifecycle states.
 ### SCN-001: First launch — empty app
 - **Persona:** P-02
 - **Feature:** onboarding
-- **Traces:** ST-001 (JTBD-09, JRN-01/#2)
+- **Traces:** ST-001, FLW-01 (JTBD-09, JRN-01/#2)
 - **Entry point:** first launch, no saved state
 - **Preconditions:** none
 - **Steps:**
@@ -91,7 +92,7 @@ in different lifecycle states.
 ### SCN-002: Add first workspace
 - **Persona:** P-02
 - **Feature:** onboarding
-- **Traces:** ST-002 (JTBD-09, JRN-01/#3)
+- **Traces:** ST-002, FLW-01 (JTBD-09, JRN-01/#3)
 - **Entry point:** sidebar "+ Add workspace" button
 - **Preconditions:** none
 - **Steps:**
@@ -107,7 +108,7 @@ in different lifecycle states.
 ### SCN-003: Capture first idea with ⌘K
 - **Persona:** P-02
 - **Feature:** capture
-- **Traces:** ST-003 (JTBD-04, JRN-01/#5)
+- **Traces:** ST-003, FLW-02 (JTBD-04, JRN-01/#5)
 - **Entry point:** global ⌘K hotkey (any view)
 - **Preconditions:** orchd connected
 - **Steps:**
@@ -126,7 +127,7 @@ in different lifecycle states.
 ### SCN-004: Home attention triage
 - **Persona:** P-01
 - **Feature:** home
-- **Traces:** ST-004 (JTBD-01, JRN-02/#2)
+- **Traces:** ST-004, FLW-03 (JTBD-01, JRN-02/#2)
 - **Entry point:** app launch or sidebar "⌂ Home"
 - **Preconditions:** sessions exist across workspaces
 - **Steps:**
@@ -143,7 +144,7 @@ in different lifecycle states.
 ### SCN-005: Home goals overview
 - **Persona:** P-01
 - **Feature:** home
-- **Traces:** ST-005 (JTBD-06, JRN-07/#4)
+- **Traces:** ST-005, FLW-03 (JTBD-06, JRN-07/#4)
 - **Entry point:** Home view, "Goals" section below attention groups
 - **Preconditions:** at least one active (non-archived) project
 - **Steps:**
@@ -161,7 +162,7 @@ in different lifecycle states.
 ### SCN-006: Theme toggle cycle
 - **Persona:** P-01
 - **Feature:** chrome
-- **Traces:** ST-006 (JTBD-06)
+- **Traces:** ST-006, FLW-04 (JTBD-06)
 - **Entry point:** sidebar footer ThemeToggle button
 - **Preconditions:** none
 - **Steps:**
@@ -176,7 +177,7 @@ in different lifecycle states.
 ### SCN-007: Sidebar navigation
 - **Persona:** P-01
 - **Feature:** chrome
-- **Traces:** ST-007 (JTBD-01, JTBD-06)
+- **Traces:** ST-007, FLW-04 (JTBD-01, JTBD-06)
 - **Entry point:** left sidebar (always visible)
 - **Preconditions:** projects and workspaces exist
 - **Steps:**
@@ -192,7 +193,7 @@ in different lifecycle states.
 ### SCN-008: Link workspace to project from sidebar
 - **Persona:** P-01
 - **Feature:** chrome
-- **Traces:** ST-007 (JTBD-06)
+- **Traces:** ST-007, FLW-04 (JTBD-06)
 - **Entry point:** «No project» sidebar group, inline link select on an unlinked workspace
 - **Preconditions:** an unlinked workspace and at least one active project exist
 - **Steps:**
@@ -210,7 +211,7 @@ in different lifecycle states.
 ### SCN-009: Create project
 - **Persona:** P-01
 - **Feature:** projects
-- **Traces:** ST-008 (JTBD-06, JRN-07/#1)
+- **Traces:** ST-008, FLW-05 (JTBD-06, JRN-07/#1)
 - **Entry point:** sidebar "+ project" button
 - **Preconditions:** none (workspace can be created inline)
 - **Steps:**
@@ -228,7 +229,7 @@ in different lifecycle states.
 ### SCN-010: Project overview & workspace management
 - **Persona:** P-01
 - **Feature:** projects
-- **Traces:** ST-008 (JTBD-06, JRN-07/#2)
+- **Traces:** ST-008, FLW-05 (JTBD-06, JRN-07/#2)
 - **Entry point:** project header in sidebar → project panel
 - **Preconditions:** project exists
 - **Steps:**
@@ -245,7 +246,7 @@ in different lifecycle states.
 ### SCN-011: Export / import project
 - **Persona:** P-01
 - **Feature:** projects
-- **Traces:** ST-009 (JTBD-06, JRN-07/#5)
+- **Traces:** ST-009, FLW-06 (JTBD-06, JRN-07/#5)
 - **Entry point:** project panel Overview tab, export/import controls
 - **Preconditions:** project exists
 - **Steps:**
@@ -262,7 +263,7 @@ in different lifecycle states.
 ### SCN-012: Archive and un-archive project
 - **Persona:** P-01
 - **Feature:** projects
-- **Traces:** ST-009 (JTBD-06, JRN-07/#5)
+- **Traces:** ST-009, FLW-06 (JTBD-06, JRN-07/#5)
 - **Entry point:** project panel "Danger zone" → "Archive project"
 - **Preconditions:** project not archived
 - **Steps:**
@@ -281,7 +282,7 @@ in different lifecycle states.
 ### SCN-013: Open a new terminal
 - **Persona:** P-01
 - **Feature:** terminals
-- **Traces:** ST-010 (JTBD-02, JRN-03/#1)
+- **Traces:** ST-010, FLW-07 (JTBD-02, JRN-03/#1)
 - **Entry point:** workspace view tab strip "+ New terminal"
 - **Preconditions:** a workspace is active
 - **Steps:**
@@ -296,7 +297,7 @@ in different lifecycle states.
 ### SCN-014: Switch terminal tabs (keep-alive)
 - **Persona:** P-01
 - **Feature:** terminals
-- **Traces:** ST-010 (JTBD-02, JRN-03/#2)
+- **Traces:** ST-010, FLW-07 (JTBD-02, JRN-03/#2)
 - **Entry point:** tab strip with 2+ sessions
 - **Preconditions:** multiple live sessions
 - **Steps:**
@@ -311,7 +312,7 @@ in different lifecycle states.
 ### SCN-015: Close a terminal
 - **Persona:** P-01
 - **Feature:** terminals
-- **Traces:** ST-010 (JTBD-02, JRN-03/#5)
+- **Traces:** ST-010, FLW-07 (JTBD-02, JRN-03/#5)
 - **Entry point:** × button on a session tab
 - **Preconditions:** session exists
 - **Steps:**
@@ -326,7 +327,7 @@ in different lifecycle states.
 ### SCN-016: Session lifecycle indicators
 - **Persona:** P-01
 - **Feature:** terminals
-- **Traces:** ST-011 (JTBD-01, JRN-02/#3)
+- **Traces:** ST-011, FLW-07 (JTBD-01, JRN-02/#3)
 - **Entry point:** any surface with StatusDot (tabs, Home rows)
 - **Preconditions:** session running
 - **Steps:**
@@ -341,7 +342,7 @@ in different lifecycle states.
 ### SCN-017: Command history strip
 - **Persona:** P-01
 - **Feature:** terminals
-- **Traces:** ST-012 (JTBD-02, JRN-03/#3)
+- **Traces:** ST-012, FLW-08 (JTBD-02, JRN-03/#3)
 - **Entry point:** workspace view, strip under the terminal (per active session)
 - **Preconditions:** shell integration emits OSC-133 events
 - **Steps:**
@@ -356,7 +357,7 @@ in different lifecycle states.
 ### SCN-018: Click a link in terminal output
 - **Persona:** P-01
 - **Feature:** terminals
-- **Traces:** ST-013 (JTBD-03, JRN-03/#4)
+- **Traces:** ST-013, FLW-08 (JTBD-03, JRN-03/#4)
 - **Entry point:** terminal output containing paths or OSC-8 hyperlinks
 - **Preconditions:** session with output
 - **Steps:**
@@ -371,7 +372,7 @@ in different lifecycle states.
 ### SCN-019: Daemon restart reconnect
 - **Persona:** P-03
 - **Feature:** terminals
-- **Traces:** ST-014 (JTBD-02, JRN-04/#3)
+- **Traces:** ST-014, FLW-09 (JTBD-02, JRN-04/#3)
 - **Entry point:** daemon restarts (or app reopens) with live sessions
 - **Preconditions:** daemon-side sessions exist
 - **Steps:**
@@ -388,7 +389,7 @@ in different lifecycle states.
 ### SCN-020: Browse the file tree
 - **Persona:** P-01
 - **Feature:** files
-- **Traces:** ST-015 (JTBD-03, JRN-06/#1)
+- **Traces:** ST-015, FLW-10 (JTBD-03, JRN-06/#1)
 - **Entry point:** workspace view right rail "Files"
 - **Preconditions:** workspace with roots
 - **Steps:**
@@ -405,7 +406,7 @@ in different lifecycle states.
 ### SCN-021: Preview a file
 - **Persona:** P-01
 - **Feature:** files
-- **Traces:** ST-015 (JTBD-03, JRN-06/#2)
+- **Traces:** ST-015, FLW-10 (JTBD-03, JRN-06/#2)
 - **Entry point:** file row click in the tree (or terminal link, SCN-018)
 - **Preconditions:** workspace with files
 - **Steps:**
@@ -420,7 +421,7 @@ in different lifecycle states.
 ### SCN-022: Create / rename files and folders
 - **Persona:** P-01
 - **Feature:** files
-- **Traces:** ST-016 (JTBD-03, JRN-06/#3)
+- **Traces:** ST-016, FLW-11 (JTBD-03, JRN-06/#3)
 - **Entry point:** right-click (or ⋯ button) on a tree row → menu
 - **Preconditions:** workspace with roots
 - **Steps:**
@@ -436,7 +437,7 @@ in different lifecycle states.
 ### SCN-023: Delete a file or folder
 - **Persona:** P-01
 - **Feature:** files
-- **Traces:** ST-016 (JTBD-03, JRN-06/#3)
+- **Traces:** ST-016, FLW-11 (JTBD-03, JRN-06/#3)
 - **Entry point:** tree row menu → Delete (non-root rows)
 - **Preconditions:** entry exists
 - **Steps:**
@@ -452,7 +453,7 @@ in different lifecycle states.
 ### SCN-024: Live watch degradation and refresh
 - **Persona:** P-01
 - **Feature:** files
-- **Traces:** ST-017 (JTBD-03, JRN-06/#4)
+- **Traces:** ST-017, FLW-10 (JTBD-03, JRN-06/#4)
 - **Entry point:** workspace view with the watcher dead (fs://watch-error)
 - **Preconditions:** file watch previously started
 - **Steps:**
@@ -470,7 +471,7 @@ in different lifecycle states.
 ### SCN-025: Manage ideas in a project
 - **Persona:** P-01
 - **Feature:** ideas
-- **Traces:** ST-018 (JTBD-05, JRN-05/#1)
+- **Traces:** ST-018, FLW-12 (JTBD-05, JRN-05/#1)
 - **Entry point:** project panel "Ideas" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -488,7 +489,7 @@ in different lifecycle states.
 ### SCN-028: Orphan idea flows (Inbox: spawn project, link)
 - **Persona:** P-01
 - **Feature:** ideas
-- **Traces:** ST-019 (JTBD-04, JRN-05/#2)
+- **Traces:** ST-019, FLW-12 (JTBD-04, JRN-05/#2)
 - **Entry point:** sidebar "✉ Inbox" nav (orphan count badge when > 0) → Inbox panel
 - **Preconditions:** an idea captured with "no project"
 - **Steps:**
@@ -506,7 +507,7 @@ in different lifecycle states.
 ### SCN-026: Run research on an idea
 - **Persona:** P-01
 - **Feature:** research
-- **Traces:** ST-020 (JTBD-05, JRN-05/#3)
+- **Traces:** ST-020, FLW-12 (JTBD-05, JRN-05/#3)
 - **Entry point:** idea row "Research" button → ResearchRunDialog
 - **Preconditions:** a connected MCP server with tools; orchd up
 - **Steps:**
@@ -524,7 +525,7 @@ in different lifecycle states.
 ### SCN-027: Form an insight from research
 - **Persona:** P-01
 - **Feature:** research
-- **Traces:** ST-021 (JTBD-05, JRN-05/#4)
+- **Traces:** ST-021, FLW-12 (JTBD-05, JRN-05/#4)
 - **Entry point:** ResearchPane "Form insight" (done run) or "form insight without research" (failed run)
 - **Preconditions:** research run exists
 - **Steps:**
@@ -544,7 +545,7 @@ in different lifecycle states.
 ### SCN-029: Manage insights
 - **Persona:** P-01
 - **Feature:** insights
-- **Traces:** ST-022 (JTBD-05)
+- **Traces:** ST-022, FLW-12 (JTBD-05)
 - **Entry point:** project panel "Insights" tab
 - **Preconditions:** insights exist (created only via research pipeline — no create form)
 - **Steps:**
@@ -563,7 +564,7 @@ in different lifecycle states.
 ### SCN-030: Manage tasks
 - **Persona:** P-01
 - **Feature:** tasks
-- **Traces:** ST-023 (JTBD-06, JRN-07/#2)
+- **Traces:** ST-023, FLW-13 (JTBD-06, JRN-07/#2)
 - **Entry point:** project panel "Tasks" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -581,7 +582,7 @@ in different lifecycle states.
 ### SCN-051: Set task priority (urgent / normal)
 - **Persona:** P-01
 - **Feature:** tasks
-- **Traces:** ST-037 (JTBD-06, JTBD-10, JRN-10/#4)
+- **Traces:** ST-037, FLW-13 (JTBD-06, JTBD-10, JRN-10/#4)
 - **Entry point:** project panel "Tasks" tab — create form and task rows
 - **Preconditions:** project exists
 - **Steps:**
@@ -598,7 +599,7 @@ in different lifecycle states.
 ### SCN-031: Manage the goal tree
 - **Persona:** P-01
 - **Feature:** goals
-- **Traces:** ST-024 (JTBD-06, JRN-07/#2)
+- **Traces:** ST-024, FLW-14 (JTBD-06, JRN-07/#2)
 - **Entry point:** project panel "Goals" tab
 - **Preconditions:** project exists (one strategic root goal)
 - **Steps:**
@@ -619,7 +620,7 @@ in different lifecycle states.
 ### SCN-032: Build the knowledge graph
 - **Persona:** P-01
 - **Feature:** graph
-- **Traces:** ST-025 (JTBD-06, JRN-07/#3)
+- **Traces:** ST-025, FLW-14 (JTBD-06, JRN-07/#3)
 - **Entry point:** project panel "Graph" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -641,7 +642,7 @@ in different lifecycle states.
 ### SCN-033: MCP server lifecycle and consent
 - **Persona:** P-01
 - **Feature:** extensions
-- **Traces:** ST-026 (JTBD-07, JRN-08/#2)
+- **Traces:** ST-026, FLW-16 (JTBD-07, JRN-08/#2)
 - **Entry point:** sidebar "⚙ Extensions" → Servers tab
 - **Preconditions:** orchd up
 - **Steps:**
@@ -659,7 +660,7 @@ in different lifecycle states.
 ### SCN-034: Invoke tools and connectors
 - **Persona:** P-01
 - **Feature:** extensions
-- **Traces:** ST-027 (JTBD-07, JRN-08/#3)
+- **Traces:** ST-027, FLW-16 (JTBD-07, JRN-08/#3)
 - **Entry point:** Extensions → Tools / Connectors tabs
 - **Preconditions:** connected server / configured connector account
 - **Steps:**
@@ -675,7 +676,7 @@ in different lifecycle states.
 ### SCN-035: Limits, call log, artifacts, skills
 - **Persona:** P-01
 - **Feature:** extensions
-- **Traces:** ST-028 (JTBD-07, JRN-08/#4)
+- **Traces:** ST-028, FLW-16 (JTBD-07, JRN-08/#4)
 - **Entry point:** Extensions → Log / Artifacts / Skills tabs
 - **Preconditions:** some invocations exist
 - **Steps:**
@@ -694,7 +695,7 @@ in different lifecycle states.
 ### SCN-036: Edit rules and policy
 - **Persona:** P-01
 - **Feature:** rules
-- **Traces:** ST-029 (JTBD-06, JTBD-07)
+- **Traces:** ST-029, FLW-15 (JTBD-06, JTBD-07)
 - **Entry point:** project panel "Rules" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -714,7 +715,7 @@ in different lifecycle states.
 ### SCN-037: Sessiond disconnect and reconnect
 - **Persona:** P-01
 - **Feature:** system-status
-- **Traces:** ST-030 (JTBD-08, JRN-09/#1)
+- **Traces:** ST-030, FLW-17 (JTBD-08, JRN-09/#1)
 - **Entry point:** top-of-shell DaemonBanner
 - **Preconditions:** sessiond connection drops
 - **Steps:**
@@ -729,7 +730,7 @@ in different lifecycle states.
 ### SCN-038: Sessiond upgrade required
 - **Persona:** P-01
 - **Feature:** system-status
-- **Traces:** ST-031 (JTBD-08, JRN-09/#2)
+- **Traces:** ST-031, FLW-17 (JTBD-08, JRN-09/#2)
 - **Entry point:** daemon://incompatible event → UpgradeDialog (auto-open)
 - **Preconditions:** installed sessiond older than the app requires
 - **Steps:**
@@ -745,7 +746,7 @@ in different lifecycle states.
 ### SCN-039: Orchd down degradation
 - **Persona:** P-01
 - **Feature:** system-status
-- **Traces:** ST-030 (JTBD-08, JRN-09/#1)
+- **Traces:** ST-030, FLW-17 (JTBD-08, JRN-09/#1)
 - **Entry point:** orchd://down event
 - **Preconditions:** orchestrator socket drops
 - **Steps:**
@@ -761,7 +762,7 @@ in different lifecycle states.
 ### SCN-040: Orchd upgrade and cancel re-entry
 - **Persona:** P-01
 - **Feature:** system-status
-- **Traces:** ST-031 (JTBD-08, JRN-09/#2)
+- **Traces:** ST-031, FLW-17 (JTBD-08, JRN-09/#2)
 - **Entry point:** orchd://incompatible event → UpgradeDialog (orchd variant)
 - **Preconditions:** installed orchd older than required
 - **Steps:**
@@ -777,7 +778,7 @@ in different lifecycle states.
 ### SCN-041: Storage degradation banners
 - **Persona:** P-01
 - **Feature:** system-status
-- **Traces:** ST-030 (JTBD-08, JRN-09/#3)
+- **Traces:** ST-030, FLW-17 (JTBD-08, JRN-09/#3)
 - **Entry point:** orchd storage status on connect/reconnect
 - **Preconditions:** orchd database degraded
 - **Steps:**
@@ -794,7 +795,7 @@ in different lifecycle states.
 ### SCN-042: Diagnostics panel
 - **Persona:** P-01
 - **Feature:** diagnostics
-- **Traces:** ST-032 (JTBD-08, JRN-09/#4)
+- **Traces:** ST-032, FLW-17 (JTBD-08, JRN-09/#4)
 - **Entry point:** sidebar footer "Diagnostics" button (red count badge when events exist)
 - **Preconditions:** none
 - **Steps:**
@@ -813,7 +814,7 @@ in different lifecycle states.
 ### SCN-043: Render crash recovery
 - **Persona:** P-01
 - **Feature:** error-recovery
-- **Traces:** ST-032 (JTBD-08, JRN-09/#5)
+- **Traces:** ST-032, FLW-17 (JTBD-08, JRN-09/#5)
 - **Entry point:** unexpected React render crash anywhere
 - **Preconditions:** none
 - **Steps:**
@@ -831,7 +832,7 @@ in different lifecycle states.
 ### SCN-044: Terminal attach failure surfaced
 - **Persona:** P-01
 - **Feature:** terminals
-- **Traces:** ST-014 (JTBD-08, JRN-04/#4)
+- **Traces:** ST-014, FLW-09 (JTBD-08, JRN-04/#4)
 - **Entry point:** terminal pane when attach_session rejects (daemon hiccup mid-attach)
 - **Preconditions:** session exists, attach fails
 - **Steps:**
@@ -849,7 +850,7 @@ in different lifecycle states.
 ### SCN-045: Keep the machine awake while sessions run
 - **Persona:** P-01
 - **Feature:** power
-- **Traces:** ST-033 (JTBD-10, JRN-10/#5)
+- **Traces:** ST-033, FLW-18 (JTBD-10, JRN-10/#5)
 - **Entry point:** keep-awake toggle in app chrome (sidebar footer, near ThemeToggle/Diagnostics)
 - **Preconditions:** keep-awake enabled (default on)
 - **Steps:**
@@ -867,16 +868,16 @@ in different lifecycle states.
 ### SCN-046: Enable the CEO and set the delegation scope
 - **Persona:** P-01
 - **Feature:** supervisor
-- **Traces:** ST-034 (JTBD-10, JRN-10/#1)
+- **Traces:** ST-034, FLW-19 (JTBD-10, JRN-10/#1)
 - **Entry point:** project panel "Rules" tab — supervisor section (extends SCN-036 policy)
 - **Preconditions:** project exists; orchd up
 - **Steps:**
   1. User enables the CEO for the project
   2. User selects which confirmation classes are delegated and reviews the effective caps (spend, calls/min) the CEO inherits from policy
-  3. User writes the CEO instruction text (free-form markdown the CEO must follow) and optional custom CEO rules
+  3. User writes the CEO instruction text (free-form markdown the CEO must follow) and optional custom CEO rules — or clicks "Recommended scope" to seed a safe preset (safe-shell + file-write, caps from policy; IMP-03/BP-012), then edits
   4. User saves
 - **Expected result:** delegation scope, instruction text, and custom rules persist with the project policy; an information-access summary states what the CEO reads ("CEO reads: project goals, tasks, ideas, insights, graph, rules + your instruction"); a scope summary states exactly what it may decide ("CEO may: {classes} within {caps}"); disabled by default until explicitly enabled
-- **UI elements:** CEO enable toggle, delegated-class checkboxes, inherited-caps summary, CEO instruction textarea, custom-rules editor, info-access summary line, scope summary line, "MCP tools for the CEO — soon" placeholder note, "Save policy" (shared)
+- **UI elements:** CEO enable toggle, "Recommended scope" preset button, delegated-class checkboxes, inherited-caps summary, CEO instruction textarea, custom-rules editor, info-access summary line, scope summary line, "MCP tools for the CEO — soon" placeholder note, "Save policy" (shared)
 - **States covered:** success, error
 - **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → controls disabled; empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
 - **Status:** validated
@@ -885,7 +886,7 @@ in different lifecycle states.
 ### SCN-047: CEO answers an agent's question autonomously
 - **Persona:** P-01
 - **Feature:** supervisor
-- **Traces:** ST-034 (JTBD-10, JRN-10/#2)
+- **Traces:** ST-034, FLW-19 (JTBD-10, JRN-10/#2)
 - **Entry point:** a terminal session enters waiting-for-input with a question matching a delegated class (operator may be absent)
 - **Preconditions:** CEO enabled with a delegation scope (SCN-046); session running
 - **Steps:**
@@ -902,7 +903,7 @@ in different lifecycle states.
 ### SCN-048: CEO escalates an out-of-authority question
 - **Persona:** P-01
 - **Feature:** supervisor
-- **Traces:** ST-034 (JTBD-10, JRN-10/#3)
+- **Traces:** ST-034, FLW-19 (JTBD-10, JRN-10/#3)
 - **Entry point:** a waiting session's question falls outside the delegated scope (or over a cap)
 - **Preconditions:** CEO enabled; question out of scope
 - **Steps:**
@@ -919,7 +920,7 @@ in different lifecycle states.
 ### SCN-049: Workflow continuation after a task ends
 - **Persona:** P-01
 - **Feature:** supervisor
-- **Traces:** ST-035 (JTBD-10, JRN-10/#4)
+- **Traces:** ST-035, FLW-19 (JTBD-10, JRN-10/#4)
 - **Entry point:** an agent completes its task in a session under CEO supervision
 - **Preconditions:** CEO enabled; project has a workflow and a backlog (SCN-030)
 - **Steps:**
@@ -935,7 +936,7 @@ in different lifecycle states.
 ### SCN-050: Review decisions made while away
 - **Persona:** P-03
 - **Feature:** supervisor
-- **Traces:** ST-036 (JTBD-10, JRN-10/#6)
+- **Traces:** ST-036, FLW-19 (JTBD-10, JRN-10/#6)
 - **Entry point:** decision-log surface (app chrome or Home) after time away
 - **Preconditions:** autonomous decisions/escalations occurred
 - **Steps:**
@@ -953,7 +954,7 @@ in different lifecycle states.
 ### SCN-052: Usage stats dashboard — tokens, cost, activity
 - **Persona:** P-01
 - **Feature:** analytics
-- **Traces:** ST-038, ST-040 (JTBD-11, JRN-11/#2, JRN-11/#3)
+- **Traces:** ST-038, FLW-20, ST-040 (JTBD-11, JRN-11/#2, JRN-11/#3)
 - **Entry point:** stats view in app chrome (sidebar nav)
 - **Preconditions:** usage data exists (agent sessions and/or MCP invocations)
 - **Steps:**
@@ -970,7 +971,7 @@ in different lifecycle states.
 ### SCN-053: Output stats — commits and code per project
 - **Persona:** P-01
 - **Feature:** analytics
-- **Traces:** ST-039 (JTBD-11, JRN-11/#4)
+- **Traces:** ST-039, FLW-20 (JTBD-11, JRN-11/#4)
 - **Entry point:** stats view — output section
 - **Preconditions:** workspaces with git history
 - **Steps:**
@@ -988,7 +989,7 @@ in different lifecycle states.
 ### SCN-054: Project documentation
 - **Persona:** P-01
 - **Feature:** docs
-- **Traces:** ST-041 (JTBD-06, JRN-07/#2)
+- **Traces:** ST-041, FLW-21 (JTBD-06, JRN-07/#2)
 - **Entry point:** project panel "Docs" tab (8th tab)
 - **Preconditions:** project exists
 - **Steps:**
@@ -1008,19 +1009,36 @@ in different lifecycle states.
 ### SCN-055: Home v2 — attention hub
 - **Persona:** P-01
 - **Feature:** home
-- **Traces:** ST-042 (JTBD-01, JTBD-10, JRN-02/#2, JRN-10/#6)
+- **Traces:** ST-042, FLW-03 (JTBD-01, JTBD-10, JRN-02/#2, JRN-10/#6)
 - **Entry point:** app launch or sidebar "⌂ Home"; supersedes SCN-004 on ship (SCN-004 → retired), SCN-005 goals glance folds in unchanged
 - **Preconditions:** sessions exist; CEO may be enabled (all blocks degrade honestly when it is not)
 - **Steps:**
   1. User opens Home after time away and reads the "Since you left" strip (decisions / hand-offs / open escalations; "open log" link)
   2. User scans "Needs you" — every escalation card shows the agent's question text and a reason badge ("out of scope: {class}" / "no next task" / "waiting for input")
-  3. User clicks "Go →" on the top card, answers in the terminal, returns
+  3. User clicks "Go →" on the top card, answers in the terminal, returns; on a "no next task" card the user instead clicks "open backlog →" and lands on that project's Tasks tab to add or prioritize work (IMP-02 — recovery lands where the fix lives)
   4. User scans "Running" — each row shows project · current task · elapsed
   5. User scans "Continued by CEO" hand-offs ("done {task} → started {next}") and finished rows
   6. User glances the Goals section (as SCN-005)
 - **Expected result:** attention is ranked: escalations first (question visible without navigation), then running with progress, then hand-offs/finished; stat tiles read needs-you / running / CEO answered today / spend today (tone shifts when needs-you > 0); the digest clears once seen; CEO-off degrades to plain waiting rows (SCN-004 behavior) with no dead chrome
-- **UI elements:** "Since you left" strip + "open log" link, escalation cards (question preview, reason badge, "Go →"), waiting rows, running rows (project · task · elapsed), hand-off rows, finished rows, stat tiles ×4, Goals section, empty state "Nothing needs you."
+- **UI elements:** "Since you left" strip + "open log" link, escalation cards (question preview, reason badge, "Go →", "open backlog →" on no-next-task cards), waiting rows, running rows (project · task · elapsed), hand-off rows, finished rows, stat tiles ×4, Goals section, empty state "Nothing needs you."
 - **States covered:** loading, empty, success
 - **Errors & recovery:** orchd down → digest/CEO/task data show "orchestrator unavailable" note while session rows (sessiond) stay live — degradation equals current Home; no CEO activity while away → digest suppressed entirely (no empty ceremony); stale session state impossible (exited-wins, SCN-016)
+- **Status:** draft
+- **Coverage:** none yet
+
+### SCN-056: First-run fast-path — terminal auto-spawn
+- **Persona:** P-02
+- **Feature:** onboarding
+- **Traces:** ST-002, FLW-01 (JTBD-09, JRN-01/#3-4; IMP-01)
+- **Entry point:** empty app, "+ Add workspace" from the empty state
+- **Preconditions:** zero prior sessions in the app (fast-path applies to the cold start only)
+- **Steps:**
+  1. User clicks "+ Add workspace" and picks a folder → system creates the workspace, navigates into it, AND auto-spawns the first terminal (cwd = workspace root)
+  2. User starts typing → the agent/shell is live immediately
+- **Expected result:** time-to-aha loses the manual "+ New terminal" step; the terminal tab is focused; nothing else changes vs SCN-002/SCN-013
+- **Alt paths:** workspace added while sessions already exist elsewhere → no auto-spawn (steady-state behavior unchanged, no surprise terminals)
+- **UI elements:** "+ Add workspace" button, OS folder picker, auto-created session tab, focused terminal pane
+- **States covered:** success, error
+- **Errors & recovery:** workspace creation errors — as SCN-002; auto-spawn fails → workspace view still opens with "+ New terminal" available and an honest toast (degradation = today's manual path, never a blocked first run)
 - **Status:** draft
 - **Coverage:** none yet
