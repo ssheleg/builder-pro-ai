@@ -629,7 +629,7 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given a completed hand-off, when I scan Home, then it reads "done {task} → started {next} (CEO)", not just an exited terminal.
   - Given nothing needs me, when I open Home, then an honest "nothing needs you" state shows.
 - **Priority:** must
-- **Status:** validated *(SCN-055 draft — supersedes SCN-004 on ship)*
+- **Status:** validated *(SCN-055 draft — supersedes the current Home triage scenario on ship)*
 
 ---
 
