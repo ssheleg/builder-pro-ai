@@ -70,6 +70,10 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdRulesetChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdDocsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdDocsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
   onOrchdGraphChanged: (cb: (p: unknown) => void) => {
     cbs.orchdGraphChanged = cb;
     return Promise.resolve(unlisten);
@@ -388,7 +392,7 @@ beforeEach(() => {
 });
 
 describe("App", () => {
-  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP + one connectors + one skills + one research, S3 T13 + S4 T6 + S-EXT T8/T13b/T17 + S-IDEA T6)", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + eleven orchd + three MCP + one connectors + one skills + one research, S3 T13 + S4 T6 + S-EXT T8/T13b/T17 + S-IDEA T6 + SCN-054)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -409,6 +413,7 @@ describe("App", () => {
       "orchdInsightsChanged",
       "orchdTasksChanged",
       "orchdRulesetChanged",
+      "orchdDocsChanged",
       "orchdGraphChanged",
       "orchdDown",
       "orchdUp",

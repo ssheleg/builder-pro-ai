@@ -223,6 +223,7 @@ export const strings = {
       insights: "Insights",
       rules: "Rules",
       graph: "Graph",
+      docs: "Docs",
     },
     loading: "Loading project…",
     jsonCopied: "JSON copied",
@@ -310,6 +311,44 @@ export const strings = {
     allowedPathAria: "New allowed path",
     allowedPathPlaceholder: "path",
     savePolicy: "Save policy",
+  },
+
+  // ── docs panel (SCN-054: per-project markdown documents, the 8th project tab) ────────────────
+  docs: {
+    /** Locked banner copy — SCN-054 reuses the rules-file pattern's exact register ("file lost" /
+     * "file changed externally", see `rules` above); duplicated rather than cross-referenced so
+     * either surface's copy can evolve without silently rewording the other. */
+    missingBanner: "file lost",
+    modifiedBanner: "file changed externally",
+    recreate: "Recreate",
+    revealFile: "reveal file",
+    loading: "Loading documents…",
+    loadingDoc: "Loading document…",
+    /** SCN-054 locked empty-state copy. */
+    empty: "No documents in this project yet.",
+    addDoc: "+ doc",
+    nameAria: "New document name",
+    namePlaceholder: "doc-name",
+    /** Client-side mirror of the daemon's `validate_doc_name` character class — shown inline
+     * when the typed name would be rejected (the daemon stays the authoritative validator). */
+    invalidName: "name may only contain a-z, 0-9, '.', '_' and '-'",
+    /** "+ doc" guard: `UpsertDoc` is deliberately upsert-shaped on the wire (the rules-template
+     * minimal verb set), so creating over an existing name would blank that doc's file — the
+     * client blocks it against the (push-fresh) list instead. */
+    duplicateName: "a document with this name already exists",
+    listAria: "Documents",
+    docRowAria: (name: string) => `Open ${name}`,
+    deleteConfirm: "delete document?",
+    editorAria: "Document content",
+    modeAria: "Editor mode",
+    modeEdit: "Edit",
+    modePreview: "Preview",
+    selectPrompt: "Select a document or create one.",
+    /** Relative last-modified stamps for the doc list (SCN-054 "name + last-modified"). */
+    justNow: "just now",
+    minutesAgo: (n: number) => `${n}m ago`,
+    hoursAgo: (n: number) => `${n}h ago`,
+    daysAgo: (n: number) => `${n}d ago`,
   },
 
   // ── ideas list (+ spawn-project flow) ────────────────────────────────────────────────────────

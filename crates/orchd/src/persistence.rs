@@ -27,13 +27,19 @@
 //! `Migration { upto: 5 }` step — existing tasks backfill to `'normal'` via the column DEFAULT.
 //! Its CRUD lives in this file's own task block (`create_task` gains the priority arg,
 //! `set_task_priority` is the new focused mutator mirroring `set_task_status`).
+//! Schema v6 (SCN-054/ST-041, project docs) appends ONE additive table, `doc` — per-project
+//! markdown documents as "rules.md × N named files": the `ruleset` table's files-as-truth split
+//! (file on disk is the source of truth, the row stores only `md_path` + sha256 `md_hash`)
+//! generalized to N owner-named files per project — as ONE `Migration { upto: 6 }` step. Its
+//! CRUD lives in this file's own doc block (`list_docs`/`get_doc`/`upsert_doc`/`delete_doc`/
+//! `acknowledge_doc_file`), mirroring the ruleset block method-for-method.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bpa_orchd_proto::{
-    AuditRow, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEntityType, Idea,
+    AuditRow, Doc, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEntityType, Idea,
     IdeaLifecycle, Insight, InsightStatus, McpArtifact, McpInvocation, Policy, PolicyRules,
     PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, TaskPriority, TaskSource, TaskStatus,
 };
@@ -45,8 +51,8 @@ use uuid::Uuid;
 /// bumps this 1→2 for the additive knowledge-graph tables; S-EXT spec §4 bumps this 2→3 for the
 /// additive MCP/connectors/skills/trust tables; S-IDEA spec §4 D7 bumps this 3→4 for the
 /// additive `research_run` table; SCN-051/ST-037 bumps this 4→5 for the additive
-/// `task.priority` column).
-pub const SCHEMA_VERSION: i64 = 5;
+/// `task.priority` column; SCN-054/ST-041 bumps this 5→6 for the additive `doc` table).
+pub const SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -267,6 +273,10 @@ impl Db {
             bpa_daemon_core::migrate::Migration {
                 upto: 5,
                 apply: migrate_v5,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 6,
+                apply: migrate_v6,
             },
         ];
         bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
@@ -640,6 +650,32 @@ pub(crate) fn migrate_v5(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
         "ALTER TABLE task ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'
            CHECK (priority IN ('urgent','normal'));
          -- user_version → 5",
+    )
+}
+
+/// v5 -> v6: SCN-054 project docs (ST-041). ONE additive table, `doc` — the `ruleset` table's
+/// files-as-truth column set (`md_path`/`md_hash`, v1 DDL above) minus the ruleset-only
+/// `scope`/`policy`, plus the owner-chosen `name` (unique within its project; validated by
+/// [`validate_doc_name`] BEFORE any row is written — the CHECK below is the belt-and-braces
+/// storage-level floor, not the primary validator). `ON DELETE CASCADE` mirrors
+/// `project_workspace`'s child-row discipline: docs live and die with their project. Purely
+/// additive, forward-only per D1; a v5→v6 upgrade of a live orchd.db creates this table and
+/// seeds nothing — see `v5_fixture_migrates_to_v6_and_creates_an_empty_doc_table` below for the
+/// proof against a REAL v5 fixture.
+pub(crate) fn migrate_v6(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE doc (
+           id         TEXT PRIMARY KEY,                  -- uuid v4
+           project_id TEXT NOT NULL,                     -- FK -> project(id) ON DELETE CASCADE
+           name       TEXT NOT NULL CHECK (name <> ''),  -- owner-chosen, [a-z0-9._-] (validate_doc_name)
+           md_path    TEXT NOT NULL,                     -- absolute path; file is the source of truth
+           md_hash    TEXT NOT NULL DEFAULT '',          -- sha256 of the last content orchd wrote/accepted
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL,
+           FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE,
+           UNIQUE(project_id, name)
+         );
+         -- user_version → 6",
     )
 }
 
@@ -2773,6 +2809,277 @@ impl Db {
 }
 
 // ================================================================================
+// ---- SCN-054 project docs: `doc` row CRUD (docs/ux/scenarios.md SCN-054, FLW-21, ST-041) ----
+// ================================================================================
+//
+// "rules.md × N named files": each method below mirrors its ruleset sibling above —
+// `get_doc`/`upsert_doc`/`acknowledge_doc_file` are `get_ruleset`/`upsert_ruleset`/
+// `acknowledge_rule_file` re-keyed from `(scope, project_id)` to `(project_id, name)`, built on
+// the SAME `crate::ruleset_files` primitives (one hashing/atomic-write implementation, zero
+// drift). Docs add what a multi-file family needs and nothing more: `list_docs`, `delete_doc`,
+// and an owner-chosen `name` validated by [`validate_doc_name`]. There is deliberately NO
+// repoint-`md_path` verb (the ruleset's owner-facing repoint affordance doesn't exist in
+// SCN-054) — a doc's path is fixed at create time by [`project_doc_md_path`].
+
+/// Longest accepted doc name (filename component; generous for a human-typed name, small enough
+/// that `<name>.md` never approaches any filesystem's component limit).
+const DOC_NAME_MAX_LEN: usize = 64;
+
+/// SCN-054 name validation — the choke-point every doc write passes through BEFORE any row/file
+/// side effect. A doc's `name` becomes the on-disk filename component `<name>.md`
+/// ([`project_doc_md_path`]), so this is a security boundary, not just UX polish: only
+/// `[a-z0-9._-]` is accepted (no `/`, no `\`, no whitespace — a name can never contain a path
+/// separator), a leading `.` is rejected (no hidden files, and it subsumes rejecting the `.`/`..`
+/// traversal components outright), empty is rejected (SCN-054: "empty name → '+ doc' blocked" —
+/// the client mirrors this guard, this is the authoritative one), and length is capped at
+/// [`DOC_NAME_MAX_LEN`]. Every rejection is `Validation` with a human-readable reason (spec §7
+/// honest error surface — the UI shows it inline + toast).
+fn validate_doc_name(name: &str) -> Result<(), OrchdPersistError> {
+    if name.is_empty() {
+        return Err(OrchdPersistError::Validation(
+            "doc name must not be empty".to_string(),
+        ));
+    }
+    if name.len() > DOC_NAME_MAX_LEN {
+        return Err(OrchdPersistError::Validation(format!(
+            "doc name must be at most {DOC_NAME_MAX_LEN} characters"
+        )));
+    }
+    if name.starts_with('.') {
+        return Err(OrchdPersistError::Validation(
+            "doc name must not start with '.'".to_string(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(OrchdPersistError::Validation(
+            "doc name may only contain a-z, 0-9, '.', '_' and '-'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// A new doc's on-disk path (SCN-054: "file-backed alongside rules.md so agents can read the
+/// same files from the project directory"): `<dir of the project's rules file>/docs/
+/// <project-id>/<name>.md`. Deriving from the ruleset row's CURRENT `md_path` (not a hardcoded
+/// app-support constant) keeps docs next to wherever the owner has pointed the project's rules —
+/// with the default rules path this resolves to `{app-support}/rules/docs/<project-id>/
+/// <name>.md`. The `<project-id>` segment exists because every project's DEFAULT rules file
+/// shares one flat `rules/` dir ([`project_ruleset_md_path`]) — without it two projects' `notes`
+/// docs would collide. A doc's path is stamped once at create; a later rules repoint moves only
+/// FUTURE docs' homes (existing rows keep their stored path — files-as-truth, never silently
+/// relocated).
+fn project_doc_md_path(ruleset_md_path: &str, project_id: &str, name: &str) -> Option<String> {
+    let parent = Path::new(ruleset_md_path).parent()?;
+    Some(
+        parent
+            .join("docs")
+            .join(project_id)
+            .join(format!("{name}.md"))
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// Row-mapper for the fixed `doc` column order used by every doc SELECT below (mirrors
+/// [`RuleSetRow::from_row`], but maps straight into the wire [`Doc`] — a doc row has no
+/// TEXT-enum/JSON columns to decode, so no intermediate raw-row struct is needed).
+fn doc_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Doc> {
+    Ok(Doc {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        name: r.get(2)?,
+        md_path: r.get(3)?,
+        md_hash: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+    })
+}
+
+const DOC_COLUMNS: &str = "id, project_id, name, md_path, md_hash, created_at, updated_at";
+
+/// `(project_id, name)` lookup — the doc equivalent of [`load_ruleset_row_by_scope`]'s
+/// `(scope, project_id)` key. Unknown pair ⇒ `NotFound`.
+fn load_doc_by_project_and_name(
+    conn: &Connection,
+    project_id: &str,
+    name: &str,
+) -> Result<Doc, OrchdPersistError> {
+    conn.query_row(
+        &format!("SELECT {DOC_COLUMNS} FROM doc WHERE project_id = ?1 AND name = ?2"),
+        rusqlite::params![project_id, name],
+        doc_from_row,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)
+}
+
+fn load_doc_by_id(conn: &Connection, id: &str) -> Result<Doc, OrchdPersistError> {
+    conn.query_row(
+        &format!("SELECT {DOC_COLUMNS} FROM doc WHERE id = ?1"),
+        rusqlite::params![id],
+        doc_from_row,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)
+}
+
+impl Db {
+    /// `ListDocs`'s DB half (SCN-054: the Docs tab's list). Name-ordered for a stable list; an
+    /// unknown `project_id` yields an empty `Vec` (read leniency, mirrors [`Db::list_tasks`] —
+    /// reads never guard). The per-row file mtime ("last-modified") is NOT read here — the
+    /// dispatch layer pairs these rows with a fresh `ruleset_files::modified_at_ms` per reply,
+    /// exactly how `build_ruleset_view` pairs the row with a fresh `read_state`.
+    pub fn list_docs(&self, project_id: &str) -> Result<Vec<Doc>, OrchdPersistError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {DOC_COLUMNS} FROM doc WHERE project_id = ?1 ORDER BY name"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![project_id], doc_from_row)?;
+        let mut docs = Vec::new();
+        for row in rows {
+            docs.push(row?);
+        }
+        Ok(docs)
+    }
+
+    /// `GetDoc`'s DB-row half (SCN-054 — the FILE half is read separately, fresh, by
+    /// `ruleset_files::read_state`; the socket dispatch layer assembles both into the wire
+    /// `DocView`, mirroring [`Db::get_ruleset`]'s split exactly). Unknown `(project_id, name)` ⇒
+    /// `NotFound`.
+    pub fn get_doc(&self, project_id: &str, name: &str) -> Result<Doc, OrchdPersistError> {
+        load_doc_by_project_and_name(&self.conn, project_id, name)
+    }
+
+    /// `UpsertDoc` (SCN-054): THE one write path — create ("+ doc"), save, and recreate-after-
+    /// loss are all this method, exactly how [`Db::upsert_ruleset`]`{md_content}` serves the
+    /// rules editor's Save and [Recreate] alike. Order, all inside one transaction:
+    /// 1. `name` is validated ([`validate_doc_name`]) BEFORE any side effect — an invalid name
+    ///    never leaves a half-applied write (mirrors the upsert-ruleset path-validation order).
+    /// 2. The archived-project guard fires ([`ensure_project_active`] — unknown `project_id` ⇒
+    ///    `NotFound`, archived ⇒ `Invariant`, same as every project-scoped mutator).
+    /// 3. New `(project_id, name)` ⇒ the row is created with its path stamped by
+    ///    [`project_doc_md_path`] off the project's CURRENT ruleset row (auto-created with every
+    ///    project, spec §5.2 — so the lookup cannot miss for a live project).
+    /// 4. `md_content` is written atomically (`ruleset_files::write_atomic` — parent dirs
+    ///    created, tmp+rename) and its sha256 replaces `md_hash`.
+    ///
+    /// `updated_at` always bumps — an upsert is by definition a real touch (same rationale as
+    /// [`Db::upsert_ruleset`]).
+    pub fn upsert_doc(
+        &self,
+        project_id: &str,
+        name: &str,
+        md_content: &str,
+    ) -> Result<Doc, OrchdPersistError> {
+        validate_doc_name(name)?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_project_active(&tx, project_id)?;
+
+        let existing = tx
+            .query_row(
+                &format!("SELECT {DOC_COLUMNS} FROM doc WHERE project_id = ?1 AND name = ?2"),
+                rusqlite::params![project_id, name],
+                doc_from_row,
+            )
+            .optional()?;
+
+        let doc_id = match existing {
+            Some(doc) => {
+                let hash = crate::ruleset_files::write_atomic(Path::new(&doc.md_path), md_content)
+                    .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+                tx.execute(
+                    "UPDATE doc SET md_hash = ?2, updated_at = ?3 WHERE id = ?1",
+                    rusqlite::params![doc.id, hash, now_ms()],
+                )?;
+                doc.id
+            }
+            None => {
+                let ruleset =
+                    load_ruleset_row_by_scope(&tx, &RuleScope::Project, Some(project_id))?;
+                let md_path =
+                    project_doc_md_path(&ruleset.md_path, project_id, name).ok_or_else(|| {
+                        // Unreachable for any validated (absolute-file-path) ruleset row; guarded
+                        // rather than unwrapped so a hand-edited DB degrades honestly (spec §7).
+                        OrchdPersistError::Io(
+                            "project ruleset md_path has no parent directory".to_string(),
+                        )
+                    })?;
+                let hash = crate::ruleset_files::write_atomic(Path::new(&md_path), md_content)
+                    .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+                let id = Uuid::new_v4().to_string();
+                let now = now_ms();
+                tx.execute(
+                    "INSERT INTO doc (id, project_id, name, md_path, md_hash, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![id, project_id, name, md_path, hash, now, now],
+                )?;
+                id
+            }
+        };
+
+        let doc = load_doc_by_id(&tx, &doc_id)?;
+        tx.commit()?;
+        Ok(doc)
+    }
+
+    /// `DeleteDoc` (SCN-054 step 4, after the "delete document?" confirm): removes the FILE
+    /// first (`ruleset_files::remove_if_exists` — an already-lost file is fine, deleting a
+    /// "file lost" doc must still work), then the row, in one transaction. A non-missing file
+    /// removal failure (permission denied, …) aborts BEFORE the row delete — never an orphaned
+    /// on-disk file the UI no longer lists. Returns the deleted row so the dispatch layer can
+    /// name the `DocsChanged{project_id}` push without a second pre-delete lookup (deliberate
+    /// small deviation from `DeleteTask`'s separate `task_project_id` helper: one transactional
+    /// read has no lookup/delete race window). Unknown `id` ⇒ `NotFound`; archived project ⇒
+    /// `Invariant`.
+    pub fn delete_doc(&self, id: &str) -> Result<Doc, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let doc = load_doc_by_id(&tx, id)?;
+        ensure_project_active(&tx, &doc.project_id)?;
+
+        crate::ruleset_files::remove_if_exists(Path::new(&doc.md_path))
+            .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+
+        tx.execute("DELETE FROM doc WHERE id = ?1", rusqlite::params![id])?;
+        tx.commit()?;
+        Ok(doc)
+    }
+
+    /// `AcknowledgeDocFile` (SCN-054's "file changed externally" → [Accept]): re-reads the file
+    /// at the row's `md_path` and stores its fresh sha256 as `md_hash` — mirrors
+    /// [`Db::acknowledge_rule_file`] verbatim, including the error split: the file being missing
+    /// is `Invariant("file missing")` (the ROW is found, it's the FILE that's gone — accepting a
+    /// file that isn't there is a contradiction in terms), any OTHER read failure is `Io`.
+    /// Unknown `id` ⇒ `NotFound`; archived project ⇒ `Invariant` (guard fires after the row
+    /// lookup — needed to know its `project_id` — but before the file read or row write).
+    pub fn acknowledge_doc_file(&self, id: &str) -> Result<Doc, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let doc = load_doc_by_id(&tx, id)?;
+        ensure_project_active(&tx, &doc.project_id)?;
+
+        let content = match std::fs::read_to_string(&doc.md_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(OrchdPersistError::Invariant("file missing".to_string()));
+            }
+            Err(e) => return Err(OrchdPersistError::Io(e.to_string())),
+        };
+        let hash = crate::ruleset_files::sha256_hex(&content);
+
+        tx.execute(
+            "UPDATE doc SET md_hash = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, hash, now_ms()],
+        )?;
+
+        let doc = load_doc_by_id(&tx, id)?;
+        tx.commit()?;
+        Ok(doc)
+    }
+}
+
+// ================================================================================
 // ---- raw-insert helpers for import (T9, spec §8, D7): field-verbatim inserts used ONLY by
 // `export::import_bundle`'s single transaction. Every value here comes from an already-parsed,
 // already-typed bundle row and is written to the DB EXACTLY as given — ids, `created_at`,
@@ -3044,6 +3351,8 @@ mod tests {
         "audit_log",
         // S-IDEA spec §4 (schema v4, additive): research-run provenance link.
         "research_run",
+        // SCN-054/ST-041 (schema v6, additive): per-project markdown docs.
+        "doc",
     ];
 
     fn table_exists(conn: &Connection, name: &str) -> bool {
@@ -3061,21 +3370,21 @@ mod tests {
     }
 
     #[test]
-    fn open_in_memory_creates_schema_v5_with_every_table() {
+    fn open_in_memory_creates_schema_v6_with_every_table() {
         let db = Db::open_in_memory().unwrap();
-        // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, the `task.priority` column only).
-        assert_eq!(user_version(db.conn()), 5);
+        // SCN-054 bumped SCHEMA_VERSION 5->6 (additive, the `doc` table only).
+        assert_eq!(user_version(db.conn()), 6);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
     }
 
     #[test]
-    fn open_on_disk_creates_schema_v5_with_every_table() {
+    fn open_on_disk_creates_schema_v6_with_every_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orchd.db");
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(db.conn()), 5);
+        assert_eq!(user_version(db.conn()), 6);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
@@ -3102,7 +3411,7 @@ mod tests {
         std::fs::write(&path, b"not a sqlite database").unwrap();
 
         let db = Db::open(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 5);
+        assert_eq!(user_version(db.conn()), 6);
 
         let found = std::fs::read_dir(dir.path()).unwrap().any(|e| {
             e.unwrap()
@@ -3121,7 +3430,7 @@ mod tests {
 
         let (db, outcome) =
             Db::open_with_outcome(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 5);
+        assert_eq!(user_version(db.conn()), 6);
         match outcome {
             DbOpenOutcome::RecoveredFromCorruption { quarantined_to } => {
                 assert!(
@@ -3228,6 +3537,92 @@ mod tests {
             .execute("UPDATE task SET priority = 'blocker' WHERE id = 't1'", [])
             .unwrap_err();
         assert!(matches!(err, rusqlite::Error::SqliteFailure(_, _)));
+    }
+
+    /// Applies steps v1..v5 alone (a REAL pre-docs on-disk shape) with a live project row, THEN
+    /// applies [`migrate_v6`] — proving the additive `doc` table appears empty (SCN-054 seeds
+    /// nothing), its UNIQUE(project_id, name) pair holds, and its ON DELETE CASCADE ties doc rows
+    /// to their project (mirrors `v4_fixture_migrates_to_v5_...`'s fixture approach).
+    #[test]
+    fn v5_fixture_migrates_to_v6_and_creates_an_empty_doc_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let v5_steps: &[bpa_daemon_core::migrate::Migration] = &[
+            bpa_daemon_core::migrate::Migration {
+                upto: 1,
+                apply: migrate_v1,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 2,
+                apply: migrate_v2,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 3,
+                apply: migrate_v3,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 4,
+                apply: migrate_v4,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 5,
+                apply: migrate_v5,
+            },
+        ];
+        bpa_daemon_core::migrate::run_migrations(&conn, 0, 5, v5_steps).unwrap();
+        let has_doc_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'doc'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_doc_table, 0, "the v5 fixture must NOT have `doc` yet");
+
+        let now = 1_700_000_000_000i64;
+        conn.execute(
+            "INSERT INTO project (id, name, description, status, created_at, updated_at)
+             VALUES ('p1', 'Acme', '', 'active', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        let v6_steps: &[bpa_daemon_core::migrate::Migration] =
+            &[bpa_daemon_core::migrate::Migration {
+                upto: 6,
+                apply: migrate_v6,
+            }];
+        bpa_daemon_core::migrate::run_migrations(&conn, 5, 6, v6_steps).unwrap();
+
+        assert_eq!(user_version(&conn), 6);
+        let doc_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM doc", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(doc_count, 0, "v5→v6 must seed nothing");
+
+        // UNIQUE(project_id, name) holds…
+        conn.execute(
+            "INSERT INTO doc (id, project_id, name, md_path, md_hash, created_at, updated_at)
+             VALUES ('d1', 'p1', 'notes', '/x/notes.md', '', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO doc (id, project_id, name, md_path, md_hash, created_at, updated_at)
+                 VALUES ('d2', 'p1', 'notes', '/x/other.md', '', ?1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap_err();
+        assert!(is_constraint_violation(&err), "got {err:?}");
+
+        // …and doc rows die with their project (ON DELETE CASCADE).
+        conn.execute("DELETE FROM project WHERE id = 'p1'", [])
+            .unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM doc", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "doc rows must cascade with their project");
     }
 
     #[test]
@@ -5835,6 +6230,396 @@ mod ruleset_tests {
         // No partial effect: the row's hash is still the pre-archive value, not the hand-edited
         // content's hash.
         assert_eq!(project_ruleset(&db, &project.id).md_hash, rs.md_hash);
+    }
+}
+
+/// SCN-054 doc storage tests — mirror `ruleset_tests` scenario-for-scenario (docs are
+/// "rules.md × N named files", so every rules behavior has a doc twin here: round-trip,
+/// external-change acknowledge, lost file, archived guard) plus what a multi-file family adds
+/// (list/delete round-trip, name validation incl. traversal rejection).
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A project whose ruleset file lives under the caller's tempdir. HERMETICITY (the exact
+    /// `ruleset_tests` discipline): a fresh project's default ruleset `md_path` resolves under
+    /// the REAL `app_support_dir()`, and [`project_doc_md_path`] derives every doc path from
+    /// that ruleset path's parent — so repointing the ruleset into the tempdir FIRST makes every
+    /// doc write in these tests land under the tempdir (cleaned up on drop), never in the
+    /// production app-support tree.
+    fn project_with_rules_in(db: &Db, dir: &Path) -> Project {
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let md_path = dir.join("rules.md");
+        db.upsert_ruleset(
+            RuleScope::Project,
+            Some(&project.id),
+            None,
+            Some(md_path.to_str().unwrap()),
+            None,
+        )
+        .unwrap();
+        project
+    }
+
+    // ---- upsert_doc: create + save round-trip ----
+
+    #[test]
+    fn upsert_doc_creates_the_row_and_writes_the_file_alongside_the_rules_dir() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+
+        let doc = db.upsert_doc(&project.id, "notes", "# notes\n").unwrap();
+
+        assert_eq!(doc.project_id, project.id);
+        assert_eq!(doc.name, "notes");
+        // SCN-054 file placement: `<rules dir>/docs/<project-id>/<name>.md`.
+        let expected_path = dir.path().join("docs").join(&project.id).join("notes.md");
+        assert_eq!(doc.md_path, expected_path.to_string_lossy());
+        assert_eq!(
+            std::fs::read_to_string(&expected_path).unwrap(),
+            "# notes\n"
+        );
+        assert_eq!(doc.md_hash, crate::ruleset_files::sha256_hex("# notes\n"));
+
+        // Persisted, not just returned.
+        let refetched = db.get_doc(&project.id, "notes").unwrap();
+        assert_eq!(refetched, doc);
+    }
+
+    #[test]
+    fn upsert_doc_on_an_existing_name_rewrites_content_and_rehashes_same_row() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let created = db.upsert_doc(&project.id, "notes", "v1").unwrap();
+
+        let saved = db.upsert_doc(&project.id, "notes", "v2").unwrap();
+
+        assert_eq!(saved.id, created.id, "save must UPDATE, never duplicate");
+        assert_eq!(saved.md_hash, crate::ruleset_files::sha256_hex("v2"));
+        assert_eq!(std::fs::read_to_string(&saved.md_path).unwrap(), "v2");
+        assert!(saved.updated_at >= created.updated_at);
+        assert_eq!(db.list_docs(&project.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upsert_doc_unknown_project_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.upsert_doc("nope", "notes", "x").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_upsert_doc() {
+        // spec §5.2: EVERY mutating verb touching an archived project or its children ⇒
+        // `Invariant`. A doc row is a child of `project` — same guard as every other mutator.
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        db.archive_project(&project.id).unwrap();
+
+        let err = db
+            .upsert_doc(&project.id, "notes", "# notes\n")
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+        // No partial effect: no row, no file.
+        assert!(db.list_docs(&project.id).unwrap().is_empty());
+        assert!(
+            !dir.path().join("docs").exists(),
+            "guard must fire before any file write"
+        );
+    }
+
+    // ---- name validation (SCN-054: the name becomes a filename component — security boundary) ----
+
+    #[test]
+    fn upsert_doc_empty_name_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+
+        let err = db.upsert_doc(&project.id, "", "x").unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn upsert_doc_rejects_path_traversal_and_separator_names() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+
+        for evil in [
+            "../escape",
+            "..",
+            ".",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "UPPER",
+            "with space",
+            "semi;colon",
+        ] {
+            let err = db.upsert_doc(&project.id, evil, "x").unwrap_err();
+            assert!(
+                matches!(err, OrchdPersistError::Validation(_)),
+                "name {evil:?} must be rejected as Validation, got {err:?}"
+            );
+        }
+        // Nothing was written anywhere for any of them.
+        assert!(db.list_docs(&project.id).unwrap().is_empty());
+        assert!(!dir.path().join("docs").exists());
+    }
+
+    #[test]
+    fn upsert_doc_rejects_an_over_long_name() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let long = "a".repeat(DOC_NAME_MAX_LEN + 1);
+
+        let err = db.upsert_doc(&project.id, &long, "x").unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+    }
+
+    // ---- list_docs / delete_doc round-trip ----
+
+    #[test]
+    fn list_docs_is_name_ordered_and_scoped_to_its_project() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        // A second project with its own doc — must never leak into the first's list.
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = {
+            let p = db.create_project("B", "", &ids(&["w2"])).unwrap();
+            db.upsert_ruleset(
+                RuleScope::Project,
+                Some(&p.id),
+                None,
+                Some(other_dir.path().join("rules.md").to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+            p
+        };
+        db.upsert_doc(&project.id, "zeta", "").unwrap();
+        db.upsert_doc(&project.id, "alpha", "").unwrap();
+        db.upsert_doc(&other.id, "foreign", "").unwrap();
+
+        let names: Vec<String> = db
+            .list_docs(&project.id)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+
+        assert_eq!(names, vec!["alpha".to_string(), "zeta".to_string()]);
+    }
+
+    #[test]
+    fn list_docs_unknown_project_is_an_empty_list() {
+        // Read leniency mirrors `list_tasks` — reads never guard, an unknown project simply has
+        // no docs.
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.list_docs("nope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_doc_removes_the_row_and_the_file() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "doomed", "bye").unwrap();
+        assert!(Path::new(&doc.md_path).exists());
+
+        let deleted = db.delete_doc(&doc.id).unwrap();
+
+        assert_eq!(deleted.id, doc.id);
+        assert_eq!(deleted.project_id, project.id);
+        assert!(
+            !Path::new(&doc.md_path).exists(),
+            "the file must be removed"
+        );
+        assert!(db.list_docs(&project.id).unwrap().is_empty());
+        assert!(matches!(
+            db.get_doc(&project.id, "doomed").unwrap_err(),
+            OrchdPersistError::NotFound
+        ));
+    }
+
+    #[test]
+    fn delete_doc_with_an_already_lost_file_still_deletes_the_row() {
+        // SCN-054: deleting a "file lost" doc must work — the file's absence is the state being
+        // cleaned up, not an error.
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "lost", "content").unwrap();
+        std::fs::remove_file(&doc.md_path).unwrap();
+
+        db.delete_doc(&doc.id).unwrap();
+
+        assert!(db.list_docs(&project.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_doc_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.delete_doc("nope").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_delete_doc() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "kept", "content").unwrap();
+        db.archive_project(&project.id).unwrap();
+
+        let err = db.delete_doc(&doc.id).unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+        // No partial effect: row and file both survive.
+        assert!(Path::new(&doc.md_path).exists());
+    }
+
+    // ---- external-change detection + acknowledge (the SCN-054 Accept banner's contract) ----
+
+    #[test]
+    fn read_state_detects_an_external_edit_against_the_stored_doc_hash() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "notes", "v1").unwrap();
+
+        // An agent (or the owner, in an editor) rewrites the file directly on disk.
+        std::fs::write(&doc.md_path, "v2 - external").unwrap();
+
+        let (content, state) =
+            crate::ruleset_files::read_state(Path::new(&doc.md_path), &doc.md_hash);
+        assert_eq!(content, Some("v2 - external".to_string()));
+        assert_eq!(state, bpa_orchd_proto::RuleFileState::ExternallyModified);
+    }
+
+    #[test]
+    fn acknowledge_doc_file_after_external_edit_stores_the_new_hash() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "notes", "v1").unwrap();
+        std::fs::write(&doc.md_path, "v2 - external").unwrap();
+
+        let acknowledged = db.acknowledge_doc_file(&doc.id).unwrap();
+
+        assert_eq!(
+            acknowledged.md_hash,
+            crate::ruleset_files::sha256_hex("v2 - external")
+        );
+        assert_ne!(acknowledged.md_hash, doc.md_hash);
+        // The whole point of Accept: read_state against the new hash reports Ok again.
+        let (content, state) = crate::ruleset_files::read_state(
+            Path::new(&acknowledged.md_path),
+            &acknowledged.md_hash,
+        );
+        assert_eq!(content, Some("v2 - external".to_string()));
+        assert_eq!(state, bpa_orchd_proto::RuleFileState::Ok);
+    }
+
+    #[test]
+    fn acknowledge_doc_file_missing_file_is_invariant() {
+        // SCN-054 "file lost": the ROW is found, it's the FILE that's gone — accepting a file
+        // that isn't there is a contradiction in terms (mirrors `acknowledge_rule_file`).
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "lost", "v1").unwrap();
+        std::fs::remove_file(&doc.md_path).unwrap();
+
+        let err = db.acknowledge_doc_file(&doc.id).unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "file missing"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn acknowledge_doc_file_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db.acknowledge_doc_file("nope").unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_acknowledge_doc_file() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "notes", "v1").unwrap();
+        std::fs::write(&doc.md_path, "v2 - external").unwrap();
+        db.archive_project(&project.id).unwrap();
+
+        let err = db.acknowledge_doc_file(&doc.id).unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+        // No partial effect: the stored hash is still v1's.
+        assert_eq!(
+            db.get_doc(&project.id, "notes").unwrap().md_hash,
+            doc.md_hash
+        );
+    }
+
+    // ---- lost-file recreate (SCN-054's [Recreate] path is the same upsert verb) ----
+
+    #[test]
+    fn upsert_doc_recreates_a_lost_file_in_place() {
+        let db = Db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with_rules_in(&db, dir.path());
+        let doc = db.upsert_doc(&project.id, "lost", "original").unwrap();
+        std::fs::remove_file(&doc.md_path).unwrap();
+
+        // The UI's [Recreate] sends UpsertDoc{md_content: ""} — same row, file re-materializes.
+        let recreated = db.upsert_doc(&project.id, "lost", "").unwrap();
+
+        assert_eq!(recreated.id, doc.id);
+        assert_eq!(std::fs::read_to_string(&recreated.md_path).unwrap(), "");
+        let (_, state) =
+            crate::ruleset_files::read_state(Path::new(&recreated.md_path), &recreated.md_hash);
+        assert_eq!(state, bpa_orchd_proto::RuleFileState::Ok);
+    }
+
+    // ---- validate_doc_name unit floor (the accept side; rejects are covered above) ----
+
+    #[test]
+    fn validate_doc_name_accepts_the_documented_character_class() {
+        for ok in ["notes", "api-spec_v2.notes", "a", "0", "readme.md"] {
+            assert!(validate_doc_name(ok).is_ok(), "{ok:?} must be accepted");
+        }
     }
 }
 

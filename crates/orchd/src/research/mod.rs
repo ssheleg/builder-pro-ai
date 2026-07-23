@@ -651,18 +651,19 @@ mod tests {
             .unwrap()
     }
 
-    // ---- schema v4 table, still present in the now-current schema v5 (fresh DB) ----
+    // ---- schema v4 table, still present in the now-current schema v6 (fresh DB) ----
 
     #[test]
-    fn fresh_db_has_research_run_table_at_schema_v5() {
+    fn fresh_db_has_research_run_table_at_schema_v6() {
         let db = new_db();
         let version: i64 = db
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only); the v4
-        // `research_run` table this test checks for is unaffected.
-        assert_eq!(version, 5);
+        // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only) and SCN-054
+        // bumped it 5->6 (additive, the `doc` table only); the v4 `research_run` table this test
+        // checks for is unaffected.
+        assert_eq!(version, 6);
         let exists: bool = db
             .conn()
             .query_row(

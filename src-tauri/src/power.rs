@@ -321,7 +321,9 @@ impl SleepAsserter for IoPmAsserter {
         } else {
             // Honest denial (SCN-045): surface the raw IOReturn so the toast/Diagnostics record
             // names WHY — never pretend to be awake.
-            Err(format!("IOPMAssertionCreateWithName failed (IOReturn {rc:#010x})"))
+            Err(format!(
+                "IOPMAssertionCreateWithName failed (IOReturn {rc:#010x})"
+            ))
         }
     }
 
@@ -468,7 +470,11 @@ mod tests {
         );
         let st = k.sync_sessions(3);
         assert!(!st.active);
-        assert_eq!(inner.lock().unwrap().acquires, 0, "toggle off => no acquire, ever");
+        assert_eq!(
+            inner.lock().unwrap().acquires,
+            0,
+            "toggle off => no acquire, ever"
+        );
     }
 
     #[test]
@@ -483,7 +489,11 @@ mod tests {
                 error: None
             }
         );
-        assert_eq!(inner.lock().unwrap().acquires, 0, "no live session => nothing to hold");
+        assert_eq!(
+            inner.lock().unwrap().acquires,
+            0,
+            "no live session => nothing to hold"
+        );
     }
 
     #[test]
@@ -592,7 +602,11 @@ mod tests {
                 error: None
             }
         );
-        assert_eq!(inner.lock().unwrap().acquires, 2, "denied once, then retried");
+        assert_eq!(
+            inner.lock().unwrap().acquires,
+            2,
+            "denied once, then retried"
+        );
     }
 
     #[test]
@@ -625,7 +639,11 @@ mod tests {
         let before = inner.lock().unwrap().acquires;
         let st = k.status();
         assert!(st.active);
-        assert_eq!(inner.lock().unwrap().acquires, before, "status() must not reconcile");
+        assert_eq!(
+            inner.lock().unwrap().acquires,
+            before,
+            "status() must not reconcile"
+        );
     }
 
     #[test]

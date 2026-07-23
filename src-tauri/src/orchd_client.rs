@@ -372,7 +372,7 @@ impl OrchdClient {
     /// exactly, including the pre-enqueue `live` liveness check.
     pub async fn request(&self, req: OrchdRequest) -> Result<OrchdResponse, OrchdClientError> {
         // The single per-request completion-tracing choke-point on the CORE side (spec D4, O-6):
-        // one structured `info!` line per request, covering ALL 118 Tauri command handlers at the
+        // one structured `info!` line per request, covering ALL 133 Tauri command handlers at the
         // one layer they share (they all funnel through here) instead of a per-handler edit.
         // `verb` is the exhaustive, low-cardinality `OrchdRequest::verb_name` (reused verbatim from
         // the daemon's own dispatch trace); the line carries verb + outcome + error_code + elapsed

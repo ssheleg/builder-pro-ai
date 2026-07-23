@@ -10,6 +10,8 @@ import type { FsEntry } from "../ipc/fs";
 import type {
   Account,
   AuditRow,
+  DocMeta,
+  DocView,
   DomainTask,
   Goal,
   GraphView,
@@ -28,8 +30,10 @@ import type {
   StorageStatus,
 } from "../ipc/orchd-types";
 import {
+  orchdGetDoc,
   orchdGetRuleset,
   orchdGraphListProject,
+  orchdListDocs,
   orchdListGoals,
   orchdListIdeas,
   orchdListInsights,
@@ -46,6 +50,7 @@ import {
   researchListRuns,
   orchdStorageStatus,
   describeOrchdError,
+  isNotFoundError,
 } from "../ipc/orchd";
 
 /**
@@ -187,6 +192,17 @@ export interface AppState {
    * single project's ruleset) — mirrors `orchd_get_ruleset`'s `(scope, projectId)` pair collapsed
    * into one string key. Replaced per-key by `refreshRuleset(key)`. */
   rulesets: Record<string, RuleSetView>;
+  /** A project's doc list rows (SCN-054: name + last-modified, name-ordered by the daemon),
+   * keyed by `projectId`. Mirrors `goalsByProject`/`tasksByProject` exactly — absence means "not
+   * yet fetched" (the Docs tab's loading state), replaced per-key by `refreshDocs(projectId)`; a
+   * `DocsChanged{projectId}` push never touches any OTHER project's entry. */
+  docsByProject: Record<string, DocMeta[]>;
+  /** Open doc views (SCN-054: the Docs tab's editor half — content + healthy/changed/lost file
+   * state), keyed by [`docViewKey`]'s `` `${projectId}/${name}` `` (`/` can never appear in a
+   * validated doc name, so the key is unambiguous). Mirrors `rulesets`' per-key convention;
+   * replaced per-key by `refreshDoc(projectId, name)`, DROPPED per-key when a re-fetch reports
+   * the doc no longer exists (deleted by another client — see `refreshDoc`'s doc). */
+  docViews: Record<string, DocView>;
 
   /**
    * MCP slice (S-EXT §8, T8: the Extensions view's Servers/Tools tabs). Mirrors the app-domain
@@ -358,6 +374,15 @@ export interface AppState {
   /** Re-fetch one ruleset by its `rulesets` key (`` `global` `` or `` `project:${id}` `` — see
    * `rulesets`'s doc above), replacing only that key's entry. */
   refreshRuleset: (key: string) => Promise<void>;
+  /** Re-fetch ONE project's doc list, replacing only `docsByProject[projectId]` (SCN-054).
+   * Mirrors `refreshGoals`/`refreshTasks` exactly. */
+  refreshDocs: (projectId: string) => Promise<void>;
+  /** Re-fetch ONE doc's view, replacing only `docViews[docViewKey(projectId, name)]`. A
+   * `NotFound` rejection DROPS the entry instead of toasting — that is the honest "this doc was
+   * deleted by another client" signal a `DocsChanged` push refresh can race into, not an error
+   * (see `isNotFoundError`'s doc, `ipc/orchd.ts`); every other rejection surfaces via
+   * `reportError` like its siblings. */
+  refreshDoc: (projectId: string, name: string) => Promise<void>;
   /** Open the project panel: sets `view: "project"` and `activeProjectId: id` (T18 renders the
    * panel itself; this task only owns the state transition). */
   openProject: (id: string) => void;
@@ -447,6 +472,17 @@ function parseRulesetKey(key: string): { scope: RuleScope; projectId: string | n
   if (key === "global") return { scope: "global", projectId: null };
   const projectId = key.startsWith("project:") ? key.slice("project:".length) : key;
   return { scope: "project", projectId };
+}
+
+/**
+ * `docViews`' key format (SCN-054): `orchd_get_doc`'s `(projectId, name)` pair collapsed into
+ * one string key, mirroring how `rulesets`' key collapses `(scope, projectId)`. `/` is safe as
+ * the separator — the daemon's `validate_doc_name` rejects any name containing it, so the split
+ * is unambiguous. Exported for `DocsPanel.tsx`/`App.tsx`, which read/refresh entries by the same
+ * key the store writes.
+ */
+export function docViewKey(projectId: string, name: string): string {
+  return `${projectId}/${name}`;
 }
 
 /** localStorage key for the keep-awake toggle (SCN-045). Values `"on"`/`"off"`; absence = the
@@ -577,6 +613,8 @@ export const useAppStore = create<AppState>((set, get) => {
     researchRunsByIdea: {},
     graphByProject: {},
     rulesets: {},
+    docsByProject: {},
+    docViews: {},
     mcpServers: [],
     mcpToolsByServer: {},
     mcpArtifacts: [],
@@ -848,6 +886,37 @@ export const useAppStore = create<AppState>((set, get) => {
         set((s) => ({ rulesets: { ...s.rulesets, [key]: view } }));
       } catch (e) {
         get().reportError("refreshRuleset", e);
+      }
+    },
+
+    // ── SCN-054 project docs ─────────────────────────────────────────────────────────────────
+
+    refreshDocs: async (projectId) => {
+      try {
+        const docs = await orchdListDocs(projectId);
+        set((s) => ({ docsByProject: { ...s.docsByProject, [projectId]: docs } }));
+      } catch (e) {
+        get().reportError("refreshDocs", e);
+      }
+    },
+
+    refreshDoc: async (projectId, name) => {
+      const key = docViewKey(projectId, name);
+      try {
+        const view = await orchdGetDoc(projectId, name);
+        set((s) => ({ docViews: { ...s.docViews, [key]: view } }));
+      } catch (e) {
+        if (isNotFoundError(e)) {
+          // The doc was deleted (by this client's own confirmed delete, or another client's,
+          // racing this refresh) — dropping the stale view IS the correct outcome, not an error
+          // (see `refreshDoc`'s interface doc above).
+          set((s) => {
+            const { [key]: _dropped, ...rest } = s.docViews;
+            return { docViews: rest };
+          });
+          return;
+        }
+        get().reportError("refreshDoc", e);
       }
     },
 

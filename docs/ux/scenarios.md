@@ -59,7 +59,7 @@
 | SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | validated | — |
 | SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | — |
 | SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | — |
-| SCN-054 | Project documentation | docs | P-01 | ST-041 | validated | — |
+| SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | — |
 | SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | — |
 | SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | — |
 
@@ -1001,8 +1001,8 @@ in different lifecycle states.
 - **UI elements:** Docs tab, document list, "+ doc" button, name input, markdown editor, edit/preview toggle, "Save" button, "Delete" + window.confirm, "reveal file" button, empty state "No documents in this project yet."
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** empty name → "+ doc" blocked; save rejects → inline + toast, editor content preserved; file changed externally → "file changed externally" + Accept banner; file lost → "file lost" + Recreate (SCN-036 pattern); orchd down → Save/Delete/Accept/Recreate disabled, reading and "reveal file" stay live
-- **Status:** validated
-- **Coverage:** none yet
+- **Status:** implemented
+- **Coverage:** src/components/DocsPanel.tsx:24-30 (name-rule mirror), :38-44 (relative last-modified), :259 (panel: list + editor, banners :495-533, orchd-down gating, save-reject inline+toast :326-343), src/components/DocsPanel.test.tsx (19 SCN-054 tests), src/components/markdown.ts:33 (dependency-free preview parser) + markdown.test.ts (11 tests), src/components/ProjectPanel.tsx:38,502 (8th "Docs" tab), src/strings.ts:317-347, src/store/store.ts:894-925 (docsByProject/docViews slices), src/App.tsx:213-231 (orchd://docs-changed binding) + :301-312 (reconnect rehydrate), src/ipc/orchd.ts:366-407 + src/ipc/events.ts:340, crates/orchd-proto/src/lib.rs:792-849 (Doc/DocMeta/DocView), :1331-1373 (ListDocs/GetDoc/UpsertDoc/DeleteDoc/AcknowledgeDocFile verbs), crates/orchd/src/persistence.rs:665-692 (schema v6 `doc` table), :2837-3078 (doc CRUD: name validation, files-as-truth upsert/delete/acknowledge), :6241+ (20 doc_tests incl. traversal rejection, external-change, lost-file, archived guards), crates/orchd/src/socket_server.rs:602-660,1320-1372 (build_doc_view/doc_meta/respond_doc + dispatch arms), crates/orchd/tests/dispatch_integration.rs:948 (wire lifecycle + error-path tests), src-tauri/src/commands.rs:1800-1965 (commands + reveal_doc_file_core no-path-from-JS), src-tauri/src/broker.rs:97 (orchd://docs-changed)
 
 ## home (v2)
 

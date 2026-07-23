@@ -70,6 +70,9 @@ fn export_and_read() -> String {
     ResearchStatus::export_all_to(types_ts_dir()).expect("export ResearchStatus");
     StorageStatus::export_all_to(types_ts_dir()).expect("export StorageStatus");
     StorageMode::export_all_to(types_ts_dir()).expect("export StorageMode");
+    Doc::export_all_to(types_ts_dir()).expect("export Doc");
+    DocMeta::export_all_to(types_ts_dir()).expect("export DocMeta");
+    DocView::export_all_to(types_ts_dir()).expect("export DocView");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -297,6 +300,7 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "args_json",
         "storage_mode",
         "quarantined_path",
+        "modified_at",
     ] {
         assert!(
             !ts.contains(snake),
@@ -711,6 +715,49 @@ fn research_run_is_present_with_camelcase_fields_and_ts_number_timestamps() {
     assert!(
         contains_normalized(&ts, "updatedAt: number"),
         "ResearchRun.updated_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("bigint"),
+        "generated orchd-types.ts must never contain `bigint`; got:\n{ts}"
+    );
+}
+
+// ---- SCN-054 project-docs entity export tests (docs/ux/scenarios.md SCN-054, ST-041) ----
+
+#[test]
+fn doc_entities_are_present_with_camelcase_fields_and_ts_number_timestamps() {
+    let ts = export_and_read();
+    for expected in [
+        "export type Doc",
+        "export type DocMeta",
+        "export type DocView",
+    ] {
+        assert!(
+            contains_normalized(&ts, expected),
+            "expected {expected:?} in generated orchd-types.ts; got:\n{ts}"
+        );
+    }
+    assert!(
+        contains_normalized(&ts, "modifiedAt: number"),
+        "DocMeta.modified_at (i64) must serialize as camelCase `modifiedAt`, TS `number`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "doc: Doc"),
+        "DocView.doc must be typed `Doc`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "mdContent: string | null"),
+        "DocView.md_content (Option<String>) must serialize as camelCase `mdContent`, TS \
+         `string | null`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "fileState: RuleFileState"),
+        "DocView.file_state must REUSE the rules wire-state enum `RuleFileState` (SCN-054 \
+         mirrors the rules model, no parallel doc enum); got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("modified_at"),
+        "generated TS must not contain snake_case `modified_at`"
     );
     assert!(
         !ts.contains("bigint"),

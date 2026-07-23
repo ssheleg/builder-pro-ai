@@ -5,6 +5,7 @@ import type { FsEntry } from "../ipc/fs";
 import type {
   Account,
   AuditRow,
+  DocView,
   DomainTask,
   Goal,
   GraphView,
@@ -29,6 +30,8 @@ const orchdListTasksMock = vi.fn();
 const researchListRunsMock = vi.fn();
 const orchdGraphListProjectMock = vi.fn();
 const orchdGetRulesetMock = vi.fn();
+const orchdListDocsMock = vi.fn();
+const orchdGetDocMock = vi.fn();
 const mcpListServersMock = vi.fn();
 const mcpListToolsMock = vi.fn();
 const mcpListArtifactsMock = vi.fn();
@@ -47,6 +50,8 @@ vi.mock("../ipc/orchd", () => ({
   researchListRuns: (...a: unknown[]) => researchListRunsMock(...a),
   orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
+  orchdListDocs: (...a: unknown[]) => orchdListDocsMock(...a),
+  orchdGetDoc: (...a: unknown[]) => orchdGetDocMock(...a),
   mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
@@ -57,6 +62,13 @@ vi.mock("../ipc/orchd", () => ({
   trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
   orchdStorageStatus: (...a: unknown[]) => orchdStorageStatusMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
+  // Faithful to the real predicate (`ipc/orchd.ts`) so `refreshDoc`'s NotFound drop-path is
+  // exercised for real rather than stubbed to a constant.
+  isNotFoundError: (e: unknown) =>
+    e !== null &&
+    typeof e === "object" &&
+    (e as { kind?: unknown }).kind === "daemon" &&
+    (e as { code?: unknown }).code === "NotFound",
 }));
 
 // SCN-045 keep-awake: `setKeepAwakeEnabled`/`syncKeepAwake` call straight through to these —
@@ -69,7 +81,7 @@ vi.mock("../ipc/power", () => ({
   powerStatus: vi.fn(),
 }));
 
-import { useAppStore } from "./store";
+import { useAppStore, docViewKey } from "./store";
 import { toSupportBundle } from "../ipc/diag";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
@@ -99,6 +111,8 @@ describe("useAppStore", () => {
     researchListRunsMock.mockReset();
     orchdGraphListProjectMock.mockReset();
     orchdGetRulesetMock.mockReset();
+    orchdListDocsMock.mockReset();
+    orchdGetDocMock.mockReset();
     mcpListServersMock.mockReset();
     mcpListToolsMock.mockReset();
     mcpListArtifactsMock.mockReset();
@@ -142,6 +156,8 @@ describe("useAppStore", () => {
         researchRunsByIdea: {},
         graphByProject: {},
         rulesets: {},
+        docsByProject: {},
+        docViews: {},
         mcpServers: [],
         mcpToolsByServer: {},
         mcpArtifacts: [],
@@ -865,6 +881,8 @@ describe("useAppStore", () => {
     expect(s.tasksByProject).toEqual({});
     expect(s.graphByProject).toEqual({});
     expect(s.rulesets).toEqual({});
+    expect(s.docsByProject).toEqual({});
+    expect(s.docViews).toEqual({});
     expect(s.mcpServers).toEqual([]);
     expect(s.mcpToolsByServer).toEqual({});
     expect(s.mcpArtifacts).toEqual([]);
@@ -1014,6 +1032,81 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().rulesets["project:p1"]).toEqual(projectView);
     // The pre-existing "global" entry must be untouched by a project-scoped refresh.
     expect(useAppStore.getState().rulesets["global"]).toEqual(rulesetView());
+  });
+
+  // ── SCN-054 project docs ───────────────────────────────────────────────────────────────────
+
+  const docView = (over: Partial<DocView> = {}): DocView => ({
+    doc: {
+      id: "d1",
+      projectId: "p1",
+      name: "notes",
+      mdPath: "/rules/docs/p1/notes.md",
+      mdHash: "abc",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    mdContent: "# notes",
+    fileState: "ok",
+    ...over,
+  });
+
+  it("refreshDocs replaces only that project's doc list, leaving other projects untouched", async () => {
+    useAppStore.setState(
+      { docsByProject: { other: [{ name: "keep", modifiedAt: 1 }] } },
+      false,
+    );
+    orchdListDocsMock.mockResolvedValueOnce([{ name: "notes", modifiedAt: 5 }]);
+
+    await useAppStore.getState().refreshDocs("p1");
+
+    expect(orchdListDocsMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().docsByProject["p1"]).toEqual([{ name: "notes", modifiedAt: 5 }]);
+    expect(useAppStore.getState().docsByProject["other"]).toEqual([{ name: "keep", modifiedAt: 1 }]);
+  });
+
+  it("refreshDocs surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    orchdListDocsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshDocs("p1");
+    expect(useAppStore.getState().docsByProject["p1"]).toBeUndefined();
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  it("refreshDoc keys the view by docViewKey(projectId, name)", async () => {
+    orchdGetDocMock.mockResolvedValueOnce(docView());
+
+    await useAppStore.getState().refreshDoc("p1", "notes");
+
+    expect(orchdGetDocMock).toHaveBeenCalledWith("p1", "notes");
+    expect(useAppStore.getState().docViews[docViewKey("p1", "notes")]).toEqual(docView());
+  });
+
+  it("refreshDoc on a NotFound rejection DROPS the stale view without a toast (deleted doc)", async () => {
+    useAppStore.setState(
+      {
+        docViews: {
+          [docViewKey("p1", "gone")]: docView({ doc: { ...docView().doc, name: "gone" } }),
+          [docViewKey("p1", "kept")]: docView({ doc: { ...docView().doc, name: "kept" } }),
+        },
+      },
+      false,
+    );
+    orchdGetDocMock.mockRejectedValueOnce({ kind: "daemon", code: "NotFound", message: "" });
+
+    await useAppStore.getState().refreshDoc("p1", "gone");
+
+    expect(useAppStore.getState().docViews[docViewKey("p1", "gone")]).toBeUndefined();
+    expect(useAppStore.getState().docViews[docViewKey("p1", "kept")]).toBeDefined();
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
+  it("refreshDoc surfaces every OTHER rejection as a toast", async () => {
+    const err = { kind: "daemon", code: "Io", message: "read failed" };
+    orchdGetDocMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshDoc("p1", "notes");
+    expect(useAppStore.getState().docViews[docViewKey("p1", "notes")]).toBeUndefined();
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 
   it("setOrchdDown and setOrchdIncompatible flip their flags independently from the false default", () => {

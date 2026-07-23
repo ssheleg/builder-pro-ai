@@ -218,7 +218,7 @@ async fn second_instance_flock_refusal() {
 }
 
 #[tokio::test]
-async fn fresh_boot_creates_schema_v5_and_global_ruleset() {
+async fn fresh_boot_creates_schema_v6_and_global_ruleset() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
     let home_dir = tempfile::tempdir().unwrap();
@@ -249,8 +249,9 @@ async fn fresh_boot_creates_schema_v5_and_global_ruleset() {
         .conn()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only).
-    assert_eq!(user_version, 5);
+    // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only); SCN-054 bumped it
+    // 5->6 (additive, the `doc` table only).
+    assert_eq!(user_version, 6);
 
     for table in [
         "project",
@@ -274,6 +275,8 @@ async fn fresh_boot_creates_schema_v5_and_global_ruleset() {
         "audit_log",
         // S-IDEA spec §4 (schema v4, additive): research-run provenance link.
         "research_run",
+        // SCN-054/ST-041 (schema v6, additive): per-project markdown docs.
+        "doc",
     ] {
         let exists: bool = db
             .conn()

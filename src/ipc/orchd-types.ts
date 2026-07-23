@@ -34,6 +34,35 @@ reason: string | null, invocationId: string | null, };
 export type ConnectorOp = { name: string, description: string | null, };
 
 /**
+ * A per-project markdown document's DB-row half (SCN-054). Field set mirrors [`RuleSet`]
+ * column-for-column minus the ruleset-only `scope`/`policy` (a doc is always project-scoped and
+ * carries no policy) plus the owner-chosen `name` — the doc's identity within its project
+ * (unique per project+name pair, validated against `[a-z0-9._-]`, never a path). NOTE: this doc
+ * comment is copied into the generated TS verbatim by ts-rs, so field names here are camelCase
+ * (`mdPath`/`mdHash`) — same discipline as [`StorageStatus`]'s doc.
+ */
+export type Doc = { id: string, projectId: string, name: string, mdPath: string, mdHash: string, createdAt: number, updatedAt: number, };
+
+/**
+ * `ListDocs`'s list-row shape (SCN-054: "the list shows name + last-modified"): name plus the
+ * doc FILE's mtime in unix-ms, read fresh per list (files-as-truth — an external edit moves it
+ * with no daemon write). When the file's mtime cannot be read (file lost/unreadable), the
+ * dispatch layer falls back to the DB row's `updatedAt` — the last time orchd itself touched
+ * the doc — rather than fabricating a timestamp.
+ */
+export type DocMeta = { name: string, modifiedAt: number, };
+
+/**
+ * `GetDoc`/`UpsertDoc`/`AcknowledgeDocFile`'s reply — mirrors [`RuleSetView`] field-for-field
+ * (SCN-054 reuses the rules wire-state model wholesale): the DB row paired with a FRESH
+ * read-state classification of the file at `doc.mdPath` against `doc.mdHash`. Reuses
+ * [`RuleFileState`] verbatim — `ok` (healthy) / `externallyModified` ("file changed externally"
+ * + Accept banner) / `missing` ("file lost" + Recreate banner) are exactly the three SCN-054
+ * states, so a parallel enum would be pure drift surface.
+ */
+export type DocView = { doc: Doc, mdContent: string | null, fileState: RuleFileState, };
+
+/**
  * named `DomainTask` to avoid the `tokio::task` clash (spec §4.2).
  */
 export type DomainTask = { id: string, projectId: string, parentId: string | null, title: string, body: string, status: TaskStatus, 

@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type JSX } from "react";
-import { useAppStore } from "./store/store";
+import { useAppStore, docViewKey } from "./store/store";
 import {
   onSessionCreated,
   onSessionStateChanged,
@@ -17,6 +17,7 @@ import {
   onOrchdInsightsChanged,
   onOrchdTasksChanged,
   onOrchdRulesetChanged,
+  onOrchdDocsChanged,
   onOrchdGraphChanged,
   onOrchdDown,
   onOrchdUp,
@@ -209,6 +210,23 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         void useAppStore.getState().refreshRuleset(key);
       }),
     );
+    // SCN-054 docs coarse-invalidation: re-fetch the named project's doc LIST (the push's own
+    // scope, mirroring `goals-changed`/`tasks-changed` above) AND every already-loaded doc VIEW
+    // of that project — another client's save/accept changes content+fileState the open editor
+    // must reflect (files-as-truth; a view whose doc was deleted is dropped by `refreshDoc`'s
+    // NotFound handling rather than toasted).
+    track(
+      onOrchdDocsChanged((p) => {
+        const s = useAppStore.getState();
+        void s.refreshDocs(p.projectId);
+        const prefix = docViewKey(p.projectId, "");
+        for (const key of Object.keys(s.docViews)) {
+          if (key.startsWith(prefix)) {
+            void s.refreshDoc(p.projectId, key.slice(prefix.length));
+          }
+        }
+      }),
+    );
     // Unconditional re-fetch, mirroring `goals-changed`/`tasks-changed` above (audit #5.1): there
     // is no "graph panel currently open" gating to mirror — none of the S3 precedents this event
     // was modeled on gate their refresh on view/activeProjectId, so this doesn't invent one either.
@@ -280,6 +298,17 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           // domain surface's reconnect-refresh exactly — an open project panel's Graph tab must
           // not stay stale after an orchd reconnect any more than Goals/Tasks/Ideas/Insights do.
           void s.refreshGraph(projectId);
+          // SCN-054: the Docs tab mirrors the same reconnect-refresh — its list is re-fetched
+          // for the open project; loaded doc VIEWS (any project's) rehydrate in the loop below.
+          void s.refreshDocs(projectId);
+        }
+        // Doc views self-heal on reconnect for every doc currently loaded in the store (SCN-054 +
+        // spec D8) — during the outage a `DocsChanged` push (another client's save, an agent's
+        // accepted edit) is lost, so every held view can be stale until re-read. Mirrors the
+        // "research runs for every idea currently holding runs" loop below.
+        for (const key of Object.keys(s.docViews)) {
+          const slash = key.indexOf("/");
+          if (slash > 0) void s.refreshDoc(key.slice(0, slash), key.slice(slash + 1));
         }
         // Extensions slices (S-EXT §8): whole-store, project-independent — refetch unconditionally
         // (spec D8's "mcp servers + artifacts + accounts + skills + policies + invocations").

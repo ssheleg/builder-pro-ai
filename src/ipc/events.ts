@@ -325,3 +325,18 @@ export function onOrchdResearchRunsChanged(
 ): Promise<UnlistenFn> {
   return listen<ResearchRunsChangedPayload>("orchd://research-runs-changed", (e) => cb(e.payload));
 }
+
+// ── SCN-054 project-docs coarse-invalidation event (FLW-21, ST-041, `EV_ORCHD_DOCS_CHANGED`) ──
+
+/** Payload of `orchd://docs-changed` (`broker.rs`'s `map_orchd_push` reshapes
+ * `OrchdPush::DocsChanged{project_id}` to camelCase): the ONE project whose doc list/content
+ * changed — mirrors `TasksChangedPayload` exactly (docs are always project-scoped, so unlike
+ * `RulesetChangedPayload` there is no nullable global scope). */
+export interface DocsChangedPayload {
+  projectId: string;
+}
+
+/** Subscribe to `orchd://docs-changed` — see `DocsChangedPayload`. */
+export function onOrchdDocsChanged(cb: (p: DocsChangedPayload) => void): Promise<UnlistenFn> {
+  return listen<DocsChangedPayload>("orchd://docs-changed", (e) => cb(e.payload));
+}
