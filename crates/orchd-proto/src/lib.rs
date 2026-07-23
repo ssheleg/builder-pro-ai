@@ -836,9 +836,9 @@ pub struct DocMeta {
 /// `GetDoc`/`UpsertDoc`/`AcknowledgeDocFile`'s reply — mirrors [`RuleSetView`] field-for-field
 /// (SCN-054 reuses the rules wire-state model wholesale): the DB row paired with a FRESH
 /// read-state classification of the file at `doc.mdPath` against `doc.mdHash`. Reuses
-/// [`RuleFileState`] verbatim — `ok` (healthy) / `externallyModified` ("file changed externally"
-/// + Accept banner) / `missing` ("file lost" + Recreate banner) are exactly the three SCN-054
-/// states, so a parallel enum would be pure drift surface.
+/// [`RuleFileState`] verbatim — `ok` (healthy), `externallyModified` ("file changed externally"
+/// with the Accept banner), and `missing` ("file lost" with the Recreate banner) are exactly the
+/// three SCN-054 states, so a parallel enum would be pure drift surface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "orchd-types.ts")]
