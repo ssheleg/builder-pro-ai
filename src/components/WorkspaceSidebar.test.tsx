@@ -188,7 +188,9 @@ describe("WorkspaceSidebar", () => {
       await Promise.resolve();
     });
     expect(createSessionMock).toHaveBeenCalledTimes(1);
-    expect(createSessionMock).toHaveBeenCalledWith("w3");
+    // SCN-056: the fast-path terminal spawns with cwd = the new workspace's root (AUD-2026-07-23-17),
+    // not an omitted cwd (which sessiond would default to $HOME).
+    expect(createSessionMock).toHaveBeenCalledWith("w3", { cwd: "/p/gamma", cols: 80, rows: 24 });
     expect(useAppStore.getState().view).toBe("workspace");
   });
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type JSX } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import { useAppStore, docViewKey } from "../store/store";
 import {
   orchdUpsertDoc,
@@ -8,7 +8,7 @@ import {
   describeOrchdError,
 } from "../ipc/orchd";
 import type { DocMeta } from "../ipc/orchd-types";
-import { parseMarkdown, type MdBlock } from "./markdown";
+import { parseMarkdown, renderInline, type MdBlock } from "./markdown";
 import { Button, SegmentedPill } from "../ui/primitives";
 import { strings } from "../strings";
 
@@ -189,17 +189,17 @@ function renderBlock(block: MdBlock, key: number): JSX.Element {
             margin: "var(--sp-2) 0",
           }}
         >
-          {block.text}
+          {renderInline(block.text)}
         </div>
       );
     case "paragraph":
       return (
         <p key={key} style={{ margin: "var(--sp-2) 0" }}>
-          {block.text}
+          {renderInline(block.text)}
         </p>
       );
     case "list": {
-      const items = block.items.map((item, j) => <li key={j}>{item}</li>);
+      const items = block.items.map((item, j) => <li key={j}>{renderInline(item)}</li>);
       return block.ordered ? (
         <ol key={key} style={{ margin: "var(--sp-2) 0", paddingLeft: "var(--sp-5)" }}>
           {items}
@@ -276,6 +276,15 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [mode, setMode] = useState<"edit" | "preview">("edit");
 
+  // Dirty-draft guard baseline (PRN-03): the last content hydrated from the store, tagged with the
+  // selected doc name. On a same-doc re-hydrate (an `orchd://docs-changed` push or reconnect
+  // rehydrate landing mid-edit) the editor keeps a draft the user has edited away from this
+  // baseline (dirty) and only re-adopts a still-matching one (clean) — the "file changed
+  // externally" banner mediates the conflict, so the guard just stops the silent pre-banner
+  // clobber. Selecting a different doc (identity change) always hydrates fully. `null` until first
+  // hydrate.
+  const hydratedDocRef = useRef<{ name: string | null; content: string } | null>(null);
+
   // The list re-fetches on mount/project change (SCN-054 step 1); switching projects must never
   // keep the previous project's selection/drafts (the ProjectPanel import-state discipline).
   useEffect(() => {
@@ -296,10 +305,22 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
   }, [projectId, selectedName]);
 
   // Store wins over a stale local draft whenever a fresh view lands (mount refresh, a mutation's
-  // own post-success refresh, or the `orchd://docs-changed` push binding in App.tsx).
+  // own post-success refresh, or the `orchd://docs-changed` push binding in App.tsx) — WITH the
+  // dirty-draft guard (PRN-03, see `hydratedDocRef` above): a same-doc update keeps an in-progress
+  // edit (the banner mediates), a clean editor re-hydrates, and selecting a different doc always
+  // hydrates fully.
   useEffect(() => {
-    setContent(view?.mdContent ?? "");
-    setSaveError(null);
+    const nextContent = view?.mdContent ?? "";
+    const baseline = hydratedDocRef.current;
+    const sameDoc = baseline !== null && baseline.name === selectedName;
+    if (!sameDoc) {
+      setContent(nextContent);
+      setSaveError(null);
+    } else {
+      setContent((cur) => (cur === baseline.content ? nextContent : cur));
+    }
+    // Always advance the baseline to the latest server content so the next clean hydrate works.
+    hydratedDocRef.current = { name: selectedName, content: nextContent };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.mdContent, selectedName]);
 

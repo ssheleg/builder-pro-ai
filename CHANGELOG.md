@@ -2,7 +2,63 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
-## [Unreleased] — Soft Control Room design v2 (2026-07-20)
+## [0.10.0] — UX audit remediation: stats honesty, first-run fast-path (2026-07-23)
+
+Deep UX audit of the 13 never-audited scenarios (SCN-045..057, report
+[`docs/ux/audits/2026-07-23.md`](docs/ux/audits/2026-07-23.md)) plus the remediation of every
+finding it produced. Post-fix re-audit: **PASS 7 / PARTIAL 0 / FAIL 0 / BLOCKED 6** (BLOCKED =
+documented-unbuilt, verified honest — no phantom UI, no chrome promising unbuilt behavior).
+
+### Fixed
+- **First-run fast-path spawned the terminal in `$HOME`, not the picked folder** (SCN-056): the
+  cold-start auto-spawn called `createSession(ws.id)` with no opts, and sessiond defaults an
+  omitted `cwd` to `$HOME` — so the very aha the fast-path exists to optimize landed the user
+  outside their repo. Now passes `{ cwd: ws.roots[0] ?? dir, cols, rows }`, mirroring the manual
+  "+ New terminal" root-aware spawn. (The `TerminalTabs` comment claiming the daemon defaults to
+  `roots[0]` — the likely origin of the bug — was corrected too.)
+- **Stats range-switch race** (SCN-052): `refreshStats` had no in-flight guard, so a slower scan
+  could resolve after a newer one and render figures under the WRONG range label. Now every
+  refresh claims a monotonic request epoch and a settled reply is applied only while it is still
+  current.
+- **`stats_git` turned a panicked worker into a fake-empty success** (SCN-053): `unwrap_or_default()`
+  yielded an empty `Vec` the view read as "success, nothing to show". It now surfaces an honest
+  per-root `available:false` + reason.
+- **Zeros styled as data** (SCN-052/053): usage-derived tiles and cells now render "—" while
+  loading or when the usage scan failed, instead of `0`; the empty state appears only when BOTH
+  sources are genuinely empty (a range with commits but no usage no longer hides the git table);
+  the freshness stamp falls back to the refresh-completion time so the git table is never
+  stampless when usage failed; the honest per-root "no git data" reason is surfaced on hover.
+
+### Added
+- **Per-model-family usage cut** (SCN-052): `FamilyUsage` (Rust + wire) folded from the same cached
+  per-file aggregates the scanner already keeps (no cache-format change), rendered as a
+  "By model family" table. This replaces the previously promised but nowhere-implemented
+  "per agent" cut — session logs carry no per-instance agent id, so the model family is the honest
+  name of the only agent-side dimension available (ST-038/SCN-052 wording updated to match).
+- **Cancel for an in-flight stats scan** (SCN-053 "slow scan → cancellable", previously unimplemented).
+- **Inline markdown in the project-docs preview** (SCN-054): `**bold**`, `*italic*`, `` `code` ``
+  and links now render via a JSX-only `renderInline` (no HTML sink); links render as
+  non-navigating link text with the URL on hover, so the webview can never navigate away.
+- **`docs/ux/lint.py`** — the canonical super-ux contract linter restored into the repo, so the
+  chain's integrity (traces resolve, index↔entries sync, no orphans/broken links) is a
+  deterministic check again.
+- **FLW-22 "Per-project auth context"** flow, and the A-9 spike formalized with four exit checks
+  (including the `CLAUDE_CONFIG_DIR` × usage-scanner interaction that would otherwise silently
+  undercount tokens). **A-8 is now CONFIRMED** by shipped code rather than an open assumption.
+
+### Changed
+- **CEO supervisor section progressively discloses** (SCN-046): while the CEO is off, only the
+  toggle, an "enable to configure" hint and the S6b pending note render — a disabled CEO no longer
+  shows a "CEO may: …" summary that reads as an active grant.
+- **One orchd-down rule for the whole policy form** (SCN-036/046): the CEO controls stay editable
+  as drafts like the policy fields above them; only "Save policy" is gated.
+- **Unsaved drafts survive an external change**: a `ruleset-changed`/`docs-changed` push or a
+  reconnect rehydrate landing mid-edit keeps dirty fields (clean ones still re-hydrate) instead of
+  silently clobbering the edit — the existing external-change banner mediates.
+- Task create-form and row selects carry `title`s; SCN-046 step 2 amended to spend-only (the
+  connector `ratePerMin` is a separate trust axis the CEO does not inherit).
+
+## [0.10.0] — Soft Control Room design v2 (2026-07-20)
 
 New visual base (spec `docs/superpowers/specs/2026-07-20-soft-control-room-design.md`,
 guidebook [`docs/design-system.md`](docs/design-system.md)): warm paper neutrality — depth
@@ -37,7 +93,7 @@ by fill steps instead of borders/shadows.
   the build on any reintroduced `var(--border…)` read, so outlined containers cannot creep
   back one component at a time.
 
-## [Unreleased] — UX scenario base + audit fix pass (2026-07-19)
+## [0.10.0] — UX scenario base + audit fix pass (2026-07-19)
 
 super-ux adopted: [`docs/ux/scenarios.md`](docs/ux/scenarios.md) is now the source of truth for
 user-facing behavior (44 scenarios, all `implemented`). First full audit
@@ -62,7 +118,7 @@ same day. Frontend suite 932 → 949 tests.
 - **Strings doctrine (AUD-05):** the "Daemon disconnected — reconnecting…" banner copy moved from
   an inline literal into `strings.chrome.daemonDisconnected`.
 
-## [Unreleased] — QA audit + test-hardening pass (2026-07-19)
+## [0.10.0] — QA audit + test-hardening pass (2026-07-19)
 
 Full-tree QA audit (five parallel surface auditors) + a TDD fix loop. Plan and finding disposition:
 [`docs/qa/2026-07-19-code-audit-test-plan.md`](docs/qa/2026-07-19-code-audit-test-plan.md).

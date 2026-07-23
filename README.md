@@ -1,7 +1,7 @@
 # Builder Pro AI
 
 [![ci](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-0.9.2-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.10.0-blue)](CHANGELOG.md)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](docs/build-macos.md)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
 [![built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
@@ -24,7 +24,7 @@ Built with **Tauri 2** (Rust core + React 19 / TypeScript UI). Ships as a univer
   <em>Placeholder — a real screenshot lands here before the first public release.</em>
 </p>
 
-> **Status: `0.9.2`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
+> **Status: `0.10.0`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
 > below the "Shipped" line is implemented, tested, and documented; everything under "Planned" is
 > not built yet and is labelled as such. **Signed + notarized universal binaries are published on
 > [Releases](https://github.com/ssheleg/builder-pro-ai/releases)** (or build from source — see
@@ -71,7 +71,7 @@ Design tenets the whole codebase is held to:
 
 ## Highlights
 
-What works today (`0.9.2`):
+What works today (`0.10.0`):
 
 - 🖥️ **Daemon-owned terminals** — real PTYs supervised by `launchd`, so live shells survive the GUI
   closing, crashing, or restarting (tmux-style reattach + sanitized scrollback replay). OSC-133/OSC-7
@@ -177,8 +177,8 @@ bash scripts/final-suite.sh   # → "ALL GATES PASSED"
 
 | Suite | Command | Covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1072 tests** (`0.9.2`) |
-| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **949 tests, 59 files** (`0.9.2`) |
+| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1153 tests** (`0.10.0`) |
+| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **1070 tests, 63 files** (`0.10.0`) |
 | e2e (terminals) | `npm run e2e:survive` | create → run → status → quit client → daemon+shell survive → reattach + scrollback |
 | e2e (app domain) | `npm run e2e:orchd` | create → drain-restart → data intact → export → wipe → re-import → graph/MCP/research survival |
 | Coverage gate | `bash scripts/coverage-gate.sh` | ≥80% line coverage on both daemon crates (needs `cargo install cargo-llvm-cov`) |
@@ -240,6 +240,7 @@ next starts. Versions are the git tags in [`CHANGELOG.md`](CHANGELOG.md).
 | `0.9.0` | UX-scenario base + redesign (S-UXR) | a maintained 181-scenario UX catalog + code-traced audit; a design-token system and primitives kit; every view restyled metrics-forward in **light + dark** |
 | `0.9.1` | Diagnostics + contrast (S-DIAG / S-DESIGN) | a secret-scrubbed error log + error boundary + copyable support bundle; a measured WCAG-AA contrast pass with a regression test |
 | `0.9.2` | Boot-race fix (BL-101) | `AppState` managed synchronously in `setup()` so a first-frame command returns an honest `Disconnected`, never the raw Tauri "state not managed" error — caught by the new diagnostics log on a live install |
+| `0.10.0` | Soft Control Room v2 + the autonomy/analytics slice + UX audit remediation | a warm fill-model visual base (36 views migrated, `SegmentedPill`/`Heatmap` atoms); keep-awake, task priority, a file-backed Docs tab, CEO delegation **config** (S6b honesty boundary — it persists scope, it does not act), and a usage/output Stats dashboard; then a deep audit of SCN-045..057 whose every finding was fixed — first-run terminals now open in the picked folder (they were landing in `$HOME`), stats gained a request-epoch guard, a cancellable scan and a per-model-family cut, and every failed/loading source shows "—" instead of a zero that looks like data |
 
 ### Planned (not built yet)
 

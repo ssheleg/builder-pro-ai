@@ -50,18 +50,19 @@
 | SCN-042 | Diagnostics panel | diagnostics | P-01 | ST-032 | implemented | 2026-07-22 PASS |
 | SCN-043 | Render crash recovery | error-recovery | P-01 | ST-032 | implemented | 2026-07-22 PASS |
 | SCN-044 | Terminal attach failure surfaced | terminals | P-01 | ST-014 | implemented | 2026-07-22 PASS |
-| SCN-045 | Keep the machine awake while sessions run | power | P-01 | ST-033 | validated | — |
-| SCN-046 | Enable the CEO and set the delegation scope | supervisor | P-01 | ST-034 | validated | config plumbing only; CEO acts in S6b |
-| SCN-047 | CEO answers an agent's question autonomously | supervisor | P-01 | ST-034 | validated | — |
-| SCN-048 | CEO escalates an out-of-authority question | supervisor | P-01 | ST-034 | validated | — |
-| SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | — |
-| SCN-050 | Review decisions made while away | supervisor | P-03 | ST-036 | validated | — |
-| SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | validated | — |
-| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | — |
-| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | — |
-| SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | — |
-| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | — |
-| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | — |
+| SCN-045 | Keep the machine awake while sessions run | power | P-01 | ST-033 | implemented | 2026-07-23 PASS |
+| SCN-046 | Enable the CEO and set the delegation scope | supervisor | P-01 | ST-034 | implemented | 2026-07-23 PASS (config plumbing only; CEO acts in S6b) |
+| SCN-047 | CEO answers an agent's question autonomously | supervisor | P-01 | ST-034 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-048 | CEO escalates an out-of-authority question | supervisor | P-01 | ST-034 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-050 | Review decisions made while away | supervisor | P-03 | ST-036 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | implemented | 2026-07-23 PASS |
+| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | implemented | 2026-07-23 PASS (re-audit; was PARTIAL, AUD-07/08/09/10/25 closed) |
+| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | implemented | 2026-07-23 PASS (re-audit; was PARTIAL, AUD-11/12/13/14 closed) |
+| SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | 2026-07-23 PASS |
+| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | 2026-07-23 BLOCKED (not built) |
+| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | implemented | 2026-07-23 PASS (re-audit; AUD-17 closed) |
+| SCN-057 | Per-project auth context for terminals | auth | P-01 | ST-043 | draft | 2026-07-23 BLOCKED (draft, gated A-9) |
 
 ## Personas
 
@@ -591,8 +592,8 @@ in different lifecycle states.
 - **UI elements:** priority control in create form, priority control on task row, urgent marker on task rows
 - **States covered:** success, error
 - **Errors & recovery:** priority save rejects → revert to stored value + toast; orchd down → priority control disabled like other mutations
-- **Status:** validated
-- **Coverage:** src/components/TasksList.tsx:40-49,102-118,258-292,404-414,531-544 (create-form + row selects, urgent marker/chip, urgent-first sort, reject→revert+toast, orchdDown gating); src/ipc/orchd.ts:241-290 (orchdCreateTask priority arg, orchdSetTaskPriority); src-tauri/src/commands.rs:1611-1710 (orchd_create_task priority, orchd_set_task_priority); crates/orchd-proto/src/lib.rs:203-215,1258-1265 (TaskPriority, SetTaskPriority verb); crates/orchd/src/persistence.rs:631-651,2406-2435 (migrate_v5 `task.priority`, set_task_priority)
+- **Status:** implemented
+- **Coverage:** src/components/TasksList.tsx:40-49,102-118,258-292,404-414,531-544 (create-form + row selects, urgent marker/chip, urgent-first sort, reject→revert+toast, orchdDown gating); src/ipc/orchd.ts:241-290 (orchdCreateTask priority arg, orchdSetTaskPriority); src-tauri/src/commands.rs:1627-1655 (orchd_create_task priority),1709-1720 (orchd_set_task_priority); crates/orchd-proto/src/lib.rs:203-215 (TaskPriority),1369-1372 (SetTaskPriority verb),1516 (name map); crates/orchd/src/persistence.rs:649-655 (migrate_v5 `task.priority`),2443-2467 (set_task_priority)
 
 ## goals
 
@@ -860,8 +861,8 @@ in different lifecycle states.
 - **UI elements:** keep-awake toggle, active-assertion indicator, failure banner/toast
 - **States covered:** success, error
 - **Errors & recovery:** OS denies the assertion → honest banner/toast "keep-awake unavailable: {reason}" + Diagnostics record — never a silent fake "awake"; app quit/crash → assertion released by OS (no orphan lock)
-- **Status:** validated
-- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-385, src-tauri/src/lib.rs:599-603,719-721, src/ipc/power.ts:13-48, src/store/store.ts:408-431,452-477,525-553,964-990, src/App.tsx:413-446, src/components/WorkspaceSidebar.tsx:87-90,447-458,540-613, src/strings.ts:615-627
+- **Status:** implemented
+- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-387 (SleepAsserter, reconcile, IOKit FFI, commands), src-tauri/src/lib.rs:604,727-729 (new_power_slot manage + handler registration), src/ipc/power.ts:13-48, src/store/store.ts:443-457 (keepAwake slice types),617 (applyPowerStatus mirror),1064-1090 (init + setKeepAwakeEnabled + syncKeepAwake), src/App.tsx:470-476 (live-count sync effect), src/components/WorkspaceSidebar.tsx:479 (pill mount),563-636 (KeepAwakePill), src/strings.ts:697-711 (keepAwake group: keepAwakeOn/keepAwakeFailed)
 
 ## supervisor
 
@@ -873,16 +874,16 @@ in different lifecycle states.
 - **Preconditions:** project exists; orchd up
 - **Steps:**
   1. User enables the CEO for the project
-  2. User selects which confirmation classes are delegated and reviews the effective caps (spend, calls/min) the CEO inherits from policy
+  2. User selects which confirmation classes are delegated and reviews the effective spend cap the CEO inherits from policy (the CEO inherits the project's spend cap + approval-class machinery per A-7; the connector `ratePerMin` is a separate trust axis the CEO is not governed by, so it is not shown here — AUD-2026-07-23-03)
   3. User writes the CEO instruction text (free-form markdown the CEO must follow) and optional custom CEO rules — or clicks "Recommended scope" to seed a safe preset (safe-shell + file-write, caps from policy; IMP-03/BP-012), then edits
   4. User saves
-- **Expected result:** delegation scope, instruction text, and custom rules persist with the project policy; an information-access summary states what the CEO reads ("CEO reads: project goals, tasks, ideas, insights, graph, rules + your instruction"); a scope summary states exactly what it may decide ("CEO may: {classes} within {caps}"); disabled by default until explicitly enabled
+- **Expected result:** delegation scope, instruction text, and custom rules persist with the project policy; the delegation detail progressively discloses — while the CEO is OFF only the enable toggle, a muted "enable to configure" hint, and the S6b pending note show (no "CEO may: …" summary that would read as an active grant, PRN-11); once enabled, an information-access summary states what the CEO reads ("CEO reads: project goals, tasks, ideas, insights, graph, rules + your instruction") and a scope summary states exactly what it may decide ("CEO may: {classes} within {caps}"); disabled by default until explicitly enabled
 - **UI elements:** CEO enable toggle, "Recommended scope" preset button, delegated-class checkboxes, inherited-caps summary, CEO instruction textarea, custom-rules editor, info-access summary line, scope summary line, "MCP tools for the CEO — soon" placeholder note, "Save policy" (shared)
 - **States covered:** success, error
-- **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → controls disabled; empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
-- **Status:** validated
+- **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → **Save disabled, but the CEO controls stay editable as drafts** — unified with the SCN-036 policy fields, one drafts-stay-live rule for the whole form (AUD-2026-07-23 PRN-04); an external ruleset change landing mid-edit never silently clobbers an unsaved draft (dirty fields are kept, clean fields re-hydrate — PRN-03); empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
+- **Status:** implemented
 - **Note (honesty boundary, S6b):** this scenario ships the delegation CONFIG only. It persists the scope, instruction and custom rules and states what the CEO would read/decide; it does NOT execute anything. Autonomous execution — the CEO actually answering agent questions (SCN-047) and continuing workflows (SCN-049) — awaits the orchestrator-agent runtime (S6b). The UI carries a matching pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same register as the Skills-tab registry banner.
-- **Coverage:** crates/orchd-proto/src/lib.rs:225-284 (SupervisorConfig + PolicyRules.supervisor additive field), src/ipc/orchd-types.ts:209,300-305 (generated TS), crates/orchd/src/persistence.rs:2576-2585,2607-2634,2659-2683 (validate_policy supervisor guards, PolicyRulesStrict mirror, decode backfill), src/components/RulesetPanel.tsx:31,46-89,455-536,662-771 (validatePolicy + supervisor section, project scope only), src/strings.ts:319-352 (rules.supervisor.* incl. pendingNote); tests — crates/orchd/src/persistence.rs:6176-6320, crates/orchd-proto/tests/roundtrip.rs:1467-1516, crates/orchd-proto/tests/ts_export.rs:159-200, src/components/RulesetPanel.test.tsx:301-430
+- **Coverage:** crates/orchd-proto/src/lib.rs:225-284 (SupervisorConfig + PolicyRules.supervisor additive field), src/ipc/orchd-types.ts:209,300-305 (generated TS), crates/orchd/src/persistence.rs:2576-2585,2607-2634,2659-2683 (validate_policy supervisor guards, PolicyRulesStrict mirror, decode backfill), src/components/RulesetPanel.tsx (validatePolicy + supervisor section, project scope only; progressive disclosure while OFF — PRN-11; drafts-stay-live under orchd-down unified across the form — PRN-04; dirty-draft guard on the policy fields — PRN-03), src/strings.ts (rules.supervisor.* incl. pendingNote + disabledHint); tests — crates/orchd/src/persistence.rs:6176-6320, crates/orchd-proto/tests/roundtrip.rs:1467-1516, crates/orchd-proto/tests/ts_export.rs:159-200, src/components/RulesetPanel.test.tsx (supervisor suite incl. disclosure, unified gating, dirty-draft guard)
 
 ### SCN-047: CEO answers an agent's question autonomously
 - **Persona:** P-01
@@ -957,17 +958,17 @@ in different lifecycle states.
 - **Feature:** analytics
 - **Traces:** ST-038, FLW-20, ST-040 (JTBD-11, JRN-11/#2, JRN-11/#3)
 - **Entry point:** stats view in app chrome (sidebar nav)
-- **Preconditions:** usage data exists (agent sessions and/or MCP invocations)
+- **Preconditions:** usage data exists (Claude Code agent sessions — the local session logs)
 - **Steps:**
   1. User opens the stats view
   2. User picks a range with the SegmentedPill (All | 30d | 7d)
-  3. User reads tokens/cost per project and per agent, and the activity Heatmap
-- **Expected result:** figures render for the chosen range; activity density shows as a Heatmap; per-project and per-agent cuts are visible; the orphan atoms SegmentedPill + Heatmap ship here (closes COV-01)
-- **UI elements:** stats nav item, SegmentedPill range switcher, per-project/per-agent stat tiles, activity Heatmap, honest empty state
+  3. User reads tokens/cost per project and per model family, and the activity Heatmap (windowed to the range)
+- **Expected result:** figures render for the chosen range; activity density shows as a Heatmap windowed to the range; per-project and per-model-family cuts are visible; a stale scan reply never overwrites a newer range (request-epoch guard); the orphan atoms SegmentedPill + Heatmap ship here (closes COV-01). Note: "per model family" is the honest name of the only agent-side dimension the session logs expose — there is no per-instance agent id (AUD-2026-07-23-07).
+- **UI elements:** stats nav item, SegmentedPill range switcher, per-project stat tiles, per-model-family table, activity Heatmap, freshness stamp, Refresh / Cancel (while scanning), honest empty state
 - **States covered:** loading, empty, error, success
-- **Errors & recovery:** no data in range → honest empty state (never zeros styled as data); collection source unavailable (A-8) → per-source "data unavailable: {source}" note, remaining sources still render; fetch fails → error card + Retry + toast
-- **Status:** validated
-- **Coverage:** src-tauri/src/stats.rs (scanner+cache+pricing+commands), src/ipc/stats.ts, src/store/store.ts (stats slice + refreshStats), src/components/StatsView.tsx, src/components/StatsView.test.tsx, src/components/WorkspaceSidebar.tsx (stats-nav-button), src/App.tsx (stats branch), src/strings.ts (stats group)
+- **Errors & recovery:** no data in range → honest empty state, shown only when BOTH sources are empty (never zeros styled as data); a failed/loading source shows "—" for its derived tiles, never a styled zero; collection source unavailable (A-8) → per-source "data unavailable: {source}" note WITH a Retry, remaining sources still render; scan is cancellable while in flight
+- **Status:** implemented
+- **Coverage:** src-tauri/src/stats.rs (scanner+cache+pricing+per-family cut+commands; git worker-failure honesty), src/ipc/stats.ts (DayUsage/FamilyUsage/GitStats wire), src/store/store.ts (stats slice: epoch guard + cancelStats + lastRefreshMs + refreshStats), src/components/StatsView.tsx (tiles, "—"-on-fail, per-model table, range-windowed Heatmap, Retry/Cancel, gitReason title), src/components/StatsView.test.tsx (16 tests incl. epoch race, cancel, family cut, heatmap window), src/components/WorkspaceSidebar.tsx (stats-nav-button), src/App.tsx (stats branch), src/strings.ts (stats group)
 
 ### SCN-053: Output stats — commits and code per project
 - **Persona:** P-01
@@ -981,9 +982,9 @@ in different lifecycle states.
 - **Expected result:** commit and code-change figures per project for the range, derived from workspace git; cached honestly with a "as of {time}" stamp
 - **UI elements:** output stat tiles per project, freshness stamp, per-project "no git data" note
 - **States covered:** loading, empty, error, success
-- **Errors & recovery:** workspace without git or git read fails → that project shows honest "no git data" (never fabricated zeros); slow scan → visible loading, cancellable; scan failure → error + Retry
-- **Status:** validated
-- **Coverage:** src-tauri/src/stats.rs (git_stats_for_root + numstat parse + honest unavailable), src/components/StatsView.tsx (git columns, no-git rows, as-of stamp, Refresh), src/components/StatsView.test.tsx
+- **Errors & recovery:** workspace without git or git read fails → that project shows honest "no git data" with the reason on hover (never fabricated zeros); a panicked git worker surfaces as per-root "no git data", never a fake-empty success; slow scan → visible loading, cancellable (Cancel abandons the in-flight scan); scan failure → error note + Retry
+- **Status:** implemented
+- **Coverage:** src-tauri/src/stats.rs (git_stats_for_root + numstat parse + honest unavailable; stats_git worker-failure → honest per-root unavailable, not unwrap_or_default), src/components/StatsView.tsx (git columns, no-git rows w/ gitReason title, freshness stamp incl. lastRefreshMs fallback, Cancel), src/store/store.ts (cancelStats, lastRefreshMs), src/components/StatsView.test.tsx
 
 ## docs
 
@@ -998,12 +999,12 @@ in different lifecycle states.
   2. User creates a doc (name → markdown editor), writes, saves
   3. User switches a doc between edit and rendered-preview modes
   4. User deletes a doc and confirms "delete document?"
-- **Expected result:** docs persist with the project (file-backed, like rules.md) and render as formatted markdown; the list shows name + last-modified; agents can read the same files from the project directory
+- **Expected result:** docs persist with the project (file-backed, like rules.md) and render as formatted markdown — block structure plus inline marks (bold, italic, `code`, and markdown links shown as the link text with the URL on hover, rendered JSX-only with no HTML sink); the list shows name + last-modified; agents can read the same files from the project directory
 - **UI elements:** Docs tab, document list, "+ doc" button, name input, markdown editor, edit/preview toggle, "Save" button, "Delete" + window.confirm, "reveal file" button, empty state "No documents in this project yet."
 - **States covered:** loading, empty, error, success
-- **Errors & recovery:** empty name → "+ doc" blocked; save rejects → inline + toast, editor content preserved; file changed externally → "file changed externally" + Accept banner; file lost → "file lost" + Recreate (SCN-036 pattern); orchd down → Save/Delete/Accept/Recreate disabled, reading and "reveal file" stay live
+- **Errors & recovery:** empty name → "+ doc" blocked; save rejects → inline + toast, editor content preserved; file changed externally → "file changed externally" + Accept banner (an external change landing mid-edit keeps the unsaved editor draft — dirty-draft guard, PRN-03 — and the banner mediates, rather than the edit being silently replaced); file lost → "file lost" + Recreate (SCN-036 pattern); orchd down → Save/Delete/Accept/Recreate disabled, reading and "reveal file" stay live
 - **Status:** implemented
-- **Coverage:** src/components/DocsPanel.tsx:24-30 (name-rule mirror), :38-44 (relative last-modified), :259 (panel: list + editor, banners :495-533, orchd-down gating, save-reject inline+toast :326-343), src/components/DocsPanel.test.tsx (19 SCN-054 tests), src/components/markdown.ts:33 (dependency-free preview parser) + markdown.test.ts (11 tests), src/components/ProjectPanel.tsx:38,502 (8th "Docs" tab), src/strings.ts:317-347, src/store/store.ts:894-925 (docsByProject/docViews slices), src/App.tsx:213-231 (orchd://docs-changed binding) + :301-312 (reconnect rehydrate), src/ipc/orchd.ts:366-407 + src/ipc/events.ts:340, crates/orchd-proto/src/lib.rs:792-849 (Doc/DocMeta/DocView), :1331-1373 (ListDocs/GetDoc/UpsertDoc/DeleteDoc/AcknowledgeDocFile verbs), crates/orchd/src/persistence.rs:665-692 (schema v6 `doc` table), :2837-3078 (doc CRUD: name validation, files-as-truth upsert/delete/acknowledge), :6241+ (20 doc_tests incl. traversal rejection, external-change, lost-file, archived guards), crates/orchd/src/socket_server.rs:602-660,1320-1372 (build_doc_view/doc_meta/respond_doc + dispatch arms), crates/orchd/tests/dispatch_integration.rs:948 (wire lifecycle + error-path tests), src-tauri/src/commands.rs:1800-1965 (commands + reveal_doc_file_core no-path-from-JS), src-tauri/src/broker.rs:97 (orchd://docs-changed)
+- **Coverage:** src/components/DocsPanel.tsx:24-30 (name-rule mirror), :38-44 (relative last-modified), :259 (panel: list + editor, banners :495-533, orchd-down gating, save-reject inline+toast :326-343, dirty-draft guard on the editor content), src/components/DocsPanel.test.tsx (SCN-054 tests incl. dirty-draft guard), src/components/markdown.ts (dependency-free block parser + renderInline: bold/italic/code/non-navigating link, JSX-only) + markdown.test.ts (block + renderInline tests), src/components/ProjectPanel.tsx:38,502 (8th "Docs" tab), src/strings.ts:317-347, src/store/store.ts:894-925 (docsByProject/docViews slices), src/App.tsx:213-231 (orchd://docs-changed binding) + :301-312 (reconnect rehydrate), src/ipc/orchd.ts:366-407 + src/ipc/events.ts:340, crates/orchd-proto/src/lib.rs:792-849 (Doc/DocMeta/DocView), :1331-1373 (ListDocs/GetDoc/UpsertDoc/DeleteDoc/AcknowledgeDocFile verbs), crates/orchd/src/persistence.rs:665-692 (schema v6 `doc` table), :2837-3078 (doc CRUD: name validation, files-as-truth upsert/delete/acknowledge), :6241+ (20 doc_tests incl. traversal rejection, external-change, lost-file, archived guards), crates/orchd/src/socket_server.rs:602-660,1320-1372 (build_doc_view/doc_meta/respond_doc + dispatch arms), crates/orchd/tests/dispatch_integration.rs:948 (wire lifecycle + error-path tests), src-tauri/src/commands.rs:1800-1965 (commands + reveal_doc_file_core no-path-from-JS), src-tauri/src/broker.rs:97 (orchd://docs-changed)
 
 ## home (v2)
 
@@ -1041,5 +1042,31 @@ in different lifecycle states.
 - **UI elements:** "+ Add workspace" button, OS folder picker, auto-created session tab, focused terminal pane
 - **States covered:** success, error
 - **Errors & recovery:** workspace creation errors — as SCN-002; auto-spawn fails → workspace view still opens with "+ New terminal" available and an honest toast (degradation = today's manual path, never a blocked first run)
-- **Status:** validated
-- **Coverage:** src/components/WorkspaceSidebar.tsx:115-146 (fast-path in onAdd), src/components/WorkspaceSidebar.test.tsx (3 SCN-056 tests), src/strings.ts:201
+- **Status:** implemented
+- **Coverage:** src/components/WorkspaceSidebar.tsx:119-152 (fast-path in onAdd; auto-spawn cwd = ws.roots[0], AUD-2026-07-23-17), src/components/WorkspaceSidebar.test.tsx (3 SCN-056 tests incl. cwd assertion), src/strings.ts:201
+
+## auth
+
+### SCN-057: Per-project auth context for terminals
+- **Persona:** P-01
+- **Traces:** ST-043, FLW-22, FLW-07 (JTBD-02, JTBD-06, JRN-07/#2)
+- **Feature:** auth
+- **Entry point:** project panel "Rules" tab → "Auth context" section (FLW-22; sibling of the SCN-046 supervisor section); effective on every terminal spawned in that project (SCN-013, SCN-056)
+- **Preconditions:** at least one project exists; the operator has credentials for the org/account they want to bind (Console API key, or an OAuth token from `claude setup-token`)
+- **Steps:**
+  1. In a project's settings the operator picks an auth context: "Inherit (default shell env)", "API key", or "Subscription token", and enters the secret; optionally pins an org UUID
+  2. The operator saves — the secret is written to the OS secret store (Keychain), never to project files or logs; the panel shows a masked fingerprint (last 4) + the bound org, not the raw value
+  3. The operator opens a terminal in this project (SCN-013 / SCN-056) → the app spawns the child process with the context injected as environment (`ANTHROPIC_API_KEY` **or** `CLAUDE_CODE_OAUTH_TOKEN`, plus a per-context `CLAUDE_CONFIG_DIR`, and `forceLoginOrgUUID` written into that dir's settings when an org was pinned)
+  4. The operator opens a terminal in a *different* project bound to a different org → that terminal runs under the other org; `claude /status` in each proves the split
+  5. The operator clears a project's context back to "Inherit" → new terminals fall back to the ambient shell login (today's behavior)
+- **Expected result:** each project's terminals authenticate under that project's bound org/account with no manual `export` and no cross-project bleed; the active context is visible per project (settings badge + terminal-tab tooltip: "org: {name}"); secrets never appear in project files, git, the command-history strip (SCN-017), or logs
+- **UI elements:** project-settings "Auth context" panel (mode picker, secret input with masked display, org-UUID field, "Test" button, "Clear" button), per-project auth badge, terminal-tab auth tooltip, save/clear toasts
+- **States covered:** empty (inherit — no context bound), success (bound + verified), loading (Test in flight), error
+- **Errors & recovery:**
+  - **macOS Keychain is process-global** — OAuth `/login` credentials in Keychain are shared regardless of `CLAUDE_CONFIG_DIR`, so a subscription `/login` done *inside* a terminal can leak across projects. The app only guarantees isolation for the **env-injected** context (API key / setup-token); the panel states this honestly and recommends API-key or `setup-token` mode over interactive `/login` for multi-org use. `forceLoginOrgUUID` is written as a guard so a mismatched login **fails fast** rather than acting under the wrong org.
+  - **Missing / empty secret** for a non-inherit mode → save rejected inline ("enter a key or token, or switch to Inherit"); no half-bound state.
+  - **"Test" fails** (invalid key, revoked token, wrong org vs pinned UUID) → red result with the reason; the context still saves but the badge shows "unverified".
+  - **Secret store unavailable** (Keychain locked / denied) → save fails with an honest toast; the app never silently falls back to writing the secret in plaintext.
+- **Design rationale:** env injection at spawn is the only cross-platform mechanism that truly isolates orgs (auth precedence: `ANTHROPIC_API_KEY` > `apiKeyHelper` > `CLAUDE_CODE_OAUTH_TOKEN` > `/login`); `CLAUDE_CONFIG_DIR` isolates config on Linux/Windows but **not** Keychain-backed creds on macOS — hence the honesty boundary above. Feasibility of the token/cost read-back is tracked by A-8; this scenario is the org-isolation half and is gated behind the same spike (A-9). Interaction (A-8/SCN-052): a per-context `CLAUDE_CONFIG_DIR` relocates Claude Code's session JSONL, so the usage-stats scanner must also scan bound contexts' dirs — spike check 4. Injected env vars must pass sessiond's env-hygiene allowlist (pty_supervisor, spec §9.3).
+- **Status:** draft
+- **Coverage:** none yet — integration point: terminal/session spawn env in the Tauri command + orchd session create (where cwd is set today, per SCN-013 coverage)

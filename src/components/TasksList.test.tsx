@@ -478,3 +478,35 @@ describe("TasksList", () => {
     await waitFor(() => expect(orchdSetTaskRankMock).toHaveBeenCalledWith("nC", 0 - 1024));
   });
 });
+
+// ── PRN-06: labeled selects — every unlabeled select carries a `title` mirroring its aria-label so
+// a sighted user gets a hover tooltip of its purpose (the current option text alone is ambiguous).
+describe("TasksList — labeled selects (PRN-06)", () => {
+  it("row selects (priority, status) expose a title equal to their aria-label", () => {
+    const a = makeTask({ id: "a", status: "backlog" });
+    useAppStore.setState({ tasksByProject: { [projectId]: [a] } }, false);
+
+    render(<TasksList projectId={projectId} />);
+
+    expect(screen.getByTestId("task-priority-select-a").getAttribute("title")).toBe(
+      strings.tasks.priorityAria,
+    );
+    expect(screen.getByTestId("task-status-select-a").getAttribute("title")).toBe(
+      strings.tasks.statusAria,
+    );
+  });
+
+  it("create-form selects (source, priority, parent) expose a title equal to their aria-label", () => {
+    render(<TasksList projectId={projectId} />);
+
+    expect(screen.getByTestId("task-create-source").getAttribute("title")).toBe(
+      strings.tasks.newSourceAria,
+    );
+    expect(screen.getByTestId("task-create-priority").getAttribute("title")).toBe(
+      strings.tasks.newPriorityAria,
+    );
+    expect(screen.getByTestId("task-create-parent").getAttribute("title")).toBe(
+      strings.tasks.parentAria,
+    );
+  });
+});

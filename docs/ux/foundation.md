@@ -264,7 +264,7 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given the sidebar, when I click "+ Add workspace" and pick a folder, then a workspace is created from the folder name and the app navigates into it.
   - Given the create fails, when it rejects, then a toast names the reason (disconnected / incompatible / too large / internal).
 - **Priority:** must
-- **Status:** delivered *(SCN-002; fast-path extension SCN-056 validated)*
+- **Status:** delivered *(SCN-002; fast-path extension SCN-056 implemented 2026-07-23 — cwd fix AUD-2026-07-23-17)*
 
 ### ST-003: Capture an idea without breaking flow
 - **Story:** As P-01/P-02, I want a global one-keystroke capture, so that ideas don't interrupt my terminal work.
@@ -582,14 +582,14 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
 - **Priority:** should
 - **Status:** validated *(SCN-051 validated)*
 
-### ST-038: See token and cost usage per agent and project *(stated 2026-07-22)*
-- **Story:** As P-01, I want token and cost statistics per agent and per project over selectable ranges, so that I know where the money goes.
+### ST-038: See token and cost usage per model family and project *(stated 2026-07-22)*
+- **Story:** As P-01, I want token and cost statistics per model family and per project over selectable ranges, so that I know where the money goes.
 - **Traces:** JTBD-11, JRN-11/#2, JRN-11/#3
 - **Acceptance criteria:**
-  - Given usage occurred, when I open the stats view and pick a range (All | 30d | 7d), then tokens and cost render per project and per agent for that range.
-  - Given no data for a range, when I view it, then an honest empty state shows — never zeros styled as data.
+  - Given usage occurred, when I open the stats view and pick a range (All | 30d | 7d), then tokens and cost render per project and per model family for that range.
+  - Given no data for a range, when I view it, then an honest empty state shows — never zeros styled as data (and a failed source shows "—", never a styled zero).
 - **Priority:** must
-- **Status:** validated *(SCN-052 validated)*
+- **Status:** implemented *(SCN-052 implemented 2026-07-23; "per agent" honestly narrowed to "per model family" — session logs carry no per-instance agent id, AUD-2026-07-23-07)*
 
 ### ST-039: See output statistics — commits and code *(stated 2026-07-22)*
 - **Story:** As P-01, I want commit counts and code-change stats per project per period, so that I can see what the operation actually produced.
@@ -630,6 +630,17 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given nothing needs me, when I open Home, then an honest "nothing needs you" state shows.
 - **Priority:** must
 - **Status:** validated *(SCN-055 validated 2026-07-23 — supersedes the current Home triage scenario on ship)*
+
+### ST-043: Per-project auth context for terminals *(stated 2026-07-23)*
+- **Story:** As P-01, I want each project's terminals to run under that project's own Claude Code auth context (a specific org/account), so that one project can operate in org A and another in org B without manual `export`s or cross-project credential bleed.
+- **Traces:** JTBD-02, JTBD-06, JRN-07/#2
+- **Acceptance criteria:**
+  - Given a project with a bound auth context, when I spawn a terminal in it, then the child process authenticates under that context (env-injected key/token + per-context config dir), and `claude /status` in two differently-bound projects proves the split.
+  - Given a bound secret, when I save it, then it lives in the OS secret store and never appears in project files, git, the command-history strip, or logs; the panel shows only a masked fingerprint + bound org.
+  - Given macOS Keychain is process-global, when the panel is shown, then it states honestly that only env-injected (API-key / setup-token) contexts are isolation-guaranteed and writes `forceLoginOrgUUID` as a fail-fast guard against a mismatched interactive `/login`.
+  - Given I clear a context, when I spawn a terminal, then it falls back to the ambient shell login (today's behavior).
+- **Priority:** should
+- **Status:** proposed *(SCN-057 draft 2026-07-23; gated behind the A-8/A-9 spike)*
 
 ---
 
@@ -674,14 +685,45 @@ Marked by risk dimension: **D**esirability / **V**iability / **F**easibility /
   authority. Remaining build risk: grounding quality — covered by the
   decision log (every answer cites its source) and SCN-047's
   "never guesses" rule.
-- **A-8 (F)** — Token/cost data for terminal agents (ST-038) is obtainable:
-  Claude Code exposes usage locally (session JSONL / OTel). Feasibility spike
-  needed; if a source is unavailable, scope narrows to MCP-call costs
-  (already collected via SCN-035 plumbing).
+- **A-8 (F) — CONFIRMED 2026-07-23 by shipped code.** Token/cost data for
+  terminal agents (ST-038) IS obtainable from Claude Code's local session
+  logs: the SCN-052 stats scanner reads `~/.claude/projects/<dir>/<session>.jsonl`
+  incrementally with per-file caching and per-source honest degradation
+  (src-tauri/src/stats.rs:5,176,260-285,453 + scanner tests). No spike needed
+  for the read-back half. **Residual (moved to the A-9 spike, check 4):**
+  SCN-057's per-context `CLAUDE_CONFIG_DIR` would relocate session JSONL out
+  of `~/.claude/projects` — the scanner must also scan each bound context's
+  projects dir or usage silently undercounts.
+- **A-9 (F/U) — stated 2026-07-23.** Per-project org isolation (ST-043/SCN-057)
+  is feasible via env injection at terminal spawn (`ANTHROPIC_API_KEY` /
+  `CLAUDE_CODE_OAUTH_TOKEN` + per-context `CLAUDE_CONFIG_DIR`,
+  `forceLoginOrgUUID` guard). **Known boundary:** on macOS the Keychain is
+  process-global, so an interactive `/login` inside a terminal is NOT isolated
+  by `CLAUDE_CONFIG_DIR` — only env-injected key/token contexts are.
+  **Spike (tracked, blocks the ST-043/SCN-057 build — FLW-22):**
+  - **Deliverable:** a throwaway branch + a result note appended to this
+    entry (CONFIRMED / BLOCKED per check), no product code.
+  - **Exit checks:**
+    1. child-process env plumbing at the spawn site — a terminal spawned via
+       the existing SCN-013 path receives injected `ANTHROPIC_API_KEY` /
+       `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CONFIG_DIR`, passing sessiond's
+       env-hygiene allowlist (pty_supervisor, spec §9.3); verify with
+       `claude /status`;
+    2. secret-store round-trip — write/read/delete a test secret via
+       `crates/secrets` (new service name alongside the existing MCP/account
+       ones, crates/secrets/src/lib.rs:14-17) with no plaintext on disk or in
+       logs;
+    3. `forceLoginOrgUUID` fails fast on an org-mismatched interactive
+       `/login` as documented;
+    4. stats interaction (from A-8) — with a custom `CLAUDE_CONFIG_DIR`, the
+       SCN-052 scanner sees the relocated session JSONL (or the build scopes
+       a scanner-roots extension into ST-043).
+  - **Degradation if check 1 fails:** documented manual-`export` recipe, no
+    false isolation guarantee.
 
 ## 6. Best-practices applicability
 
-The tagged catalog ([best-practices.md](../../../.claude/plugins/cache/super-ux/super-ux/0.7.0/skills/references/best-practices.md))
+The tagged catalog (super-ux reference `skills/references/best-practices.md`, shipped with the plugin)
 is **48 Laws of Subscription App Success** — paywall, freemium, push, and
 lifecycle-monetization mechanisms. Builder Pro AI is a **free local macOS
 developer tool**: no paywall, no monetization, no push channel, no store
@@ -703,12 +745,13 @@ class and should not be force-fit in future scenario or audit work.
 
 ## Definition of done
 
-- Layers consistent, IDs stable (P-01..03, JTBD-01..11, JRN-01..11, ST-001..041).
+- Layers consistent, IDs stable (P-01..03, JTBD-01..11, JRN-01..11, ST-001..043).
 - All inferred entries marked; operator-stated entries carry
   `(stated 2026-07-22)`; risky assumptions flagged in §5.
 - Every scenario maps to ≥1 story; every must/should story has ≥1 scenario
   (delivered ones implemented; SCN-045..053 validated by the operator
   2026-07-22; SCN-054 draft awaiting design review).
-- **WHY layer validated by the operator 2026-07-22**; open items: A-7
-  delegation-boundary spec before ST-034 build, A-8 token-source spike
-  before ST-038 build, SCN-054 design approval.
+- **WHY layer validated by the operator 2026-07-22**; open items: A-8
+  token-source spike + A-9 org-isolation spike (shared) before ST-038/ST-043
+  build; SCN-057 awaiting operator approval. *(A-7 resolved 2026-07-22;
+  ST-041/SCN-054 shipped; SCN-055 validated.)*

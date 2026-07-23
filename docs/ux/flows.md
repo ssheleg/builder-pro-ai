@@ -2,11 +2,12 @@
 
 # User Flows — The HOW Layer
 
-Reverse-engineered 2026-07-23 from the 55 scenarios (44 implemented + 11
-validated/draft) and the Figma screen set. Implemented-backed flows carry
-code evidence via their scenarios' Coverage; to-be flows (FLW-18..21, parts
-of FLW-03) are design-stage. All entries `inferred`→confirmed against the
-operator-validated foundation. Heuristic findings: [§Improvement](#improvement-findings-prn-pass-2026-07-23).
+Reverse-engineered 2026-07-23 from the scenario base and the Figma screen
+set. Implemented-backed flows carry code evidence via their scenarios'
+Coverage; to-be flows (FLW-19 runtime half, parts of FLW-03, FLW-22) are
+design-stage — FLW-18/20/21 shipped and lost the tag per the 2026-07-23
+audit. All entries `inferred`→confirmed against the operator-validated
+foundation. Heuristic findings: [§Improvement](#improvement-findings-prn-pass-2026-07-23).
 
 ---
 
@@ -15,7 +16,7 @@ operator-validated foundation. Heuristic findings: [§Improvement](#improvement-
 - **Goal:** from cold start to a working terminal in a real folder, zero reading
 - **Entry points:** first launch (no state); sidebar "+ Add workspace" any time
 - **Success exit:** live terminal in the chosen folder (JRN-01 aha)
-- **Task analysis:** 1. see the single next action → 2. pick a folder → 3. reach a terminal. Step 3 is currently manual ("+ New terminal") — cut candidate: system can spawn it (see IMP-01).
+- **Task analysis:** 1. see the single next action → 2. pick a folder → 3. reach a terminal. Step 3 auto-spawns on the app-wide cold start (IMP-01 → SCN-056, shipped); steady-state adds stay manual by design.
 - **Flow:**
 ```mermaid
 flowchart TD
@@ -26,7 +27,12 @@ flowchart TD
   C -->|no| C_err[Toast: reason - disconnected/too large/internal]
   C_err --> A
   C -->|yes| D[Screen: Workspace view]
-  D -->|+ New terminal - manual today, auto per IMP-01| E[Live terminal]
+  D --> F{cold start - zero prior sessions?}
+  F -->|yes SCN-056| AS{auto-spawn OK?}
+  AS -->|yes| E[Live terminal - tab focused]
+  AS -->|no| AS_err[Toast: honest failure] -->|manual + New terminal stays| M[+ New terminal]
+  F -->|no - steady state| M
+  M --> E
 ```
 - **Screens & states:**
   | Screen | States | Key elements |
@@ -153,7 +159,7 @@ flowchart TD
 flowchart TD
   W[Workspace view] -->|+ New terminal| C{create OK?}
   C -->|no| C_err[Toast, no tab] --> W
-  C -->|yes| T[Tab appears + auto-activate]
+  C -->|yes| T[Tab appears + auto-activate if none active]
   T -->|switch tab| T2[Pane swaps, scrollback intact, hidden keeps buffering]
   T -->|x close| K{kill OK?}
   K -->|yes/no| G[Tab removed either way - no zombie]
@@ -393,7 +399,7 @@ flowchart TD
   | ErrorBoundary | error | Reload (primary), Copy details |
   | Diagnostics | empty, success | ring, copy bundle, clear |
 
-### FLW-18: Keep the machine awake *(to-be)*
+### FLW-18: Keep the machine awake
 - **Traces:** ST-033 (JTBD-10, JRN-10/#5)
 - **Goal:** long unattended runs never killed by sleep; state never lies
 - **Entry points:** toggle in sidebar footer (default on); session count changes
@@ -413,7 +419,7 @@ flowchart TD
   |--------|--------|--------------|
   | Sidebar footer | success, error | toggle, ok-dot indicator, failure surfacing |
 
-### FLW-19: CEO supervision loop *(to-be — the autonomy core)*
+### FLW-19: CEO supervision loop *(partially shipped — setup/config live per SCN-046; supervision runtime (Q..DEGR nodes) to-be, S6b)*
 - **Traces:** ST-034, ST-035, ST-036 (JTBD-10, JRN-10)
 - **Goal:** questions answered and work continued within delegated authority; everything logged; out-of-scope always escalates
 - **Entry points:** Rules → supervisor setup; agent question event; task-completion event; Home digest "open log"
@@ -440,10 +446,10 @@ flowchart TD
   | Decision log | empty, success | digest, entries w/ basis, escalation links |
   | Session surfaces | success | "CEO answered" marker, escalated tab tint |
 
-### FLW-20: Read the operation *(to-be)*
+### FLW-20: Read the operation
 - **Traces:** ST-038, ST-039, ST-040 (JTBD-11, JRN-11)
 - **Goal:** "where did the week go" in under a minute
-- **Entry points:** sidebar "✦ Stats"; Home spend tile
+- **Entry points:** sidebar "✦ Stats"; Home spend tile *(pending SCN-055 — Home v2)*
 - **Success exit:** outlier spotted → action taken (caps/kill/rebalance)
 - **Flow:**
 ```mermaid
@@ -459,7 +465,7 @@ flowchart TD
   |--------|--------|--------------|
   | Stats view | loading, empty, error, success | SegmentedPill, stat tiles, Heatmap, per-project table, freshness stamp |
 
-### FLW-21: Project documentation *(to-be)*
+### FLW-21: Project documentation
 - **Traces:** ST-041 (JTBD-06, JRN-07/#2)
 - **Goal:** docs live with the project; agents read the same files
 - **Entry points:** Docs tab; external file edits (agents/editors)
@@ -473,13 +479,44 @@ flowchart TD
   S -->|no| S_err[Inline + toast, content preserved] --> ED
   S -->|yes| ED
   EXT[Changed externally] --> AB[Accept banner] --> ED
-  LOST[File lost] --> RB[Recreate banner] --> D
+  LOST[File lost] --> RB[Recreate banner] --> ED
   ED -->|Delete + confirm| D
 ```
 - **Screens & states:**
   | Screen | States | Key elements |
   |--------|--------|--------------|
   | Docs tab | loading, empty, error, success | list, editor, edit/preview toggle (primary: Save), banners |
+
+### FLW-22: Per-project auth context *(to-be — gated on the A-9 spike)*
+- **Traces:** ST-043 (JTBD-02, JTBD-06, JRN-07/#2)
+- **Goal:** each project's terminals authenticate under that project's bound org/account — org A and org B side by side, no manual `export`, no cross-project bleed for env-injected contexts
+- **Entry points:** project panel "Rules" tab → "Auth context" section (sibling of the SCN-046 supervisor section — same section pattern; secrets go to Keychain via `crates/secrets` with a new service name, never rules.md); effect applies at every terminal spawn (SCN-013, SCN-056)
+- **Success exit:** `claude /status` in two differently-bound projects proves the split; clearing a context restores ambient login
+- **Task analysis:** bind once per project (mode + secret + optional org pin) → verify ("Test") → every spawn injects silently → operator re-opens the panel only to rotate or clear. First-value = the first two-org day with zero `export`s. Injected vars must pass sessiond's env-hygiene allowlist (pty_supervisor, spec §9.3).
+- **Flow:**
+```mermaid
+flowchart TD
+  P[Rules tab: Auth context section] -->|pick mode: Inherit / API key / Subscription token| F[Form: secret + optional org UUID pin]
+  F -->|Save, non-inherit, empty secret| F_err[Inline: enter a key or token, or switch to Inherit]
+  F_err --> F
+  F -->|Save| K{Keychain write OK?}
+  K -->|no| K_err[Toast: secret store unavailable - nothing saved, never plaintext]
+  K_err --> F
+  K -->|yes| B[Badge: bound org + masked last-4 fingerprint]
+  F -->|Test| T{key/token valid AND org matches pin?}
+  T -->|yes| B2[Badge: verified]
+  T -->|no| T_err[Red result with reason - saves as unverified]
+  T_err --> F
+  B -->|spawn terminal SCN-013/SCN-056| S[Child env: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN + CLAUDE_CONFIG_DIR + forceLoginOrgUUID guard]
+  S --> RUN[Terminal under bound org - tab tooltip org name]
+  RUN -->|interactive /login inside terminal| WARN[Keychain is process-global: not isolated - forceLoginOrgUUID fails fast on mismatch]
+  B -->|Clear| INH[Inherit: ambient shell login - today's behavior]
+```
+- **Screens & states:**
+  | Screen | States | Key elements |
+  |--------|--------|--------------|
+  | Rules tab — Auth context section | empty (inherit), loading (Test), error, success | mode picker, secret input (masked), org-UUID field, Test, Clear, Keychain honesty note (primary: Save) |
+  | Terminal surfaces | success | per-project auth badge, tab tooltip "org: {name}" |
 
 ---
 
@@ -535,7 +572,7 @@ flowchart LR
 
 ## Definition of done
 
-- 21 flows, each traced to stories; every screen node states-declared; every
+- 22 flows, each traced to stories; every screen node states-declared; every
   error edge lands on recovery (verified per-diagram); entry points enumerated.
 - Scenario cross-links: every scenario Traces now carries its FLW id; every
   flow lists ≥1 covering scenario via the map in this file's flow Traces.

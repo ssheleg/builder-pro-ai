@@ -16,7 +16,7 @@ import { useAppStore } from "../store/store";
 import { strings } from "../strings";
 import type { Project } from "../ipc/orchd-types";
 import type { Workspace } from "../ipc/types";
-import type { UsageStats, GitStats } from "../ipc/stats";
+import type { UsageStats, GitStats, FamilyUsage } from "../ipc/stats";
 
 const wsA: Workspace = { id: "w1", name: "alpha", rootPath: "/p/alpha", roots: ["/p/alpha"] };
 const wsNested: Workspace = {
@@ -45,8 +45,24 @@ const PROJECTS = [
 ];
 const WORKSPACES = { w1: wsA, w2: wsNested };
 
-function usage(days: UsageStats["days"], error: string | null = null): UsageStats {
-  return { asOf: 1_753_228_800_000, days, error };
+function usage(
+  days: UsageStats["days"],
+  error: string | null = null,
+  families: FamilyUsage[] = [],
+): UsageStats {
+  return { asOf: 1_753_228_800_000, days, families, error };
+}
+function family(over: Partial<FamilyUsage>): FamilyUsage {
+  return {
+    family: "opus",
+    tokensIn: 1000,
+    tokensOut: 2000,
+    cacheWrite: 0,
+    cacheRead: 0,
+    estCostUsd: 5,
+    sessions: 3,
+    ...over,
+  };
 }
 function day(over: Partial<UsageStats["days"][0]>): UsageStats["days"][0] {
   return {
@@ -74,7 +90,16 @@ beforeEach(() => {
     {
       projects: PROJECTS,
       workspaces: WORKSPACES,
-      stats: { range: "30d", usage: null, git: null, usageError: null, gitError: null, loading: false },
+      stats: {
+        range: "30d",
+        usage: null,
+        git: null,
+        usageError: null,
+        gitError: null,
+        loading: false,
+        epoch: 0,
+        lastRefreshMs: null,
+      },
       toast: null,
       toastQueue: [],
       diagEvents: [],
@@ -169,5 +194,87 @@ describe("StatsView (SCN-052/053)", () => {
       expect(screen.getByTestId("stats-cost").textContent).toContain(strings.stats.costPartialLabel),
     );
     expect(screen.getByTestId("stats-row-alpha-proj").textContent).toContain("$0.50*");
+  });
+
+  it("SCN-052: per-model-family cut renders a row per family (AUD-2026-07-23-07)", async () => {
+    statsUsageMock.mockResolvedValue(
+      usage([day({})], null, [
+        family({ family: "opus", tokensIn: 1_000_000, tokensOut: 0, estCostUsd: 15, sessions: 4 }),
+        family({ family: "fable", tokensIn: 10, tokensOut: 10, estCostUsd: null, sessions: 1 }),
+      ]),
+    );
+    render(<StatsView />);
+    await waitFor(() => expect(screen.getByTestId("stats-by-model")).toBeTruthy());
+    expect(screen.getByTestId("stats-family-opus").textContent).toContain("$15.00");
+    // unpriced family shows tokens but a dashed cost — never a fake $0
+    const fable = screen.getByTestId("stats-family-fable");
+    expect(fable.textContent).toContain("—");
+  });
+
+  it("SCN-052: heatmap window tracks the range pill — 7d shows a 7-day label (PRN-01)", async () => {
+    render(<StatsView />);
+    await waitFor(() => expect(screen.getByText(strings.stats.activity(30))).toBeTruthy());
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: strings.stats.range7d }));
+    });
+    await waitFor(() => expect(screen.getByText(strings.stats.activity(7))).toBeTruthy());
+  });
+
+  it("SCN-052: a stale scan reply never overwrites a newer range (epoch guard, AUD-2026-07-23-25)", async () => {
+    let resolveFirst!: (v: UsageStats) => void;
+    statsUsageMock
+      .mockReturnValueOnce(new Promise<UsageStats>((r) => (resolveFirst = r)))
+      .mockResolvedValue(usage([day({ tokensOut: 999 })]));
+    render(<StatsView />);
+    await waitFor(() => expect(statsUsageMock).toHaveBeenCalledTimes(1));
+    // range switch supersedes the still-pending first scan; the 7d scan resolves immediately
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: strings.stats.range7d }));
+    });
+    await waitFor(() => expect(useAppStore.getState().stats.usage?.days[0]?.tokensOut).toBe(999));
+    // the late 30d reply now lands — it must be discarded, NOT overwrite the 7d figures
+    await act(async () => {
+      resolveFirst(usage([day({ tokensOut: 1 })]));
+      await Promise.resolve();
+    });
+    expect(useAppStore.getState().stats.usage?.days[0]?.tokensOut).toBe(999);
+  });
+
+  it("SCN-053: slow scan is cancellable — Cancel clears loading and discards the reply (AUD-2026-07-23-11)", async () => {
+    let resolveUsage!: (v: UsageStats) => void;
+    statsUsageMock.mockReturnValue(new Promise<UsageStats>((r) => (resolveUsage = r)));
+    statsGitMock.mockReturnValue(new Promise<GitStats[]>(() => {}));
+    render(<StatsView />);
+    await waitFor(() => expect(screen.getByTestId("stats-cancel")).toBeTruthy());
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stats-cancel"));
+    });
+    expect(useAppStore.getState().stats.loading).toBe(false);
+    // a late reply must not repopulate the view (epoch was bumped by Cancel)
+    await act(async () => {
+      resolveUsage(usage([day({})]));
+      await Promise.resolve();
+    });
+    expect(useAppStore.getState().stats.usage).toBeNull();
+  });
+
+  it("AUD-2026-07-23-09: usage-scan failure shows '—' tiles + a Retry, never zeros", async () => {
+    statsUsageMock.mockRejectedValue(new Error("scan broke"));
+    render(<StatsView />);
+    await waitFor(() => expect(screen.getByTestId("stats-usage-retry")).toBeTruthy());
+    // usage-derived tiles dashed, not "0"
+    expect(screen.getByTestId("stats-tokens").textContent).toContain("—");
+    expect(screen.getByTestId("stats-tokens").textContent).not.toContain("0");
+    // git survived → its tile is real
+    expect(screen.getByTestId("stats-row-alpha-proj").textContent).toContain("3 · +10 −4");
+  });
+});
+
+describe("heatWindowDays", () => {
+  it("7d → 7 columns, everything else → 30", async () => {
+    const { heatWindowDays } = await import("./StatsView");
+    expect(heatWindowDays("7d")).toBe(7);
+    expect(heatWindowDays("30d")).toBe(30);
+    expect(heatWindowDays("all")).toBe(30);
   });
 });

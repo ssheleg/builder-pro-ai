@@ -63,8 +63,10 @@ export function TerminalTabs(props: {
     // workspace switch — `FilesRail` just stops rendering it) — only trust the selection when
     // it's actually one of THIS workspace's roots; otherwise fall back to roots[0] same as if
     // nothing were selected. No workspace/roots found (e.g. a hydration race) -> cwd stays
-    // `undefined` and is OMITTED from the opts, matching the existing pre-T12 behavior (the
-    // daemon defaults to roots[0] server-side).
+    // `undefined` and is OMITTED from the opts, matching the existing pre-T12 behavior. NOTE:
+    // an omitted cwd is defaulted by sessiond to $HOME, NOT roots[0] (crates/sessiond
+    // socket_server.rs; see src-tauri/src/commands.rs `build_create_session`) — so every
+    // caller that wants the repo root must pass it explicitly, as this path does.
     const selectedRoot =
       selectedFile && activeWorkspace?.roots.includes(selectedFile.root)
         ? selectedFile.root
