@@ -57,11 +57,11 @@
 | SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | 2026-07-23 BLOCKED (not built — S6b) |
 | SCN-050 | Review decisions made while away | supervisor | P-03 | ST-036 | validated | 2026-07-23 BLOCKED (not built — S6b) |
 | SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | implemented | 2026-07-23 PASS |
-| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | 2026-07-23 PARTIAL→fixed (AUD-07/08/09/10/25) |
-| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | 2026-07-23 PARTIAL→fixed (AUD-11/12/13/14) |
+| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | implemented | 2026-07-23 PASS (re-audit; was PARTIAL, AUD-07/08/09/10/25 closed) |
+| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | implemented | 2026-07-23 PASS (re-audit; was PARTIAL, AUD-11/12/13/14 closed) |
 | SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | 2026-07-23 PASS |
 | SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | 2026-07-23 BLOCKED (not built) |
-| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | implemented | 2026-07-23 PARTIAL→fixed (AUD-17) |
+| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | implemented | 2026-07-23 PASS (re-audit; AUD-17 closed) |
 | SCN-057 | Per-project auth context for terminals | auth | P-01 | ST-043 | draft | 2026-07-23 BLOCKED (draft, gated A-9) |
 
 ## Personas
@@ -593,7 +593,7 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** priority save rejects → revert to stored value + toast; orchd down → priority control disabled like other mutations
 - **Status:** implemented
-- **Coverage:** src/components/TasksList.tsx:40-49,102-118,258-292,404-414,531-544 (create-form + row selects, urgent marker/chip, urgent-first sort, reject→revert+toast, orchdDown gating); src/ipc/orchd.ts:241-290 (orchdCreateTask priority arg, orchdSetTaskPriority); src-tauri/src/commands.rs:1611-1710 (orchd_create_task priority, orchd_set_task_priority); crates/orchd-proto/src/lib.rs:203-215,1258-1265 (TaskPriority, SetTaskPriority verb); crates/orchd/src/persistence.rs:631-651,2406-2435 (migrate_v5 `task.priority`, set_task_priority)
+- **Coverage:** src/components/TasksList.tsx:40-49,102-118,258-292,404-414,531-544 (create-form + row selects, urgent marker/chip, urgent-first sort, reject→revert+toast, orchdDown gating); src/ipc/orchd.ts:241-290 (orchdCreateTask priority arg, orchdSetTaskPriority); src-tauri/src/commands.rs:1627-1655 (orchd_create_task priority),1709-1720 (orchd_set_task_priority); crates/orchd-proto/src/lib.rs:203-215 (TaskPriority),1369-1372 (SetTaskPriority verb),1516 (name map); crates/orchd/src/persistence.rs:649-655 (migrate_v5 `task.priority`),2443-2467 (set_task_priority)
 
 ## goals
 
@@ -862,7 +862,7 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** OS denies the assertion → honest banner/toast "keep-awake unavailable: {reason}" + Diagnostics record — never a silent fake "awake"; app quit/crash → assertion released by OS (no orphan lock)
 - **Status:** implemented
-- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-385, src-tauri/src/lib.rs:599-603,719-721, src/ipc/power.ts:13-48, src/store/store.ts:408-431,452-477,525-553,964-990, src/App.tsx:413-446, src/components/WorkspaceSidebar.tsx:87-90,447-458,540-613, src/strings.ts:615-627
+- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-387 (SleepAsserter, reconcile, IOKit FFI, commands), src-tauri/src/lib.rs:604,727-729 (new_power_slot manage + handler registration), src/ipc/power.ts:13-48, src/store/store.ts:443-457 (keepAwake slice types),617 (applyPowerStatus mirror),1064-1090 (init + setKeepAwakeEnabled + syncKeepAwake), src/App.tsx:470-476 (live-count sync effect), src/components/WorkspaceSidebar.tsx:479 (pill mount),563-636 (KeepAwakePill), src/strings.ts:697-711 (keepAwake group: keepAwakeOn/keepAwakeFailed)
 
 ## supervisor
 
@@ -967,7 +967,7 @@ in different lifecycle states.
 - **UI elements:** stats nav item, SegmentedPill range switcher, per-project stat tiles, per-model-family table, activity Heatmap, freshness stamp, Refresh / Cancel (while scanning), honest empty state
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** no data in range → honest empty state, shown only when BOTH sources are empty (never zeros styled as data); a failed/loading source shows "—" for its derived tiles, never a styled zero; collection source unavailable (A-8) → per-source "data unavailable: {source}" note WITH a Retry, remaining sources still render; scan is cancellable while in flight
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src-tauri/src/stats.rs (scanner+cache+pricing+per-family cut+commands; git worker-failure honesty), src/ipc/stats.ts (DayUsage/FamilyUsage/GitStats wire), src/store/store.ts (stats slice: epoch guard + cancelStats + lastRefreshMs + refreshStats), src/components/StatsView.tsx (tiles, "—"-on-fail, per-model table, range-windowed Heatmap, Retry/Cancel, gitReason title), src/components/StatsView.test.tsx (16 tests incl. epoch race, cancel, family cut, heatmap window), src/components/WorkspaceSidebar.tsx (stats-nav-button), src/App.tsx (stats branch), src/strings.ts (stats group)
 
 ### SCN-053: Output stats — commits and code per project
@@ -983,7 +983,7 @@ in different lifecycle states.
 - **UI elements:** output stat tiles per project, freshness stamp, per-project "no git data" note
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** workspace without git or git read fails → that project shows honest "no git data" with the reason on hover (never fabricated zeros); a panicked git worker surfaces as per-root "no git data", never a fake-empty success; slow scan → visible loading, cancellable (Cancel abandons the in-flight scan); scan failure → error note + Retry
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src-tauri/src/stats.rs (git_stats_for_root + numstat parse + honest unavailable; stats_git worker-failure → honest per-root unavailable, not unwrap_or_default), src/components/StatsView.tsx (git columns, no-git rows w/ gitReason title, freshness stamp incl. lastRefreshMs fallback, Cancel), src/store/store.ts (cancelStats, lastRefreshMs), src/components/StatsView.test.tsx
 
 ## docs
