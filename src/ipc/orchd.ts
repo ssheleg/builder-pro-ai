@@ -40,6 +40,7 @@ import type {
   Skill,
   SkillScope,
   StorageStatus,
+  TaskPriority,
   TaskSource,
   TaskStatus,
 } from "./orchd-types";
@@ -238,6 +239,9 @@ export function orchdListInsights(projectId: string | null): Promise<Insight[]> 
 
 // ── tasks ────────────────────────────────────────────────────────────────────────────────────
 
+/** `priority: null` ⇒ the daemon defaults to `"normal"` (SCN-051 — mirrors `status: null` ⇒
+ * `"backlog"`); callers that expose the priority control (`TasksList`'s create form) pass the
+ * selected value explicitly. */
 export function orchdCreateTask(
   projectId: string,
   parentId: string | null,
@@ -247,6 +251,7 @@ export function orchdCreateTask(
   source: TaskSource,
   sourceId: string | null,
   tags: string[],
+  priority: TaskPriority | null,
 ): Promise<DomainTask> {
   return invoke<DomainTask>("orchd_create_task", {
     projectId,
@@ -257,6 +262,7 @@ export function orchdCreateTask(
     source,
     sourceId,
     tags,
+    priority,
   });
 }
 
@@ -275,6 +281,12 @@ export function orchdSetTaskStatus(id: string, status: TaskStatus): Promise<Doma
 
 export function orchdSetTaskRank(id: string, rank: number): Promise<DomainTask> {
   return invoke<DomainTask>("orchd_set_task_rank", { id, rank });
+}
+
+/** SCN-051 (ST-037): the urgent/normal flip on an existing task row — one focused command per
+ * mutation, mirroring `orchdSetTaskStatus`/`orchdSetTaskRank` above. */
+export function orchdSetTaskPriority(id: string, priority: TaskPriority): Promise<DomainTask> {
+  return invoke<DomainTask>("orchd_set_task_priority", { id, priority });
 }
 
 export function orchdDeleteTask(id: string): Promise<void> {

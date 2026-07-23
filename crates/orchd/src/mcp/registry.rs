@@ -600,16 +600,17 @@ mod tests {
     // ---- schema v3 (fresh DB) ----
 
     #[test]
-    fn fresh_db_is_schema_v4_with_all_nine_s_ext_tables() {
+    fn fresh_db_is_schema_v5_with_all_nine_s_ext_tables() {
         let db = new_db();
         let version: i64 = db
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // S-IDEA spec §4 bumped SCHEMA_VERSION 3->4 (additive, `research_run` only); the nine
-        // S-EXT tables this test checks for are unaffected — still created by `migrate_v3`, which
-        // `migrate_v4` builds on top of, never replaces.
-        assert_eq!(version, 4);
+        // S-IDEA spec §4 bumped SCHEMA_VERSION 3->4 (additive, `research_run` only) and SCN-051
+        // bumped it 4->5 (additive, `task.priority` only); the nine S-EXT tables this test checks
+        // for are unaffected — still created by `migrate_v3`, which `migrate_v4`/`migrate_v5`
+        // build on top of, never replace.
+        assert_eq!(version, 5);
         for table in [
             "mcp_server",
             "mcp_tool",

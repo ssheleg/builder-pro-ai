@@ -34,6 +34,7 @@ import {
   orchdUpdateTask,
   orchdSetTaskStatus,
   orchdSetTaskRank,
+  orchdSetTaskPriority,
   orchdDeleteTask,
   orchdListTasks,
   researchStartRun,
@@ -293,7 +294,7 @@ describe("ipc/orchd", () => {
   // ── tasks ──────────────────────────────────────────────────────────────────────────────────
 
   it("orchdCreateTask sends every field in Rust param order", async () => {
-    await orchdCreateTask("p1", null, "Task title", "body", "todo", "idea", "i1", ["tag1"]);
+    await orchdCreateTask("p1", null, "Task title", "body", "todo", "idea", "i1", ["tag1"], "urgent");
     expect(invokeMock).toHaveBeenCalledWith("orchd_create_task", {
       projectId: "p1",
       parentId: null,
@@ -303,6 +304,7 @@ describe("ipc/orchd", () => {
       source: "idea",
       sourceId: "i1",
       tags: ["tag1"],
+      priority: "urgent",
     });
   });
 
@@ -327,6 +329,14 @@ describe("ipc/orchd", () => {
   it("orchdSetTaskRank sends id/rank", async () => {
     await orchdSetTaskRank("t1", 1.5);
     expect(invokeMock).toHaveBeenCalledWith("orchd_set_task_rank", { id: "t1", rank: 1.5 });
+  });
+
+  it("orchdSetTaskPriority sends id/priority (SCN-051)", async () => {
+    await orchdSetTaskPriority("t1", "urgent");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_set_task_priority", {
+      id: "t1",
+      priority: "urgent",
+    });
   });
 
   it("orchdDeleteTask sends id", async () => {

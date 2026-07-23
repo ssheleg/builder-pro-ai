@@ -690,6 +690,7 @@ describe("useAppStore", () => {
     title: "A task",
     body: "",
     status: "todo",
+    priority: "normal",
     source: "idea",
     sourceId: null,
     tags: [],

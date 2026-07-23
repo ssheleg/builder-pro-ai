@@ -1237,7 +1237,7 @@ describe("S3 T13: orchd domain event wiring", () => {
   it("orchd://tasks-changed refreshes ONLY the named project's tasks", async () => {
     orchdListTasksMock.mockResolvedValue([
       { id: "t1", projectId: "p1", parentId: null, title: "t", body: "", status: "todo",
-        source: "idea", sourceId: null, tags: [], rank: 0, rankAgent: null,
+        priority: "normal", source: "idea", sourceId: null, tags: [], rank: 0, rankAgent: null,
         rankAgentReasoning: "", createdAt: 1, updatedAt: 1 },
     ]);
     await act(async () => {

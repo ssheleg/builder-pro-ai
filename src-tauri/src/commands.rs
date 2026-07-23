@@ -32,7 +32,7 @@ use bpa_orchd_proto::{
     Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
     McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdRequest,
     OrchdResponse, Policy, PolicyRules, PolicyScope, Project, ResearchRun, RuleScope, RuleSetView,
-    Skill, SkillScope, StorageStatus, TaskSource, TaskStatus,
+    Skill, SkillScope, StorageStatus, TaskPriority, TaskSource, TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -1620,6 +1620,7 @@ pub async fn orchd_create_task(
     source: TaskSource,
     source_id: Option<String>,
     tags: Vec<String>,
+    priority: Option<TaskPriority>,
 ) -> Result<DomainTask, CommandError> {
     expect_domain_task(
         state
@@ -1633,6 +1634,7 @@ pub async fn orchd_create_task(
                 source,
                 source_id,
                 tags,
+                priority,
             })
             .await?,
     )
@@ -1683,6 +1685,22 @@ pub async fn orchd_set_task_rank(
         state
             .orchd()?
             .request(OrchdRequest::SetTaskRank { id, rank })
+            .await?,
+    )
+}
+
+/// SCN-051 (ST-037): the urgent/normal flip — mirrors `orchd_set_task_status`/
+/// `orchd_set_task_rank`'s one-focused-command-per-mutation shape verbatim.
+#[tauri::command]
+pub async fn orchd_set_task_priority(
+    state: State<'_, AppState>,
+    id: String,
+    priority: TaskPriority,
+) -> Result<DomainTask, CommandError> {
+    expect_domain_task(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetTaskPriority { id, priority })
             .await?,
     )
 }

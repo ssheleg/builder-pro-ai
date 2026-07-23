@@ -592,7 +592,7 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** priority save rejects → revert to stored value + toast; orchd down → priority control disabled like other mutations
 - **Status:** validated
-- **Coverage:** none yet
+- **Coverage:** src/components/TasksList.tsx:40-49,102-118,258-292,404-414,531-544 (create-form + row selects, urgent marker/chip, urgent-first sort, reject→revert+toast, orchdDown gating); src/ipc/orchd.ts:241-290 (orchdCreateTask priority arg, orchdSetTaskPriority); src-tauri/src/commands.rs:1611-1710 (orchd_create_task priority, orchd_set_task_priority); crates/orchd-proto/src/lib.rs:203-215,1258-1265 (TaskPriority, SetTaskPriority verb); crates/orchd/src/persistence.rs:631-651,2406-2435 (migrate_v5 `task.priority`, set_task_priority)
 
 ## goals
 

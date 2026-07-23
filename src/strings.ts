@@ -434,6 +434,11 @@ export const strings = {
       done: "done",
     },
     source: { idea: "idea", insight: "insight", bug: "bug", plan: "plan" },
+    // SCN-051 (ST-037): urgent/normal priority — the row/create-form select options and the
+    // danger-tone chip label on urgent rows.
+    priority: { urgent: "urgent", normal: "normal" },
+    priorityAria: "Task priority",
+    newPriorityAria: "New task priority",
     deleteConfirm: "delete task?",
     deleteConfirmWithChildren: (n: number) => `delete task? will delete ${n} subtasks`,
     statusAria: "Task status",

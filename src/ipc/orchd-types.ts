@@ -36,7 +36,14 @@ export type ConnectorOp = { name: string, description: string | null, };
 /**
  * named `DomainTask` to avoid the `tokio::task` clash (spec §4.2).
  */
-export type DomainTask = { id: string, projectId: string, parentId: string | null, title: string, body: string, status: TaskStatus, source: TaskSource, sourceId: string | null, tags: Array<string>, rank: number, rankAgent: number | null, rankAgentReasoning: string, createdAt: number, updatedAt: number, };
+export type DomainTask = { id: string, projectId: string, parentId: string | null, title: string, body: string, status: TaskStatus, 
+/**
+ * SCN-051 (ST-037): urgent/normal. `#[serde(default)]` (⇒ `Normal`) so pre-priority
+ * payloads — a schema-≤v4 export bundle's task rows, or a frame from a pre-priority peer —
+ * still decode instead of rejecting the whole bundle/frame; the daemon itself always sends
+ * the field, so the generated TS type keeps it required.
+ */
+priority: TaskPriority, source: TaskSource, sourceId: string | null, tags: Array<string>, rank: number, rankAgent: number | null, rankAgentReasoning: string, createdAt: number, updatedAt: number, };
 
 export type FitVerdict = "fit" | "noFit" | "unknown";
 
@@ -227,6 +234,15 @@ export type StorageMode = "persistent" | "in_memory_fallback" | "recovered_from_
  * never changes without a daemon restart.
  */
 export type StorageStatus = { storageMode: StorageMode, quarantinedPath: string | null, };
+
+/**
+ * SCN-051 (ST-037): two-level task priority. `Urgent` renders visually distinct (danger-tone
+ * marker + chip) and sorts ahead of `Normal` within its status group (UI concern, SCN-051);
+ * workflow continuation (SCN-049) consumes urgent tasks first. `Normal` is the single
+ * contract-wide default — `#[default]` here backs the DB column default (`'normal'`), the
+ * `#[serde(default)]` decode backfill on [`DomainTask::priority`], and the create-form default.
+ */
+export type TaskPriority = "urgent" | "normal";
 
 export type TaskSource = "idea" | "insight" | "bug" | "plan";
 

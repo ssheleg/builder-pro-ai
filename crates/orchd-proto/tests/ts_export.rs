@@ -32,6 +32,7 @@ fn export_and_read() -> String {
     InsightStatus::export_all_to(types_ts_dir()).expect("export InsightStatus");
     DomainTask::export_all_to(types_ts_dir()).expect("export DomainTask");
     TaskStatus::export_all_to(types_ts_dir()).expect("export TaskStatus");
+    TaskPriority::export_all_to(types_ts_dir()).expect("export TaskPriority");
     TaskSource::export_all_to(types_ts_dir()).expect("export TaskSource");
     PolicyRules::export_all_to(types_ts_dir()).expect("export PolicyRules");
     RuleSet::export_all_to(types_ts_dir()).expect("export RuleSet");
@@ -203,6 +204,33 @@ fn domain_task_rank_is_ts_number() {
     assert!(
         contains_normalized(&ts, "rank: number"),
         "DomainTask.rank (f64) must be TS `number`; got:\n{ts}"
+    );
+}
+
+// ---- SCN-051 (ST-037) task-priority export tests ----
+
+#[test]
+fn task_priority_type_is_exported_with_camelcase_wire_tags() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "export type TaskPriority"),
+        "expected \"export type TaskPriority\" in generated orchd-types.ts; got:\n{ts}"
+    );
+    for tag in ["urgent", "normal"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "TaskPriority must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+}
+
+#[test]
+fn domain_task_priority_field_is_typed_task_priority() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "priority: TaskPriority"),
+        "DomainTask.priority must be TS `priority: TaskPriority` (required — the daemon always \
+         sends it, `#[serde(default)]` only backfills DECODING of pre-priority payloads); got:\n{ts}"
     );
 }
 

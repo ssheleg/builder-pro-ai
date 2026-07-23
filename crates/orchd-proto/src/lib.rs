@@ -168,6 +168,12 @@ pub struct DomainTask {
     pub title: String,
     pub body: String,
     pub status: TaskStatus,
+    /// SCN-051 (ST-037): urgent/normal. `#[serde(default)]` (⇒ `Normal`) so pre-priority
+    /// payloads — a schema-≤v4 export bundle's task rows, or a frame from a pre-priority peer —
+    /// still decode instead of rejecting the whole bundle/frame; the daemon itself always sends
+    /// the field, so the generated TS type keeps it required.
+    #[serde(default)]
+    pub priority: TaskPriority,
     pub source: TaskSource,
     pub source_id: Option<String>,
     pub tags: Vec<String>,
@@ -190,6 +196,20 @@ pub enum TaskStatus {
     Progress,
     Testing,
     Done,
+}
+
+/// SCN-051 (ST-037): two-level task priority. `Urgent` renders visually distinct (danger-tone
+/// marker + chip) and sorts ahead of `Normal` within its status group (UI concern, SCN-051);
+/// workflow continuation (SCN-049) consumes urgent tasks first. `Normal` is the single
+/// contract-wide default — `#[default]` here backs the DB column default (`'normal'`), the
+/// `#[serde(default)]` decode backfill on [`DomainTask::priority`], and the create-form default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum TaskPriority {
+    Urgent,
+    #[default]
+    Normal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -896,6 +916,10 @@ pub enum OrchdRequest {
         source: TaskSource,
         source_id: Option<String>,
         tags: Vec<String>,
+        /// SCN-051: `None` ⇒ `Normal` (mirrors `status`'s `None` ⇒ `Backlog`). `#[serde(default)]`
+        /// so a pre-priority peer's frame (no `priority` key) still decodes.
+        #[serde(default)]
+        priority: Option<TaskPriority>,
     },
     UpdateTask {
         id: String,
@@ -1227,6 +1251,14 @@ pub enum OrchdRequest {
     /// "names only — no secrets on the wire"). An empty registry ⇒ an empty `Vec`, never an
     /// error. Appended at the enum TAIL (append-only wire rule).
     ConnectorListProviders,
+    /// → `OrchdResponse::Task` + pushes `TasksChanged{project_id}` (SCN-051, ST-037). One
+    /// focused verb per task mutation — the exact `SetTaskStatus`/`SetTaskRank` shape, NOT an
+    /// `UpdateTask` field. Unknown `id` ⇒ `NotFound`; an archived project ⇒ `Invariant` (same
+    /// guards as every task mutator). Appended at the enum TAIL (append-only wire rule).
+    SetTaskPriority {
+        id: String,
+        priority: TaskPriority,
+    },
 }
 
 impl OrchdRequest {
@@ -1235,7 +1267,7 @@ impl OrchdRequest {
     ///
     /// This is the single per-verb tracing choke-point's name source, reused by BOTH layers that
     /// see an `OrchdRequest`: the daemon's `socket_server::dispatch` completion trace and the
-    /// core's `orchd_client::request` trace (which together cover all 77 daemon verbs and all 117
+    /// core's `orchd_client::request` trace (which together cover all 78 daemon verbs and all 118
     /// command handlers without a per-arm edit). Living next to the enum keeps them in lockstep.
     ///
     /// The match is deliberately **exhaustive with no `_` wildcard**: adding a future variant to
@@ -1326,6 +1358,7 @@ impl OrchdRequest {
             Self::UnarchiveProject { .. } => "UnarchiveProject",
             Self::GraphUpdateEdge { .. } => "GraphUpdateEdge",
             Self::ConnectorListProviders => "ConnectorListProviders",
+            Self::SetTaskPriority { .. } => "SetTaskPriority",
         }
     }
 }

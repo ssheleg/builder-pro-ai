@@ -10,13 +10,14 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, Goal, GoalKind, GraphEdge,
-    GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
-    McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
-    OAuthChallenge, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest,
-    OrchdResponse, Policy, PolicyScope, Project, ProjectStatus, ResearchRun, ResearchStatus,
-    RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
-    ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
+    encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, DomainTask, Goal,
+    GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView,
+    Idea, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool,
+    McpTransport, OAuthChallenge, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush,
+    OrchdRequest, OrchdResponse, Policy, PolicyScope, Project, ProjectStatus, ResearchRun,
+    ResearchStatus, RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
+    TaskPriority, TaskSource, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION,
+    ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -259,6 +260,13 @@ fn expect_idea(res: OrchdResponse) -> Idea {
     match res {
         OrchdResponse::Idea(i) => i,
         other => panic!("expected Idea, got {other:?}"),
+    }
+}
+
+fn expect_task(res: OrchdResponse) -> DomainTask {
+    match res {
+        OrchdResponse::Task(t) => t,
+        other => panic!("expected Task, got {other:?}"),
     }
 }
 
@@ -1044,6 +1052,138 @@ async fn import_bundle_happy_path_returns_report_and_broadcasts_family_pushes() 
             .is_none(),
         "no extra pushes beyond the 3 touched families"
     );
+
+    c1.shutdown(boot).await;
+}
+
+/// SCN-051 (ST-037) wire round-trip: `CreateTask{priority: Some(Urgent)}` persists the priority,
+/// omitting it (`None`) defaults to `Normal`, and the appended `SetTaskPriority` verb flips it —
+/// each mutation answering `OrchdResponse::Task` AND broadcasting `TasksChanged{project_id}` to
+/// the other connected client (the same push contract as every other task verb).
+#[tokio::test]
+async fn create_with_priority_and_set_task_priority_round_trip_and_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    // Synchronize: c2's Pong proves its push registration happened-before c1's mutations below
+    // (mirrors `import_bundle_happy_path_returns_report_and_broadcasts_family_pushes`).
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let project = create_project(&mut c1, "Priorities").await;
+    // create_project broadcasts ProjectsChanged — drain it so the task-push asserts stay exact.
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::ProjectsChanged)
+    );
+
+    // Create with an explicit urgent priority.
+    let urgent = expect_task(
+        c1.request(OrchdRequest::CreateTask {
+            project_id: project.id.clone(),
+            parent_id: None,
+            title: "urgent one".into(),
+            body: String::new(),
+            status: None,
+            source: TaskSource::Plan,
+            source_id: None,
+            tags: vec![],
+            priority: Some(TaskPriority::Urgent),
+        })
+        .await,
+    );
+    assert_eq!(urgent.priority, TaskPriority::Urgent);
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::TasksChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // Create WITHOUT a priority — defaults to Normal (SCN-051 create-form default).
+    let normal = expect_task(
+        c1.request(OrchdRequest::CreateTask {
+            project_id: project.id.clone(),
+            parent_id: None,
+            title: "normal one".into(),
+            body: String::new(),
+            status: None,
+            source: TaskSource::Plan,
+            source_id: None,
+            tags: vec![],
+            priority: None,
+        })
+        .await,
+    );
+    assert_eq!(normal.priority, TaskPriority::Normal);
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::TasksChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // Flip it urgent via the appended SetTaskPriority verb.
+    let flipped = expect_task(
+        c1.request(OrchdRequest::SetTaskPriority {
+            id: normal.id.clone(),
+            priority: TaskPriority::Urgent,
+        })
+        .await,
+    );
+    assert_eq!(flipped.id, normal.id);
+    assert_eq!(flipped.priority, TaskPriority::Urgent);
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::TasksChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // And the flip is durable: an independent ListTasks read sees it.
+    match c1
+        .request(OrchdRequest::ListTasks {
+            project_id: Some(project.id.clone()),
+        })
+        .await
+    {
+        OrchdResponse::Tasks(tasks) => {
+            let refetched = tasks.iter().find(|t| t.id == normal.id).unwrap();
+            assert_eq!(refetched.priority, TaskPriority::Urgent);
+        }
+        other => panic!("expected Tasks, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}
+
+/// SCN-051 error path: `SetTaskPriority` on an unknown id answers `Error{NotFound}` (the toast
+/// + revert path in `TasksList.tsx`), mirroring `unknown_id_delete_task_is_not_found` below.
+#[tokio::test]
+async fn unknown_id_set_task_priority_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let res = c1
+        .request(OrchdRequest::SetTaskPriority {
+            id: "nonexistent-task-id".to_string(),
+            priority: TaskPriority::Urgent,
+        })
+        .await;
+    match res {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
+        other => panic!("expected Error{{NotFound}}, got {other:?}"),
+    }
 
     c1.shutdown(boot).await;
 }

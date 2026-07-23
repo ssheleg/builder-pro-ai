@@ -297,6 +297,8 @@ export function FormInsightDialog(props: {
           "insight",
           insight.id,
           [],
+          // priority: the daemon's default (normal, SCN-051) — this flow has no priority control.
+          null,
         );
         taskId = task.id;
         setCreatedTaskId(task.id);

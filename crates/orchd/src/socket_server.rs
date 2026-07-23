@@ -1159,6 +1159,7 @@ async fn dispatch_inner(
             source,
             source_id,
             tags,
+            priority,
         } => {
             let result = {
                 let db = deps.db.lock().await;
@@ -1171,6 +1172,7 @@ async fn dispatch_inner(
                     source,
                     source_id.as_deref(),
                     &tags,
+                    priority,
                 )
             };
             respond_task(result, broadcaster)
@@ -1198,6 +1200,17 @@ async fn dispatch_inner(
             let result = {
                 let db = deps.db.lock().await;
                 db.set_task_rank(&id, rank)
+            };
+            respond_task(result, broadcaster)
+        }
+        // SCN-051 (ST-037): the focused urgent/normal mutator — same respond/push shape as
+        // `SetTaskStatus`/`SetTaskRank` above (⇒ `TasksChanged{project_id}` via `respond_task`).
+        // Lives with its task-verb siblings for readability; its WIRE position is the enum tail
+        // (append-only rule) — dispatch order is irrelevant to the codec.
+        OrchdRequest::SetTaskPriority { id, priority } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.set_task_priority(&id, priority)
             };
             respond_task(result, broadcaster)
         }

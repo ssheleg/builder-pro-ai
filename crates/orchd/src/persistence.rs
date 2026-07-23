@@ -22,6 +22,11 @@
 //! `impl Db` blocks on top of this file's `conn()`/`now_ms()`/`OrchdPersistError` seam. Task T4
 //! additionally folds graph-ingest-on-accept (D9) into this file's own `set_insight_status` — see
 //! that method's doc comment.
+//! Schema v5 (SCN-051/ST-037, task priority) appends ONE additive column,
+//! `task.priority TEXT NOT NULL DEFAULT 'normal'` (urgent|normal), as ONE
+//! `Migration { upto: 5 }` step — existing tasks backfill to `'normal'` via the column DEFAULT.
+//! Its CRUD lives in this file's own task block (`create_task` gains the priority arg,
+//! `set_task_priority` is the new focused mutator mirroring `set_task_status`).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -30,7 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bpa_orchd_proto::{
     AuditRow, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEntityType, Idea,
     IdeaLifecycle, Insight, InsightStatus, McpArtifact, McpInvocation, Policy, PolicyRules,
-    PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, TaskSource, TaskStatus,
+    PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, TaskPriority, TaskSource, TaskStatus,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
@@ -39,8 +44,9 @@ use uuid::Uuid;
 /// Current schema/migration version stored in `PRAGMA user_version` (spec §5.1; S4 spec §4 D1
 /// bumps this 1→2 for the additive knowledge-graph tables; S-EXT spec §4 bumps this 2→3 for the
 /// additive MCP/connectors/skills/trust tables; S-IDEA spec §4 D7 bumps this 3→4 for the
-/// additive `research_run` table).
-pub const SCHEMA_VERSION: i64 = 4;
+/// additive `research_run` table; SCN-051/ST-037 bumps this 4→5 for the additive
+/// `task.priority` column).
+pub const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -257,6 +263,10 @@ impl Db {
             bpa_daemon_core::migrate::Migration {
                 upto: 4,
                 apply: migrate_v4,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 5,
+                apply: migrate_v5,
             },
         ];
         bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
@@ -618,6 +628,21 @@ pub(crate) fn migrate_v4(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     )
 }
 
+/// v4 -> v5: SCN-051 task priority (ST-037). ONE additive column on `task`:
+/// `priority TEXT NOT NULL DEFAULT 'normal'` with the urgent/normal CHECK, matching the style of
+/// v1's other `task` TEXT-enum columns (`status`/`source`). Purely additive, forward-only per D1:
+/// every pre-v5 task backfills to `'normal'` via the column DEFAULT itself (SQLite materializes
+/// the default for existing rows on `ADD COLUMN`), so no explicit backfill `UPDATE` is needed —
+/// see `v4_fixture_migrates_to_v5_and_backfills_existing_tasks_to_normal` below for the proof
+/// against a REAL v4 fixture.
+pub(crate) fn migrate_v5(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE task ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'
+           CHECK (priority IN ('urgent','normal'));
+         -- user_version → 5",
+    )
+}
+
 // ================================================================================
 // ---- domain persistence (spec §5.2): project + project_workspace + goal CRUD ----
 // ================================================================================
@@ -866,6 +891,25 @@ fn decode_task_status(s: &str) -> Result<TaskStatus, OrchdPersistError> {
         "done" => Ok(TaskStatus::Done),
         other => Err(OrchdPersistError::Io(format!(
             "corrupt task.status value: {other}"
+        ))),
+    }
+}
+
+/// `task.priority` TEXT literals (SCN-051, schema v5) — the exact strings the v5 CHECK
+/// constraint locks, mirroring [`encode_task_status`]'s enum⇄TEXT shape.
+fn encode_task_priority(p: &TaskPriority) -> &'static str {
+    match p {
+        TaskPriority::Urgent => "urgent",
+        TaskPriority::Normal => "normal",
+    }
+}
+
+fn decode_task_priority(s: &str) -> Result<TaskPriority, OrchdPersistError> {
+    match s {
+        "urgent" => Ok(TaskPriority::Urgent),
+        "normal" => Ok(TaskPriority::Normal),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt task.priority value: {other}"
         ))),
     }
 }
@@ -1193,6 +1237,7 @@ struct TaskRow {
     title: String,
     body: String,
     status: String,
+    priority: String,
     source: String,
     source_id: Option<String>,
     tags: String,
@@ -1212,14 +1257,15 @@ impl TaskRow {
             title: r.get(3)?,
             body: r.get(4)?,
             status: r.get(5)?,
-            source: r.get(6)?,
-            source_id: r.get(7)?,
-            tags: r.get(8)?,
-            rank: r.get(9)?,
-            rank_agent: r.get(10)?,
-            rank_agent_reasoning: r.get(11)?,
-            created_at: r.get(12)?,
-            updated_at: r.get(13)?,
+            priority: r.get(6)?,
+            source: r.get(7)?,
+            source_id: r.get(8)?,
+            tags: r.get(9)?,
+            rank: r.get(10)?,
+            rank_agent: r.get(11)?,
+            rank_agent_reasoning: r.get(12)?,
+            created_at: r.get(13)?,
+            updated_at: r.get(14)?,
         })
     }
 
@@ -1231,6 +1277,7 @@ impl TaskRow {
             title: self.title,
             body: self.body,
             status: decode_task_status(&self.status)?,
+            priority: decode_task_priority(&self.priority)?,
             source: decode_task_source(&self.source)?,
             source_id: self.source_id,
             tags: decode_tags(&self.tags)?,
@@ -1245,8 +1292,8 @@ impl TaskRow {
 
 fn load_task(conn: &Connection, id: &str) -> Result<DomainTask, OrchdPersistError> {
     conn.query_row(
-        "SELECT id, project_id, parent_id, title, body, status, source, source_id, tags,
-                rank, rank_agent, rank_agent_reasoning, created_at, updated_at
+        "SELECT id, project_id, parent_id, title, body, status, priority, source, source_id,
+                tags, rank, rank_agent, rank_agent_reasoning, created_at, updated_at
          FROM task WHERE id = ?1",
         rusqlite::params![id],
         TaskRow::from_row,
@@ -2199,9 +2246,10 @@ impl Db {
     /// (else `Invariant`); the walk-up cycle guard ([`task_ancestor_chain_contains`]) is checked
     /// defensively too (see that function's doc for why it can't trigger through this verb in
     /// v1). `rank = COALESCE(MAX(rank), 0) + 1024` scoped to `project_id` (first task in a
-    /// project ⇒ exactly `1024`). `status` defaults `Backlog` when `None`. `rank_agent` starts
-    /// unset, `rank_agent_reasoning` starts `""` (DB column defaults) — those are agent-set
-    /// fields with no owning verb in T7.
+    /// project ⇒ exactly `1024`). `status` defaults `Backlog` when `None`; `priority` defaults
+    /// `Normal` when `None` (SCN-051 — set at create time OR later via [`Db::set_task_priority`]).
+    /// `rank_agent` starts unset, `rank_agent_reasoning` starts `""` (DB column defaults) — those
+    /// are agent-set fields with no owning verb in T7.
     #[allow(clippy::too_many_arguments)]
     pub fn create_task(
         &self,
@@ -2213,6 +2261,7 @@ impl Db {
         source: TaskSource,
         source_id: Option<&str>,
         tags: &[String],
+        priority: Option<TaskPriority>,
     ) -> Result<DomainTask, OrchdPersistError> {
         let tx = self.conn.unchecked_transaction()?;
         ensure_project_active(&tx, project_id)?;
@@ -2250,12 +2299,13 @@ impl Db {
         let tags_json = serde_json::to_string(tags)
             .map_err(|e| OrchdPersistError::Io(format!("failed to serialize tags: {e}")))?;
         let status = status.unwrap_or(TaskStatus::Backlog);
+        let priority = priority.unwrap_or_default();
         let now = now_ms();
         tx.execute(
             "INSERT INTO task
-               (id, project_id, parent_id, title, body, status, source, source_id, tags,
-                rank, rank_agent, rank_agent_reasoning, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, '', ?11, ?11)",
+               (id, project_id, parent_id, title, body, status, priority, source, source_id,
+                tags, rank, rank_agent, rank_agent_reasoning, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, '', ?12, ?12)",
             rusqlite::params![
                 id,
                 project_id,
@@ -2263,6 +2313,7 @@ impl Db {
                 title,
                 body,
                 encode_task_status(&status),
+                encode_task_priority(&priority),
                 encode_task_source(&source),
                 source_id,
                 tags_json,
@@ -2340,6 +2391,37 @@ impl Db {
         tx.execute(
             "UPDATE task SET status = ?2, updated_at = ?3 WHERE id = ?1",
             rusqlite::params![id, encode_task_status(&status), now_ms()],
+        )?;
+
+        let task = load_task(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// `SetTaskPriority` (SCN-051, ST-037): the focused per-mutation verb for the urgent/normal
+    /// flip — the exact [`Db::set_task_status`] shape (guard uses the task's OWN `project_id`;
+    /// unknown `id` ⇒ `NotFound`; archived project ⇒ `Invariant`). Sorting urgent-ahead within a
+    /// status group is a CLIENT concern (`TasksList.tsx`) — this verb only persists the field;
+    /// workflow continuation (SCN-049, future) reads it back through `list_tasks`.
+    pub fn set_task_priority(
+        &self,
+        id: &str,
+        priority: TaskPriority,
+    ) -> Result<DomainTask, OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let project_id: String = tx
+            .query_row(
+                "SELECT project_id FROM task WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(OrchdPersistError::NotFound)?;
+        ensure_project_active(&tx, &project_id)?;
+
+        tx.execute(
+            "UPDATE task SET priority = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, encode_task_priority(&priority), now_ms()],
         )?;
 
         let task = load_task(&tx, id)?;
@@ -2838,9 +2920,9 @@ pub(crate) fn insert_task_raw(
         .map_err(|e| OrchdPersistError::Io(format!("failed to serialize task.tags: {e}")))?;
     tx.execute(
         "INSERT INTO task
-           (id, project_id, parent_id, title, body, status, source, source_id, tags,
+           (id, project_id, parent_id, title, body, status, priority, source, source_id, tags,
             rank, rank_agent, rank_agent_reasoning, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             t.id,
             t.project_id,
@@ -2848,6 +2930,9 @@ pub(crate) fn insert_task_raw(
             t.title,
             t.body,
             encode_task_status(&t.status),
+            // A pre-priority bundle's task decoded `priority` as `Normal` via the wire type's
+            // `#[serde(default)]` (SCN-051 back-compat), so this write is always well-formed.
+            encode_task_priority(&t.priority),
             encode_task_source(&t.source),
             t.source_id,
             tags,
@@ -2976,21 +3061,21 @@ mod tests {
     }
 
     #[test]
-    fn open_in_memory_creates_schema_v4_with_every_table() {
+    fn open_in_memory_creates_schema_v5_with_every_table() {
         let db = Db::open_in_memory().unwrap();
-        // S-IDEA spec §4 bumped SCHEMA_VERSION 3->4 (additive, `research_run` only).
-        assert_eq!(user_version(db.conn()), 4);
+        // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, the `task.priority` column only).
+        assert_eq!(user_version(db.conn()), 5);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
     }
 
     #[test]
-    fn open_on_disk_creates_schema_v4_with_every_table() {
+    fn open_on_disk_creates_schema_v5_with_every_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orchd.db");
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(db.conn()), 4);
+        assert_eq!(user_version(db.conn()), 5);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
@@ -3017,7 +3102,7 @@ mod tests {
         std::fs::write(&path, b"not a sqlite database").unwrap();
 
         let db = Db::open(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 4);
+        assert_eq!(user_version(db.conn()), 5);
 
         let found = std::fs::read_dir(dir.path()).unwrap().any(|e| {
             e.unwrap()
@@ -3036,7 +3121,7 @@ mod tests {
 
         let (db, outcome) =
             Db::open_with_outcome(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 4);
+        assert_eq!(user_version(db.conn()), 5);
         match outcome {
             DbOpenOutcome::RecoveredFromCorruption { quarantined_to } => {
                 assert!(
@@ -3060,6 +3145,89 @@ mod tests {
         let path = dir.path().join("orchd.db");
         let (_db, outcome) = Db::open_with_outcome(&path).unwrap();
         assert_eq!(outcome, DbOpenOutcome::Clean);
+    }
+
+    // ---- v4 -> v5 migration (SCN-051 task priority, REAL v4 fixture) ----
+
+    /// Builds a REAL schema-v4 database (apply `migrate_v1`..`migrate_v4` alone — the exact
+    /// pre-priority on-disk shape), inserts a pre-priority task row, THEN applies [`migrate_v5`]
+    /// — proving both the new `task.priority` column's shape and that every EXISTING task
+    /// backfills to `'normal'` via the column DEFAULT (mirrors `crate::graph`'s v1→v2
+    /// backfill-test approach).
+    #[test]
+    fn v4_fixture_migrates_to_v5_and_backfills_existing_tasks_to_normal() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let v4_steps: &[bpa_daemon_core::migrate::Migration] = &[
+            bpa_daemon_core::migrate::Migration {
+                upto: 1,
+                apply: migrate_v1,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 2,
+                apply: migrate_v2,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 3,
+                apply: migrate_v3,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 4,
+                apply: migrate_v4,
+            },
+        ];
+        bpa_daemon_core::migrate::run_migrations(&conn, 0, 4, v4_steps).unwrap();
+        let has_priority: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('task') WHERE name = 'priority'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has_priority, 0,
+            "the v4 fixture must NOT have task.priority yet"
+        );
+
+        let now = 1_700_000_000_000i64;
+        conn.execute(
+            "INSERT INTO project (id, name, description, status, created_at, updated_at)
+             VALUES ('p1', 'Acme', '', 'active', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task (id, project_id, parent_id, title, body, status, source,
+                               source_id, tags, rank, rank_agent, rank_agent_reasoning,
+                               created_at, updated_at)
+             VALUES ('t1', 'p1', NULL, 'legacy', '', 'backlog', 'plan',
+                     NULL, '[]', 1024.0, NULL, '', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        let v5_steps: &[bpa_daemon_core::migrate::Migration] =
+            &[bpa_daemon_core::migrate::Migration {
+                upto: 5,
+                apply: migrate_v5,
+            }];
+        bpa_daemon_core::migrate::run_migrations(&conn, 4, 5, v5_steps).unwrap();
+
+        assert_eq!(user_version(&conn), 5);
+        let priority: String = conn
+            .query_row("SELECT priority FROM task WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            priority, "normal",
+            "a pre-v5 task must backfill to 'normal' via the column DEFAULT"
+        );
+        // The CHECK constraint must reject anything outside the locked urgent/normal pair.
+        let err = conn
+            .execute("UPDATE task SET priority = 'blocker' WHERE id = 't1'", [])
+            .unwrap_err();
+        assert!(matches!(err, rusqlite::Error::SqliteFailure(_, _)));
     }
 
     #[test]
@@ -4397,6 +4565,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let t2 = db
@@ -4409,6 +4578,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let t3 = db
@@ -4421,6 +4591,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
 
@@ -4434,12 +4605,32 @@ mod domain_tests {
         let db = Db::open_in_memory().unwrap();
         let a = db.create_project("A", "", &ids(&["w1"])).unwrap();
         let b = db.create_project("B", "", &ids(&["w2"])).unwrap();
-        db.create_task(&a.id, None, "a1", "", None, TaskSource::Plan, None, &[])
-            .unwrap();
+        db.create_task(
+            &a.id,
+            None,
+            "a1",
+            "",
+            None,
+            TaskSource::Plan,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
 
         // b's first task must still rank 1024, unaffected by a's existing task.
         let b1 = db
-            .create_task(&b.id, None, "b1", "", None, TaskSource::Plan, None, &[])
+            .create_task(
+                &b.id,
+                None,
+                "b1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
             .unwrap();
         assert_eq!(b1.rank, 1024.0);
     }
@@ -4458,6 +4649,7 @@ mod domain_tests {
                 TaskSource::Idea,
                 Some("idea-1"),
                 &ids(&["urgent", "backend"]),
+                None,
             )
             .unwrap();
 
@@ -4492,6 +4684,7 @@ mod domain_tests {
                 TaskSource::Bug,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         assert_eq!(task.status, TaskStatus::Waiting);
@@ -4501,7 +4694,17 @@ mod domain_tests {
     fn create_task_unknown_project_is_not_found() {
         let db = Db::open_in_memory().unwrap();
         let err = db
-            .create_task("nope", None, "t", "", None, TaskSource::Plan, None, &[])
+            .create_task(
+                "nope",
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
             .unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
     }
@@ -4520,6 +4723,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
@@ -4531,7 +4735,17 @@ mod domain_tests {
         let a = db.create_project("A", "", &ids(&["w1"])).unwrap();
         let b = db.create_project("B", "", &ids(&["w2"])).unwrap();
         let a_task = db
-            .create_task(&a.id, None, "a1", "", None, TaskSource::Plan, None, &[])
+            .create_task(
+                &a.id,
+                None,
+                "a1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
             .unwrap();
 
         let err = db
@@ -4544,6 +4758,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap_err();
         assert!(
@@ -4566,6 +4781,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let child = db
@@ -4578,6 +4794,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
@@ -4598,6 +4815,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap_err();
         assert!(
@@ -4619,6 +4837,7 @@ mod domain_tests {
             TaskSource::Plan,
             None,
             &[],
+            None,
         )
         .unwrap();
         db.archive_project(&project.id).unwrap();
@@ -4646,6 +4865,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let b = db
@@ -4658,6 +4878,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let c = db
@@ -4670,6 +4891,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
 
@@ -4704,6 +4926,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
 
@@ -4736,6 +4959,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         db.archive_project(&project.id).unwrap();
@@ -4759,6 +4983,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
 
@@ -4796,10 +5021,134 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         db.archive_project(&project.id).unwrap();
         let err = db.set_task_status(&task.id, TaskStatus::Done).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    // ---- task priority (SCN-051, ST-037) ----
+
+    #[test]
+    fn create_task_defaults_priority_normal_and_honors_explicit_urgent() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+
+        // `None` ⇒ `Normal` (SCN-051 create-form default; mirrors `status`'s `None` ⇒ Backlog).
+        let normal = db
+            .create_task(
+                &project.id,
+                None,
+                "n",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(normal.priority, TaskPriority::Normal);
+
+        // Explicit `Urgent` persists and round-trips through an independent re-fetch.
+        let urgent = db
+            .create_task(
+                &project.id,
+                None,
+                "u",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                Some(TaskPriority::Urgent),
+            )
+            .unwrap();
+        assert_eq!(urgent.priority, TaskPriority::Urgent);
+        let refetched = db
+            .list_tasks(Some(&project.id))
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == urgent.id)
+            .unwrap();
+        assert_eq!(refetched.priority, TaskPriority::Urgent);
+    }
+
+    #[test]
+    fn set_task_priority_updates_priority_and_db_literal() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+
+        let updated = db
+            .set_task_priority(&task.id, TaskPriority::Urgent)
+            .unwrap();
+        assert_eq!(updated.priority, TaskPriority::Urgent);
+        assert!(
+            updated.updated_at >= task.updated_at,
+            "priority change must touch updated_at"
+        );
+        let raw: String = db
+            .conn()
+            .query_row(
+                "SELECT priority FROM task WHERE id = ?1",
+                rusqlite::params![task.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "urgent");
+
+        // …and back to normal (SCN-051: the row control offers both directions).
+        let reverted = db
+            .set_task_priority(&task.id, TaskPriority::Normal)
+            .unwrap();
+        assert_eq!(reverted.priority, TaskPriority::Normal);
+    }
+
+    #[test]
+    fn set_task_priority_unknown_id_is_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .set_task_priority("nope", TaskPriority::Urgent)
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn archived_project_blocks_set_task_priority() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        db.archive_project(&project.id).unwrap();
+        let err = db
+            .set_task_priority(&task.id, TaskPriority::Urgent)
+            .unwrap_err();
         assert!(matches!(err, OrchdPersistError::Invariant(_)));
     }
 
@@ -4819,6 +5168,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let t2 = db
@@ -4831,6 +5181,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         assert_eq!(t1.rank, 1024.0);
@@ -4863,6 +5214,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         db.archive_project(&project.id).unwrap();
@@ -4886,6 +5238,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let child = db
@@ -4898,6 +5251,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let grandchild = db
@@ -4910,6 +5264,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
 
@@ -4953,6 +5308,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         db.archive_project(&project.id).unwrap();
@@ -4968,10 +5324,30 @@ mod domain_tests {
         let a = db.create_project("A", "", &ids(&["w1"])).unwrap();
         let b = db.create_project("B", "", &ids(&["w2"])).unwrap();
         let a1 = db
-            .create_task(&a.id, None, "a1", "", None, TaskSource::Plan, None, &[])
+            .create_task(
+                &a.id,
+                None,
+                "a1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
             .unwrap();
         let b1 = db
-            .create_task(&b.id, None, "b1", "", None, TaskSource::Plan, None, &[])
+            .create_task(
+                &b.id,
+                None,
+                "b1",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
             .unwrap();
 
         let all = db.list_tasks(None).unwrap();
@@ -4998,6 +5374,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let t2 = db
@@ -5010,6 +5387,7 @@ mod domain_tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         // move t2 to rank BEFORE t1.

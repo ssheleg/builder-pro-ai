@@ -648,6 +648,7 @@ pub fn run() {
             commands::orchd_update_task,
             commands::orchd_set_task_status,
             commands::orchd_set_task_rank,
+            commands::orchd_set_task_priority,
             commands::orchd_delete_task,
             commands::orchd_list_tasks,
             commands::orchd_get_ruleset,

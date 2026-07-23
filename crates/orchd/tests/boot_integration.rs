@@ -218,7 +218,7 @@ async fn second_instance_flock_refusal() {
 }
 
 #[tokio::test]
-async fn fresh_boot_creates_schema_v4_and_global_ruleset() {
+async fn fresh_boot_creates_schema_v5_and_global_ruleset() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
     let home_dir = tempfile::tempdir().unwrap();
@@ -249,7 +249,8 @@ async fn fresh_boot_creates_schema_v4_and_global_ruleset() {
         .conn()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 4);
+    // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only).
+    assert_eq!(user_version, 5);
 
     for table in [
         "project",

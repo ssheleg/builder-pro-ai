@@ -95,6 +95,7 @@ fn sample_task() -> DomainTask {
         title: "Do the thing".into(),
         body: "Task body".into(),
         status: TaskStatus::Backlog,
+        priority: TaskPriority::Urgent,
         source: TaskSource::Idea,
         source_id: Some("idea-1".into()),
         tags: vec!["urgent".into()],
@@ -460,6 +461,19 @@ fn all_requests() -> Vec<OrchdRequest> {
             source: TaskSource::Bug,
             source_id: None,
             tags: vec!["bug".into()],
+            priority: Some(TaskPriority::Urgent),
+        },
+        OrchdRequest::CreateTask {
+            project_id: "proj-1".into(),
+            parent_id: None,
+            title: "Task title".into(),
+            body: "Task body".into(),
+            status: None,
+            source: TaskSource::Plan,
+            source_id: None,
+            tags: vec![],
+            // `None` ⇒ the daemon defaults to `Normal` (SCN-051 create-form default).
+            priority: None,
         },
         OrchdRequest::UpdateTask {
             id: "task-1".into(),
@@ -693,6 +707,14 @@ fn all_requests() -> Vec<OrchdRequest> {
             kind: GraphEdgeKind::Supports,
         },
         OrchdRequest::ConnectorListProviders,
+        OrchdRequest::SetTaskPriority {
+            id: "task-1".into(),
+            priority: TaskPriority::Urgent,
+        },
+        OrchdRequest::SetTaskPriority {
+            id: "task-1".into(),
+            priority: TaskPriority::Normal,
+        },
     ]
 }
 
@@ -962,6 +984,64 @@ fn graph_entity_type_task_serializes_lowercase_on_the_wire() {
         }),
     };
     assert_wire_contains(&frame, "task");
+}
+
+#[test]
+fn task_priority_urgent_serializes_lowercase_on_the_wire() {
+    // SCN-051 (ST-037): exact tag equality (a broken `rename_all` producing "Urgent" fails)…
+    assert_serde_tag(&TaskPriority::Urgent, "urgent");
+    assert_serde_tag(&TaskPriority::Normal, "normal");
+    // …and prove the tag literally reaches the CBOR wire from a frame whose OTHER fields carry
+    // no "urgent" substring, so the only source of "urgent" in the bytes is the serialized tag.
+    let frame = OrchdFrame::Request {
+        id: 1,
+        req: OrchdRequest::SetTaskPriority {
+            id: "task-1".into(),
+            priority: TaskPriority::Urgent,
+        },
+    };
+    assert_wire_contains(&frame, "urgent");
+}
+
+#[test]
+fn task_priority_default_is_normal() {
+    // SCN-051: `Normal` is the contract-wide default — the DB column default, the create-form
+    // default, and the `#[serde(default)]` backfill below all hang off this one impl.
+    assert_eq!(TaskPriority::default(), TaskPriority::Normal);
+}
+
+#[test]
+fn domain_task_without_priority_key_deserializes_as_normal() {
+    // SCN-051 back-compat: a pre-priority export bundle (schema ≤ v4) serialized its tasks
+    // WITHOUT a `priority` key. `#[serde(default)]` on `DomainTask.priority` must decode such a
+    // payload as `Normal` instead of rejecting the whole bundle. (Codec-independent: the same
+    // derived `Deserialize` impl backs both this JSON input and the CBOR wire.)
+    let json = r#"{
+        "id": "task-1", "projectId": "proj-1", "parentId": null,
+        "title": "T", "body": "", "status": "backlog", "source": "plan",
+        "sourceId": null, "tags": [], "rank": 1024.0, "rankAgent": null,
+        "rankAgentReasoning": "", "createdAt": 0, "updatedAt": 0
+    }"#;
+    let task: DomainTask = serde_json::from_str(json).expect("pre-priority task must deserialize");
+    assert_eq!(task.priority, TaskPriority::Normal);
+}
+
+#[test]
+fn create_task_without_priority_key_deserializes_as_none() {
+    // SCN-051 back-compat mirror of the entity test above, for the verb: a `CreateTask` frame
+    // from a pre-priority peer omits the `priority` key entirely — `#[serde(default)]` decodes
+    // it as `None` (⇒ daemon defaults to `Normal`) instead of failing the frame.
+    let json = r#"{"CreateTask": {
+        "project_id": "proj-1", "parent_id": null, "title": "T", "body": "",
+        "status": null, "source": "plan", "source_id": null, "tags": []
+    }}"#;
+    // NOTE: frame types are NOT camelCased (Hop-B wire-only) — field names stay snake_case;
+    // `TaskSource`'s tag itself IS camelCased ("plan") because the entity enum is TS-exported.
+    let req: OrchdRequest = serde_json::from_str(json).expect("pre-priority CreateTask decodes");
+    match req {
+        OrchdRequest::CreateTask { priority, .. } => assert_eq!(priority, None),
+        other => panic!("expected CreateTask, got {other:?}"),
+    }
 }
 
 #[test]

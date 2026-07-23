@@ -184,7 +184,7 @@ describe("ProjectPanel", () => {
       { id: "g2", projectId: "p1", parentId: "g1", kind: "additional", title: "t2", body: "", ord: 1, status: "active", metricRefs: [], createdAt: 1, updatedAt: 1 },
     ]);
     orchdListTasksMock.mockResolvedValue([
-      { id: "tk1", projectId: "p1", parentId: null, title: "task", body: "", status: "backlog", source: "plan", sourceId: null, tags: [], rank: 1024, rankAgent: null, rankAgentReasoning: "", createdAt: 1, updatedAt: 1 },
+      { id: "tk1", projectId: "p1", parentId: null, title: "task", body: "", status: "backlog", priority: "normal", source: "plan", sourceId: null, tags: [], rank: 1024, rankAgent: null, rankAgentReasoning: "", createdAt: 1, updatedAt: 1 },
     ]);
     orchdListIdeasMock.mockResolvedValue([makeIdea({ id: "i1", projectId: "p1" }), makeIdea({ id: "i2", projectId: "other" })]);
     orchdListInsightsMock.mockResolvedValue([makeInsight({ id: "in1", projectId: "p1" })]);
