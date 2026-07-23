@@ -5,6 +5,7 @@ import type { FsEntry } from "../ipc/fs";
 import type {
   Account,
   AuditRow,
+  DocView,
   DomainTask,
   Goal,
   GraphView,
@@ -29,6 +30,8 @@ const orchdListTasksMock = vi.fn();
 const researchListRunsMock = vi.fn();
 const orchdGraphListProjectMock = vi.fn();
 const orchdGetRulesetMock = vi.fn();
+const orchdListDocsMock = vi.fn();
+const orchdGetDocMock = vi.fn();
 const mcpListServersMock = vi.fn();
 const mcpListToolsMock = vi.fn();
 const mcpListArtifactsMock = vi.fn();
@@ -47,6 +50,8 @@ vi.mock("../ipc/orchd", () => ({
   researchListRuns: (...a: unknown[]) => researchListRunsMock(...a),
   orchdGraphListProject: (...a: unknown[]) => orchdGraphListProjectMock(...a),
   orchdGetRuleset: (...a: unknown[]) => orchdGetRulesetMock(...a),
+  orchdListDocs: (...a: unknown[]) => orchdListDocsMock(...a),
+  orchdGetDoc: (...a: unknown[]) => orchdGetDocMock(...a),
   mcpListServers: (...a: unknown[]) => mcpListServersMock(...a),
   mcpListTools: (...a: unknown[]) => mcpListToolsMock(...a),
   mcpListArtifacts: (...a: unknown[]) => mcpListArtifactsMock(...a),
@@ -57,9 +62,26 @@ vi.mock("../ipc/orchd", () => ({
   trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
   orchdStorageStatus: (...a: unknown[]) => orchdStorageStatusMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
+  // Faithful to the real predicate (`ipc/orchd.ts`) so `refreshDoc`'s NotFound drop-path is
+  // exercised for real rather than stubbed to a constant.
+  isNotFoundError: (e: unknown) =>
+    e !== null &&
+    typeof e === "object" &&
+    (e as { kind?: unknown }).kind === "daemon" &&
+    (e as { code?: unknown }).code === "NotFound",
 }));
 
-import { useAppStore } from "./store";
+// SCN-045 keep-awake: `setKeepAwakeEnabled`/`syncKeepAwake` call straight through to these —
+// mocked for the same determinism reason as the orchd wrappers above.
+const powerSetEnabledMock = vi.fn();
+const powerSyncSessionsMock = vi.fn();
+vi.mock("../ipc/power", () => ({
+  powerSetEnabled: (...a: unknown[]) => powerSetEnabledMock(...a),
+  powerSyncSessions: (...a: unknown[]) => powerSyncSessionsMock(...a),
+  powerStatus: vi.fn(),
+}));
+
+import { useAppStore, docViewKey } from "./store";
 import { toSupportBundle } from "../ipc/diag";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
@@ -89,6 +111,8 @@ describe("useAppStore", () => {
     researchListRunsMock.mockReset();
     orchdGraphListProjectMock.mockReset();
     orchdGetRulesetMock.mockReset();
+    orchdListDocsMock.mockReset();
+    orchdGetDocMock.mockReset();
     mcpListServersMock.mockReset();
     mcpListToolsMock.mockReset();
     mcpListArtifactsMock.mockReset();
@@ -98,8 +122,13 @@ describe("useAppStore", () => {
     trustListPoliciesMock.mockReset();
     trustListAuditMock.mockReset();
     orchdStorageStatusMock.mockReset();
+    powerSetEnabledMock.mockReset().mockResolvedValue({ enabled: true, active: false, error: null });
+    powerSyncSessionsMock
+      .mockReset()
+      .mockResolvedValue({ enabled: true, active: false, error: null });
     useAppStore.setState(
       {
+        keepAwake: { enabled: true, active: false, error: null },
         sessions: {},
         workspaces: {},
         activeSessionId: null,
@@ -127,6 +156,8 @@ describe("useAppStore", () => {
         researchRunsByIdea: {},
         graphByProject: {},
         rulesets: {},
+        docsByProject: {},
+        docViews: {},
         mcpServers: [],
         mcpToolsByServer: {},
         mcpArtifacts: [],
@@ -675,6 +706,7 @@ describe("useAppStore", () => {
     title: "A task",
     body: "",
     status: "todo",
+    priority: "normal",
     source: "idea",
     sourceId: null,
     tags: [],
@@ -830,7 +862,12 @@ describe("useAppStore", () => {
       projectId: null,
       mdPath: "/rules.md",
       mdHash: "abc",
-      policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+      policy: {
+        spendCapUsd: null,
+        approvalClasses: [],
+        pathAllowlist: [],
+        supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+      },
       createdAt: 1,
       updatedAt: 1,
     },
@@ -849,6 +886,8 @@ describe("useAppStore", () => {
     expect(s.tasksByProject).toEqual({});
     expect(s.graphByProject).toEqual({});
     expect(s.rulesets).toEqual({});
+    expect(s.docsByProject).toEqual({});
+    expect(s.docViews).toEqual({});
     expect(s.mcpServers).toEqual([]);
     expect(s.mcpToolsByServer).toEqual({});
     expect(s.mcpArtifacts).toEqual([]);
@@ -998,6 +1037,81 @@ describe("useAppStore", () => {
     expect(useAppStore.getState().rulesets["project:p1"]).toEqual(projectView);
     // The pre-existing "global" entry must be untouched by a project-scoped refresh.
     expect(useAppStore.getState().rulesets["global"]).toEqual(rulesetView());
+  });
+
+  // ── SCN-054 project docs ───────────────────────────────────────────────────────────────────
+
+  const docView = (over: Partial<DocView> = {}): DocView => ({
+    doc: {
+      id: "d1",
+      projectId: "p1",
+      name: "notes",
+      mdPath: "/rules/docs/p1/notes.md",
+      mdHash: "abc",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    mdContent: "# notes",
+    fileState: "ok",
+    ...over,
+  });
+
+  it("refreshDocs replaces only that project's doc list, leaving other projects untouched", async () => {
+    useAppStore.setState(
+      { docsByProject: { other: [{ name: "keep", modifiedAt: 1 }] } },
+      false,
+    );
+    orchdListDocsMock.mockResolvedValueOnce([{ name: "notes", modifiedAt: 5 }]);
+
+    await useAppStore.getState().refreshDocs("p1");
+
+    expect(orchdListDocsMock).toHaveBeenCalledWith("p1");
+    expect(useAppStore.getState().docsByProject["p1"]).toEqual([{ name: "notes", modifiedAt: 5 }]);
+    expect(useAppStore.getState().docsByProject["other"]).toEqual([{ name: "keep", modifiedAt: 1 }]);
+  });
+
+  it("refreshDocs surfaces a rejection as a toast via describeOrchdError", async () => {
+    const err = { kind: "disconnected" };
+    orchdListDocsMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshDocs("p1");
+    expect(useAppStore.getState().docsByProject["p1"]).toBeUndefined();
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
+  });
+
+  it("refreshDoc keys the view by docViewKey(projectId, name)", async () => {
+    orchdGetDocMock.mockResolvedValueOnce(docView());
+
+    await useAppStore.getState().refreshDoc("p1", "notes");
+
+    expect(orchdGetDocMock).toHaveBeenCalledWith("p1", "notes");
+    expect(useAppStore.getState().docViews[docViewKey("p1", "notes")]).toEqual(docView());
+  });
+
+  it("refreshDoc on a NotFound rejection DROPS the stale view without a toast (deleted doc)", async () => {
+    useAppStore.setState(
+      {
+        docViews: {
+          [docViewKey("p1", "gone")]: docView({ doc: { ...docView().doc, name: "gone" } }),
+          [docViewKey("p1", "kept")]: docView({ doc: { ...docView().doc, name: "kept" } }),
+        },
+      },
+      false,
+    );
+    orchdGetDocMock.mockRejectedValueOnce({ kind: "daemon", code: "NotFound", message: "" });
+
+    await useAppStore.getState().refreshDoc("p1", "gone");
+
+    expect(useAppStore.getState().docViews[docViewKey("p1", "gone")]).toBeUndefined();
+    expect(useAppStore.getState().docViews[docViewKey("p1", "kept")]).toBeDefined();
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
+  it("refreshDoc surfaces every OTHER rejection as a toast", async () => {
+    const err = { kind: "daemon", code: "Io", message: "read failed" };
+    orchdGetDocMock.mockRejectedValueOnce(err);
+    await useAppStore.getState().refreshDoc("p1", "notes");
+    expect(useAppStore.getState().docViews[docViewKey("p1", "notes")]).toBeUndefined();
+    expect(useAppStore.getState().toast).toBe(`mapped: ${JSON.stringify(err)}`);
   });
 
   it("setOrchdDown and setOrchdIncompatible flip their flags independently from the false default", () => {
@@ -1243,5 +1357,127 @@ describe("useAppStore", () => {
     });
     useAppStore.getState().clearDiag();
     expect(useAppStore.getState().diagEvents).toEqual([]);
+  });
+
+  // ── keep-awake (SCN-045 / FLW-18) ────────────────────────────────────────────────────────────
+
+  describe("keepAwake (SCN-045)", () => {
+    beforeEach(async () => {
+      useAppStore.setState({ diagEvents: [], toast: null, toastQueue: [] });
+      // Drain the module-level once-per-streak gate (`lastPowerError` closure state survives
+      // across tests in this file): a successful sync resets it, so every test below starts from
+      // a clean "no active failure streak".
+      powerSyncSessionsMock.mockResolvedValueOnce({ enabled: true, active: false, error: null });
+      await useAppStore.getState().syncKeepAwake(0);
+      useAppStore.setState({ diagEvents: [], toast: null, toastQueue: [] });
+    });
+
+    it("defaults: enabled (SCN-045 default-on), not active, no error", () => {
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: true,
+        active: false,
+        error: null,
+      });
+    });
+
+    it("setKeepAwakeEnabled(false) calls powerSetEnabled and mirrors the reconciled status", async () => {
+      powerSetEnabledMock.mockResolvedValueOnce({ enabled: false, active: false, error: null });
+      await useAppStore.getState().setKeepAwakeEnabled(false);
+      expect(powerSetEnabledMock).toHaveBeenCalledWith(false);
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: false,
+        active: false,
+        error: null,
+      });
+      expect(useAppStore.getState().toast).toBeNull(); // a clean toggle is not an error
+    });
+
+    it("syncKeepAwake passes the live count through and mirrors active (assertion held)", async () => {
+      powerSyncSessionsMock.mockResolvedValueOnce({ enabled: true, active: true, error: null });
+      await useAppStore.getState().syncKeepAwake(2);
+      expect(powerSyncSessionsMock).toHaveBeenCalledWith(2);
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: true,
+        active: true,
+        error: null,
+      });
+    });
+
+    it("an OS denial surfaces honestly — failure state + toast + Diagnostics record — never a fake awake", async () => {
+      powerSyncSessionsMock.mockResolvedValue({ enabled: true, active: false, error: "os denied" });
+      await useAppStore.getState().syncKeepAwake(1);
+      const s = useAppStore.getState();
+      expect(s.keepAwake).toEqual({ enabled: true, active: false, error: "os denied" });
+      // SCN-045 copy: "keep-awake unavailable: {reason}" reaches the toast...
+      expect(s.toast).toContain("keep-awake unavailable: os denied");
+      // ...AND the diagnostics ring, classified under the Power kind.
+      expect(s.diagEvents).toHaveLength(1);
+      expect(s.diagEvents[0].kind).toBe("Power");
+      // `op` follows the store's action-name convention (`"refreshProjects"`, …).
+      expect(s.diagEvents[0].op).toBe("syncKeepAwake");
+    });
+
+    it("the same denial is reported ONCE per failure streak, not on every sync", async () => {
+      powerSyncSessionsMock.mockResolvedValue({ enabled: true, active: false, error: "os denied" });
+      await useAppStore.getState().syncKeepAwake(1);
+      await useAppStore.getState().syncKeepAwake(2);
+      await useAppStore.getState().syncKeepAwake(3);
+      const s = useAppStore.getState();
+      expect(s.diagEvents).toHaveLength(1);
+      expect(s.toastQueue).toHaveLength(1);
+      // The pill's failure state stays current even while the report is deduped.
+      expect(s.keepAwake.error).toBe("os denied");
+    });
+
+    it("recovery clears the failure state AND re-arms the once-per-streak gate", async () => {
+      powerSyncSessionsMock.mockResolvedValueOnce({
+        enabled: true,
+        active: false,
+        error: "os denied",
+      });
+      await useAppStore.getState().syncKeepAwake(1);
+      expect(useAppStore.getState().diagEvents).toHaveLength(1);
+
+      // The transient OS condition clears — a later sync succeeds (SCN-045 recovery).
+      powerSyncSessionsMock.mockResolvedValueOnce({ enabled: true, active: true, error: null });
+      await useAppStore.getState().syncKeepAwake(1);
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: true,
+        active: true,
+        error: null,
+      });
+
+      // A NEW failure streak after the recovery is reported again (it is not the same streak).
+      powerSyncSessionsMock.mockResolvedValueOnce({
+        enabled: true,
+        active: false,
+        error: "os denied",
+      });
+      await useAppStore.getState().syncKeepAwake(2);
+      expect(useAppStore.getState().diagEvents).toHaveLength(2);
+    });
+
+    it("a rejected powerSyncSessions invoke degrades honestly (active=false, reported once per streak)", async () => {
+      powerSyncSessionsMock.mockRejectedValue({ kind: "internal", message: "ipc down" });
+      await useAppStore.getState().syncKeepAwake(1);
+      await useAppStore.getState().syncKeepAwake(2);
+      const s = useAppStore.getState();
+      expect(s.keepAwake.active).toBe(false);
+      expect(s.keepAwake.error).toBe("ipc down");
+      expect(s.diagEvents).toHaveLength(1); // same streak — one report
+      expect(s.toast).toContain("keep-awake unavailable: ipc down");
+    });
+
+    it("a rejected powerSetEnabled keeps the persisted intent but never fakes an active hold", async () => {
+      powerSetEnabledMock.mockRejectedValueOnce({ kind: "internal", message: "ipc down" });
+      await useAppStore.getState().setKeepAwakeEnabled(false);
+      const s = useAppStore.getState();
+      // The toggle intent is the owner's persisted preference; the HOLD state stays honest.
+      expect(s.keepAwake.enabled).toBe(false);
+      expect(s.keepAwake.active).toBe(false);
+      expect(s.keepAwake.error).toBe("ipc down");
+      expect(s.diagEvents).toHaveLength(1);
+      expect(s.diagEvents[0].op).toBe("setKeepAwakeEnabled");
+    });
   });
 });

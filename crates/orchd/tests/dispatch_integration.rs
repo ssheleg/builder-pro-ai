@@ -10,13 +10,14 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, Goal, GoalKind, GraphEdge,
-    GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact,
-    McpAuthKind, McpCallResult, McpConnectReport, McpScope, McpServer, McpTool, McpTransport,
-    OAuthChallenge, OrchdErrorCode, OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest,
-    OrchdResponse, Policy, PolicyScope, Project, ProjectStatus, ResearchRun, ResearchStatus,
-    RuleFileState, RuleScope, RuleSetView, Skill, SkillFileState, SkillScope,
-    ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
+    encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, DocMeta, DocView,
+    DomainTask, Goal, GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode,
+    GraphNodeKind, GraphView, Idea, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
+    McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdErrorCode, OrchdFrame,
+    OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Policy, PolicyScope, Project,
+    ProjectStatus, ResearchRun, ResearchStatus, RuleFileState, RuleScope, RuleSetView, Skill,
+    SkillFileState, SkillScope, TaskPriority, TaskSource, ORCHD_CLIENT_MAX_VERSION,
+    ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -262,10 +263,31 @@ fn expect_idea(res: OrchdResponse) -> Idea {
     }
 }
 
+fn expect_task(res: OrchdResponse) -> DomainTask {
+    match res {
+        OrchdResponse::Task(t) => t,
+        other => panic!("expected Task, got {other:?}"),
+    }
+}
+
 fn expect_ruleset_view(res: OrchdResponse) -> RuleSetView {
     match res {
         OrchdResponse::RuleSetView(v) => v,
         other => panic!("expected RuleSetView, got {other:?}"),
+    }
+}
+
+fn expect_doc_view(res: OrchdResponse) -> DocView {
+    match res {
+        OrchdResponse::DocView(v) => v,
+        other => panic!("expected DocView, got {other:?}"),
+    }
+}
+
+fn expect_docs(res: OrchdResponse) -> Vec<DocMeta> {
+    match res {
+        OrchdResponse::Docs(v) => v,
+        other => panic!("expected Docs, got {other:?}"),
     }
 }
 
@@ -913,6 +935,219 @@ async fn get_ruleset_ok_then_externally_modified_after_on_disk_edit() {
     c1.shutdown(boot).await;
 }
 
+/// SCN-054 (FLW-21, ST-041) full docs lifecycle over the wire: `UpsertDoc` creates the row AND
+/// the file under the project's rules dir (`rules/docs/<project-id>/<name>.md`) and broadcasts
+/// `DocsChanged{project_id}` to the other connected client; `ListDocs`/`GetDoc` read it back;
+/// an on-disk hand-edit flips `GetDoc` to `ExternallyModified` (the "file changed externally" +
+/// Accept banner) and `AcknowledgeDocFile` accepts it back to `Ok`; deleting the file on disk
+/// flips `GetDoc` to `Missing` (the "file lost" + Recreate banner) and `UpsertDoc{md_content:
+/// ""}` recreates it in place; `DeleteDoc` removes row + file and answers `Ack`. Every mutation
+/// pushes, every read doesn't (spec §6's mutating-request scoping) — the exact ruleset contract,
+/// times N named files.
+#[tokio::test]
+async fn docs_lifecycle_round_trip_with_external_change_lost_file_and_pushes() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    // Synchronize: c2's Pong proves its push registration happened-before c1's mutations below
+    // (mirrors `create_with_priority_and_set_task_priority_round_trip_and_push`).
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let project = create_project(&mut c1, "Docs").await;
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::ProjectsChanged)
+    );
+
+    // Empty state first (SCN-054: "No documents in this project yet.").
+    let empty = expect_docs(
+        c1.request(OrchdRequest::ListDocs {
+            project_id: project.id.clone(),
+        })
+        .await,
+    );
+    assert!(empty.is_empty());
+
+    // "+ doc" — create via the one upsert verb.
+    let created = expect_doc_view(
+        c1.request(OrchdRequest::UpsertDoc {
+            project_id: project.id.clone(),
+            name: "notes".to_string(),
+            md_content: "# notes\n".to_string(),
+        })
+        .await,
+    );
+    assert_eq!(created.doc.name, "notes");
+    assert_eq!(created.file_state, RuleFileState::Ok);
+    assert_eq!(created.md_content.as_deref(), Some("# notes\n"));
+    let expected_path = home_dir
+        .path()
+        .join("Library/Application Support/ai.builderpro.desktop/rules/docs")
+        .join(&project.id)
+        .join("notes.md");
+    assert_eq!(created.doc.md_path, expected_path.to_string_lossy());
+    assert_eq!(
+        std::fs::read_to_string(&expected_path).unwrap(),
+        "# notes\n"
+    );
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::DocsChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // The list shows name + last-modified (mtime-scale sanity only — exact mtime is the FS's).
+    let listed = expect_docs(
+        c1.request(OrchdRequest::ListDocs {
+            project_id: project.id.clone(),
+        })
+        .await,
+    );
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "notes");
+    assert!(listed[0].modified_at > 0);
+
+    // External hand-edit (an agent writing the same file) → "file changed externally".
+    std::fs::write(&expected_path, "agent-edited\n").unwrap();
+    let modified = expect_doc_view(
+        c1.request(OrchdRequest::GetDoc {
+            project_id: project.id.clone(),
+            name: "notes".to_string(),
+        })
+        .await,
+    );
+    assert_eq!(modified.file_state, RuleFileState::ExternallyModified);
+    assert_eq!(modified.md_content.as_deref(), Some("agent-edited\n"));
+
+    // [Accept] → the new content is the accepted truth, state back to Ok; pushes.
+    let acknowledged = expect_doc_view(
+        c1.request(OrchdRequest::AcknowledgeDocFile {
+            id: created.doc.id.clone(),
+        })
+        .await,
+    );
+    assert_eq!(acknowledged.file_state, RuleFileState::Ok);
+    assert_eq!(acknowledged.md_content.as_deref(), Some("agent-edited\n"));
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::DocsChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // File lost on disk → Missing, no content.
+    std::fs::remove_file(&expected_path).unwrap();
+    let lost = expect_doc_view(
+        c1.request(OrchdRequest::GetDoc {
+            project_id: project.id.clone(),
+            name: "notes".to_string(),
+        })
+        .await,
+    );
+    assert_eq!(lost.file_state, RuleFileState::Missing);
+    assert_eq!(lost.md_content, None);
+
+    // [Recreate] — the same upsert verb with empty content; pushes.
+    let recreated = expect_doc_view(
+        c1.request(OrchdRequest::UpsertDoc {
+            project_id: project.id.clone(),
+            name: "notes".to_string(),
+            md_content: String::new(),
+        })
+        .await,
+    );
+    assert_eq!(recreated.doc.id, created.doc.id);
+    assert_eq!(recreated.file_state, RuleFileState::Ok);
+    assert_eq!(std::fs::read_to_string(&expected_path).unwrap(), "");
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::DocsChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // "delete document?" confirmed → Ack, row + file gone, pushes.
+    expect_ack(
+        c1.request(OrchdRequest::DeleteDoc {
+            id: created.doc.id.clone(),
+        })
+        .await,
+    );
+    assert!(!expected_path.exists());
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::DocsChanged {
+            project_id: project.id.clone()
+        })
+    );
+    let after_delete = expect_docs(
+        c1.request(OrchdRequest::ListDocs {
+            project_id: project.id.clone(),
+        })
+        .await,
+    );
+    assert!(after_delete.is_empty());
+
+    c1.shutdown(boot).await;
+}
+
+/// SCN-054 error paths over the wire: a traversal/invalid name answers `Error{Validation}` and
+/// broadcasts nothing (a FAILED verb never pushes, spec §6), and `GetDoc` on an unknown name
+/// answers `Error{NotFound}` (the toast path in `DocsPanel.tsx`).
+#[tokio::test]
+async fn invalid_doc_name_is_validation_and_unknown_doc_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let project = create_project(&mut c1, "Docs").await;
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::ProjectsChanged)
+    );
+
+    match c1
+        .request(OrchdRequest::UpsertDoc {
+            project_id: project.id.clone(),
+            name: "../escape".to_string(),
+            md_content: "evil".to_string(),
+        })
+        .await
+    {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::Validation),
+        other => panic!("expected Error{{Validation}}, got {other:?}"),
+    }
+    // A failed verb broadcasts nothing.
+    assert_eq!(c2.recv_push_timeout(Duration::from_millis(300)).await, None);
+
+    match c1
+        .request(OrchdRequest::GetDoc {
+            project_id: project.id.clone(),
+            name: "never-created".to_string(),
+        })
+        .await
+    {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
+        other => panic!("expected Error{{NotFound}}, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}
+
 #[tokio::test]
 async fn set_idea_project_none_detaches() {
     let dir = tempfile::tempdir().unwrap();
@@ -1044,6 +1279,138 @@ async fn import_bundle_happy_path_returns_report_and_broadcasts_family_pushes() 
             .is_none(),
         "no extra pushes beyond the 3 touched families"
     );
+
+    c1.shutdown(boot).await;
+}
+
+/// SCN-051 (ST-037) wire round-trip: `CreateTask{priority: Some(Urgent)}` persists the priority,
+/// omitting it (`None`) defaults to `Normal`, and the appended `SetTaskPriority` verb flips it —
+/// each mutation answering `OrchdResponse::Task` AND broadcasting `TasksChanged{project_id}` to
+/// the other connected client (the same push contract as every other task verb).
+#[tokio::test]
+async fn create_with_priority_and_set_task_priority_round_trip_and_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    // Synchronize: c2's Pong proves its push registration happened-before c1's mutations below
+    // (mirrors `import_bundle_happy_path_returns_report_and_broadcasts_family_pushes`).
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let project = create_project(&mut c1, "Priorities").await;
+    // create_project broadcasts ProjectsChanged — drain it so the task-push asserts stay exact.
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::ProjectsChanged)
+    );
+
+    // Create with an explicit urgent priority.
+    let urgent = expect_task(
+        c1.request(OrchdRequest::CreateTask {
+            project_id: project.id.clone(),
+            parent_id: None,
+            title: "urgent one".into(),
+            body: String::new(),
+            status: None,
+            source: TaskSource::Plan,
+            source_id: None,
+            tags: vec![],
+            priority: Some(TaskPriority::Urgent),
+        })
+        .await,
+    );
+    assert_eq!(urgent.priority, TaskPriority::Urgent);
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::TasksChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // Create WITHOUT a priority — defaults to Normal (SCN-051 create-form default).
+    let normal = expect_task(
+        c1.request(OrchdRequest::CreateTask {
+            project_id: project.id.clone(),
+            parent_id: None,
+            title: "normal one".into(),
+            body: String::new(),
+            status: None,
+            source: TaskSource::Plan,
+            source_id: None,
+            tags: vec![],
+            priority: None,
+        })
+        .await,
+    );
+    assert_eq!(normal.priority, TaskPriority::Normal);
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::TasksChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // Flip it urgent via the appended SetTaskPriority verb.
+    let flipped = expect_task(
+        c1.request(OrchdRequest::SetTaskPriority {
+            id: normal.id.clone(),
+            priority: TaskPriority::Urgent,
+        })
+        .await,
+    );
+    assert_eq!(flipped.id, normal.id);
+    assert_eq!(flipped.priority, TaskPriority::Urgent);
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::TasksChanged {
+            project_id: project.id.clone()
+        })
+    );
+
+    // And the flip is durable: an independent ListTasks read sees it.
+    match c1
+        .request(OrchdRequest::ListTasks {
+            project_id: Some(project.id.clone()),
+        })
+        .await
+    {
+        OrchdResponse::Tasks(tasks) => {
+            let refetched = tasks.iter().find(|t| t.id == normal.id).unwrap();
+            assert_eq!(refetched.priority, TaskPriority::Urgent);
+        }
+        other => panic!("expected Tasks, got {other:?}"),
+    }
+
+    c1.shutdown(boot).await;
+}
+
+/// SCN-051 error path: `SetTaskPriority` on an unknown id answers `Error{NotFound}` (the toast
+/// + revert path in `TasksList.tsx`), mirroring `unknown_id_delete_task_is_not_found` below.
+#[tokio::test]
+async fn unknown_id_set_task_priority_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let res = c1
+        .request(OrchdRequest::SetTaskPriority {
+            id: "nonexistent-task-id".to_string(),
+            priority: TaskPriority::Urgent,
+        })
+        .await;
+    match res {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
+        other => panic!("expected Error{{NotFound}}, got {other:?}"),
+    }
 
     c1.shutdown(boot).await;
 }

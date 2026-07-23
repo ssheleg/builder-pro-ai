@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import { readTheme, setThemePref, type Theme } from "../ui/theme";
 import { classifyError, scrubSecrets, pushCapped, DIAG_CAP, type DiagEvent } from "../ipc/diag";
+import { powerSetEnabled, powerSyncSessions, type PowerStatus } from "../ipc/power";
+import { statsUsage, statsGit } from "../ipc/stats";
+import { strings } from "../strings";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
@@ -8,6 +11,8 @@ import type { FsEntry } from "../ipc/fs";
 import type {
   Account,
   AuditRow,
+  DocMeta,
+  DocView,
   DomainTask,
   Goal,
   GraphView,
@@ -26,8 +31,10 @@ import type {
   StorageStatus,
 } from "../ipc/orchd-types";
 import {
+  orchdGetDoc,
   orchdGetRuleset,
   orchdGraphListProject,
+  orchdListDocs,
   orchdListGoals,
   orchdListIdeas,
   orchdListInsights,
@@ -44,6 +51,7 @@ import {
   researchListRuns,
   orchdStorageStatus,
   describeOrchdError,
+  isNotFoundError,
 } from "../ipc/orchd";
 
 /**
@@ -98,7 +106,7 @@ export interface AppState {
    * S-EXT Extensions panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management.
    * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
    */
-  view: "home" | "workspace" | "project" | "ext" | "inbox";
+  view: "home" | "workspace" | "project" | "ext" | "inbox" | "stats";
 
   /**
    * File-explorer slice (spec §6.6/§6.4). Every keyed map here uses the SAME key format:
@@ -185,6 +193,17 @@ export interface AppState {
    * single project's ruleset) — mirrors `orchd_get_ruleset`'s `(scope, projectId)` pair collapsed
    * into one string key. Replaced per-key by `refreshRuleset(key)`. */
   rulesets: Record<string, RuleSetView>;
+  /** A project's doc list rows (SCN-054: name + last-modified, name-ordered by the daemon),
+   * keyed by `projectId`. Mirrors `goalsByProject`/`tasksByProject` exactly — absence means "not
+   * yet fetched" (the Docs tab's loading state), replaced per-key by `refreshDocs(projectId)`; a
+   * `DocsChanged{projectId}` push never touches any OTHER project's entry. */
+  docsByProject: Record<string, DocMeta[]>;
+  /** Open doc views (SCN-054: the Docs tab's editor half — content + healthy/changed/lost file
+   * state), keyed by [`docViewKey`]'s `` `${projectId}/${name}` `` (`/` can never appear in a
+   * validated doc name, so the key is unambiguous). Mirrors `rulesets`' per-key convention;
+   * replaced per-key by `refreshDoc(projectId, name)`, DROPPED per-key when a re-fetch reports
+   * the doc no longer exists (deleted by another client — see `refreshDoc`'s doc). */
+  docViews: Record<string, DocView>;
 
   /**
    * MCP slice (S-EXT §8, T8: the Extensions view's Servers/Tools tabs). Mirrors the app-domain
@@ -274,7 +293,7 @@ export interface AppState {
   setActiveSession: (id: SessionId | null) => void;
 
   /** Switch the top-level view. See `view`'s doc above. */
-  setView: (v: "home" | "workspace" | "project" | "ext" | "inbox") => void;
+  setView: (v: "home" | "workspace" | "project" | "ext" | "inbox" | "stats") => void;
   /** Set (`open=true`) or clear (`open=false`) one directory's expanded flag. */
   setExpanded: (root: string, rel: string, open: boolean) => void;
   /** Insert or replace one directory's cached listing. */
@@ -356,6 +375,15 @@ export interface AppState {
   /** Re-fetch one ruleset by its `rulesets` key (`` `global` `` or `` `project:${id}` `` — see
    * `rulesets`'s doc above), replacing only that key's entry. */
   refreshRuleset: (key: string) => Promise<void>;
+  /** Re-fetch ONE project's doc list, replacing only `docsByProject[projectId]` (SCN-054).
+   * Mirrors `refreshGoals`/`refreshTasks` exactly. */
+  refreshDocs: (projectId: string) => Promise<void>;
+  /** Re-fetch ONE doc's view, replacing only `docViews[docViewKey(projectId, name)]`. A
+   * `NotFound` rejection DROPS the entry instead of toasting — that is the honest "this doc was
+   * deleted by another client" signal a `DocsChanged` push refresh can race into, not an error
+   * (see `isNotFoundError`'s doc, `ipc/orchd.ts`); every other rejection surfaces via
+   * `reportError` like its siblings. */
+  refreshDoc: (projectId: string, name: string) => Promise<void>;
   /** Open the project panel: sets `view: "project"` and `activeProjectId: id` (T18 renders the
    * panel itself; this task only owns the state transition). */
   openProject: (id: string) => void;
@@ -403,6 +431,50 @@ export interface AppState {
   theme: Theme;
   /** Persist + apply + store the theme preference. */
   setTheme: (t: Theme) => void;
+
+  /**
+   * Keep-awake slice (SCN-045, FLW-18): `enabled` = the persisted toggle (localStorage
+   * `"bpa-keep-awake"`, default ON — mirrors `theme`'s FOUC-free localStorage persistence, see
+   * `../ui/theme.ts`); `active` = the macOS power assertion is GENUINELY held right now (the
+   * core's `SleepAsserter::is_held`, never the intent — spec §7 honesty); `error` = the current
+   * OS acquire denial while a hold is still wanted (`null` otherwise), driving the pill's
+   * failure state (`WorkspaceSidebar`).
+   */
+  keepAwake: { enabled: boolean; active: boolean; error: string | null };
+  /**
+   * Persist the toggle, push it into the core (`power_set_enabled`) and mirror the reconciled
+   * `PowerStatus` back. A denial/rejection surfaces honestly via `reportError` (toast + Diag
+   * record, SCN-045 "Errors & recovery") — never a silent fake "awake".
+   */
+  setKeepAwakeEnabled: (enabled: boolean) => Promise<void>;
+  /**
+   * Sync the live-session count into the core (`power_sync_sessions`; `App.tsx` calls this
+   * whenever the number of `lifecycle.kind !== "exited"` sessions changes) and mirror the
+   * reconciled status. An OS denial is surfaced ONCE per failure streak (not on every sync —
+   * the count changes with normal session churn, and re-toasting an unchanged denial each time
+   * would be pure noise), while `keepAwake.error` stays current on every call.
+   */
+  syncKeepAwake: (liveCount: number) => Promise<void>;
+
+  /**
+   * Stats view slice (SCN-052/053, FLW-20). Two independent sources with per-source honesty:
+   * `usage` (Claude Code session-log scan; its own `error` field carries scan failure) and
+   * `git` (per-root output stats; per-row `available:false` + reason). `gitError` is the
+   * IPC-level failure for the git call as a whole; `usageError` likewise for usage — either
+   * source failing must never blank the other (SCN-052 "Errors & recovery").
+   */
+  stats: {
+    range: import("../ipc/stats").StatsRange;
+    usage: import("../ipc/stats").UsageStats | null;
+    git: import("../ipc/stats").GitStats[] | null;
+    usageError: string | null;
+    gitError: string | null;
+    loading: boolean;
+  };
+  /** Switch the range pill and refetch (SCN-052 step 2). */
+  setStatsRange: (range: import("../ipc/stats").StatsRange) => Promise<void>;
+  /** Fetch both sources for the current range. Per-source failure capture — see `stats` doc. */
+  refreshStats: () => Promise<void>;
 }
 
 /** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
@@ -421,6 +493,55 @@ function parseRulesetKey(key: string): { scope: RuleScope; projectId: string | n
   if (key === "global") return { scope: "global", projectId: null };
   const projectId = key.startsWith("project:") ? key.slice("project:".length) : key;
   return { scope: "project", projectId };
+}
+
+/**
+ * `docViews`' key format (SCN-054): `orchd_get_doc`'s `(projectId, name)` pair collapsed into
+ * one string key, mirroring how `rulesets`' key collapses `(scope, projectId)`. `/` is safe as
+ * the separator — the daemon's `validate_doc_name` rejects any name containing it, so the split
+ * is unambiguous. Exported for `DocsPanel.tsx`/`App.tsx`, which read/refresh entries by the same
+ * key the store writes.
+ */
+export function docViewKey(projectId: string, name: string): string {
+  return `${projectId}/${name}`;
+}
+
+/** localStorage key for the keep-awake toggle (SCN-045). Values `"on"`/`"off"`; absence = the
+ * default ON. Same synchronous, FOUC-free persistence path as the theme (`../ui/theme.ts`). */
+const KEEP_AWAKE_STORAGE_KEY = "bpa-keep-awake";
+
+/** Read the persisted keep-awake preference; defaults to ON (SCN-045 "default on"). Mirrors
+ * `readTheme`'s try/catch: localStorage can throw in a locked-down webview. */
+function readKeepAwakeEnabled(): boolean {
+  try {
+    const v = localStorage.getItem(KEEP_AWAKE_STORAGE_KEY);
+    if (v === "on") return true;
+    if (v === "off") return false;
+  } catch {
+    // localStorage unavailable — fall through to the default.
+  }
+  return true;
+}
+
+/** Persist the keep-awake toggle. Best-effort, mirrors `setThemePref`: a failed write only costs
+ * persistence across restarts, never this session's behavior. */
+function persistKeepAwakeEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(KEEP_AWAKE_STORAGE_KEY, enabled ? "on" : "off");
+  } catch {
+    // best-effort persistence; the core still reconciles this session.
+  }
+}
+
+/** Best human-readable reason out of an unknown power-IPC rejection (the `power_*` commands
+ * themselves are infallible — a rejection means the invoke/runtime layer broke). */
+function describePowerFailure(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (e !== null && typeof e === "object") {
+    const m = (e as { message?: unknown }).message;
+    if (typeof m === "string" && m) return m;
+  }
+  return String(e);
 }
 
 /** How long the visible toast stays up before auto-advancing to the next (Toast atom, spec §7). */
@@ -458,6 +579,36 @@ export const useAppStore = create<AppState>((set, get) => {
     }, TOAST_AUTO_DISMISS_MS);
   };
 
+  // Keep-awake once-per-streak gate (SCN-045; closure state like `toastTimer` — write-only
+  // plumbing, not renderable state): the failure reason last REPORTED (toast + Diag record).
+  // `syncKeepAwake` fires on every live-count change, so an unchanged denial must not re-toast
+  // on each session start/stop; a recovery (`error: null`) re-arms the gate so the NEXT streak
+  // is reported again.
+  let lastPowerError: string | null = null;
+
+  // Surface a keep-awake failure honestly, once per streak: SCN-045's exact copy
+  // ("keep-awake unavailable: {reason}") through the store's ONE reporting path (`reportError`:
+  // toast + Diagnostics ring + console breadcrumb). Shaped as a `daemon`-kind error with the
+  // `Power` code so `classifyError` files the Diag event under `kind: "Power"` and
+  // `describeOrchdError` passes the message through verbatim.
+  const reportPowerFailure = (op: string, reason: string): void => {
+    if (reason === lastPowerError) return;
+    lastPowerError = reason;
+    get().reportError(op, {
+      kind: "daemon",
+      code: "Power",
+      message: strings.power.keepAwakeFailed(reason),
+    });
+  };
+
+  // Mirror a reconciled `PowerStatus` into the slice and route its error (if any) through the
+  // once-per-streak gate. A clean status re-arms the gate — the streak is over.
+  const applyPowerStatus = (op: string, status: PowerStatus): void => {
+    set({ keepAwake: { enabled: status.enabled, active: status.active, error: status.error } });
+    if (status.error !== null) reportPowerFailure(op, status.error);
+    else lastPowerError = null;
+  };
+
   return {
     sessions: {},
     workspaces: {},
@@ -483,6 +634,8 @@ export const useAppStore = create<AppState>((set, get) => {
     researchRunsByIdea: {},
     graphByProject: {},
     rulesets: {},
+    docsByProject: {},
+    docViews: {},
     mcpServers: [],
     mcpToolsByServer: {},
     mcpArtifacts: [],
@@ -757,6 +910,37 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    // ── SCN-054 project docs ─────────────────────────────────────────────────────────────────
+
+    refreshDocs: async (projectId) => {
+      try {
+        const docs = await orchdListDocs(projectId);
+        set((s) => ({ docsByProject: { ...s.docsByProject, [projectId]: docs } }));
+      } catch (e) {
+        get().reportError("refreshDocs", e);
+      }
+    },
+
+    refreshDoc: async (projectId, name) => {
+      const key = docViewKey(projectId, name);
+      try {
+        const view = await orchdGetDoc(projectId, name);
+        set((s) => ({ docViews: { ...s.docViews, [key]: view } }));
+      } catch (e) {
+        if (isNotFoundError(e)) {
+          // The doc was deleted (by this client's own confirmed delete, or another client's,
+          // racing this refresh) — dropping the stale view IS the correct outcome, not an error
+          // (see `refreshDoc`'s interface doc above).
+          set((s) => {
+            const { [key]: _dropped, ...rest } = s.docViews;
+            return { docViews: rest };
+          });
+          return;
+        }
+        get().reportError("refreshDoc", e);
+      }
+    },
+
     openProject: (id) => set({ view: "project", activeProjectId: id }),
 
     // ── MCP slice (S-EXT §8, T8) ─────────────────────────────────────────────────────────────
@@ -859,5 +1043,86 @@ export const useAppStore = create<AppState>((set, get) => {
     },
     setOrchdIncompatible: (v) => set({ orchdIncompatible: v }),
     setOrchdUpgradeDialogOpen: (v) => set({ orchdUpgradeDialogOpen: v }),
+
+    // ── keep-awake (SCN-045 / FLW-18) ────────────────────────────────────────────────────────
+    //
+    // `active`/`error` ALWAYS come from the core's reconciled `PowerStatus` (the assertion's
+    // real held-state), never from the toggle intent — the pill can therefore never claim an
+    // "awake" the OS denied (spec §7 / SCN-045 honesty). Failures follow the `refresh*` shape:
+    // caught here, surfaced via the store's one reporting path, never an unhandled rejection.
+
+    keepAwake: { enabled: readKeepAwakeEnabled(), active: false, error: null },
+
+    setKeepAwakeEnabled: async (enabled) => {
+      // Persist + optimistically flip the toggle so the pill answers the click immediately;
+      // `active` deliberately stays as-is until the core's reconcile below answers.
+      persistKeepAwakeEnabled(enabled);
+      set((s) => ({ keepAwake: { ...s.keepAwake, enabled } }));
+      try {
+        applyPowerStatus("setKeepAwakeEnabled", await powerSetEnabled(enabled));
+      } catch (e) {
+        // The invoke itself broke (the command is infallible at the wire layer): keep the
+        // persisted intent, but the HOLD state must degrade honestly — never claim active.
+        const reason = describePowerFailure(e);
+        set((s) => ({ keepAwake: { ...s.keepAwake, active: false, error: reason } }));
+        reportPowerFailure("setKeepAwakeEnabled", reason);
+      }
+    },
+
+    syncKeepAwake: async (liveCount) => {
+      try {
+        applyPowerStatus("syncKeepAwake", await powerSyncSessions(liveCount));
+      } catch (e) {
+        const reason = describePowerFailure(e);
+        set((s) => ({ keepAwake: { ...s.keepAwake, active: false, error: reason } }));
+        reportPowerFailure("syncKeepAwake", reason);
+      }
+    },
+
+    // ── stats slice (SCN-052/053) ───────────────────────────────────────────────────────────────
+
+    stats: { range: "30d", usage: null, git: null, usageError: null, gitError: null, loading: false },
+
+    setStatsRange: async (range) => {
+      set((s) => ({ stats: { ...s.stats, range } }));
+      await get().refreshStats();
+    },
+
+    refreshStats: async () => {
+      // Both sources fetch in parallel and fail INDEPENDENTLY (SCN-052 per-source honesty):
+      // a usage-scan failure must never blank the git section, and vice versa. Failures land
+      // in the slice (the view's inline notes) AND in Diagnostics via `reportError` — same
+      // one-path rule every other refresh follows.
+      const { range } = get().stats;
+      const roots = Object.values(get().workspaces).flatMap((w) => w.roots ?? [w.rootPath]);
+      set((s) => ({ stats: { ...s.stats, loading: true } }));
+      const [usageRes, gitRes] = await Promise.allSettled([
+        statsUsage(range),
+        statsGit(roots, range),
+      ]);
+      set((s) => {
+        const next = { ...s.stats, loading: false };
+        if (usageRes.status === "fulfilled") {
+          next.usage = usageRes.value;
+          next.usageError = usageRes.value.error;
+        } else {
+          next.usage = null;
+          next.usageError =
+            usageRes.reason instanceof Error ? usageRes.reason.message : String(usageRes.reason);
+        }
+        if (gitRes.status === "fulfilled") {
+          next.git = gitRes.value;
+          next.gitError = null;
+        } else {
+          next.git = null;
+          next.gitError =
+            gitRes.reason instanceof Error ? gitRes.reason.message : String(gitRes.reason);
+        }
+        return { stats: next };
+      });
+      const after = get().stats;
+      if (after.usageError) get().reportError("refreshStats", after.usageError);
+      if (after.gitError) get().reportError("refreshStats", after.gitError);
+    },
   };
 });

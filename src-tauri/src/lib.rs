@@ -67,7 +67,9 @@ pub mod fs_watcher;
 pub mod launchd;
 pub mod orchd_client;
 pub mod paths;
+pub mod power;
 pub mod socket_client;
+pub mod stats;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -595,6 +597,11 @@ pub fn run() {
         // `manage`d synchronously — inside `setup()` below, before either bring-up task is spawned,
         // BL-101 — so ALL commands are callable from the very first frame.)
         .manage(fs_watcher::new_watch_slot())
+        // Keep-awake slot (SCN-045, FLW-18): core-local like the watch slot above — no daemon
+        // dependency, so it's `manage`d here too. Holds the (macOS) IOPM asserter + reconciler;
+        // nothing is asserted until the frontend syncs a live session in. Process-scoped IOPM
+        // assertions auto-release at app quit/crash (see `power.rs` module docs — no orphan lock).
+        .manage(power::new_power_slot())
         .invoke_handler(tauri::generate_handler![
             ping,
             commands::create_session,
@@ -642,11 +649,18 @@ pub fn run() {
             commands::orchd_update_task,
             commands::orchd_set_task_status,
             commands::orchd_set_task_rank,
+            commands::orchd_set_task_priority,
             commands::orchd_delete_task,
             commands::orchd_list_tasks,
             commands::orchd_get_ruleset,
             commands::orchd_upsert_ruleset,
             commands::orchd_acknowledge_rule_file,
+            commands::orchd_list_docs,
+            commands::orchd_get_doc,
+            commands::orchd_upsert_doc,
+            commands::orchd_delete_doc,
+            commands::orchd_acknowledge_doc_file,
+            commands::orchd_reveal_doc_file,
             commands::orchd_export_project,
             commands::orchd_export_all,
             commands::orchd_import_bundle,
@@ -710,6 +724,11 @@ pub fn run() {
             fs_explorer::open_external,
             fs_watcher::start_workspace_watch,
             fs_watcher::stop_workspace_watch,
+            power::power_set_enabled,
+            power::power_sync_sessions,
+            power::power_status,
+            stats::stats_usage,
+            stats::stats_git,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

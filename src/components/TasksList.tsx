@@ -4,10 +4,11 @@ import {
   orchdCreateTask,
   orchdSetTaskStatus,
   orchdSetTaskRank,
+  orchdSetTaskPriority,
   orchdDeleteTask,
   describeOrchdError,
 } from "../ipc/orchd";
-import type { DomainTask, TaskSource, TaskStatus } from "../ipc/orchd-types";
+import type { DomainTask, TaskPriority, TaskSource, TaskStatus } from "../ipc/orchd-types";
 import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { Badge, Button } from "../ui/primitives";
 import { strings } from "../strings";
@@ -34,6 +35,18 @@ const SOURCE_LABEL: Record<TaskSource, string> = {
   bug: strings.tasks.source.bug,
   plan: strings.tasks.source.plan,
 };
+
+/** Locked enum order (`TaskPriority`, SCN-051/ST-037) — the row/create-form priority selects. */
+const PRIORITY_VALUES: TaskPriority[] = ["urgent", "normal"];
+
+const PRIORITY_LABEL: Record<TaskPriority, string> = {
+  urgent: strings.tasks.priority.urgent,
+  normal: strings.tasks.priority.normal,
+};
+
+/** Sort weight for the SCN-051 "urgent ahead of normal within its status group" rule — a lower
+ * weight sorts first; ties fall through to `rank` (see `groupByStatus`). */
+const PRIORITY_WEIGHT: Record<TaskPriority, number> = { urgent: 0, normal: 1 };
 
 /**
  * Fractional-rank move increment (task-16 brief "CRITICAL rank lesson"). `orchd_set_task_rank`
@@ -73,12 +86,15 @@ function countDescendants(tasks: DomainTask[], id: string): number {
 }
 
 /**
- * Groups `tasks` by status (spec §4.2 order, §10) and sorts each group by `rank` ascending — the
- * single flat order that both drives the group's on-screen row order AND is what ▲/▼'s midpoint
- * math operates against (task-16 brief: "the adjacent same-group task"). Subtasks are NOT
- * re-nested into a parent-relative tree here — indentation is a pure rendering detail applied per
- * row (`rowDepth` below), so a subtask still competes for rank position with every other task in
- * its status group exactly like a top-level task.
+ * Groups `tasks` by status (spec §4.2 order, §10) and sorts each group priority-first (urgent
+ * ahead of normal, SCN-051) then by `rank` ascending — the single flat order that drives the
+ * group's on-screen row order. ▲/▼'s midpoint math does NOT operate on this whole group anymore:
+ * it operates on the task's same-priority SEGMENT of it (`prioritySegment` below), because rank
+ * alone can never move a normal task above an urgent one — priority always wins the sort, so a
+ * cross-segment rank swap would be a silent no-op on screen. Subtasks are NOT re-nested into a
+ * parent-relative tree here — indentation is a pure rendering detail applied per row (`rowDepth`
+ * below), so a subtask still competes for sort position with every other task in its status group
+ * exactly like a top-level task.
  */
 function groupByStatus(tasks: DomainTask[]): Map<TaskStatus, DomainTask[]> {
   const groups = new Map<TaskStatus, DomainTask[]>();
@@ -87,9 +103,18 @@ function groupByStatus(tasks: DomainTask[]): Map<TaskStatus, DomainTask[]> {
     groups.get(t.status)?.push(t);
   }
   for (const list of groups.values()) {
-    list.sort((a, b) => a.rank - b.rank);
+    list.sort(
+      (a, b) => PRIORITY_WEIGHT[a.priority] - PRIORITY_WEIGHT[b.priority] || a.rank - b.rank,
+    );
   }
   return groups;
+}
+
+/** The contiguous same-priority slice of `group` that `task` belongs to (SCN-051) — the array
+ * ▲/▼'s neighbor/midpoint math and the first/last-row disable logic operate against. `group` is
+ * already priority-then-rank sorted (`groupByStatus`), so a filter preserves rank order. */
+function prioritySegment(group: DomainTask[], task: DomainTask): DomainTask[] {
+  return group.filter((t) => t.priority === task.priority);
 }
 
 /** Visual indent for a subtask row — binary (0 or 1 level), not full ancestor-chain depth, since
@@ -160,6 +185,19 @@ const iconButtonStyle: CSSProperties = {
   flexShrink: 0,
 };
 
+/** SCN-051 urgent left-marker: a 4px danger rounded rect at the row's leading edge (the Figma
+ * design's tone pair — `--danger` mark + `--danger-weak` chip below). The slot is rendered for
+ * EVERY row (transparent when normal) so titles stay column-aligned across mixed groups. */
+function priorityMarkerStyle(urgent: boolean): CSSProperties {
+  return {
+    width: 4,
+    height: 16,
+    borderRadius: 2,
+    background: urgent ? "var(--danger)" : "transparent",
+    flexShrink: 0,
+  };
+}
+
 const createFormStyle: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
@@ -191,6 +229,7 @@ interface TaskRowProps {
    * `TasksList`'s own doc comment. */
   disabled: boolean;
   onStatusChange: (id: string, status: TaskStatus) => void;
+  onPriorityChange: (id: string, priority: TaskPriority) => void;
   onMoveUp: (task: DomainTask) => void;
   onMoveDown: (task: DomainTask) => void;
   onDelete: (task: DomainTask) => void;
@@ -198,22 +237,60 @@ interface TaskRowProps {
 
 /** One task row (design-system.md "Task row" atom, S3 §10). Title/tags/source are read-only here
  * — inline title/body editing is out of this task's scope (task-16 brief lists only status
- * select, rank ▲/▼, and delete per row); the create dialog is the only place fields are entered. */
+ * select, rank ▲/▼, and delete per row); the create dialog is the only place fields are entered.
+ * SCN-051 adds the urgent visuals (leading 4px danger marker + danger-weak "urgent" chip) and
+ * the priority select — the select is CONTROLLED by the store's `task.priority`, so a rejected
+ * save reverts on its own (the store value never changed; React restores the controlled value),
+ * with the toast surfaced by `TasksList.handlePriorityChange`. */
 function TaskRow(props: TaskRowProps): JSX.Element {
-  const { task, canMoveUp, canMoveDown, disabled, onStatusChange, onMoveUp, onMoveDown, onDelete } =
-    props;
+  const {
+    task,
+    canMoveUp,
+    canMoveDown,
+    disabled,
+    onStatusChange,
+    onPriorityChange,
+    onMoveUp,
+    onMoveDown,
+    onDelete,
+  } = props;
   const depth = rowDepth(task);
+  const urgent = task.priority === "urgent";
 
   return (
     <div data-testid={`task-row-${task.id}`} role="listitem" style={rowStyle(depth)}>
+      <span
+        {...(urgent ? { "data-testid": `task-urgent-marker-${task.id}` } : {})}
+        aria-hidden="true"
+        style={priorityMarkerStyle(urgent)}
+      />
       <span data-testid={`task-title-${task.id}`} style={titleTextStyle}>
         {task.title}
       </span>
+      {urgent && (
+        <Badge data-testid={`task-urgent-chip-${task.id}`} tone="danger">
+          {strings.tasks.priority.urgent}
+        </Badge>
+      )}
       {task.source && (
         <Badge data-testid={`task-source-${task.id}`} tone="muted">
           {SOURCE_LABEL[task.source]}
         </Badge>
       )}
+      <select
+        data-testid={`task-priority-select-${task.id}`}
+        aria-label={strings.tasks.priorityAria}
+        value={task.priority}
+        disabled={disabled}
+        onChange={(e) => onPriorityChange(task.id, e.target.value as TaskPriority)}
+        style={selectStyle}
+      >
+        {PRIORITY_VALUES.map((p) => (
+          <option key={p} value={p}>
+            {PRIORITY_LABEL[p]}
+          </option>
+        ))}
+      </select>
       <select
         data-testid={`task-status-select-${task.id}`}
         aria-label={strings.tasks.statusAria}
@@ -264,12 +341,15 @@ function TaskRow(props: TaskRowProps): JSX.Element {
 }
 
 /**
- * Status-grouped task list with fractional-rank reordering (S3 spec §10, task-16). Renders the
- * six `TaskStatus` groups in their locked spec §4.2 order, always (even empty), each internally
- * rank-ordered ascending; ▲/▼ moves compute a midpoint against the two would-be neighbors in that
- * SAME flat rank order (see `groupByStatus`/`RANK_GAP` docs above) and issue a single
- * `orchdSetTaskRank` call — no server-side renumbering exists, so the computed rank must already
- * be unique and correctly positioned.
+ * Status-grouped task list with fractional-rank reordering (S3 spec §10, task-16) and two-level
+ * task priority (SCN-051, ST-037). Renders the six `TaskStatus` groups in their locked spec §4.2
+ * order, always (even empty), each internally sorted urgent-first then rank ascending
+ * (`groupByStatus`); ▲/▼ moves compute a midpoint against the two would-be neighbors in the
+ * task's same-priority SEGMENT of that order (see `prioritySegment`/`RANK_GAP` docs above) and
+ * issue a single `orchdSetTaskRank` call — no server-side renumbering exists, so the computed
+ * rank must already be unique and correctly positioned. Priority is set at create time (form
+ * select, default normal) or per row (select → `orchdSetTaskPriority`); urgent rows carry a
+ * danger marker + chip.
  *
  * Structural mutations (create/delete — anything that changes which rows exist) explicitly
  * `refreshTasks(projectId)` after a successful round-trip, mirroring `GoalTree`/`IdeasList`'s
@@ -309,10 +389,23 @@ export function TasksList(props: { projectId: string }): JSX.Element {
   const [createSource, setCreateSource] = useState<TaskSource>("idea");
   const [createParentId, setCreateParentId] = useState("");
   const [createTags, setCreateTags] = useState("");
+  const [createPriority, setCreatePriority] = useState<TaskPriority>("normal");
 
   async function handleStatusChange(id: string, status: TaskStatus): Promise<void> {
     try {
       await orchdSetTaskStatus(id, status);
+    } catch (e) {
+      showToast(describeOrchdError(e));
+    }
+  }
+
+  /** SCN-051: priority flip on an existing row. Reject ⇒ toast + implicit revert — the select is
+   * controlled by the STORE'S `task.priority`, which a rejected save never changed (the exact
+   * `handleStatusChange` pattern above); success relies on the shared `orchd://tasks-changed` →
+   * `refreshTasks` pipe, same as a status/rank edit. */
+  async function handlePriorityChange(id: string, priority: TaskPriority): Promise<void> {
+    try {
+      await orchdSetTaskPriority(id, priority);
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -327,29 +420,31 @@ export function TasksList(props: { projectId: string }): JSX.Element {
   }
 
   /**
-   * ▲: move `task` above the row currently just before it in its status group's rank order. The
-   * new rank is the midpoint of that row's two would-be new neighbors — the row two spots up
-   * (`prevPrev`) and the row one spot up (`prev`, whose position `task` is overtaking). When
-   * `prev` is already the group's first row (no `prevPrev`), there is nothing to average with, so
-   * the new rank goes below the group's floor: `firstRank - RANK_GAP`.
+   * ▲: move `task` above the row currently just before it in its same-priority SEGMENT's rank
+   * order (`segment`, from `prioritySegment` — SCN-051: rank can never lift a task across a
+   * priority boundary, priority always wins the sort). The new rank is the midpoint of that
+   * row's two would-be new neighbors — the row two spots up (`prevPrev`) and the row one spot up
+   * (`prev`, whose position `task` is overtaking). When `prev` is already the segment's first
+   * row (no `prevPrev`), there is nothing to average with, so the new rank goes below the
+   * segment's floor: `firstRank - RANK_GAP`.
    */
-  async function handleMoveUp(group: DomainTask[], task: DomainTask): Promise<void> {
-    const idx = group.findIndex((t) => t.id === task.id);
+  async function handleMoveUp(segment: DomainTask[], task: DomainTask): Promise<void> {
+    const idx = segment.findIndex((t) => t.id === task.id);
     if (idx <= 0) return;
-    const prev = group[idx - 1];
-    const prevPrev = idx - 2 >= 0 ? group[idx - 2] : undefined;
+    const prev = segment[idx - 1];
+    const prevPrev = idx - 2 >= 0 ? segment[idx - 2] : undefined;
     const newRank = prevPrev ? (prevPrev.rank + prev.rank) / 2 : prev.rank - RANK_GAP;
     await applyRank(task.id, newRank);
   }
 
   /** ▼: symmetric to `handleMoveUp` — midpoint of the row one spot down (`next`) and two spots
-   * down (`nextNext`); with no `nextNext` (next is already the group's last row), the new rank
-   * goes above the group's ceiling: `lastRank + RANK_GAP`. */
-  async function handleMoveDown(group: DomainTask[], task: DomainTask): Promise<void> {
-    const idx = group.findIndex((t) => t.id === task.id);
-    if (idx < 0 || idx >= group.length - 1) return;
-    const next = group[idx + 1];
-    const nextNext = idx + 2 < group.length ? group[idx + 2] : undefined;
+   * down (`nextNext`) within the same-priority segment; with no `nextNext` (next is already the
+   * segment's last row), the new rank goes above the segment's ceiling: `lastRank + RANK_GAP`. */
+  async function handleMoveDown(segment: DomainTask[], task: DomainTask): Promise<void> {
+    const idx = segment.findIndex((t) => t.id === task.id);
+    if (idx < 0 || idx >= segment.length - 1) return;
+    const next = segment[idx + 1];
+    const nextNext = idx + 2 < segment.length ? segment[idx + 2] : undefined;
     const newRank = nextNext ? (next.rank + nextNext.rank) / 2 : next.rank + RANK_GAP;
     await applyRank(task.id, newRank);
   }
@@ -374,12 +469,23 @@ export function TasksList(props: { projectId: string }): JSX.Element {
       .filter((tag) => tag !== "");
     const parentId = createParentId === "" ? null : createParentId;
     try {
-      await orchdCreateTask(projectId, parentId, title, createBody, null, createSource, null, tags);
+      await orchdCreateTask(
+        projectId,
+        parentId,
+        title,
+        createBody,
+        null,
+        createSource,
+        null,
+        tags,
+        createPriority,
+      );
       setCreateTitle("");
       setCreateBody("");
       setCreateSource("idea");
       setCreateParentId("");
       setCreateTags("");
+      setCreatePriority("normal");
       await refreshTasks(projectId);
     } catch (e) {
       showToast(describeOrchdError(e));
@@ -420,6 +526,19 @@ export function TasksList(props: { projectId: string }): JSX.Element {
           {SOURCE_VALUES.map((s) => (
             <option key={s} value={s}>
               {SOURCE_LABEL[s]}
+            </option>
+          ))}
+        </select>
+        <select
+          data-testid="task-create-priority"
+          aria-label={strings.tasks.newPriorityAria}
+          value={createPriority}
+          onChange={(e) => setCreatePriority(e.target.value as TaskPriority)}
+          style={selectStyle}
+        >
+          {PRIORITY_VALUES.map((p) => (
+            <option key={p} value={p}>
+              {PRIORITY_LABEL[p]}
             </option>
           ))}
         </select>
@@ -473,19 +592,26 @@ export function TasksList(props: { projectId: string }): JSX.Element {
                 {strings.tasks.empty}
               </div>
             ) : (
-              group.map((task, idx) => (
-                <TaskRow
-                  key={task.id}
-                  task={task}
-                  canMoveUp={idx > 0}
-                  canMoveDown={idx < group.length - 1}
-                  disabled={orchdDown}
-                  onStatusChange={(id, s) => void handleStatusChange(id, s)}
-                  onMoveUp={(t) => void handleMoveUp(group, t)}
-                  onMoveDown={(t) => void handleMoveDown(group, t)}
-                  onDelete={(t) => void handleDelete(t)}
-                />
-              ))
+              group.map((task) => {
+                // SCN-051: ▲/▼ neighbors + first/last disabling live within the task's
+                // same-priority segment — the priority boundary is not crossable by rank.
+                const segment = prioritySegment(group, task);
+                const segIdx = segment.findIndex((t) => t.id === task.id);
+                return (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    canMoveUp={segIdx > 0}
+                    canMoveDown={segIdx < segment.length - 1}
+                    disabled={orchdDown}
+                    onStatusChange={(id, s) => void handleStatusChange(id, s)}
+                    onPriorityChange={(id, p) => void handlePriorityChange(id, p)}
+                    onMoveUp={(t) => void handleMoveUp(segment, t)}
+                    onMoveDown={(t) => void handleMoveDown(segment, t)}
+                    onDelete={(t) => void handleDelete(t)}
+                  />
+                );
+              })
             )}
           </div>
         );

@@ -333,6 +333,7 @@ describe("FormInsightDialog", () => {
         "insight",
         "in1",
         [],
+        null, // priority: daemon default (normal, SCN-051) — no priority control in this flow
       ),
     );
     await waitFor(() =>

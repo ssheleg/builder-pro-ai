@@ -91,6 +91,10 @@ pub const EV_ORCHD_POLICIES_CHANGED: &str = "orchd://policies-changed";
 /// append-only). Payload `{ ideaId }` (`ideaId` may be `null` — a future workspace-wide
 /// invalidation, currently unproduced), mirrors [`EV_ORCHD_MCP_SERVERS_CHANGED`]'s shape exactly.
 pub const EV_ORCHD_RESEARCH_RUNS_CHANGED: &str = "orchd://research-runs-changed";
+/// SCN-054 project-docs coarse-invalidation (FLW-21, ST-041, appended — order FROZEN
+/// append-only). Payload `{ projectId }` — the ONE project whose doc list/content changed,
+/// mirrors [`EV_ORCHD_TASKS_CHANGED`]'s shape exactly (docs are always project-scoped).
+pub const EV_ORCHD_DOCS_CHANGED: &str = "orchd://docs-changed";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -293,6 +297,14 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
         OrchdPush::ResearchRunsChanged { idea_id } => BrokerAction::Emit(
             EV_ORCHD_RESEARCH_RUNS_CHANGED,
             serde_json::json!({ "ideaId": idea_id }),
+        ),
+        // SCN-054 project docs (appended — order FROZEN append-only): fired by every successful
+        // doc mutation (UpsertDoc/DeleteDoc/AcknowledgeDocFile). Mirrors `TasksChanged`'s
+        // camelCase-reshape precedent above — docs are always project-scoped, so the payload is
+        // a plain non-null `projectId`.
+        OrchdPush::DocsChanged { project_id } => BrokerAction::Emit(
+            EV_ORCHD_DOCS_CHANGED,
+            serde_json::json!({ "projectId": project_id }),
         ),
     }
 }
@@ -808,6 +820,22 @@ mod tests {
                 assert_eq!(event, EV_ORCHD_RULESET_CHANGED);
                 assert_eq!(payload["scope"], "global");
                 assert!(payload["projectId"].is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchd_docs_changed_maps_to_emit_with_camel_case_project_id_payload() {
+        // SCN-054: the docs coarse-invalidation push reshapes exactly like TasksChanged.
+        let action = map_orchd_push(OrchdPush::DocsChanged {
+            project_id: "proj-4".to_string(),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_DOCS_CHANGED);
+                assert_eq!(payload["projectId"], "proj-4");
+                assert!(payload.get("project_id").is_none());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

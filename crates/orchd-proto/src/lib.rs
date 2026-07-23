@@ -168,6 +168,12 @@ pub struct DomainTask {
     pub title: String,
     pub body: String,
     pub status: TaskStatus,
+    /// SCN-051 (ST-037): urgent/normal. `#[serde(default)]` (⇒ `Normal`) so pre-priority
+    /// payloads — a schema-≤v4 export bundle's task rows, or a frame from a pre-priority peer —
+    /// still decode instead of rejecting the whole bundle/frame; the daemon itself always sends
+    /// the field, so the generated TS type keeps it required.
+    #[serde(default)]
+    pub priority: TaskPriority,
     pub source: TaskSource,
     pub source_id: Option<String>,
     pub tags: Vec<String>,
@@ -192,6 +198,20 @@ pub enum TaskStatus {
     Done,
 }
 
+/// SCN-051 (ST-037): two-level task priority. `Urgent` renders visually distinct (danger-tone
+/// marker + chip) and sorts ahead of `Normal` within its status group (UI concern, SCN-051);
+/// workflow continuation (SCN-049) consumes urgent tasks first. `Normal` is the single
+/// contract-wide default — `#[default]` here backs the DB column default (`'normal'`), the
+/// `#[serde(default)]` decode backfill on [`DomainTask::priority`], and the create-form default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum TaskPriority {
+    Urgent,
+    #[default]
+    Normal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "orchd-types.ts")]
@@ -202,6 +222,56 @@ pub enum TaskSource {
     Plan,
 }
 
+/// The per-project "CEO supervisor" config (SCN-046, FLW-19 JRN-10/#1, foundation §5 A-7). It
+/// rides INSIDE [`PolicyRules`] as one additive field rather than a table of its own precisely
+/// because A-7 says the CEO's authority is a view onto the existing policy: the caps it acts
+/// within are the pre-existing policy `spendCapUsd` plus the approval-class machinery, never a
+/// duplicate set of caps. This struct therefore carries only what the policy did not already model:
+/// the enable switch, WHICH confirmation classes are delegated, the operator's free-form
+/// instruction, and any extra rules.
+///
+/// PLUMBING ONLY (honesty boundary, S6b). Persisting this config does NOT make a CEO act — the
+/// orchestrator-agent runtime that would READ this config and autonomously answer agent questions
+/// or continue workflows (SCN-047/SCN-049) does not exist yet (S6b). The UI carries a matching
+/// pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same
+/// register as the Skills tab's registry banner. Nothing here starts an agent.
+///
+/// `#[serde(default)]` at the container level lets a policy JSON blob that predates this field
+/// (every ruleset policy row written before SCN-046, plus the DB's `'{}'` column default and any
+/// older export bundle) decode straight into [`SupervisorConfig::default`] — a disabled CEO with an
+/// empty scope — instead of failing with a "missing field" error. It also lets a partial object
+/// (say `{"enabled":true}` from a hand-edited bundle) fill the rest from `Default` rather than
+/// erroring, so a truncated blob degrades to "off" honestly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export_to = "orchd-types.ts")]
+pub struct SupervisorConfig {
+    /// Master switch, default `false` (SCN-046: "disabled by default until explicitly enabled").
+    /// An enabled CEO with an empty delegation scope is an invalid save (SCN-046: "empty delegation
+    /// scope with CEO on → blocked") — enforced client-side (the blocked alert) AND by the
+    /// persistence `validate_policy` guard, so the invariant holds even against a racing or
+    /// hand-crafted request, not just the UI.
+    pub enabled: bool,
+    /// The confirmation classes the operator has delegated to the CEO — the subset of the policy's
+    /// approval-class machinery the CEO is allowed to answer on the operator's behalf (SCN-046 step
+    /// 2). Each entry must be non-empty (validated alongside the policy's own list entries).
+    pub delegated_classes: Vec<String>,
+    /// Free-form markdown the CEO must follow (SCN-046 step 3). Stored verbatim; never parsed here.
+    pub instruction: String,
+    /// Optional extra CEO rules beyond the instruction — one editable line each (SCN-046
+    /// "custom-rules editor"). Each entry must be non-empty, same rule as the delegated classes.
+    pub custom_rules: Vec<String>,
+}
+
+/// Per-ruleset owner-consent policy (S1, spec §5.2). Strict-validated before storage (the
+/// persistence `validate_policy` guard): `spendCapUsd >= 0`, non-empty confirmation-class and
+/// allowed-path entries, and `deny_unknown_fields`.
+///
+/// `supervisor` (SCN-046, A-7) is an ADDITIVE field carrying the per-project CEO config — see
+/// [`SupervisorConfig`] for why it lives inside this policy rather than in its own table, and why
+/// its `#[serde(default)]` matters for decoding rows/bundles that predate it. Because the field is
+/// non-`Option`, an update that means to SET it must send it explicitly (same D11 discipline as the
+/// two lists); the `default` only backfills DECODING, never a partial wire write.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "orchd-types.ts")]
@@ -209,6 +279,8 @@ pub struct PolicyRules {
     pub spend_cap_usd: Option<f64>,
     pub approval_classes: Vec<String>,
     pub path_allowlist: Vec<String>,
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -769,6 +841,65 @@ pub enum StorageMode {
     RecoveredFromCorruption,
 }
 
+// ---- SCN-054 project-docs entities (docs/ux/scenarios.md SCN-054, FLW-21, ST-041; appended —
+// order FROZEN append-only). Per-project markdown documents, "rules.md × N named files": the
+// EXACT `RuleSet`/`RuleSetView` files-as-truth split (D4 of S3) generalized to N owner-named
+// files per project — markdown files on disk are the source of truth, the DB row only stores
+// `md_path` + a sha256 `md_hash`, and `file_state` is computed FRESH at read time by re-hashing
+// the file against the stored hash. Docs live in a `docs/<project-id>/` subdir NEXT TO the
+// project's own rules file (SCN-054: "docs persist with the project (file-backed, like rules.md)
+// ... agents can read the same files from the project directory"). ----
+
+/// A per-project markdown document's DB-row half (SCN-054). Field set mirrors [`RuleSet`]
+/// column-for-column minus the ruleset-only `scope`/`policy` (a doc is always project-scoped and
+/// carries no policy) plus the owner-chosen `name` — the doc's identity within its project
+/// (unique per project+name pair, validated against `[a-z0-9._-]`, never a path). NOTE: this doc
+/// comment is copied into the generated TS verbatim by ts-rs, so field names here are camelCase
+/// (`mdPath`/`mdHash`) — same discipline as [`StorageStatus`]'s doc.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct Doc {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub md_path: String,
+    pub md_hash: String,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+/// `ListDocs`'s list-row shape (SCN-054: "the list shows name + last-modified"): name plus the
+/// doc FILE's mtime in unix-ms, read fresh per list (files-as-truth — an external edit moves it
+/// with no daemon write). When the file's mtime cannot be read (file lost/unreadable), the
+/// dispatch layer falls back to the DB row's `updatedAt` — the last time orchd itself touched
+/// the doc — rather than fabricating a timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct DocMeta {
+    pub name: String,
+    #[ts(type = "number")]
+    pub modified_at: i64,
+}
+
+/// `GetDoc`/`UpsertDoc`/`AcknowledgeDocFile`'s reply — mirrors [`RuleSetView`] field-for-field
+/// (SCN-054 reuses the rules wire-state model wholesale): the DB row paired with a FRESH
+/// read-state classification of the file at `doc.mdPath` against `doc.mdHash`. Reuses
+/// [`RuleFileState`] verbatim — `ok` (healthy), `externallyModified` ("file changed externally"
+/// with the Accept banner), and `missing` ("file lost" with the Recreate banner) are exactly the
+/// three SCN-054 states, so a parallel enum would be pure drift surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct DocView {
+    pub doc: Doc,
+    pub md_content: Option<String>,
+    pub file_state: RuleFileState,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -896,6 +1027,10 @@ pub enum OrchdRequest {
         source: TaskSource,
         source_id: Option<String>,
         tags: Vec<String>,
+        /// SCN-051: `None` ⇒ `Normal` (mirrors `status`'s `None` ⇒ `Backlog`). `#[serde(default)]`
+        /// so a pre-priority peer's frame (no `priority` key) still decodes.
+        #[serde(default)]
+        priority: Option<TaskPriority>,
     },
     UpdateTask {
         id: String,
@@ -1227,6 +1362,58 @@ pub enum OrchdRequest {
     /// "names only — no secrets on the wire"). An empty registry ⇒ an empty `Vec`, never an
     /// error. Appended at the enum TAIL (append-only wire rule).
     ConnectorListProviders,
+    /// → `OrchdResponse::Task` + pushes `TasksChanged{project_id}` (SCN-051, ST-037). One
+    /// focused verb per task mutation — the exact `SetTaskStatus`/`SetTaskRank` shape, NOT an
+    /// `UpdateTask` field. Unknown `id` ⇒ `NotFound`; an archived project ⇒ `Invariant` (same
+    /// guards as every task mutator). Appended at the enum TAIL (append-only wire rule).
+    SetTaskPriority {
+        id: String,
+        priority: TaskPriority,
+    },
+    // SCN-054 project docs (docs/ux/scenarios.md SCN-054, FLW-21, ST-041, appended — order
+    // FROZEN append-only). The verb set deliberately collapses to the RULES template's minimal
+    // shape rather than a richer per-action API: create, save, AND recreate-after-loss are all
+    // ONE upsert verb (exactly how `UpsertRuleSet{md_content}` serves Save and the "file lost" →
+    // [Recreate] path alike), and accepting an external edit is a dedicated re-hash verb
+    // (exactly `AcknowledgeRuleFile`). No optimistic-concurrency digest on save either — the
+    // rules template has none; the external-change banner + Accept/overwrite choice is the
+    // owner's conflict resolution.
+    /// → `OrchdResponse::Docs` (`Vec<DocMeta>`, name-ordered). Read-only, broadcasts nothing.
+    /// An unknown `project_id` yields an empty list (mirrors `ListTasks`'s read leniency).
+    ListDocs {
+        project_id: String,
+    },
+    /// → `OrchdResponse::DocView`. Read-only, broadcasts nothing; the doc file is read FRESH
+    /// each time (mirrors `GetRuleSet` — spec §7's "read file fresh each time" applies verbatim).
+    /// Unknown `(project_id, name)` ⇒ `Error{NotFound}`.
+    GetDoc {
+        project_id: String,
+        name: String,
+    },
+    /// → `OrchdResponse::DocView` + pushes `DocsChanged{project_id}`. THE one write verb
+    /// (SCN-054 steps 2/4 + the Recreate error path): creates the row + file when `(project_id,
+    /// name)` is new ("+ doc"), atomically rewrites the file + rehashes when it exists (Save),
+    /// and thereby also serves [Recreate] after a lost file (`md_content: ""` — the exact
+    /// `UpsertRuleSet` recreate path). Invalid `name` ⇒ `Error{Validation}`; unknown
+    /// `project_id` ⇒ `NotFound`; archived project ⇒ `Invariant`.
+    UpsertDoc {
+        project_id: String,
+        name: String,
+        md_content: String,
+    },
+    /// → `OrchdResponse::Ack` + pushes `DocsChanged{project_id}` (SCN-054 step 4's confirmed
+    /// "delete document?"). Removes the row AND the file (missing file tolerated — deleting a
+    /// "file lost" doc must still work). Unknown `id` ⇒ `NotFound`; archived ⇒ `Invariant`.
+    DeleteDoc {
+        id: String,
+    },
+    /// → `OrchdResponse::DocView` + pushes `DocsChanged{project_id}`. Re-reads the doc file and
+    /// stores its fresh hash — the "file changed externally" banner's [Accept] (mirrors
+    /// `AcknowledgeRuleFile` verbatim, including `Invariant("file missing")` when the file is
+    /// gone). Unknown `id` ⇒ `NotFound`; archived ⇒ `Invariant`.
+    AcknowledgeDocFile {
+        id: String,
+    },
 }
 
 impl OrchdRequest {
@@ -1235,7 +1422,7 @@ impl OrchdRequest {
     ///
     /// This is the single per-verb tracing choke-point's name source, reused by BOTH layers that
     /// see an `OrchdRequest`: the daemon's `socket_server::dispatch` completion trace and the
-    /// core's `orchd_client::request` trace (which together cover all 77 daemon verbs and all 117
+    /// core's `orchd_client::request` trace (which together cover all 87 daemon verbs and all 133
     /// command handlers without a per-arm edit). Living next to the enum keeps them in lockstep.
     ///
     /// The match is deliberately **exhaustive with no `_` wildcard**: adding a future variant to
@@ -1326,6 +1513,12 @@ impl OrchdRequest {
             Self::UnarchiveProject { .. } => "UnarchiveProject",
             Self::GraphUpdateEdge { .. } => "GraphUpdateEdge",
             Self::ConnectorListProviders => "ConnectorListProviders",
+            Self::SetTaskPriority { .. } => "SetTaskPriority",
+            Self::ListDocs { .. } => "ListDocs",
+            Self::GetDoc { .. } => "GetDoc",
+            Self::UpsertDoc { .. } => "UpsertDoc",
+            Self::DeleteDoc { .. } => "DeleteDoc",
+            Self::AcknowledgeDocFile { .. } => "AcknowledgeDocFile",
         }
     }
 }
@@ -1396,6 +1589,11 @@ pub enum OrchdResponse {
     // Provider NAMES only — no `client_id`/`client_secret`/endpoint URLs (spec D7: "names only —
     // no secrets on the wire"). A plain `Vec<String>` needs no new exported DTO type.
     ConnectorProviders(Vec<String>),
+    // SCN-054 project docs (appended — order FROZEN append-only). `DocView` mirrors
+    // `RuleSetView(RuleSetView)`'s single-entity shape; `Docs` carries the list-row `DocMeta`
+    // projection, not full rows (the list needs only name + last-modified, SCN-054).
+    DocView(DocView),
+    Docs(Vec<DocMeta>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1448,6 +1646,13 @@ pub enum OrchdPush {
     // invalidation, mirroring `McpServersChanged`/`SkillsChanged`'s optional-scope shape.
     ResearchRunsChanged {
         idea_id: Option<String>,
+    },
+    // SCN-054 project docs (appended — order FROZEN append-only): fired by every successful doc
+    // mutation (`UpsertDoc`/`DeleteDoc`/`AcknowledgeDocFile`). Names the ONE project whose doc
+    // list/content changed — the exact `TasksChanged{project_id}` coarse-invalidation shape
+    // (docs are always project-scoped, so no `RuleSetChanged`-style optional scope is needed).
+    DocsChanged {
+        project_id: String,
     },
 }
 

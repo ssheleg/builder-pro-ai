@@ -24,6 +24,9 @@ vi.mock("./RulesetPanel", () => ({
 vi.mock("./graph/GraphCanvas", () => ({
   GraphCanvas: (props: { projectId: string }) => <div data-testid="marker-graph">{props.projectId}</div>,
 }));
+vi.mock("./DocsPanel", () => ({
+  DocsPanel: (props: { projectId: string }) => <div data-testid="marker-docs">{props.projectId}</div>,
+}));
 
 const orchdListGoalsMock = vi.fn();
 const orchdListTasksMock = vi.fn();
@@ -184,7 +187,7 @@ describe("ProjectPanel", () => {
       { id: "g2", projectId: "p1", parentId: "g1", kind: "additional", title: "t2", body: "", ord: 1, status: "active", metricRefs: [], createdAt: 1, updatedAt: 1 },
     ]);
     orchdListTasksMock.mockResolvedValue([
-      { id: "tk1", projectId: "p1", parentId: null, title: "task", body: "", status: "backlog", source: "plan", sourceId: null, tags: [], rank: 1024, rankAgent: null, rankAgentReasoning: "", createdAt: 1, updatedAt: 1 },
+      { id: "tk1", projectId: "p1", parentId: null, title: "task", body: "", status: "backlog", priority: "normal", source: "plan", sourceId: null, tags: [], rank: 1024, rankAgent: null, rankAgentReasoning: "", createdAt: 1, updatedAt: 1 },
     ]);
     orchdListIdeasMock.mockResolvedValue([makeIdea({ id: "i1", projectId: "p1" }), makeIdea({ id: "i2", projectId: "other" })]);
     orchdListInsightsMock.mockResolvedValue([makeInsight({ id: "in1", projectId: "p1" })]);
@@ -227,9 +230,13 @@ describe("ProjectPanel", () => {
     expect(screen.getByTestId("marker-graph").textContent).toBe("p1");
     expect(screen.queryByTestId("marker-rules")).toBeNull();
 
+    fireEvent.click(screen.getByTestId("project-tab-docs"));
+    expect(screen.getByTestId("marker-docs").textContent).toBe("p1");
+    expect(screen.queryByTestId("marker-graph")).toBeNull();
+
     fireEvent.click(screen.getByTestId("project-tab-overview"));
     expect(screen.getByTestId("project-overview")).toBeTruthy();
-    expect(screen.queryByTestId("marker-graph")).toBeNull();
+    expect(screen.queryByTestId("marker-docs")).toBeNull();
   });
 
   it('renders the "Graph" tab button and selecting it shows the GraphCanvas stub', () => {
@@ -241,6 +248,17 @@ describe("ProjectPanel", () => {
     fireEvent.click(tabButton);
 
     expect(screen.getByTestId("marker-graph")).toBeTruthy();
+  });
+
+  it('SCN-054: renders the 8th "Docs" tab and selecting it shows the DocsPanel stub', () => {
+    render(<ProjectPanel projectId="p1" />);
+    const tabButton = screen.getByTestId("project-tab-docs");
+    expect(tabButton.textContent).toBe(strings.project.tabs.docs);
+    expect(screen.queryByTestId("marker-docs")).toBeNull();
+
+    fireEvent.click(tabButton);
+
+    expect(screen.getByTestId("marker-docs").textContent).toBe("p1");
   });
 
   it("an unresolvable workspace id renders the \"unavailable\" chip; Unlink calls orchdRemoveProjectWorkspace", async () => {

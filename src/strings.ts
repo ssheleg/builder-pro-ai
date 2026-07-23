@@ -223,6 +223,7 @@ export const strings = {
       insights: "Insights",
       rules: "Rules",
       graph: "Graph",
+      docs: "Docs",
     },
     loading: "Loading project…",
     jsonCopied: "JSON copied",
@@ -310,6 +311,82 @@ export const strings = {
     allowedPathAria: "New allowed path",
     allowedPathPlaceholder: "path",
     savePolicy: "Save policy",
+
+    // ── CEO supervisor section (SCN-046, FLW-19, A-7) — the per-project delegation config that
+    // rides inside PolicyRules. PLUMBING ONLY: `pendingNote` is the honesty-boundary equivalent of
+    // the Skills tab's registry banner — persisting this config does not start a CEO; the
+    // orchestrator-agent runtime that acts on it lands in S6b (SCN-047/049). ──
+    supervisor: {
+      sectionLabel: "CEO supervisor",
+      /** Verbatim honesty-boundary note (S6b) — mirrors the Skills tab's registry banner register.
+       * Persisting the config never makes a CEO act; the runtime that reads it lands in S6b. */
+      pendingNote: "The CEO acts on this once the orchestrator agent runtime lands (S6b).",
+      enableLabel: "Enable the CEO",
+      enableAria: "Enable the CEO supervisor",
+      delegatedLabel: "Delegated confirmation classes",
+      /** Empty-universe hint: no confirmation classes exist yet to delegate (define some in the
+       * policy above, or seed the recommended scope). */
+      noClasses: "No confirmation classes yet — add classes above or use the recommended scope.",
+      delegateClassAria: (c: string) => `Delegate the "${c}" class to the CEO`,
+      inheritedCapsLabel: "Inherited caps",
+      inheritedSpendCap: (cap: string) => `spend cap $${cap}`,
+      inheritedNoSpendCap: "no spend cap",
+      recommendedScope: "Recommended scope",
+      instructionLabel: "CEO instruction",
+      instructionAria: "CEO instruction (markdown the CEO must follow)",
+      instructionPlaceholder: "What the CEO must always follow (markdown)…",
+      customRulesLabel: "Custom rules",
+      customRuleAria: "New custom CEO rule",
+      customRulePlaceholder: "rule",
+      /** SCN-046 locked info-access summary line. */
+      infoAccess:
+        "CEO reads: project goals, tasks, ideas, insights, graph, rules + your instruction",
+      /** SCN-046 scope summary: "CEO may: {classes} within {caps}". */
+      scopeSummary: (classes: string, caps: string) => `CEO may: ${classes} within ${caps}`,
+      scopeSummaryNoClasses: "no classes delegated",
+      /** Placeholder for the not-yet-built MCP-tool delegation (S6b-adjacent). */
+      mcpSoon: "MCP tools for the CEO — soon",
+      /** SCN-046 blocked alert: enabled CEO with an empty delegation scope. */
+      blockedNoClasses: "delegate at least one class or disable the CEO",
+    },
+  },
+
+  // ── docs panel (SCN-054: per-project markdown documents, the 8th project tab) ────────────────
+  docs: {
+    /** Locked banner copy — SCN-054 reuses the rules-file pattern's exact register ("file lost" /
+     * "file changed externally", see `rules` above); duplicated rather than cross-referenced so
+     * either surface's copy can evolve without silently rewording the other. */
+    missingBanner: "file lost",
+    modifiedBanner: "file changed externally",
+    recreate: "Recreate",
+    revealFile: "reveal file",
+    loading: "Loading documents…",
+    loadingDoc: "Loading document…",
+    /** SCN-054 locked empty-state copy. */
+    empty: "No documents in this project yet.",
+    addDoc: "+ doc",
+    nameAria: "New document name",
+    namePlaceholder: "doc-name",
+    /** Client-side mirror of the daemon's `validate_doc_name` character class — shown inline
+     * when the typed name would be rejected (the daemon stays the authoritative validator). */
+    invalidName: "name may only contain a-z, 0-9, '.', '_' and '-'",
+    /** "+ doc" guard: `UpsertDoc` is deliberately upsert-shaped on the wire (the rules-template
+     * minimal verb set), so creating over an existing name would blank that doc's file — the
+     * client blocks it against the (push-fresh) list instead. */
+    duplicateName: "a document with this name already exists",
+    listAria: "Documents",
+    docRowAria: (name: string) => `Open ${name}`,
+    deleteConfirm: "delete document?",
+    editorAria: "Document content",
+    modeAria: "Editor mode",
+    modeEdit: "Edit",
+    modePreview: "Preview",
+    selectPrompt: "Select a document or create one.",
+    /** Relative last-modified stamps for the doc list (SCN-054 "name + last-modified"). */
+    justNow: "just now",
+    minutesAgo: (n: number) => `${n}m ago`,
+    hoursAgo: (n: number) => `${n}h ago`,
+    daysAgo: (n: number) => `${n}d ago`,
   },
 
   // ── ideas list (+ spawn-project flow) ────────────────────────────────────────────────────────
@@ -434,6 +511,11 @@ export const strings = {
       done: "done",
     },
     source: { idea: "idea", insight: "insight", bug: "bug", plan: "plan" },
+    // SCN-051 (ST-037): urgent/normal priority — the row/create-form select options and the
+    // danger-tone chip label on urgent rows.
+    priority: { urgent: "urgent", normal: "normal" },
+    priorityAria: "Task priority",
+    newPriorityAria: "New task priority",
     deleteConfirm: "delete task?",
     deleteConfirmWithChildren: (n: number) => `delete task? will delete ${n} subtasks`,
     statusAria: "Task status",
@@ -610,6 +692,52 @@ export const strings = {
       thDecision: "decision",
       thReason: "reason",
     },
+  },
+
+  // ── keep-awake pill (SCN-045 / FLW-18; sidebar footer) ───────────────────────────────────────
+  power: {
+    /** Toggle ON and the assertion is genuinely held (≥1 live session) — green dot. */
+    keepAwakeOn: "keep-awake · on",
+    /** Toggle ON but nothing to hold (zero live sessions) — muted dot. */
+    keepAwakeIdle: "keep-awake · idle",
+    /** Toggle OFF — muted dot; the machine sleeps on the OS's normal schedule. */
+    keepAwakeOff: "keep-awake · off",
+    /** Honest OS-denial surface (SCN-045 "keep-awake unavailable: {reason}") — the toast, the
+     * Diagnostics record message, AND the pill's failure label. Never a silent fake "awake". */
+    keepAwakeFailed: (msg: string) => `keep-awake unavailable: ${msg}`,
+  },
+
+  // ── Stats view (SCN-052/053 / FLW-20; "✦ Stats" nav) ─────────────────────────────────────────
+  stats: {
+    nav: "✦  Stats",
+    title: "Stats",
+    rangeAria: "Stats range",
+    rangeAll: "All",
+    range30d: "30d",
+    range7d: "7d",
+    loading: "Scanning usage…",
+    tokens: "tokens",
+    /** Cost is an ESTIMATE from a public-price table (stats.rs::PRICING) — always labeled. */
+    costLabel: "est. cost",
+    /** Some contributing model family has no pricing row — the figure under-counts honestly. */
+    costPartialLabel: "est. cost (partial)",
+    partialMark: "*",
+    estimatedNote:
+      "Cost is estimated from public API prices; * marks projects where some models had no pricing row.",
+    sessions: "agent sessions",
+    commits: "commits",
+    code: "code",
+    activity: "Activity — tokens per day (last 30 days)",
+    activityAria: "Token activity heatmap, last 30 days",
+    byProject: "By project",
+    asOf: (t: string) => `as of ${t}`,
+    refresh: "Refresh",
+    noGit: "no git data",
+    otherBucket: "other",
+    emptyTitle: "No usage in this range.",
+    emptyHint: "Run agent sessions (or widen the range) and refresh.",
+    usageUnavailable: (msg: string) => `usage data unavailable: ${msg}`,
+    gitUnavailable: (msg: string) => `git data unavailable: ${msg}`,
   },
 
   // ── storage-degraded banners (spec D3 wire; consumed by the P3 banner) ───────────────────────

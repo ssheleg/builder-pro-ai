@@ -1,12 +1,16 @@
 //! RuleSet markdown FILE layer (spec §7, D4): rules markdown files are the source of truth; the
-//! DB only stores `md_path` + a sha256 `md_hash`. This module owns ALL of orchd's file I/O — the
-//! ONLY file family orchd ever touches (D4's narrow, deliberate exception to "orchd gets its own
-//! general file API in S9" — architecture.md T21). Two primitives: [`write_atomic`] (create parent
-//! dirs, atomic tmp+rename write, returns the sha256 hex of the content just written) and
-//! [`read_state`] (read-fresh-every-time state classification: `Ok` / `Missing` /
-//! `ExternallyModified` — spec §7 `GetRuleSet` semantics). [`sha256_hex`] is the single hashing
-//! implementation both of them (and `persistence::Db::acknowledge_rule_file`, via re-use) build
-//! on, so "the hash of a ruleset file" is computed exactly one way anywhere in this crate —
+//! DB only stores `md_path` + a sha256 `md_hash`. This module owns ALL of orchd's file I/O —
+//! originally the rules-file family alone (D4's narrow, deliberate exception to "orchd gets its
+//! own general file API in S9" — architecture.md T21), and since SCN-054 the per-project doc
+//! files too (docs are "rules.md × N named files" and reuse this exact layer rather than growing
+//! a parallel one). Four primitives: [`write_atomic`] (create parent dirs, atomic tmp+rename
+//! write, returns the sha256 hex of the content just written), [`read_state`]
+//! (read-fresh-every-time state classification: `Ok` / `Missing` / `ExternallyModified` — spec §7
+//! `GetRuleSet` semantics, reused verbatim by SCN-054's `GetDoc`), [`modified_at_ms`] (the doc
+//! list's honest last-modified, SCN-054) and [`remove_if_exists`] (`DeleteDoc`'s file removal).
+//! [`sha256_hex`] is the single hashing implementation the write/read pair (and
+//! `persistence::Db::acknowledge_rule_file`/`acknowledge_doc_file`, via re-use) build on, so "the
+//! hash of a markdown file" is computed exactly one way anywhere in this crate —
 //! `boot::ensure_global_ruleset` is re-seated onto it too (T8), instead of keeping its own
 //! duplicate `Sha256::digest` call.
 
@@ -74,6 +78,31 @@ pub fn read_state(path: &Path, stored_hash: &str) -> (Option<String>, RuleFileSt
             }
         }
         Err(_) => (None, RuleFileState::Missing),
+    }
+}
+
+/// The file's mtime as unix-ms, read fresh (SCN-054: the doc list's "last-modified" column is
+/// files-as-truth — an agent's external edit must move it without any daemon write). `None` when
+/// the file is missing/unreadable OR its mtime predates the unix epoch (a nonsensical clock —
+/// reported as "unknown" rather than a fabricated negative timestamp); the caller
+/// (`socket_server`'s `ListDocs` arm) falls back to the DB row's `updated_at`, mirroring this
+/// crate's honest-degradation stance ([`read_state`]'s fold-to-`Missing` doc above).
+pub fn modified_at_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(since_epoch.as_millis() as i64)
+}
+
+/// Remove the file at `path`, treating "already gone" as success (SCN-054 `DeleteDoc`: deleting
+/// a doc whose file was lost externally must still delete the row — the file's absence is the
+/// very state being cleaned up, not an error). Every OTHER failure (permission denied, a
+/// directory at `path`, …) is surfaced so `Db::delete_doc` can abort BEFORE the row is deleted —
+/// never leaving an orphaned on-disk file the UI no longer lists.
+pub fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -160,6 +189,64 @@ mod tests {
 
         assert_eq!(content, Some("someone edited this".to_string()));
         assert_eq!(state, RuleFileState::ExternallyModified);
+    }
+
+    // ---- SCN-054 doc-file primitives ----
+
+    #[test]
+    fn modified_at_ms_of_a_written_file_is_a_recent_unix_ms_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        write_atomic(&path, "# notes\n").unwrap();
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let mtime = modified_at_ms(&path).expect("a just-written file must have a readable mtime");
+
+        // Within a minute either side of "now" — proves unix-MILLISECOND scale (a seconds-scale
+        // regression would be ~1000× too small and fail loudly here).
+        assert!(
+            (mtime - before).abs() < 60_000,
+            "mtime {mtime} not within 60s of now {before}"
+        );
+    }
+
+    #[test]
+    fn modified_at_ms_of_a_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(modified_at_ms(&dir.path().join("nope.md")), None);
+    }
+
+    #[test]
+    fn remove_if_exists_removes_a_present_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doomed.md");
+        write_atomic(&path, "bye").unwrap();
+
+        remove_if_exists(&path).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_if_exists_is_ok_when_the_file_is_already_gone() {
+        // SCN-054: deleting a "file lost" doc must still succeed — absence is the cleaned-up
+        // state, not an error.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(remove_if_exists(&dir.path().join("never-existed.md")).is_ok());
+    }
+
+    #[test]
+    fn remove_if_exists_surfaces_a_non_missing_failure() {
+        // A directory at `path` cannot be removed by remove_file — this must surface as an error
+        // (so `Db::delete_doc` aborts before deleting the row), NOT be swallowed like NotFound.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a-directory.md");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(remove_if_exists(&path).is_err());
     }
 
     #[test]

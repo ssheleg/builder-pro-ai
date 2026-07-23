@@ -1,6 +1,6 @@
 import { useState, type JSX } from "react";
 import { useAppStore } from "../store/store";
-import { pickFolder, createWorkspace } from "../ipc/commands";
+import { pickFolder, createWorkspace, createSession } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";
 import { orchdAddProjectWorkspace, describeOrchdError } from "../ipc/orchd";
 import type { Project } from "../ipc/orchd-types";
@@ -84,6 +84,10 @@ export function WorkspaceSidebar(props: {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showDiag, setShowDiag] = useState(false);
   const diagCount = useAppStore((s) => s.diagEvents.length);
+  // Keep-awake pill state (SCN-045): `active`/`error` are the core's reconciled truth (the
+  // assertion's REAL held-state), never the toggle intent — see the store slice's doc.
+  const keepAwake = useAppStore((s) => s.keepAwake);
+  const setKeepAwakeEnabled = useAppStore((s) => s.setKeepAwakeEnabled);
   // Orphan (`projectId === null`) ideas + insights — the Inbox nav badge (AUD-2026-07-19-11).
   // Select the two stable arrays and derive the count outside the selector: a computed-number
   // selector would be fine, but this mirrors the "select stable slices" convention used above.
@@ -116,11 +120,28 @@ export function WorkspaceSidebar(props: {
     // `pickFolder`/`createWorkspace` are sessiond round-trips — a rejection (daemon down, invalid
     // root) must surface an honest toast, never a silent no-op (BL-93 / P-03). A cancelled picker
     // (`null`) is NOT an error — it returns quietly before the catch.
+    //
+    // First-run fast-path (SCN-056 / IMP-01): when the app holds ZERO sessions anywhere, the only
+    // reason to add a workspace is to reach a terminal — so we auto-spawn the first one instead of
+    // demanding a manual "+ New terminal" click (peak-end: aha one step earlier, JRN-01/#4). The
+    // count is captured BEFORE the round-trips so a concurrently-pushed session cannot flip the
+    // decision mid-flight. Steady state (any session already exists) is untouched — no surprise
+    // terminals. The spawned session announces itself via session://created (App upserts +
+    // auto-activates); a failed spawn degrades to today's manual path: the workspace view is
+    // already open, we only surface the same honest toast "+ New terminal" would.
+    const hadSessions = Object.keys(useAppStore.getState().sessions).length > 0;
     try {
       const dir = await pickFolder();
       if (dir === null) return; // cancelled -> no-op
       const ws = await createWorkspace(basename(dir), dir);
       onSelectWorkspaceAndNavigate(ws.id);
+      if (!hadSessions) {
+        try {
+          await createSession(ws.id);
+        } catch (e) {
+          showToast(strings.terminal.tabs.newTerminalFailed(describeCommandError(e)));
+        }
+      }
     } catch (e) {
       showToast(strings.chrome.sidebar.addWorkspaceFailed(describeCommandError(e)));
     }
@@ -266,6 +287,29 @@ export function WorkspaceSidebar(props: {
               {orphanCount}
             </span>
           )}
+        </button>
+
+        <button
+          type="button"
+          data-testid="stats-nav-button"
+          aria-label={strings.stats.title}
+          aria-current={view === "stats" ? "true" : undefined}
+          onClick={() => setView("stats")}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "var(--sp-2) var(--sp-3)",
+            fontSize: "var(--fs-md)",
+            fontWeight: 600,
+            border: "none",
+            borderBottom: "1px solid var(--hairline)",
+            cursor: "pointer",
+            color: view === "stats" ? "var(--ink)" : "var(--muted)",
+            background: view === "stats" ? "var(--panel-2)" : "transparent",
+          }}
+        >
+          {strings.stats.nav}
         </button>
 
         <div style={{ flex: 1, overflowY: "auto" }}>
@@ -423,6 +467,17 @@ export function WorkspaceSidebar(props: {
           )}
         </div>
 
+        {/* Keep-awake pill (SCN-045 / FLW-18, footer next to ThemeToggle/Diagnostics): click
+            toggles the persisted preference; the dot is the honest assertion indicator — ok
+            (green) only while the OS assertion is GENUINELY held, danger on an OS denial with
+            the "keep-awake unavailable: {reason}" copy, muted for idle/off. Tone tokens follow
+            `StatusDot.tsx`'s `var(--ok)`/`var(--muted)`/`var(--danger)` convention. */}
+        <KeepAwakePill
+          enabled={keepAwake.enabled}
+          active={keepAwake.active}
+          error={keepAwake.error}
+          onToggle={() => void setKeepAwakeEnabled(!keepAwake.enabled)}
+        />
         <ThemeToggle />
         <button
           type="button"
@@ -502,5 +557,80 @@ export function WorkspaceSidebar(props: {
       {showCreateDialog && <CreateProjectDialog onClose={() => setShowCreateDialog(false)} />}
       <DiagnosticsPanel open={showDiag} onClose={() => setShowDiag(false)} />
     </>
+  );
+}
+
+/**
+ * Sidebar-footer keep-awake pill (SCN-045 / FLW-18): toggle + active-assertion indicator in one
+ * control. Purely presentational over the store's `keepAwake` slice — the honest state machine
+ * (want/held/denied) lives in `src-tauri/src/power.rs`; the once-per-streak toast/Diag surfacing
+ * lives in `store.ts::syncKeepAwake`. Label/dot resolution, most-severe first:
+ * - `error` (OS denied the assertion) → danger dot + "keep-awake unavailable: {reason}" — the
+ *   pill-level failure state SCN-045 requires alongside the toast, never a silent fake "awake";
+ * - `active` (assertion genuinely held) → ok dot + "keep-awake · on";
+ * - enabled but idle (zero live sessions — nothing to hold) → muted dot + "keep-awake · idle";
+ * - disabled → muted dot + "keep-awake · off".
+ */
+function KeepAwakePill(props: {
+  enabled: boolean;
+  active: boolean;
+  error: string | null;
+  onToggle: () => void;
+}): JSX.Element {
+  const { enabled, active, error, onToggle } = props;
+  const label =
+    error !== null
+      ? strings.power.keepAwakeFailed(error)
+      : !enabled
+        ? strings.power.keepAwakeOff
+        : active
+          ? strings.power.keepAwakeOn
+          : strings.power.keepAwakeIdle;
+  // Same semantic tone tokens `StatusDot.tsx` resolves (theme-aware, light+dark valid): the dot
+  // never shows ok unless the assertion is really held.
+  const dotTone = error !== null ? "var(--danger)" : active ? "var(--ok)" : "var(--muted)";
+  return (
+    <button
+      type="button"
+      data-testid="keep-awake-pill"
+      aria-pressed={enabled}
+      aria-label={label}
+      title={label}
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--sp-2)",
+        margin: "var(--sp-2)",
+        marginBottom: 0,
+        padding: "var(--sp-2) var(--sp-3)",
+        border: "none",
+        background: "var(--panel-2)",
+        color: "var(--muted)",
+        cursor: "pointer",
+        fontSize: "var(--fs-sm)",
+        borderRadius: "var(--r-sm)",
+      }}
+    >
+      <span
+        data-testid="keep-awake-dot"
+        role="img"
+        aria-hidden="true"
+        style={{
+          display: "inline-block",
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          backgroundColor: dotTone,
+          flexShrink: 0,
+        }}
+      />
+      {/* A long denial reason must not blow the 200px rail open — ellipsize; `title` above
+          carries the full copy. */}
+      <span style={{ overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+        {label}
+      </span>
+    </button>
   );
 }

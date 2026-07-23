@@ -6,7 +6,7 @@ import {
   orchdRevealRulesFile,
   describeOrchdError,
 } from "../ipc/orchd";
-import type { PolicyRules, RuleScope } from "../ipc/orchd-types";
+import type { PolicyRules, RuleScope, SupervisorConfig } from "../ipc/orchd-types";
 import { Badge, Button } from "../ui/primitives";
 import { strings } from "../strings";
 
@@ -24,6 +24,12 @@ function rulesetKey(scope: RuleScope, projectId: string | null): string {
   return scope === "global" ? "global" : `project:${projectId}`;
 }
 
+/** SCN-046 "Recommended scope" preset (IMP-03/BP-012): the two safe classes it seeds into the CEO's
+ * delegation scope. The caps stay whatever the policy already has — the preset never invents caps
+ * (A-7: the CEO inherits the existing `spendCapUsd` + approval-class machinery), and the seeded
+ * classes remain fully editable afterwards. */
+const RECOMMENDED_SCOPE_CLASSES = ["safe-shell", "file-write"] as const;
+
 /**
  * Client-side MIRROR of the server's `PolicyRules` strict validation (spec §5.2:
  * `deny_unknown_fields`, `spend_cap_usd >= 0`, non-empty allowlist/approval-class entries) —
@@ -32,11 +38,16 @@ function rulesetKey(scope: RuleScope, projectId: string | null): string {
  * entry here (the `ChipList` adder trims and refuses blanks), but this still re-checks them
  * defensively so the guard holds even if that invariant is ever broken upstream. A parseable but
  * negative cap is blocked; a non-numeric cap is blocked too (never silently coerced to 0/NaN).
+ *
+ * SCN-046: it also carries the CEO `supervisor` config into the built policy and enforces the core
+ * invariant — an ENABLED CEO with an empty delegation scope is blocked with the "delegate at least
+ * one class or disable the CEO" alert (the daemon's `validate_policy` is the authoritative twin).
  */
 function validatePolicy(
   spendCapText: string,
   approvalClasses: string[],
   pathAllowlist: string[],
+  supervisor: SupervisorConfig,
 ): { policy: PolicyRules } | { error: string } {
   const trimmedCap = spendCapText.trim();
   let spendCapUsd: number | null = null;
@@ -53,7 +64,10 @@ function validatePolicy(
   if (approvalClasses.some((c) => c.trim() === "") || pathAllowlist.some((p) => p.trim() === "")) {
     return { error: strings.rules.emptyEntry };
   }
-  return { policy: { spendCapUsd, approvalClasses, pathAllowlist } };
+  if (supervisor.enabled && supervisor.delegatedClasses.length === 0) {
+    return { error: strings.rules.supervisor.blockedNoClasses };
+  }
+  return { policy: { spendCapUsd, approvalClasses, pathAllowlist, supervisor } };
 }
 
 const panelStyle: CSSProperties = {
@@ -171,6 +185,72 @@ const chipInputStyle: CSSProperties = {
   padding: "3px 6px",
 };
 
+// ── CEO supervisor section (SCN-046) styles ──────────────────────────────────────────────────
+
+/** The supervisor block sits INSIDE the shared policy form (one "Save policy" saves both) but is
+ * visually set off with a top divider so the CEO delegation reads as its own group. */
+const supervisorSectionStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--sp-2)",
+  marginTop: "var(--sp-2)",
+  paddingTop: "var(--sp-3)",
+  borderTop: "1px solid var(--line)",
+};
+
+const toggleRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "var(--sp-2)",
+  fontSize: "var(--fs-md)",
+  color: "var(--ink)",
+  cursor: "pointer",
+};
+
+const checkboxLabelStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "var(--sp-1)",
+  fontSize: "var(--fs-sm)",
+  fontFamily: "var(--font-mono)",
+  color: "var(--ink)",
+  cursor: "pointer",
+};
+
+/** Muted informational lines: inherited-caps, info-access, scope summary, "MCP tools — soon". */
+const mutedLineStyle: CSSProperties = {
+  fontSize: "var(--fs-xs)",
+  color: "var(--muted)",
+  lineHeight: 1.5,
+};
+
+const supervisorTextareaStyle: CSSProperties = {
+  width: "100%",
+  minHeight: 96,
+  boxSizing: "border-box",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-sm)",
+  color: "var(--ink)",
+  background: "var(--panel-2)",
+  border: "none",
+  borderRadius: "var(--r-sm)",
+  padding: "var(--sp-2) var(--sp-3)",
+  resize: "vertical",
+};
+
+/** Honesty-boundary pending note (S6b) — the calm `--info` inset-edge register of the file-state
+ * banner, reused so "this is plumbing, not yet an acting CEO" reads as informational, never as a
+ * "needs you" amber gate (design-system.md §2). Mirrors the Skills tab's registry banner role. */
+const pendingNoteStyle: CSSProperties = {
+  padding: "var(--sp-2) var(--sp-3)",
+  boxShadow: "inset 3px 0 0 var(--info)",
+  background: "var(--info-weak)",
+  color: "var(--ink)",
+  fontSize: "var(--fs-xs)",
+  borderRadius: "var(--r-sm)",
+  lineHeight: 1.5,
+};
+
 interface ChipListProps {
   testIdPrefix: string;
   ariaLabel: string;
@@ -178,17 +258,24 @@ interface ChipListProps {
   values: string[];
   onAdd: (v: string) => void;
   onRemove: (v: string) => void;
+  /** SCN-046 honest-degradation: when the daemon is down the CEO custom-rules list disables its
+   * adder/remove affordances (the section's controls are inert until orchd is back). The SCN-036
+   * policy lists (approvalClasses/pathAllowlist) leave this unset and stay live, matching this
+   * component's existing "policy draft fields stay live" contract. */
+  disabled?: boolean;
 }
 
-/** Chip/list input for `approvalClasses`/`pathAllowlist` (design-system.md "Policy form" atom,
- * task-17): existing entries render as Chip atoms with a `×` remove; a trimmed, non-empty draft is
- * added via the button or Enter — an empty/whitespace-only draft is a silent no-op, so this widget
- * can never itself produce the "empty entry" validation error `validatePolicy` guards against. */
+/** Chip/list input for `approvalClasses`/`pathAllowlist`/CEO custom-rules (design-system.md "Policy
+ * form" atom, task-17): existing entries render as Chip atoms with a `×` remove; a trimmed,
+ * non-empty draft is added via the button or Enter — an empty/whitespace-only draft is a silent
+ * no-op, so this widget can never itself produce the "empty entry" validation error `validatePolicy`
+ * guards against. */
 function ChipList(props: ChipListProps): JSX.Element {
-  const { testIdPrefix, ariaLabel, placeholder, values, onAdd, onRemove } = props;
+  const { testIdPrefix, ariaLabel, placeholder, values, onAdd, onRemove, disabled = false } = props;
   const [draft, setDraft] = useState("");
 
   function commitAdd(): void {
+    if (disabled) return;
     const trimmed = draft.trim();
     if (trimmed === "") return;
     onAdd(trimmed);
@@ -205,6 +292,7 @@ function ChipList(props: ChipListProps): JSX.Element {
             data-testid={`${testIdPrefix}-remove-${v}`}
             aria-label={strings.rules.deleteEntry(v)}
             onClick={() => onRemove(v)}
+            disabled={disabled}
             style={chipRemoveStyle}
           >
             ×
@@ -216,6 +304,7 @@ function ChipList(props: ChipListProps): JSX.Element {
         aria-label={ariaLabel}
         placeholder={placeholder}
         value={draft}
+        disabled={disabled}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -231,6 +320,7 @@ function ChipList(props: ChipListProps): JSX.Element {
         size="sm"
         data-testid={`${testIdPrefix}-add`}
         onClick={commitAdd}
+        disabled={disabled}
         style={{ flexShrink: 0, whiteSpace: "nowrap" }}
       >
         {strings.rules.addEntry}
@@ -274,6 +364,27 @@ function ChipList(props: ChipListProps): JSX.Element {
  * textarea, the policy draft fields, reveal file — a local Finder reveal, not an orchd
  * mutation) stay live. `ProjectPanel` owns the shared banner; this component only owns disabling
  * its own controls.
+ *
+ * CEO supervisor section (SCN-046, FLW-19, A-7) — project scope only (`scope === "project"`; the
+ * global rules view has no CEO). It rides INSIDE the same policy form and is saved by the shared
+ * "Save policy" button (one round-trip persists both the caps/lists AND the `supervisor` config, an
+ * additive `PolicyRules` field). Controls: an enable toggle (default OFF), delegated-class
+ * checkboxes (universe = the policy's confirmation classes ∪ already-delegated classes), an
+ * inherited-caps summary (reads the LIVE spend-cap draft — A-7: the CEO inherits the existing cap,
+ * never a duplicate), a "Recommended scope" preset (seeds safe-shell + file-write, still editable;
+ * IMP-03/BP-012), a markdown instruction textarea, a custom-rules editor, an info-access summary,
+ * a scope summary ("CEO may: {classes} within {caps}"), and an "MCP tools — soon" placeholder.
+ * `validatePolicy` blocks Save when the CEO is enabled with an empty scope (SCN-046 "blocked
+ * alert"), the client twin of the daemon's authoritative `validate_policy` guard.
+ *
+ * HONESTY BOUNDARY (S6b): this section is PLUMBING ONLY. Persisting the config never makes a CEO
+ * act — the orchestrator-agent runtime that reads it and autonomously answers agent questions /
+ * continues workflows (SCN-047/049) does not exist yet. The `pending` note states this in the same
+ * register as the Skills tab's registry banner; nothing here starts an agent. Per SCN-046 ("orchd
+ * down → controls disabled") the supervisor's own interactive controls (toggle, checkboxes,
+ * Recommended scope, instruction, custom-rule adder) disable while `orchdDown` — a stricter rule
+ * than the SCN-036 policy lists above, which stay live as ordinary drafts; each scenario governs
+ * its own controls.
  */
 export function RulesetPanel(props: { scope: RuleScope; projectId: string | null }): JSX.Element {
   const { scope, projectId } = props;
@@ -294,6 +405,18 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
   const [pathAllowlist, setPathAllowlist] = useState<string[]>(view?.rule.policy.pathAllowlist ?? []);
   const [policyError, setPolicyError] = useState<string | null>(null);
 
+  // ── CEO supervisor draft (SCN-046, A-7) — rides inside the same policy form, saved by the shared
+  // "Save policy" button. Defaults to a disabled/empty CEO; hydrated from the policy's `supervisor`
+  // field on every fresh view (the sync effect below). ──
+  const [supervisorEnabled, setSupervisorEnabled] = useState<boolean>(
+    view?.rule.policy.supervisor.enabled ?? false,
+  );
+  const [delegatedClasses, setDelegatedClasses] = useState<string[]>(
+    view?.rule.policy.supervisor.delegatedClasses ?? [],
+  );
+  const [instruction, setInstruction] = useState<string>(view?.rule.policy.supervisor.instruction ?? "");
+  const [customRules, setCustomRules] = useState<string[]>(view?.rule.policy.supervisor.customRules ?? []);
+
   // Always re-Get on mount/scope change — see the doc comment above for why this differs from
   // GoalTree's "only if empty" cache check.
   useEffect(() => {
@@ -312,6 +435,10 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
     setSpendCapText(view?.rule.policy.spendCapUsd == null ? "" : String(view.rule.policy.spendCapUsd));
     setApprovalClasses(view?.rule.policy.approvalClasses ?? []);
     setPathAllowlist(view?.rule.policy.pathAllowlist ?? []);
+    setSupervisorEnabled(view?.rule.policy.supervisor.enabled ?? false);
+    setDelegatedClasses(view?.rule.policy.supervisor.delegatedClasses ?? []);
+    setInstruction(view?.rule.policy.supervisor.instruction ?? "");
+    setCustomRules(view?.rule.policy.supervisor.customRules ?? []);
     setPolicyError(null);
     // `policy` is a fresh object every fetch — comparing the object reference is intentional here,
     // it is exactly "a new GetRuleSet reply landed".
@@ -364,7 +491,13 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
   }
 
   async function handleSavePolicy(): Promise<void> {
-    const result = validatePolicy(spendCapText, approvalClasses, pathAllowlist);
+    const supervisor: SupervisorConfig = {
+      enabled: supervisorEnabled,
+      delegatedClasses,
+      instruction,
+      customRules,
+    };
+    const result = validatePolicy(spendCapText, approvalClasses, pathAllowlist, supervisor);
     if ("error" in result) {
       setPolicyError(result.error);
       return;
@@ -377,6 +510,39 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
       showToast(describeOrchdError(e));
     }
   }
+
+  /** SCN-046 "Recommended scope" (IMP-03/BP-012): merge the two safe preset classes into the
+   * delegation scope (dedup), leaving caps and everything else untouched and editable. */
+  function applyRecommendedScope(): void {
+    setDelegatedClasses((prev) =>
+      Array.from(new Set([...prev, ...RECOMMENDED_SCOPE_CLASSES])),
+    );
+    setPolicyError(null);
+  }
+
+  /** Toggle one confirmation class in/out of the CEO delegation scope. */
+  function toggleDelegatedClass(cls: string, checked: boolean): void {
+    setDelegatedClasses((prev) =>
+      checked ? Array.from(new Set([...prev, cls])) : prev.filter((c) => c !== cls),
+    );
+    setPolicyError(null);
+  }
+
+  // ── SCN-046 derived summaries (recomputed from live draft state so the summaries track edits
+  // before Save). The delegation-checkbox universe is the union of the policy's confirmation
+  // classes and any already-delegated classes (so preset-seeded classes appear even when they are
+  // not in `approvalClasses`). Inherited caps read the LIVE spend-cap draft (A-7: the CEO inherits
+  // the existing spend cap; per-project policy carries no calls/min, so none is shown). ──
+  const delegationUniverse = Array.from(new Set([...approvalClasses, ...delegatedClasses]));
+  const trimmedCapForSummary = spendCapText.trim();
+  const inheritedCapLabel =
+    trimmedCapForSummary === ""
+      ? strings.rules.supervisor.inheritedNoSpendCap
+      : strings.rules.supervisor.inheritedSpendCap(trimmedCapForSummary);
+  const scopeSummaryClasses =
+    delegatedClasses.length === 0
+      ? strings.rules.supervisor.scopeSummaryNoClasses
+      : delegatedClasses.join(", ");
 
   return (
     <div data-testid="ruleset-panel" style={panelStyle}>
@@ -495,8 +661,111 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           onRemove={(v) => setPathAllowlist((prev) => prev.filter((p) => p !== v))}
         />
 
+        {scope === "project" && (
+          <div data-testid="ruleset-supervisor" style={supervisorSectionStyle}>
+            <span style={labelStyle}>{strings.rules.supervisor.sectionLabel}</span>
+
+            <label style={toggleRowStyle}>
+              <input
+                type="checkbox"
+                data-testid="ruleset-supervisor-enable"
+                aria-label={strings.rules.supervisor.enableAria}
+                checked={supervisorEnabled}
+                disabled={orchdDown}
+                onChange={(e) => {
+                  setSupervisorEnabled(e.target.checked);
+                  setPolicyError(null);
+                }}
+              />
+              <span>{strings.rules.supervisor.enableLabel}</span>
+            </label>
+
+            <span style={labelStyle}>{strings.rules.supervisor.delegatedLabel}</span>
+            {delegationUniverse.length === 0 ? (
+              <span data-testid="ruleset-supervisor-no-classes" style={mutedLineStyle}>
+                {strings.rules.supervisor.noClasses}
+              </span>
+            ) : (
+              <div style={chipRowStyle} data-testid="ruleset-supervisor-classes">
+                {delegationUniverse.map((cls) => (
+                  <label key={cls} style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      data-testid={`ruleset-supervisor-class-${cls}`}
+                      aria-label={strings.rules.supervisor.delegateClassAria(cls)}
+                      checked={delegatedClasses.includes(cls)}
+                      disabled={orchdDown}
+                      onChange={(e) => toggleDelegatedClass(cls, e.target.checked)}
+                    />
+                    <span>{cls}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <span data-testid="ruleset-supervisor-inherited-caps" style={mutedLineStyle}>
+              {strings.rules.supervisor.inheritedCapsLabel}: {inheritedCapLabel}
+            </span>
+
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-testid="ruleset-supervisor-recommended"
+              disabled={orchdDown}
+              onClick={applyRecommendedScope}
+              style={{ alignSelf: "flex-start" }}
+            >
+              {strings.rules.supervisor.recommendedScope}
+            </Button>
+
+            <span style={labelStyle}>{strings.rules.supervisor.instructionLabel}</span>
+            <textarea
+              data-testid="ruleset-supervisor-instruction"
+              aria-label={strings.rules.supervisor.instructionAria}
+              placeholder={strings.rules.supervisor.instructionPlaceholder}
+              value={instruction}
+              disabled={orchdDown}
+              onChange={(e) => {
+                setInstruction(e.target.value);
+                setPolicyError(null);
+              }}
+              rows={4}
+              style={supervisorTextareaStyle}
+            />
+
+            <span style={labelStyle}>{strings.rules.supervisor.customRulesLabel}</span>
+            <ChipList
+              testIdPrefix="ruleset-supervisor-rule"
+              ariaLabel={strings.rules.supervisor.customRuleAria}
+              placeholder={strings.rules.supervisor.customRulePlaceholder}
+              values={customRules}
+              disabled={orchdDown}
+              onAdd={(v) => {
+                setCustomRules((prev) => [...prev, v]);
+                setPolicyError(null);
+              }}
+              onRemove={(v) => setCustomRules((prev) => prev.filter((r) => r !== v))}
+            />
+
+            <span data-testid="ruleset-supervisor-info-access" style={mutedLineStyle}>
+              {strings.rules.supervisor.infoAccess}
+            </span>
+            <span data-testid="ruleset-supervisor-scope-summary" style={mutedLineStyle}>
+              {strings.rules.supervisor.scopeSummary(scopeSummaryClasses, inheritedCapLabel)}
+            </span>
+            <span data-testid="ruleset-supervisor-mcp-soon" style={mutedLineStyle}>
+              {strings.rules.supervisor.mcpSoon}
+            </span>
+
+            <div data-testid="ruleset-supervisor-pending" role="note" style={pendingNoteStyle}>
+              {strings.rules.supervisor.pendingNote}
+            </div>
+          </div>
+        )}
+
         {policyError !== null && (
-          <span data-testid="ruleset-policy-error" style={errorTextStyle}>
+          <span data-testid="ruleset-policy-error" role="alert" style={errorTextStyle}>
             {policyError}
           </span>
         )}

@@ -596,6 +596,7 @@ mod tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         let subtask = db
@@ -608,6 +609,7 @@ mod tests {
                 TaskSource::Plan,
                 None,
                 &["tag1".to_string()],
+                None,
             )
             .unwrap();
 
@@ -735,6 +737,7 @@ mod tests {
                 TaskSource::Plan,
                 None,
                 &[],
+                None,
             )
             .unwrap();
 

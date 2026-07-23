@@ -1,78 +1,83 @@
 # UX Scenarios
 
-<!-- Managed with super-ux (scenario-format v1). Update in the same change as any user-facing behavior change. -->
+<!-- Managed with super-ux (ux-contract v2). Update in the same change as any user-facing behavior change. -->
 
 ## Index
 
-| ID | Title | Feature | Persona | Status | Last audit |
-|----|-------|---------|---------|--------|------------|
-| SCN-001 | First launch — empty app | onboarding | new-user | implemented | 2026-07-19 PASS |
-| SCN-002 | Add first workspace | onboarding | new-user | implemented | 2026-07-19 PASS |
-| SCN-003 | Capture first idea with ⌘K | capture | new-user | implemented | 2026-07-19 PASS |
-| SCN-004 | Home attention triage | home | owner | implemented | 2026-07-19 PASS |
-| SCN-005 | Home goals overview | home | owner | implemented | 2026-07-19 PASS |
-| SCN-006 | Theme toggle cycle | chrome | owner | implemented | 2026-07-19 PASS |
-| SCN-007 | Sidebar navigation | chrome | owner | implemented | 2026-07-19 PASS |
-| SCN-008 | Link workspace to project from sidebar | chrome | owner | implemented | 2026-07-19 PASS |
-| SCN-009 | Create project | projects | owner | implemented | 2026-07-19 PASS |
-| SCN-010 | Project overview & workspace management | projects | owner | implemented | 2026-07-19 PASS |
-| SCN-011 | Export / import project | projects | owner | implemented | 2026-07-19 PASS |
-| SCN-012 | Archive and un-archive project | projects | owner | implemented | 2026-07-19 PASS |
-| SCN-013 | Open a new terminal | terminals | owner | implemented | 2026-07-19 PASS |
-| SCN-014 | Switch terminal tabs (keep-alive) | terminals | owner | implemented | 2026-07-19 PASS |
-| SCN-015 | Close a terminal | terminals | owner | implemented | 2026-07-19 PASS |
-| SCN-016 | Session lifecycle indicators | terminals | owner | implemented | 2026-07-19 PASS |
-| SCN-017 | Command history strip | terminals | owner | implemented | 2026-07-19 PASS |
-| SCN-018 | Click a link in terminal output | terminals | owner | implemented | 2026-07-19 PASS |
-| SCN-019 | Daemon restart reconnect | terminals | returning-owner | implemented | 2026-07-19 PASS |
-| SCN-020 | Browse the file tree | files | owner | implemented | 2026-07-19 PASS |
-| SCN-021 | Preview a file | files | owner | implemented | 2026-07-19 PASS |
-| SCN-022 | Create / rename files and folders | files | owner | implemented | 2026-07-19 PASS |
-| SCN-023 | Delete a file or folder | files | owner | implemented | 2026-07-19 PASS |
-| SCN-024 | Live watch degradation and refresh | files | owner | implemented | 2026-07-19 PASS |
-| SCN-025 | Manage ideas in a project | ideas | owner | implemented | 2026-07-19 PASS |
-| SCN-026 | Run research on an idea | research | owner | implemented | 2026-07-19 PASS |
-| SCN-027 | Form an insight from research | research | owner | implemented | 2026-07-19 PASS |
-| SCN-028 | Orphan idea flows (Inbox: spawn project, link) | ideas | owner | implemented | 2026-07-19 PASS |
-| SCN-029 | Manage insights | insights | owner | implemented | 2026-07-19 PASS |
-| SCN-030 | Manage tasks | tasks | owner | implemented | 2026-07-19 PASS |
-| SCN-031 | Manage the goal tree | goals | owner | implemented | 2026-07-19 PASS |
-| SCN-032 | Build the knowledge graph | graph | owner | implemented | 2026-07-19 PASS |
-| SCN-033 | MCP server lifecycle and consent | extensions | owner | implemented | 2026-07-19 PASS |
-| SCN-034 | Invoke tools and connectors | extensions | owner | implemented | 2026-07-19 PASS |
-| SCN-035 | Limits, call log, artifacts, skills | extensions | owner | implemented | 2026-07-19 PASS |
-| SCN-036 | Edit rules and policy | rules | owner | implemented | 2026-07-19 PASS |
-| SCN-037 | Sessiond disconnect and reconnect | system-status | owner | implemented | 2026-07-19 PASS |
-| SCN-038 | Sessiond upgrade required | system-status | owner | implemented | 2026-07-19 PASS |
-| SCN-039 | Orchd down degradation | system-status | owner | implemented | 2026-07-19 PASS |
-| SCN-040 | Orchd upgrade and cancel re-entry | system-status | owner | implemented | 2026-07-19 PASS |
-| SCN-041 | Storage degradation banners | system-status | owner | implemented | 2026-07-19 PASS |
-| SCN-042 | Diagnostics panel | diagnostics | owner | implemented | 2026-07-19 PASS |
-| SCN-043 | Render crash recovery | error-recovery | owner | implemented | 2026-07-19 PASS |
-| SCN-044 | Terminal attach failure surfaced | terminals | owner | implemented | 2026-07-19 PASS |
+| ID | Title | Feature | Persona | Traces | Status | Last audit |
+|----|-------|---------|---------|--------|--------|------------|
+| SCN-001 | First launch — empty app | onboarding | P-02 | ST-001 | implemented | 2026-07-22 PASS |
+| SCN-002 | Add first workspace | onboarding | P-02 | ST-002 | implemented | 2026-07-22 PASS |
+| SCN-003 | Capture first idea with ⌘K | capture | P-02 | ST-003 | implemented | 2026-07-22 PASS |
+| SCN-004 | Home attention triage | home | P-01 | ST-004 | implemented | 2026-07-22 PASS |
+| SCN-005 | Home goals overview | home | P-01 | ST-005 | implemented | 2026-07-22 PASS |
+| SCN-006 | Theme toggle cycle | chrome | P-01 | ST-006 | implemented | 2026-07-22 PASS |
+| SCN-007 | Sidebar navigation | chrome | P-01 | ST-007 | implemented | 2026-07-22 PASS |
+| SCN-008 | Link workspace to project from sidebar | chrome | P-01 | ST-007 | implemented | 2026-07-22 PASS |
+| SCN-009 | Create project | projects | P-01 | ST-008 | implemented | 2026-07-22 PASS |
+| SCN-010 | Project overview & workspace management | projects | P-01 | ST-008 | implemented | 2026-07-22 PASS |
+| SCN-011 | Export / import project | projects | P-01 | ST-009 | implemented | 2026-07-22 PASS |
+| SCN-012 | Archive and un-archive project | projects | P-01 | ST-009 | implemented | 2026-07-22 PASS |
+| SCN-013 | Open a new terminal | terminals | P-01 | ST-010 | implemented | 2026-07-22 PASS |
+| SCN-014 | Switch terminal tabs (keep-alive) | terminals | P-01 | ST-010 | implemented | 2026-07-22 PASS |
+| SCN-015 | Close a terminal | terminals | P-01 | ST-010 | implemented | 2026-07-22 PASS |
+| SCN-016 | Session lifecycle indicators | terminals | P-01 | ST-011 | implemented | 2026-07-22 PASS |
+| SCN-017 | Command history strip | terminals | P-01 | ST-012 | implemented | 2026-07-22 PASS |
+| SCN-018 | Click a link in terminal output | terminals | P-01 | ST-013 | implemented | 2026-07-22 PASS |
+| SCN-019 | Daemon restart reconnect | terminals | P-03 | ST-014 | implemented | 2026-07-22 PASS |
+| SCN-020 | Browse the file tree | files | P-01 | ST-015 | implemented | 2026-07-22 PASS |
+| SCN-021 | Preview a file | files | P-01 | ST-015 | implemented | 2026-07-22 PASS |
+| SCN-022 | Create / rename files and folders | files | P-01 | ST-016 | implemented | 2026-07-22 PASS |
+| SCN-023 | Delete a file or folder | files | P-01 | ST-016 | implemented | 2026-07-22 PASS |
+| SCN-024 | Live watch degradation and refresh | files | P-01 | ST-017 | implemented | 2026-07-22 PASS |
+| SCN-025 | Manage ideas in a project | ideas | P-01 | ST-018 | implemented | 2026-07-22 PASS |
+| SCN-026 | Run research on an idea | research | P-01 | ST-020 | implemented | 2026-07-22 PASS |
+| SCN-027 | Form an insight from research | research | P-01 | ST-021 | implemented | 2026-07-22 PASS |
+| SCN-028 | Orphan idea flows (Inbox: spawn project, link) | ideas | P-01 | ST-019 | implemented | 2026-07-22 PASS |
+| SCN-029 | Manage insights | insights | P-01 | ST-022 | implemented | 2026-07-22 PASS |
+| SCN-030 | Manage tasks | tasks | P-01 | ST-023 | implemented | 2026-07-22 PASS |
+| SCN-031 | Manage the goal tree | goals | P-01 | ST-024 | implemented | 2026-07-22 PASS |
+| SCN-032 | Build the knowledge graph | graph | P-01 | ST-025 | implemented | 2026-07-22 PASS |
+| SCN-033 | MCP server lifecycle and consent | extensions | P-01 | ST-026 | implemented | 2026-07-22 PASS |
+| SCN-034 | Invoke tools and connectors | extensions | P-01 | ST-027 | implemented | 2026-07-22 PASS |
+| SCN-035 | Limits, call log, artifacts, skills | extensions | P-01 | ST-028 | implemented | 2026-07-22 PASS |
+| SCN-036 | Edit rules and policy | rules | P-01 | ST-029 | implemented | 2026-07-22 PASS |
+| SCN-037 | Sessiond disconnect and reconnect | system-status | P-01 | ST-030 | implemented | 2026-07-22 PASS |
+| SCN-038 | Sessiond upgrade required | system-status | P-01 | ST-031 | implemented | 2026-07-22 PASS |
+| SCN-039 | Orchd down degradation | system-status | P-01 | ST-030 | implemented | 2026-07-22 PASS |
+| SCN-040 | Orchd upgrade and cancel re-entry | system-status | P-01 | ST-031 | implemented | 2026-07-22 PASS |
+| SCN-041 | Storage degradation banners | system-status | P-01 | ST-030 | implemented | 2026-07-22 PASS |
+| SCN-042 | Diagnostics panel | diagnostics | P-01 | ST-032 | implemented | 2026-07-22 PASS |
+| SCN-043 | Render crash recovery | error-recovery | P-01 | ST-032 | implemented | 2026-07-22 PASS |
+| SCN-044 | Terminal attach failure surfaced | terminals | P-01 | ST-014 | implemented | 2026-07-22 PASS |
+| SCN-045 | Keep the machine awake while sessions run | power | P-01 | ST-033 | validated | — |
+| SCN-046 | Enable the CEO and set the delegation scope | supervisor | P-01 | ST-034 | validated | config plumbing only; CEO acts in S6b |
+| SCN-047 | CEO answers an agent's question autonomously | supervisor | P-01 | ST-034 | validated | — |
+| SCN-048 | CEO escalates an out-of-authority question | supervisor | P-01 | ST-034 | validated | — |
+| SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | — |
+| SCN-050 | Review decisions made while away | supervisor | P-03 | ST-036 | validated | — |
+| SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | validated | — |
+| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | — |
+| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | — |
+| SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | — |
+| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | — |
+| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | — |
 
 ## Personas
 
-### new-user
-Opens Builder Pro AI for the first time. No workspaces, no projects, no daemon
-history. Wants to reach a working terminal + captured idea with zero reading.
-
-### owner
-The solo builder running 5–6 projects through AI coding agents. Knows the
-product; opens the app to answer "where is each project, what moved, what
-needs me" in under 30 seconds.
-
-### returning-owner
-Same person reopening the app (or after a daemon restart) with live sessions,
-projects, and scrollback that must reappear intact.
+Defined in the WHY layer — see [foundation.md](foundation.md) §1. IDs:
+**P-01** Solo Builder (steady state), **P-02** First-run Builder (cold start),
+**P-03** Returning Builder (post-restart). All three are the same solo operator
+in different lifecycle states.
 
 ## Scenarios
 
 ## onboarding
 
 ### SCN-001: First launch — empty app
-- **Persona:** new-user
+- **Persona:** P-02
 - **Feature:** onboarding
+- **Traces:** ST-001, FLW-01 (JTBD-09, JRN-01/#2)
 - **Entry point:** first launch, no saved state
 - **Preconditions:** none
 - **Steps:**
@@ -85,8 +90,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/store/store.ts:470, src/components/WorkspaceSidebar.tsx:271-284, src/strings.ts:112, src/components/HomeView.tsx:240-269, src/App.tsx:335-388
 
 ### SCN-002: Add first workspace
-- **Persona:** new-user
+- **Persona:** P-02
 - **Feature:** onboarding
+- **Traces:** ST-002, FLW-01 (JTBD-09, JRN-01/#3)
 - **Entry point:** sidebar "+ Add workspace" button
 - **Preconditions:** none
 - **Steps:**
@@ -100,8 +106,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/WorkspaceSidebar.tsx:110-127,445-461, src/strings.ts:59-66,105
 
 ### SCN-003: Capture first idea with ⌘K
-- **Persona:** new-user
+- **Persona:** P-02
 - **Feature:** capture
+- **Traces:** ST-003, FLW-02 (JTBD-04, JRN-01/#5)
 - **Entry point:** global ⌘K hotkey (any view)
 - **Preconditions:** orchd connected
 - **Steps:**
@@ -113,13 +120,14 @@ projects, and scrollback that must reappear intact.
 - **States covered:** success, error
 - **Errors & recovery:** ⌘K ignored while typing in input/textarea/.xterm or while an upgrade dialog is open; empty title → Save disabled; orchd down → inline "orchestrator unavailable" note, Save disabled; save rejects → toast, dialog stays open for retry
 - **Status:** implemented
-- **Coverage:** src/components/QuickCapture.tsx:24-29,144-184,192,250-273, src/strings.ts:271-279
+- **Coverage:** src/components/QuickCapture.tsx:24-29,143-183,191,249-273, src/strings.ts:271-279
 
 ## home
 
 ### SCN-004: Home attention triage
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** home
+- **Traces:** ST-004, FLW-03 (JTBD-01, JRN-02/#2)
 - **Entry point:** app launch or sidebar "⌂ Home"
 - **Preconditions:** sessions exist across workspaces
 - **Steps:**
@@ -131,11 +139,12 @@ projects, and scrollback that must reappear intact.
 - **States covered:** empty, success
 - **Errors & recovery:** no sessions → "No active sessions." + "Open {name}" button when a workspace exists (no button with zero workspaces)
 - **Status:** implemented
-- **Coverage:** src/components/HomeView.tsx:205-212,240-379, src/strings.ts:125,129
+- **Coverage:** src/components/HomeView.tsx:204-211,240-378, src/strings.ts:125,129
 
 ### SCN-005: Home goals overview
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** home
+- **Traces:** ST-005, FLW-03 (JTBD-06, JRN-07/#4)
 - **Entry point:** Home view, "Goals" section below attention groups
 - **Preconditions:** at least one active (non-archived) project
 - **Steps:**
@@ -151,8 +160,9 @@ projects, and scrollback that must reappear intact.
 ## chrome
 
 ### SCN-006: Theme toggle cycle
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** chrome
+- **Traces:** ST-006, FLW-04 (JTBD-06)
 - **Entry point:** sidebar footer ThemeToggle button
 - **Preconditions:** none
 - **Steps:**
@@ -162,11 +172,12 @@ projects, and scrollback that must reappear intact.
 - **States covered:** success
 - **Errors & recovery:** nothing can fail (local only)
 - **Status:** implemented
-- **Coverage:** src/ui/ThemeToggle.tsx:8-26, src/ui/theme.ts:6-81, src/main.tsx:10
+- **Coverage:** src/ui/ThemeToggle.tsx:8-26, src/ui/theme.ts:6-81, src/main.tsx:8,12
 
 ### SCN-007: Sidebar navigation
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** chrome
+- **Traces:** ST-007, FLW-04 (JTBD-01, JTBD-06)
 - **Entry point:** left sidebar (always visible)
 - **Preconditions:** projects and workspaces exist
 - **Steps:**
@@ -180,8 +191,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/WorkspaceSidebar.tsx:102-105,177-374, src/store/store.ts:101,571-573,760
 
 ### SCN-008: Link workspace to project from sidebar
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** chrome
+- **Traces:** ST-007, FLW-04 (JTBD-06)
 - **Entry point:** «No project» sidebar group, inline link select on an unlinked workspace
 - **Preconditions:** an unlinked workspace and at least one active project exist
 - **Steps:**
@@ -197,8 +209,9 @@ projects, and scrollback that must reappear intact.
 ## projects
 
 ### SCN-009: Create project
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** projects
+- **Traces:** ST-008, FLW-05 (JTBD-06, JRN-07/#1)
 - **Entry point:** sidebar "+ project" button
 - **Preconditions:** none (workspace can be created inline)
 - **Steps:**
@@ -214,8 +227,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/CreateProjectDialog.tsx:209-380, src/components/WorkspaceSidebar.tsx:427-448,502, src/strings.ts:208-217
 
 ### SCN-010: Project overview & workspace management
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** projects
+- **Traces:** ST-008, FLW-05 (JTBD-06, JRN-07/#2)
 - **Entry point:** project header in sidebar → project panel
 - **Preconditions:** project exists
 - **Steps:**
@@ -230,8 +244,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/ProjectPanel.tsx:118-205,274-475, src/strings.ts:218-235
 
 ### SCN-011: Export / import project
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** projects
+- **Traces:** ST-009, FLW-06 (JTBD-06, JRN-07/#5)
 - **Entry point:** project panel Overview tab, export/import controls
 - **Preconditions:** project exists
 - **Steps:**
@@ -246,8 +261,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/ProjectPanel.tsx:198-242,417-475, src/strings.ts:228-241
 
 ### SCN-012: Archive and un-archive project
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** projects
+- **Traces:** ST-009, FLW-06 (JTBD-06, JRN-07/#5)
 - **Entry point:** project panel "Danger zone" → "Archive project"
 - **Preconditions:** project not archived
 - **Steps:**
@@ -264,8 +280,9 @@ projects, and scrollback that must reappear intact.
 ## terminals
 
 ### SCN-013: Open a new terminal
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** terminals
+- **Traces:** ST-010, FLW-07 (JTBD-02, JRN-03/#1)
 - **Entry point:** workspace view tab strip "+ New terminal"
 - **Preconditions:** a workspace is active
 - **Steps:**
@@ -278,8 +295,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/TerminalTabs.tsx:57-81,166-181, src/App.tsx:133-137,525-546, src/strings.ts:198,201
 
 ### SCN-014: Switch terminal tabs (keep-alive)
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** terminals
+- **Traces:** ST-010, FLW-07 (JTBD-02, JRN-03/#2)
 - **Entry point:** tab strip with 2+ sessions
 - **Preconditions:** multiple live sessions
 - **Steps:**
@@ -292,8 +310,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/TerminalTabs.tsx:109-137, src/components/TerminalPane.tsx:51-67, src/terminal/terminal-manager.ts:113-122,413-419,523-544,584-589
 
 ### SCN-015: Close a terminal
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** terminals
+- **Traces:** ST-010, FLW-07 (JTBD-02, JRN-03/#5)
 - **Entry point:** × button on a session tab
 - **Preconditions:** session exists
 - **Steps:**
@@ -306,8 +325,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/TerminalTabs.tsx:83-97,144-161, src/terminal/terminal-manager.ts:627-641, src/store/store.ts:505-513, src/strings.ts:200-202
 
 ### SCN-016: Session lifecycle indicators
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** terminals
+- **Traces:** ST-011, FLW-07 (JTBD-01, JRN-02/#3)
 - **Entry point:** any surface with StatusDot (tabs, Home rows)
 - **Preconditions:** session running
 - **Steps:**
@@ -320,8 +340,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/StatusDot.tsx:13-57, src/store/store.ts:515-556, src/App.tsx:139-140
 
 ### SCN-017: Command history strip
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** terminals
+- **Traces:** ST-012, FLW-08 (JTBD-02, JRN-03/#3)
 - **Entry point:** workspace view, strip under the terminal (per active session)
 - **Preconditions:** shell integration emits OSC-133 events
 - **Steps:**
@@ -334,8 +355,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/CommandStrip.tsx:44-71,114-270, src/strings.ts:187-194
 
 ### SCN-018: Click a link in terminal output
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** terminals
+- **Traces:** ST-013, FLW-08 (JTBD-03, JRN-03/#4)
 - **Entry point:** terminal output containing paths or OSC-8 hyperlinks
 - **Preconditions:** session with output
 - **Steps:**
@@ -345,11 +367,12 @@ projects, and scrollback that must reappear intact.
 - **States covered:** success, error
 - **Errors & recovery:** file:// outside roots → toast "file is outside the workspace or not found"; non-existent lexical path → honest "not found" from the preview read; other schemes ignored
 - **Status:** implemented
-- **Coverage:** src/terminal/terminal-manager.ts:242-312, src/terminal/link-provider.ts:15-70,147-176, src/strings.ts:182
+- **Coverage:** src/terminal/terminal-manager.ts:242-312, src/terminal/link-provider.ts:15-70,127-139,147-176, src/strings.ts:182
 
 ### SCN-019: Daemon restart reconnect
-- **Persona:** returning-owner
+- **Persona:** P-03
 - **Feature:** terminals
+- **Traces:** ST-014, FLW-09 (JTBD-02, JRN-04/#3)
 - **Entry point:** daemon restarts (or app reopens) with live sessions
 - **Preconditions:** daemon-side sessions exist
 - **Steps:**
@@ -364,8 +387,9 @@ projects, and scrollback that must reappear intact.
 ## files
 
 ### SCN-020: Browse the file tree
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** files
+- **Traces:** ST-015, FLW-10 (JTBD-03, JRN-06/#1)
 - **Entry point:** workspace view right rail "Files"
 - **Preconditions:** workspace with roots
 - **Steps:**
@@ -380,8 +404,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/FileTree.tsx:111-168,298-415,482-491,658-707,714-772,786-805, src/components/FilesRail.tsx:22-152, src/strings.ts:140-152,161
 
 ### SCN-021: Preview a file
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** files
+- **Traces:** ST-015, FLW-10 (JTBD-03, JRN-06/#2)
 - **Entry point:** file row click in the tree (or terminal link, SCN-018)
 - **Preconditions:** workspace with files
 - **Steps:**
@@ -394,8 +419,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/FilePreview.tsx:10-26,60-160, src/ipc/fs.ts:30-45, src-tauri/src/fs_explorer.rs:37-41,294-359,482-485, src/strings.ts:50-57,172-177
 
 ### SCN-022: Create / rename files and folders
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** files
+- **Traces:** ST-016, FLW-11 (JTBD-03, JRN-06/#3)
 - **Entry point:** right-click (or ⋯ button) on a tree row → menu
 - **Preconditions:** workspace with roots
 - **Steps:**
@@ -409,8 +435,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/FileTree.tsx:380-389,422-449,514-656,729-769, src-tauri/src/fs_explorer.rs:366-368, src/strings.ts:154-155,164-168
 
 ### SCN-023: Delete a file or folder
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** files
+- **Traces:** ST-016, FLW-11 (JTBD-03, JRN-06/#3)
 - **Entry point:** tree row menu → Delete (non-root rows)
 - **Preconditions:** entry exists
 - **Steps:**
@@ -424,8 +451,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/FileTree.tsx:451-464,576-589, src-tauri/src/fs_explorer.rs:424-445, src/strings.ts:156-158
 
 ### SCN-024: Live watch degradation and refresh
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** files
+- **Traces:** ST-017, FLW-10 (JTBD-03, JRN-06/#4)
 - **Entry point:** workspace view with the watcher dead (fs://watch-error)
 - **Preconditions:** file watch previously started
 - **Steps:**
@@ -441,8 +469,9 @@ projects, and scrollback that must reappear intact.
 ## ideas
 
 ### SCN-025: Manage ideas in a project
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** ideas
+- **Traces:** ST-018, FLW-12 (JTBD-05, JRN-05/#1)
 - **Entry point:** project panel "Ideas" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -455,11 +484,12 @@ projects, and scrollback that must reappear intact.
 - **States covered:** empty, error, success
 - **Errors & recovery:** empty title → "+ idea" disabled; blank/unchanged edit → silent revert; rejected save → revert to store value + toast; delete confirm cancelled → no-op; orchd down → all mutating controls disabled, reads stay live; empty list → "No ideas in this project yet."
 - **Status:** implemented
-- **Coverage:** src/components/IdeasList.tsx:21-28,155-315,334-493
+- **Coverage:** src/components/IdeasList.tsx:21-28,154-314,333-492
 
 ### SCN-028: Orphan idea flows (Inbox: spawn project, link)
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** ideas
+- **Traces:** ST-019, FLW-12 (JTBD-04, JRN-05/#2)
 - **Entry point:** sidebar "✉ Inbox" nav (orphan count badge when > 0) → Inbox panel
 - **Preconditions:** an idea captured with "no project"
 - **Steps:**
@@ -475,8 +505,9 @@ projects, and scrollback that must reappear intact.
 ## research
 
 ### SCN-026: Run research on an idea
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** research
+- **Traces:** ST-020, FLW-12 (JTBD-05, JRN-05/#3)
 - **Entry point:** idea row "Research" button → ResearchRunDialog
 - **Preconditions:** a connected MCP server with tools; orchd up
 - **Steps:**
@@ -492,8 +523,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/idea/ResearchRunDialog.tsx:108-334, src/components/idea/ResearchPane.tsx:110-221
 
 ### SCN-027: Form an insight from research
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** research
+- **Traces:** ST-021, FLW-12 (JTBD-05, JRN-05/#4)
 - **Entry point:** ResearchPane "Form insight" (done run) or "form insight without research" (failed run)
 - **Preconditions:** research run exists
 - **Steps:**
@@ -511,8 +543,9 @@ projects, and scrollback that must reappear intact.
 ## insights
 
 ### SCN-029: Manage insights
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** insights
+- **Traces:** ST-022, FLW-12 (JTBD-05)
 - **Entry point:** project panel "Insights" tab
 - **Preconditions:** insights exist (created only via research pipeline — no create form)
 - **Steps:**
@@ -524,13 +557,14 @@ projects, and scrollback that must reappear intact.
 - **States covered:** empty, error, success
 - **Errors & recovery:** empty archive reason → inline "an archive reason is required"; mutations reject → toast; orchd down → status/archival/apply disabled; empty list → "No insights in this project yet."
 - **Status:** implemented
-- **Coverage:** src/components/InsightsList.tsx:33,118-282,340-364
+- **Coverage:** src/components/InsightsList.tsx:33,117-281,339-363
 
 ## tasks
 
 ### SCN-030: Manage tasks
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** tasks
+- **Traces:** ST-023, FLW-13 (JTBD-06, JRN-07/#2)
 - **Entry point:** project panel "Tasks" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -545,11 +579,27 @@ projects, and scrollback that must reappear intact.
 - **Status:** implemented
 - **Coverage:** src/components/TasksList.tsx:52-73,202-264,296-355,461-492
 
+### SCN-051: Set task priority (urgent / normal)
+- **Persona:** P-01
+- **Feature:** tasks
+- **Traces:** ST-037, FLW-13 (JTBD-06, JTBD-10, JRN-10/#4)
+- **Entry point:** project panel "Tasks" tab — create form and task rows
+- **Preconditions:** project exists
+- **Steps:**
+  1. User sets priority (urgent/normal, default normal) in the create form or on an existing task row
+- **Expected result:** priority persists; urgent tasks render visually distinct (danger-tone marker) and sort ahead of normal within their status group; workflow continuation (SCN-049) consumes urgent first
+- **UI elements:** priority control in create form, priority control on task row, urgent marker on task rows
+- **States covered:** success, error
+- **Errors & recovery:** priority save rejects → revert to stored value + toast; orchd down → priority control disabled like other mutations
+- **Status:** validated
+- **Coverage:** src/components/TasksList.tsx:40-49,102-118,258-292,404-414,531-544 (create-form + row selects, urgent marker/chip, urgent-first sort, reject→revert+toast, orchdDown gating); src/ipc/orchd.ts:241-290 (orchdCreateTask priority arg, orchdSetTaskPriority); src-tauri/src/commands.rs:1611-1710 (orchd_create_task priority, orchd_set_task_priority); crates/orchd-proto/src/lib.rs:203-215,1258-1265 (TaskPriority, SetTaskPriority verb); crates/orchd/src/persistence.rs:631-651,2406-2435 (migrate_v5 `task.priority`, set_task_priority)
+
 ## goals
 
 ### SCN-031: Manage the goal tree
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** goals
+- **Traces:** ST-024, FLW-14 (JTBD-06, JRN-07/#2)
 - **Entry point:** project panel "Goals" tab
 - **Preconditions:** project exists (one strategic root goal)
 - **Steps:**
@@ -568,8 +618,9 @@ projects, and scrollback that must reappear intact.
 ## graph
 
 ### SCN-032: Build the knowledge graph
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** graph
+- **Traces:** ST-025, FLW-14 (JTBD-06, JRN-07/#3)
 - **Entry point:** project panel "Graph" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -589,8 +640,9 @@ projects, and scrollback that must reappear intact.
 ## extensions
 
 ### SCN-033: MCP server lifecycle and consent
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** extensions
+- **Traces:** ST-026, FLW-16 (JTBD-07, JRN-08/#2)
 - **Entry point:** sidebar "⚙ Extensions" → Servers tab
 - **Preconditions:** orchd up
 - **Steps:**
@@ -606,8 +658,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/ext/ServersTab.tsx:174-341, src/components/ext/ConnectDialog.tsx:110-153, src/strings.ts:45,497-501,540-562
 
 ### SCN-034: Invoke tools and connectors
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** extensions
+- **Traces:** ST-027, FLW-16 (JTBD-07, JRN-08/#3)
 - **Entry point:** Extensions → Tools / Connectors tabs
 - **Preconditions:** connected server / configured connector account
 - **Steps:**
@@ -621,8 +674,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/ext/ToolsBrowser.tsx:79-82,140-269, src/components/ext/ConnectorsTab.tsx:128-131,287-338,456-655, src/strings.ts:479,516,537-538,569
 
 ### SCN-035: Limits, call log, artifacts, skills
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** extensions
+- **Traces:** ST-028, FLW-16 (JTBD-07, JRN-08/#4)
 - **Entry point:** Extensions → Log / Artifacts / Skills tabs
 - **Preconditions:** some invocations exist
 - **Steps:**
@@ -639,8 +693,9 @@ projects, and scrollback that must reappear intact.
 ## rules
 
 ### SCN-036: Edit rules and policy
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** rules
+- **Traces:** ST-029, FLW-15 (JTBD-06, JTBD-07)
 - **Entry point:** project panel "Rules" tab
 - **Preconditions:** project exists
 - **Steps:**
@@ -658,8 +713,9 @@ projects, and scrollback that must reappear intact.
 ## system-status
 
 ### SCN-037: Sessiond disconnect and reconnect
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** system-status
+- **Traces:** ST-030, FLW-17 (JTBD-08, JRN-09/#1)
 - **Entry point:** top-of-shell DaemonBanner
 - **Preconditions:** sessiond connection drops
 - **Steps:**
@@ -672,8 +728,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/DaemonBanner.tsx:61-77, src/App.tsx:161-183,475, src/strings.ts:79
 
 ### SCN-038: Sessiond upgrade required
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** system-status
+- **Traces:** ST-031, FLW-17 (JTBD-08, JRN-09/#2)
 - **Entry point:** daemon://incompatible event → UpgradeDialog (auto-open)
 - **Preconditions:** installed sessiond older than the app requires
 - **Steps:**
@@ -687,8 +744,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/UpgradeDialog.tsx:141,153-158,190-218, src/components/DaemonBanner.tsx:25-59, src/App.tsx:184-193,365-378, src/strings.ts:77,82-89
 
 ### SCN-039: Orchd down degradation
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** system-status
+- **Traces:** ST-030, FLW-17 (JTBD-08, JRN-09/#1)
 - **Entry point:** orchd://down event
 - **Preconditions:** orchestrator socket drops
 - **Steps:**
@@ -702,8 +760,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/OrchdDownBanner.tsx:43-56, src/App.tsx:249-304,487, src/components/ProjectPanel.tsx:281, src/components/ext/ExtPanel.tsx:88, src/components/InboxPanel.tsx:53
 
 ### SCN-040: Orchd upgrade and cancel re-entry
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** system-status
+- **Traces:** ST-031, FLW-17 (JTBD-08, JRN-09/#2)
 - **Entry point:** orchd://incompatible event → UpgradeDialog (orchd variant)
 - **Preconditions:** installed orchd older than required
 - **Steps:**
@@ -717,8 +776,9 @@ projects, and scrollback that must reappear intact.
 - **Coverage:** src/components/UpgradeDialog.tsx:141-143,242-259, src/components/OrchdUpgradeBanner.tsx:48-61, src/App.tsx:311-317, src/strings.ts:80,90-92
 
 ### SCN-041: Storage degradation banners
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** system-status
+- **Traces:** ST-030, FLW-17 (JTBD-08, JRN-09/#3)
 - **Entry point:** orchd storage status on connect/reconnect
 - **Preconditions:** orchd database degraded
 - **Steps:**
@@ -733,8 +793,9 @@ projects, and scrollback that must reappear intact.
 ## diagnostics
 
 ### SCN-042: Diagnostics panel
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** diagnostics
+- **Traces:** ST-032, FLW-17 (JTBD-08, JRN-09/#4)
 - **Entry point:** sidebar footer "Diagnostics" button (red count badge when events exist)
 - **Preconditions:** none
 - **Steps:**
@@ -751,8 +812,9 @@ projects, and scrollback that must reappear intact.
 ## error-recovery
 
 ### SCN-043: Render crash recovery
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** error-recovery
+- **Traces:** ST-032, FLW-17 (JTBD-08, JRN-09/#5)
 - **Entry point:** unexpected React render crash anywhere
 - **Preconditions:** none
 - **Steps:**
@@ -768,8 +830,9 @@ projects, and scrollback that must reappear intact.
 ## terminals (gaps)
 
 ### SCN-044: Terminal attach failure surfaced
-- **Persona:** owner
+- **Persona:** P-01
 - **Feature:** terminals
+- **Traces:** ST-014, FLW-09 (JTBD-08, JRN-04/#4)
 - **Entry point:** terminal pane when attach_session rejects (daemon hiccup mid-attach)
 - **Preconditions:** session exists, attach fails
 - **Steps:**
@@ -780,4 +843,203 @@ projects, and scrollback that must reappear intact.
 - **States covered:** error, success
 - **Errors & recovery:** manager records the mapped failure per session (describeAttachError → strings.errors.command.*) and notifies subscribers; a fresh attach clears it; dispose drops it
 - **Status:** implemented
-- **Coverage:** src/terminal/terminal-manager.ts:51-74,133,427-431,470-483,644-668, src/components/TerminalPane.tsx:43-49,80-118, src/strings.ts:183-186
+- **Coverage:** src/terminal/terminal-manager.ts:51-69,133,427-431,460-483,627-641,643-661, src/components/TerminalPane.tsx:43-49,80-121, src/strings.ts:183-186
+
+## power
+
+### SCN-045: Keep the machine awake while sessions run
+- **Persona:** P-01
+- **Feature:** power
+- **Traces:** ST-033, FLW-18 (JTBD-10, JRN-10/#5)
+- **Entry point:** keep-awake toggle in app chrome (sidebar footer, near ThemeToggle/Diagnostics)
+- **Preconditions:** keep-awake enabled (default on)
+- **Steps:**
+  1. User starts a long agent run and walks away; ≥1 session is live
+  2. Later, all sessions end (or user disables the toggle)
+- **Expected result:** while ≥1 live session exists, a system sleep assertion is held and an "awake" indicator shows; when the last session ends or the toggle turns off, the assertion releases and normal power behavior resumes
+- **UI elements:** keep-awake toggle, active-assertion indicator, failure banner/toast
+- **States covered:** success, error
+- **Errors & recovery:** OS denies the assertion → honest banner/toast "keep-awake unavailable: {reason}" + Diagnostics record — never a silent fake "awake"; app quit/crash → assertion released by OS (no orphan lock)
+- **Status:** validated
+- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-385, src-tauri/src/lib.rs:599-603,719-721, src/ipc/power.ts:13-48, src/store/store.ts:408-431,452-477,525-553,964-990, src/App.tsx:413-446, src/components/WorkspaceSidebar.tsx:87-90,447-458,540-613, src/strings.ts:615-627
+
+## supervisor
+
+### SCN-046: Enable the CEO and set the delegation scope
+- **Persona:** P-01
+- **Feature:** supervisor
+- **Traces:** ST-034, FLW-19 (JTBD-10, JRN-10/#1)
+- **Entry point:** project panel "Rules" tab — supervisor section (extends SCN-036 policy)
+- **Preconditions:** project exists; orchd up
+- **Steps:**
+  1. User enables the CEO for the project
+  2. User selects which confirmation classes are delegated and reviews the effective caps (spend, calls/min) the CEO inherits from policy
+  3. User writes the CEO instruction text (free-form markdown the CEO must follow) and optional custom CEO rules — or clicks "Recommended scope" to seed a safe preset (safe-shell + file-write, caps from policy; IMP-03/BP-012), then edits
+  4. User saves
+- **Expected result:** delegation scope, instruction text, and custom rules persist with the project policy; an information-access summary states what the CEO reads ("CEO reads: project goals, tasks, ideas, insights, graph, rules + your instruction"); a scope summary states exactly what it may decide ("CEO may: {classes} within {caps}"); disabled by default until explicitly enabled
+- **UI elements:** CEO enable toggle, "Recommended scope" preset button, delegated-class checkboxes, inherited-caps summary, CEO instruction textarea, custom-rules editor, info-access summary line, scope summary line, "MCP tools for the CEO — soon" placeholder note, "Save policy" (shared)
+- **States covered:** success, error
+- **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → controls disabled; empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
+- **Status:** validated
+- **Note (honesty boundary, S6b):** this scenario ships the delegation CONFIG only. It persists the scope, instruction and custom rules and states what the CEO would read/decide; it does NOT execute anything. Autonomous execution — the CEO actually answering agent questions (SCN-047) and continuing workflows (SCN-049) — awaits the orchestrator-agent runtime (S6b). The UI carries a matching pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same register as the Skills-tab registry banner.
+- **Coverage:** crates/orchd-proto/src/lib.rs:225-284 (SupervisorConfig + PolicyRules.supervisor additive field), src/ipc/orchd-types.ts:209,300-305 (generated TS), crates/orchd/src/persistence.rs:2576-2585,2607-2634,2659-2683 (validate_policy supervisor guards, PolicyRulesStrict mirror, decode backfill), src/components/RulesetPanel.tsx:31,46-89,455-536,662-771 (validatePolicy + supervisor section, project scope only), src/strings.ts:319-352 (rules.supervisor.* incl. pendingNote); tests — crates/orchd/src/persistence.rs:6176-6320, crates/orchd-proto/tests/roundtrip.rs:1467-1516, crates/orchd-proto/tests/ts_export.rs:159-200, src/components/RulesetPanel.test.tsx:301-430
+
+### SCN-047: CEO answers an agent's question autonomously
+- **Persona:** P-01
+- **Feature:** supervisor
+- **Traces:** ST-034, FLW-19 (JTBD-10, JRN-10/#2)
+- **Entry point:** a terminal session enters waiting-for-input with a question matching a delegated class (operator may be absent)
+- **Preconditions:** CEO enabled with a delegation scope (SCN-046); session running
+- **Steps:**
+  1. Agent asks a question; CEO classifies it against the delegation scope
+  2. CEO answers within authority; the session continues
+  3. Operator (whenever present) sees the decision reflected in session state and the decision log
+- **Expected result:** the session never parks as "needs you" for in-scope questions; the answer, its basis (rule/policy line), and timestamp land in the decision log (SCN-050); the session's StatusDot returns to running
+- **UI elements:** StatusDot transition (waiting → running without operator input), decision-log entry, per-session "answered by CEO" marker
+- **States covered:** success, error
+- **Errors & recovery:** CEO cannot ground an answer in rules/policy → treats it as out-of-scope (SCN-048), never guesses; CEO backend failure → session parks as ordinary "needs you" + Diagnostics record — degradation equals the current manual behavior, nothing worse
+- **Status:** validated
+- **Coverage:** none yet
+
+### SCN-048: CEO escalates an out-of-authority question
+- **Persona:** P-01
+- **Feature:** supervisor
+- **Traces:** ST-034, FLW-19 (JTBD-10, JRN-10/#3)
+- **Entry point:** a waiting session's question falls outside the delegated scope (or over a cap)
+- **Preconditions:** CEO enabled; question out of scope
+- **Steps:**
+  1. CEO declines to answer and marks the session escalated
+  2. Operator sees a persistent "needs you" signal (visible outside the Home view) and opens the session
+  3. Operator answers in the terminal; escalation clears
+- **Expected result:** out-of-scope questions are never answered autonomously; the escalation is visible app-wide (persistent count/badge — A-1 confirmed), listed in the decision log as "escalated: {reason}", and clears when the session resumes
+- **UI elements:** persistent needs-you badge/count (app chrome), escalated marker on session tab and Home row, decision-log escalation entry
+- **States covered:** success
+- **Errors & recovery:** nothing can fail visibly — escalation IS the safe path; a lost signal would be the failure, so the badge derives from live session state, not a separate event that can drop
+- **Status:** validated
+- **Coverage:** none yet
+
+### SCN-049: Workflow continuation after a task ends
+- **Persona:** P-01
+- **Feature:** supervisor
+- **Traces:** ST-035, FLW-19 (JTBD-10, JRN-10/#4)
+- **Entry point:** an agent completes its task in a session under CEO supervision
+- **Preconditions:** CEO enabled; project has a workflow and a backlog (SCN-030)
+- **Steps:**
+  1. Agent finishes; CEO consults the project workflow and backlog
+  2. CEO picks the next task (urgent first — SCN-051), starts the agent on it, and records the hand-off
+- **Expected result:** the pipeline continues without operator input; the hand-off (finished task → next task) appears in the decision log; task statuses update (done → in progress) per the existing tasks flow
+- **UI elements:** decision-log hand-off entry, task status changes in the Tasks tab, session continues under a new task marker
+- **States covered:** success, empty, error
+- **Errors & recovery:** empty backlog / no unambiguous next task → session parks in honest idle "needs you: no next task" (never fake busy, never silent stop); hand-off failure → toast + Diagnostics + decision-log failure entry, session recoverable manually
+- **Status:** validated
+- **Coverage:** none yet
+
+### SCN-050: Review decisions made while away
+- **Persona:** P-03
+- **Feature:** supervisor
+- **Traces:** ST-036, FLW-19 (JTBD-10, JRN-10/#6)
+- **Entry point:** decision-log surface (app chrome or Home) after time away
+- **Preconditions:** autonomous decisions/escalations occurred
+- **Steps:**
+  1. User opens the app after being away and sees a "since you left" digest (decisions made, tasks completed/started, open escalations)
+  2. User opens the decision log and reviews entries (question, answer, basis, outcome, timestamp, newest-first)
+- **Expected result:** every autonomous decision is auditable; open escalations are one click from their sessions; the digest clears once seen
+- **UI elements:** "since you left" digest, decision-log list, per-entry basis/outcome detail, link from escalation entry to its session
+- **States covered:** empty, success
+- **Errors & recovery:** no decisions while away → honest "nothing happened while you were away"; log storage degraded → StorageBanner rules apply (SCN-041) — the log never silently truncates
+- **Status:** validated
+- **Coverage:** none yet
+
+## analytics
+
+### SCN-052: Usage stats dashboard — tokens, cost, activity
+- **Persona:** P-01
+- **Feature:** analytics
+- **Traces:** ST-038, FLW-20, ST-040 (JTBD-11, JRN-11/#2, JRN-11/#3)
+- **Entry point:** stats view in app chrome (sidebar nav)
+- **Preconditions:** usage data exists (agent sessions and/or MCP invocations)
+- **Steps:**
+  1. User opens the stats view
+  2. User picks a range with the SegmentedPill (All | 30d | 7d)
+  3. User reads tokens/cost per project and per agent, and the activity Heatmap
+- **Expected result:** figures render for the chosen range; activity density shows as a Heatmap; per-project and per-agent cuts are visible; the orphan atoms SegmentedPill + Heatmap ship here (closes COV-01)
+- **UI elements:** stats nav item, SegmentedPill range switcher, per-project/per-agent stat tiles, activity Heatmap, honest empty state
+- **States covered:** loading, empty, error, success
+- **Errors & recovery:** no data in range → honest empty state (never zeros styled as data); collection source unavailable (A-8) → per-source "data unavailable: {source}" note, remaining sources still render; fetch fails → error card + Retry + toast
+- **Status:** validated
+- **Coverage:** src-tauri/src/stats.rs (scanner+cache+pricing+commands), src/ipc/stats.ts, src/store/store.ts (stats slice + refreshStats), src/components/StatsView.tsx, src/components/StatsView.test.tsx, src/components/WorkspaceSidebar.tsx (stats-nav-button), src/App.tsx (stats branch), src/strings.ts (stats group)
+
+### SCN-053: Output stats — commits and code per project
+- **Persona:** P-01
+- **Feature:** analytics
+- **Traces:** ST-039, FLW-20 (JTBD-11, JRN-11/#4)
+- **Entry point:** stats view — output section
+- **Preconditions:** workspaces with git history
+- **Steps:**
+  1. User opens the output section and picks a range
+  2. User reads commits count and code delta per project
+- **Expected result:** commit and code-change figures per project for the range, derived from workspace git; cached honestly with a "as of {time}" stamp
+- **UI elements:** output stat tiles per project, freshness stamp, per-project "no git data" note
+- **States covered:** loading, empty, error, success
+- **Errors & recovery:** workspace without git or git read fails → that project shows honest "no git data" (never fabricated zeros); slow scan → visible loading, cancellable; scan failure → error + Retry
+- **Status:** validated
+- **Coverage:** src-tauri/src/stats.rs (git_stats_for_root + numstat parse + honest unavailable), src/components/StatsView.tsx (git columns, no-git rows, as-of stamp, Refresh), src/components/StatsView.test.tsx
+
+## docs
+
+### SCN-054: Project documentation
+- **Persona:** P-01
+- **Feature:** docs
+- **Traces:** ST-041, FLW-21 (JTBD-06, JRN-07/#2)
+- **Entry point:** project panel "Docs" tab (8th tab)
+- **Preconditions:** project exists
+- **Steps:**
+  1. User opens the Docs tab and sees the project's document list
+  2. User creates a doc (name → markdown editor), writes, saves
+  3. User switches a doc between edit and rendered-preview modes
+  4. User deletes a doc and confirms "delete document?"
+- **Expected result:** docs persist with the project (file-backed, like rules.md) and render as formatted markdown; the list shows name + last-modified; agents can read the same files from the project directory
+- **UI elements:** Docs tab, document list, "+ doc" button, name input, markdown editor, edit/preview toggle, "Save" button, "Delete" + window.confirm, "reveal file" button, empty state "No documents in this project yet."
+- **States covered:** loading, empty, error, success
+- **Errors & recovery:** empty name → "+ doc" blocked; save rejects → inline + toast, editor content preserved; file changed externally → "file changed externally" + Accept banner; file lost → "file lost" + Recreate (SCN-036 pattern); orchd down → Save/Delete/Accept/Recreate disabled, reading and "reveal file" stay live
+- **Status:** implemented
+- **Coverage:** src/components/DocsPanel.tsx:24-30 (name-rule mirror), :38-44 (relative last-modified), :259 (panel: list + editor, banners :495-533, orchd-down gating, save-reject inline+toast :326-343), src/components/DocsPanel.test.tsx (19 SCN-054 tests), src/components/markdown.ts:33 (dependency-free preview parser) + markdown.test.ts (11 tests), src/components/ProjectPanel.tsx:38,502 (8th "Docs" tab), src/strings.ts:317-347, src/store/store.ts:894-925 (docsByProject/docViews slices), src/App.tsx:213-231 (orchd://docs-changed binding) + :301-312 (reconnect rehydrate), src/ipc/orchd.ts:366-407 + src/ipc/events.ts:340, crates/orchd-proto/src/lib.rs:792-849 (Doc/DocMeta/DocView), :1331-1373 (ListDocs/GetDoc/UpsertDoc/DeleteDoc/AcknowledgeDocFile verbs), crates/orchd/src/persistence.rs:665-692 (schema v6 `doc` table), :2837-3078 (doc CRUD: name validation, files-as-truth upsert/delete/acknowledge), :6241+ (20 doc_tests incl. traversal rejection, external-change, lost-file, archived guards), crates/orchd/src/socket_server.rs:602-660,1320-1372 (build_doc_view/doc_meta/respond_doc + dispatch arms), crates/orchd/tests/dispatch_integration.rs:948 (wire lifecycle + error-path tests), src-tauri/src/commands.rs:1800-1965 (commands + reveal_doc_file_core no-path-from-JS), src-tauri/src/broker.rs:97 (orchd://docs-changed)
+
+## home (v2)
+
+### SCN-055: Home v2 — attention hub
+- **Persona:** P-01
+- **Feature:** home
+- **Traces:** ST-042, FLW-03 (JTBD-01, JTBD-10, JRN-02/#2, JRN-10/#6)
+- **Entry point:** app launch or sidebar "⌂ Home"; supersedes SCN-004 on ship (SCN-004 → retired), SCN-005 goals glance folds in unchanged
+- **Preconditions:** sessions exist; CEO may be enabled (all blocks degrade honestly when it is not)
+- **Steps:**
+  1. User opens Home after time away and reads the "Since you left" strip (decisions / hand-offs / open escalations; "open log" link)
+  2. User scans "Needs you" — every escalation card shows the agent's question text and a reason badge ("out of scope: {class}" / "no next task" / "waiting for input")
+  3. User clicks "Go →" on the top card, answers in the terminal, returns; on a "no next task" card the user instead clicks "open backlog →" and lands on that project's Tasks tab to add or prioritize work (IMP-02 — recovery lands where the fix lives)
+  4. User scans "Running" — each row shows project · current task · elapsed
+  5. User scans "Continued by CEO" hand-offs ("done {task} → started {next}") and finished rows
+  6. User glances the Goals section (as SCN-005)
+- **Expected result:** attention is ranked: escalations first (question visible without navigation), then running with progress, then hand-offs/finished; stat tiles read needs-you / running / CEO answered today / spend today (tone shifts when needs-you > 0); the digest clears once seen; CEO-off degrades to plain waiting rows (SCN-004 behavior) with no dead chrome
+- **UI elements:** "Since you left" strip + "open log" link, escalation cards (question preview, reason badge, "Go →", "open backlog →" on no-next-task cards), waiting rows, running rows (project · task · elapsed), hand-off rows, finished rows, stat tiles ×4, Goals section, empty state "Nothing needs you."
+- **States covered:** loading, empty, success
+- **Errors & recovery:** orchd down → digest/CEO/task data show "orchestrator unavailable" note while session rows (sessiond) stay live — degradation equals current Home; no CEO activity while away → digest suppressed entirely (no empty ceremony); stale session state impossible (exited-wins, SCN-016)
+- **Status:** validated
+- **Coverage:** none yet
+
+### SCN-056: First-run fast-path — terminal auto-spawn
+- **Persona:** P-02
+- **Feature:** onboarding
+- **Traces:** ST-002, FLW-01 (JTBD-09, JRN-01/#3-4; IMP-01)
+- **Entry point:** empty app, "+ Add workspace" from the empty state
+- **Preconditions:** zero prior sessions in the app (fast-path applies to the cold start only)
+- **Steps:**
+  1. User clicks "+ Add workspace" and picks a folder → system creates the workspace, navigates into it, AND auto-spawns the first terminal (cwd = workspace root)
+  2. User starts typing → the agent/shell is live immediately
+- **Expected result:** time-to-aha loses the manual "+ New terminal" step; the terminal tab is focused; nothing else changes vs SCN-002/SCN-013
+- **Alt paths:** workspace added while sessions already exist elsewhere → no auto-spawn (steady-state behavior unchanged, no surprise terminals)
+- **UI elements:** "+ Add workspace" button, OS folder picker, auto-created session tab, focused terminal pane
+- **States covered:** success, error
+- **Errors & recovery:** workspace creation errors — as SCN-002; auto-spawn fails → workspace view still opens with "+ New terminal" available and an honest toast (degradation = today's manual path, never a blocked first run)
+- **Status:** validated
+- **Coverage:** src/components/WorkspaceSidebar.tsx:115-146 (fast-path in onAdd), src/components/WorkspaceSidebar.test.tsx (3 SCN-056 tests), src/strings.ts:201

@@ -4,9 +4,11 @@ import { render, screen, cleanup, act, fireEvent, within, waitFor } from "@testi
 
 const pickFolderMock = vi.fn();
 const createWorkspaceMock = vi.fn();
+const createSessionMock = vi.fn();
 vi.mock("../ipc/commands", () => ({
   pickFolder: (...a: unknown[]) => pickFolderMock(...a),
   createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
+  createSession: (...a: unknown[]) => createSessionMock(...a),
 }));
 
 const orchdAddProjectWorkspaceMock = vi.fn();
@@ -17,6 +19,16 @@ vi.mock("../ipc/orchd", () => ({
   orchdCreateProject: (...a: unknown[]) => orchdCreateProjectMock(...a),
   orchdListProjects: vi.fn().mockResolvedValue([]),
   describeOrchdError: (...a: unknown[]) => describeOrchdErrorMock(...a),
+}));
+
+// SCN-045: the keep-awake pill's toggle goes through the store's `setKeepAwakeEnabled`, which
+// calls straight through to `../ipc/power` — mocked so a click never hits the real `invoke()`.
+const powerSetEnabledMock = vi.fn();
+const powerSyncSessionsMock = vi.fn();
+vi.mock("../ipc/power", () => ({
+  powerSetEnabled: (...a: unknown[]) => powerSetEnabledMock(...a),
+  powerSyncSessions: (...a: unknown[]) => powerSyncSessionsMock(...a),
+  powerStatus: vi.fn(),
 }));
 
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
@@ -41,14 +53,32 @@ function makeProject(over: Partial<Project> = {}): Project {
   };
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 beforeEach(() => {
+  // In-memory localStorage stub (repo convention — see `ThemeToggle.test.tsx`): the keep-awake
+  // toggle persists its preference here (SCN-045 "persisted"), and this jsdom setup provides no
+  // real localStorage of its own.
+  const persisted = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (k: string) => persisted.get(k) ?? null,
+    setItem: (k: string, v: string) => void persisted.set(k, v),
+    removeItem: (k: string) => void persisted.delete(k),
+    clear: () => persisted.clear(),
+  });
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
   createWorkspaceMock.mockResolvedValue({ id: "w3", name: "gamma", rootPath: "/p/gamma", roots: ["/p/gamma"] });
+  createSessionMock.mockReset().mockResolvedValue({ id: "s-auto" });
   orchdAddProjectWorkspaceMock.mockReset().mockResolvedValue(makeProject());
   orchdCreateProjectMock.mockReset().mockResolvedValue(makeProject());
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
+  powerSetEnabledMock.mockReset().mockResolvedValue({ enabled: true, active: false, error: null });
+  powerSyncSessionsMock
+    .mockReset()
+    .mockResolvedValue({ enabled: true, active: false, error: null });
   useAppStore.setState(
     {
       sessions: {},
@@ -59,6 +89,7 @@ beforeEach(() => {
       projects: [],
       activeProjectId: null,
       toast: null, toastQueue: [],
+      keepAwake: { enabled: true, active: false, error: null },
     },
     false,
   );
@@ -144,6 +175,50 @@ describe("WorkspaceSidebar", () => {
     });
     expect(useAppStore.getState().toast).toBe(
       strings.chrome.sidebar.addWorkspaceFailed(strings.errors.command.disconnected),
+    );
+  });
+
+  // First-run fast-path (SCN-056 / IMP-01): cold start + add workspace => the first terminal is
+  // auto-spawned so the aha (a live terminal) needs no manual "+ New terminal" click.
+  it("SCN-056: cold start (zero sessions) — adding a workspace auto-spawns the first terminal", async () => {
+    pickFolderMock.mockResolvedValue("/Users/me/projects/my-app");
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+      await Promise.resolve();
+    });
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    expect(createSessionMock).toHaveBeenCalledWith("w3");
+    expect(useAppStore.getState().view).toBe("workspace");
+  });
+
+  it("SCN-056: steady state (sessions exist) — adding a workspace spawns NO surprise terminal", async () => {
+    useAppStore.setState(
+      { sessions: { s1: { id: "s1" } as unknown as never } },
+      false,
+    );
+    pickFolderMock.mockResolvedValue("/Users/me/projects/my-app");
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+      await Promise.resolve();
+    });
+    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().view).toBe("workspace");
+  });
+
+  it("SCN-056: a failed auto-spawn degrades to the manual path — workspace opens, honest toast, never a blocked first run", async () => {
+    pickFolderMock.mockResolvedValue("/Users/me/projects/my-app");
+    createSessionMock.mockReset().mockRejectedValueOnce({ kind: "disconnected" });
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /add workspace/i }));
+      await Promise.resolve();
+    });
+    // navigation already happened — the failure only costs the shortcut
+    expect(useAppStore.getState().view).toBe("workspace");
+    expect(useAppStore.getState().toast).toBe(
+      strings.terminal.tabs.newTerminalFailed(strings.errors.command.disconnected),
     );
   });
 
@@ -260,6 +335,75 @@ describe("WorkspaceSidebar", () => {
     expect(ext).toBeTruthy();
     fireEvent.click(ext);
     expect(useAppStore.getState().view).toBe("ext");
+  });
+});
+
+describe("keep-awake pill (SCN-045 / FLW-18)", () => {
+  function pill(): HTMLElement {
+    return screen.getByTestId("keep-awake-pill");
+  }
+  function dotStyle(): string {
+    return screen.getByTestId("keep-awake-dot").getAttribute("style") ?? "";
+  }
+
+  it("renders in the footer as enabled-but-idle by default: idle label + muted dot", () => {
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(pill().textContent).toContain(strings.power.keepAwakeIdle);
+    expect(pill().getAttribute("aria-pressed")).toBe("true");
+    expect(dotStyle()).toContain("var(--muted)");
+  });
+
+  it("shows the active state (assertion held) with the ok-tone dot", () => {
+    useAppStore.setState({ keepAwake: { enabled: true, active: true, error: null } }, false);
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(pill().textContent).toContain(strings.power.keepAwakeOn);
+    expect(dotStyle()).toContain("var(--ok)");
+  });
+
+  it("shows the disabled state with a muted dot", () => {
+    useAppStore.setState({ keepAwake: { enabled: false, active: false, error: null } }, false);
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(pill().textContent).toContain(strings.power.keepAwakeOff);
+    expect(pill().getAttribute("aria-pressed")).toBe("false");
+    expect(dotStyle()).toContain("var(--muted)");
+  });
+
+  it("shows the honest failure state: danger dot + \"keep-awake unavailable: {reason}\" label", () => {
+    useAppStore.setState(
+      { keepAwake: { enabled: true, active: false, error: "os denied" } },
+      false,
+    );
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    expect(pill().textContent).toContain(strings.power.keepAwakeFailed("os denied"));
+    expect(dotStyle()).toContain("var(--danger)");
+  });
+
+  it("clicking the pill toggles: powerSetEnabled(false) is called, state mirrors the reply, and the preference persists", async () => {
+    powerSetEnabledMock.mockResolvedValueOnce({ enabled: false, active: false, error: null });
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(pill());
+    });
+    expect(powerSetEnabledMock).toHaveBeenCalledWith(false);
+    expect(useAppStore.getState().keepAwake.enabled).toBe(false);
+    // SCN-045 "persisted": survives a restart via localStorage (same path the theme uses).
+    expect(localStorage.getItem("bpa-keep-awake")).toBe("off");
+  });
+
+  it("clicking again re-enables (round-trip)", async () => {
+    useAppStore.setState({ keepAwake: { enabled: false, active: false, error: null } }, false);
+    powerSetEnabledMock.mockResolvedValueOnce({ enabled: true, active: true, error: null });
+    render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    await act(async () => {
+      fireEvent.click(pill());
+    });
+    expect(powerSetEnabledMock).toHaveBeenCalledWith(true);
+    expect(useAppStore.getState().keepAwake).toEqual({
+      enabled: true,
+      active: true,
+      error: null,
+    });
+    expect(localStorage.getItem("bpa-keep-awake")).toBe("on");
   });
 });
 

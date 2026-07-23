@@ -600,6 +600,53 @@ fn build_ruleset_view(rule: RuleSet) -> RuleSetView {
     }
 }
 
+/// Assembles the wire `DocView` (SCN-054) by pairing a DB-row `Doc` with a FRESH
+/// `ruleset_files::read_state` read of the file at `doc.md_path` against `doc.md_hash` — the
+/// EXACT [`build_ruleset_view`] shape (docs reuse the rules files-as-truth model wholesale,
+/// including the "read fresh on every doc-returning reply, not just `GetDoc`" discipline and its
+/// rationale — see that helper's doc).
+fn build_doc_view(doc: bpa_orchd_proto::Doc) -> bpa_orchd_proto::DocView {
+    let (md_content, file_state) = ruleset_files::read_state(Path::new(&doc.md_path), &doc.md_hash);
+    bpa_orchd_proto::DocView {
+        doc,
+        md_content,
+        file_state,
+    }
+}
+
+/// A `ListDocs` row (SCN-054: "the list shows name + last-modified"): `modified_at` is the doc
+/// FILE's mtime read fresh (files-as-truth — an agent's external edit moves it with no daemon
+/// write), falling back to the row's `updated_at` (the last daemon-side touch) when the file is
+/// lost/unreadable — honest degradation, never a fabricated timestamp (mirrors
+/// `ruleset_files::read_state`'s fold-to-`Missing` stance).
+fn doc_meta(doc: &bpa_orchd_proto::Doc) -> bpa_orchd_proto::DocMeta {
+    bpa_orchd_proto::DocMeta {
+        name: doc.name.clone(),
+        modified_at: ruleset_files::modified_at_ms(Path::new(&doc.md_path))
+            .unwrap_or(doc.updated_at),
+    }
+}
+
+/// A mutating doc verb's shared reply/push shape (SCN-054: `DocsChanged{project_id}`, routed by
+/// the returned row's own `project_id`) — shared by `UpsertDoc` and `AcknowledgeDocFile` (both
+/// return a bare `Doc` row from `persistence.rs`; `DeleteDoc` replies `Ack` and pushes inline).
+/// `ListDocs`/`GetDoc` are READs and do NOT use this helper — no push on a read, per spec §6's
+/// "mutating request" scoping. Mirrors [`respond_ruleset`] exactly.
+fn respond_doc(
+    result: Result<bpa_orchd_proto::Doc, OrchdPersistError>,
+    broadcaster: &Broadcaster,
+) -> OrchdResponse {
+    match result {
+        Ok(doc) => {
+            broadcaster.broadcast(OrchdFrame::Push(OrchdPush::DocsChanged {
+                project_id: doc.project_id.clone(),
+            }));
+            OrchdResponse::DocView(build_doc_view(doc))
+        }
+        Err(e) => map_err(e),
+    }
+}
+
 /// A mutating ruleset verb's shared reply/push shape (spec §6: `RuleSetChanged{scope,
 /// project_id}`) — shared by `UpsertRuleSet` and `AcknowledgeRuleFile` (both return a bare
 /// `RuleSet` row from `persistence.rs`). `GetRuleSet` is a READ and does NOT use this helper — no
@@ -1159,6 +1206,7 @@ async fn dispatch_inner(
             source,
             source_id,
             tags,
+            priority,
         } => {
             let result = {
                 let db = deps.db.lock().await;
@@ -1171,6 +1219,7 @@ async fn dispatch_inner(
                     source,
                     source_id.as_deref(),
                     &tags,
+                    priority,
                 )
             };
             respond_task(result, broadcaster)
@@ -1198,6 +1247,17 @@ async fn dispatch_inner(
             let result = {
                 let db = deps.db.lock().await;
                 db.set_task_rank(&id, rank)
+            };
+            respond_task(result, broadcaster)
+        }
+        // SCN-051 (ST-037): the focused urgent/normal mutator — same respond/push shape as
+        // `SetTaskStatus`/`SetTaskRank` above (⇒ `TasksChanged{project_id}` via `respond_task`).
+        // Lives with its task-verb siblings for readability; its WIRE position is the enum tail
+        // (append-only rule) — dispatch order is irrelevant to the codec.
+        OrchdRequest::SetTaskPriority { id, priority } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.set_task_priority(&id, priority)
             };
             respond_task(result, broadcaster)
         }
@@ -1256,6 +1316,59 @@ async fn dispatch_inner(
                 db.acknowledge_rule_file(&id)
             };
             respond_ruleset(result, broadcaster)
+        }
+
+        // ---- Project docs (SCN-054, FLW-21, ST-041): "rules.md × N named files" — every arm
+        // mirrors its ruleset sibling above (reads reply fresh-read views and push nothing;
+        // mutations reply the fresh view AND broadcast `DocsChanged{project_id}`). Live with the
+        // RuleSet family for readability; their WIRE positions are the enum tail (append-only
+        // rule) — dispatch order is irrelevant to the codec. ----
+        OrchdRequest::ListDocs { project_id } => {
+            let db = deps.db.lock().await;
+            match db.list_docs(&project_id) {
+                Ok(rows) => OrchdResponse::Docs(rows.iter().map(doc_meta).collect()),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::GetDoc { project_id, name } => {
+            let db = deps.db.lock().await;
+            match db.get_doc(&project_id, &name) {
+                Ok(doc) => OrchdResponse::DocView(build_doc_view(doc)),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::UpsertDoc {
+            project_id,
+            name,
+            md_content,
+        } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.upsert_doc(&project_id, &name, &md_content)
+            };
+            respond_doc(result, broadcaster)
+        }
+        OrchdRequest::DeleteDoc { id } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.delete_doc(&id)
+            };
+            match result {
+                Ok(doc) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::DocsChanged {
+                        project_id: doc.project_id,
+                    }));
+                    OrchdResponse::Ack
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::AcknowledgeDocFile { id } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.acknowledge_doc_file(&id)
+            };
+            respond_doc(result, broadcaster)
         }
 
         // ---- Export / import (spec §8; `now_ms` is the ONE handler-level clock read) ----

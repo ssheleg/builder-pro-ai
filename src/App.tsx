@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type JSX } from "react";
-import { useAppStore } from "./store/store";
+import { useAppStore, docViewKey } from "./store/store";
 import {
   onSessionCreated,
   onSessionStateChanged,
@@ -17,6 +17,7 @@ import {
   onOrchdInsightsChanged,
   onOrchdTasksChanged,
   onOrchdRulesetChanged,
+  onOrchdDocsChanged,
   onOrchdGraphChanged,
   onOrchdDown,
   onOrchdUp,
@@ -50,6 +51,7 @@ import { HomeView } from "./components/HomeView";
 import { ProjectPanel } from "./components/ProjectPanel";
 import { ExtPanel } from "./components/ext/ExtPanel";
 import { InboxPanel } from "./components/InboxPanel";
+import { StatsView } from "./components/StatsView";
 import { Toast } from "./components/Toast";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -115,6 +117,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   const view = useAppStore((s) => s.view);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const orchdDown = useAppStore((s) => s.orchdDown);
+  const syncKeepAwake = useAppStore((s) => s.syncKeepAwake);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<WorkspaceId | null>(null);
 
   useEffect(() => {
@@ -208,6 +211,23 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         void useAppStore.getState().refreshRuleset(key);
       }),
     );
+    // SCN-054 docs coarse-invalidation: re-fetch the named project's doc LIST (the push's own
+    // scope, mirroring `goals-changed`/`tasks-changed` above) AND every already-loaded doc VIEW
+    // of that project — another client's save/accept changes content+fileState the open editor
+    // must reflect (files-as-truth; a view whose doc was deleted is dropped by `refreshDoc`'s
+    // NotFound handling rather than toasted).
+    track(
+      onOrchdDocsChanged((p) => {
+        const s = useAppStore.getState();
+        void s.refreshDocs(p.projectId);
+        const prefix = docViewKey(p.projectId, "");
+        for (const key of Object.keys(s.docViews)) {
+          if (key.startsWith(prefix)) {
+            void s.refreshDoc(p.projectId, key.slice(prefix.length));
+          }
+        }
+      }),
+    );
     // Unconditional re-fetch, mirroring `goals-changed`/`tasks-changed` above (audit #5.1): there
     // is no "graph panel currently open" gating to mirror — none of the S3 precedents this event
     // was modeled on gate their refresh on view/activeProjectId, so this doesn't invent one either.
@@ -279,6 +299,17 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           // domain surface's reconnect-refresh exactly — an open project panel's Graph tab must
           // not stay stale after an orchd reconnect any more than Goals/Tasks/Ideas/Insights do.
           void s.refreshGraph(projectId);
+          // SCN-054: the Docs tab mirrors the same reconnect-refresh — its list is re-fetched
+          // for the open project; loaded doc VIEWS (any project's) rehydrate in the loop below.
+          void s.refreshDocs(projectId);
+        }
+        // Doc views self-heal on reconnect for every doc currently loaded in the store (SCN-054 +
+        // spec D8) — during the outage a `DocsChanged` push (another client's save, an agent's
+        // accepted edit) is lost, so every held view can be stale until re-read. Mirrors the
+        // "research runs for every idea currently holding runs" loop below.
+        for (const key of Object.keys(s.docViews)) {
+          const slash = key.indexOf("/");
+          if (slash > 0) void s.refreshDoc(key.slice(0, slash), key.slice(slash + 1));
         }
         // Extensions slices (S-EXT §8): whole-store, project-independent — refetch unconditionally
         // (spec D8's "mcp servers + artifacts + accounts + skills + policies + invocations").
@@ -409,6 +440,41 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * Keep-awake boot push (SCN-045, FLW-18): the core's `KeepAwakeState` defaults ON but cannot
+   * read localStorage, so the persisted toggle (already loaded into `keepAwake.enabled` at store
+   * creation) is pushed down exactly once at mount — a persisted "off" must win BEFORE the first
+   * live session could otherwise acquire an assertion the owner opted out of. Routed through
+   * `setKeepAwakeEnabled` (not a raw `powerSetEnabled`) so the reconciled reply and any denial
+   * take the same store path as a manual toggle; re-persisting the identical value is a no-op.
+   */
+  useEffect(() => {
+    const s = useAppStore.getState();
+    void s.setKeepAwakeEnabled(s.keepAwake.enabled);
+    // Mount-only by design (mirrors the subscription effect above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // LIVE session count for keep-awake (SCN-045): every non-exited session counts — running,
+  // waiting-for-input, even sitting at a prompt (an idle shell is still open work; only `exited`
+  // stops counting). Deliberately BROADER than `WorkspaceStatsChips`' "live" chip (which excludes
+  // waiting sessions for display purposes).
+  const liveSessionCount = Object.values(sessions).filter(
+    (m) => m.lifecycle.kind !== "exited",
+  ).length;
+
+  /**
+   * Keep-awake live-count sync (SCN-045): re-reconcile the core whenever the number of live
+   * sessions CHANGES — the 1st live session acquires the sleep assertion, the last one ending
+   * releases it (release also fires on toggle-off, via `setKeepAwakeEnabled` above). Keyed on the
+   * derived COUNT (a primitive), so unrelated session-map churn (lifecycle flips, cwd updates)
+   * never re-invokes the core; `syncKeepAwake` itself surfaces any OS denial honestly (toast +
+   * Diagnostics + pill failure state, once per failure streak — see `store.ts`).
+   */
+  useEffect(() => {
+    void syncKeepAwake(liveSessionCount);
+  }, [liveSessionCount, syncKeepAwake]);
+
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   // `FilesRail` needs a real `Workspace` (its `roots`) to have anything to show; `undefined`
   // while no workspace is selected makes it render nothing. Also gated on `view === "workspace"`
@@ -512,6 +578,9 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           // Orphan-idea Inbox (AUD-2026-07-19-11 / SCN-028): the only surface mounting the
           // ideas/insights lists with projectId={null} — ⌘K "no project" captures land here.
           <InboxPanel />
+        ) : view === "stats" ? (
+          // Stats view (SCN-052/053): usage + git output analytics; fetches lazily on first open.
+          <StatsView />
         ) : (
           <>
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>

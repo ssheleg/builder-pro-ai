@@ -5,6 +5,8 @@ import type {
   Account,
   AuditRow,
   ConnectorOp,
+  DocMeta,
+  DocView,
   DomainTask,
   FitVerdict,
   Goal,
@@ -40,6 +42,7 @@ import type {
   Skill,
   SkillScope,
   StorageStatus,
+  TaskPriority,
   TaskSource,
   TaskStatus,
 } from "./orchd-types";
@@ -238,6 +241,9 @@ export function orchdListInsights(projectId: string | null): Promise<Insight[]> 
 
 // ── tasks ────────────────────────────────────────────────────────────────────────────────────
 
+/** `priority: null` ⇒ the daemon defaults to `"normal"` (SCN-051 — mirrors `status: null` ⇒
+ * `"backlog"`); callers that expose the priority control (`TasksList`'s create form) pass the
+ * selected value explicitly. */
 export function orchdCreateTask(
   projectId: string,
   parentId: string | null,
@@ -247,6 +253,7 @@ export function orchdCreateTask(
   source: TaskSource,
   sourceId: string | null,
   tags: string[],
+  priority: TaskPriority | null,
 ): Promise<DomainTask> {
   return invoke<DomainTask>("orchd_create_task", {
     projectId,
@@ -257,6 +264,7 @@ export function orchdCreateTask(
     source,
     sourceId,
     tags,
+    priority,
   });
 }
 
@@ -275,6 +283,12 @@ export function orchdSetTaskStatus(id: string, status: TaskStatus): Promise<Doma
 
 export function orchdSetTaskRank(id: string, rank: number): Promise<DomainTask> {
   return invoke<DomainTask>("orchd_set_task_rank", { id, rank });
+}
+
+/** SCN-051 (ST-037): the urgent/normal flip on an existing task row — one focused command per
+ * mutation, mirroring `orchdSetTaskStatus`/`orchdSetTaskRank` above. */
+export function orchdSetTaskPriority(id: string, priority: TaskPriority): Promise<DomainTask> {
+  return invoke<DomainTask>("orchd_set_task_priority", { id, priority });
 }
 
 export function orchdDeleteTask(id: string): Promise<void> {
@@ -337,6 +351,47 @@ export function orchdUpsertRuleset(
 
 export function orchdAcknowledgeRuleFile(id: string): Promise<RuleSetView> {
   return invoke<RuleSetView>("orchd_acknowledge_rule_file", { id });
+}
+
+// ── project docs (SCN-054, FLW-21, ST-041: the Docs tab) ─────────────────────────────────────
+//
+// One thin wrapper per `orchd_*_doc*` `#[tauri::command]` (`src-tauri/src/commands.rs`), same
+// naming/arg-shape-verbatim convention as every wrapper above. Docs are "rules.md × N named
+// files" — the wrapper set mirrors the ruleset block: `orchdUpsertDoc` is THE one write call
+// (create "+ doc", Save, AND the "file lost" → Recreate path — exactly how `orchdUpsertRuleset`
+// serves the rules editor); `orchdAcknowledgeDocFile` is the "file changed externally" banner's
+// Accept; `orchdRevealDocFile` is CORE-ONLY path resolution (spec §9 "JS never passes a path" —
+// the core re-derives `mdPath` from its own fresh `GetDoc`, see `reveal_doc_file_core`).
+
+export function orchdListDocs(projectId: string): Promise<DocMeta[]> {
+  return invoke<DocMeta[]>("orchd_list_docs", { projectId });
+}
+
+export function orchdGetDoc(projectId: string, name: string): Promise<DocView> {
+  return invoke<DocView>("orchd_get_doc", { projectId, name });
+}
+
+export function orchdUpsertDoc(
+  projectId: string,
+  name: string,
+  mdContent: string,
+): Promise<DocView> {
+  return invoke<DocView>("orchd_upsert_doc", { projectId, name, mdContent });
+}
+
+export function orchdDeleteDoc(id: string): Promise<void> {
+  return invoke<void>("orchd_delete_doc", { id });
+}
+
+export function orchdAcknowledgeDocFile(id: string): Promise<DocView> {
+  return invoke<DocView>("orchd_acknowledge_doc_file", { id });
+}
+
+/** Resolves once the OS file reveal (Finder) has been requested — a local action, deliberately
+ * NOT gated on `orchdDown` in the UI beyond the read round-trip it needs (SCN-054: "reveal file"
+ * stays live while orchd is up; the daemon read inside will reject honestly when it is not). */
+export function orchdRevealDocFile(projectId: string, name: string): Promise<void> {
+  return invoke<void>("orchd_reveal_doc_file", { projectId, name });
 }
 
 // ── graph (S4 §7, T5's orchd_graph_* commands) ──────────────────────────────────────────────
@@ -839,5 +894,23 @@ export function isConsentError(e: unknown): boolean {
     (e as { kind: unknown }).kind === "daemon" &&
     "code" in e &&
     (e as { code: unknown }).code === "Consent"
+  );
+}
+
+/**
+ * `true` when `e` is a daemon `NotFound` rejection — same `CommandError` shape reading as
+ * `isConsentError` above. Consumed by the store's `refreshDoc` (SCN-054): when a doc-changed
+ * push races a concurrent delete from another client, the stale view's re-fetch rejects
+ * `NotFound` — that is the honest "this doc is gone" signal (the view entry is dropped), not an
+ * error worth a toast.
+ */
+export function isNotFoundError(e: unknown): boolean {
+  return (
+    e !== null &&
+    typeof e === "object" &&
+    "kind" in e &&
+    (e as { kind: unknown }).kind === "daemon" &&
+    "code" in e &&
+    (e as { code: unknown }).code === "NotFound"
   );
 }

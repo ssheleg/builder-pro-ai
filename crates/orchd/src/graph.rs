@@ -976,19 +976,20 @@ mod tests {
         .is_ok()
     }
 
-    // ---- schema v2 graph tables, still present in the now-current schema v4 (fresh DB) ----
+    // ---- schema v2 graph tables, still present in the now-current schema v6 (fresh DB) ----
 
     #[test]
-    fn fresh_db_is_schema_v4_with_graph_tables_and_all_five_indexes() {
+    fn fresh_db_is_schema_v6_with_graph_tables_and_all_five_indexes() {
         let db = new_db();
         let version: i64 = db
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // S-EXT spec §4 bumped SCHEMA_VERSION 2->3, and S-IDEA spec §4 bumped it 3->4
-        // (both additive); the S4 graph tables this test checks for are unaffected — still
-        // created by `migrate_v2`, which `migrate_v3`/`migrate_v4` build on top of, never replace.
-        assert_eq!(version, 4);
+        // S-EXT spec §4 bumped SCHEMA_VERSION 2->3, S-IDEA spec §4 bumped it 3->4, SCN-051
+        // bumped it 4->5, and SCN-054 bumped it 5->6 (all additive); the S4 graph tables this
+        // test checks for are unaffected — still created by `migrate_v2`, which
+        // `migrate_v3`..`migrate_v6` build on top of, never replace.
+        assert_eq!(version, 6);
         assert!(table_exists(db.conn(), "graph_node"));
         assert!(table_exists(db.conn(), "graph_edge"));
         for idx in [

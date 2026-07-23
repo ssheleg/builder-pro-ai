@@ -27,12 +27,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bpa_orchd_proto::{
-    Account, AuditRow, ConnectorOp, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEdge,
-    GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView, Idea, IdeaLifecycle,
-    Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
-    McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdRequest,
-    OrchdResponse, Policy, PolicyRules, PolicyScope, Project, ResearchRun, RuleScope, RuleSetView,
-    Skill, SkillScope, StorageStatus, TaskSource, TaskStatus,
+    Account, AuditRow, ConnectorOp, DocMeta, DocView, DomainTask, FitVerdict, Goal, GoalKind,
+    GoalStatus, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode, GraphNodeKind, GraphView,
+    Idea, IdeaLifecycle, Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult,
+    McpConnectReport, McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge,
+    OrchdRequest, OrchdResponse, Policy, PolicyRules, PolicyScope, Project, ResearchRun, RuleScope,
+    RuleSetView, Skill, SkillScope, StorageStatus, TaskPriority, TaskSource, TaskStatus,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -656,6 +656,20 @@ fn expect_domain_tasks(res: OrchdResponse) -> Result<Vec<DomainTask>, CommandErr
 fn expect_rule_set_view(res: OrchdResponse) -> Result<RuleSetView, CommandError> {
     match res {
         OrchdResponse::RuleSetView(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_doc_view(res: OrchdResponse) -> Result<DocView, CommandError> {
+    match res {
+        OrchdResponse::DocView(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_docs(res: OrchdResponse) -> Result<Vec<DocMeta>, CommandError> {
+    match res {
+        OrchdResponse::Docs(v) => Ok(v),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -1620,6 +1634,7 @@ pub async fn orchd_create_task(
     source: TaskSource,
     source_id: Option<String>,
     tags: Vec<String>,
+    priority: Option<TaskPriority>,
 ) -> Result<DomainTask, CommandError> {
     expect_domain_task(
         state
@@ -1633,6 +1648,7 @@ pub async fn orchd_create_task(
                 source,
                 source_id,
                 tags,
+                priority,
             })
             .await?,
     )
@@ -1683,6 +1699,22 @@ pub async fn orchd_set_task_rank(
         state
             .orchd()?
             .request(OrchdRequest::SetTaskRank { id, rank })
+            .await?,
+    )
+}
+
+/// SCN-051 (ST-037): the urgent/normal flip — mirrors `orchd_set_task_status`/
+/// `orchd_set_task_rank`'s one-focused-command-per-mutation shape verbatim.
+#[tauri::command]
+pub async fn orchd_set_task_priority(
+    state: State<'_, AppState>,
+    id: String,
+    priority: TaskPriority,
+) -> Result<DomainTask, CommandError> {
+    expect_domain_task(
+        state
+            .orchd()?
+            .request(OrchdRequest::SetTaskPriority { id, priority })
             .await?,
     )
 }
@@ -1760,6 +1792,82 @@ pub async fn orchd_acknowledge_rule_file(
     )
 }
 
+// ── project docs (SCN-054, FLW-21, ST-041): per-project markdown documents — one thin
+// pass-through per doc verb, mirroring the ruleset commands above verb-for-verb (docs are
+// "rules.md × N named files"; the daemon owns validation, file I/O and pushes). ──
+
+#[tauri::command]
+pub async fn orchd_list_docs(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<DocMeta>, CommandError> {
+    expect_docs(
+        state
+            .orchd()?
+            .request(OrchdRequest::ListDocs { project_id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_get_doc(
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+) -> Result<DocView, CommandError> {
+    expect_doc_view(
+        state
+            .orchd()?
+            .request(OrchdRequest::GetDoc { project_id, name })
+            .await?,
+    )
+}
+
+/// SCN-054's ONE write command — create ("+ doc"), Save, and the "file lost" → [Recreate] path
+/// alike (mirrors how `orchd_upsert_ruleset{md_content}` serves the rules editor's Save and
+/// Recreate; see the wire verb's own doc for the collapsed-verb rationale).
+#[tauri::command]
+pub async fn orchd_upsert_doc(
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+    md_content: String,
+) -> Result<DocView, CommandError> {
+    expect_doc_view(
+        state
+            .orchd()?
+            .request(OrchdRequest::UpsertDoc {
+                project_id,
+                name,
+                md_content,
+            })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_delete_doc(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::DeleteDoc { id })
+            .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn orchd_acknowledge_doc_file(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DocView, CommandError> {
+    expect_doc_view(
+        state
+            .orchd()?
+            .request(OrchdRequest::AcknowledgeDocFile { id })
+            .await?,
+    )
+}
+
 #[tauri::command]
 pub async fn orchd_export_project(
     state: State<'_, AppState>,
@@ -1823,6 +1931,37 @@ pub async fn orchd_reveal_rules_file(
     let path = reveal_rules_file_core(&client, scope, project_id).await?;
     opener::reveal(&path)
         .map_err(|e| CommandError::Internal(format!("failed to reveal rules file: {e}")))
+}
+
+/// Pure core of `orchd_reveal_doc_file` (SCN-054's "reveal file", same spec §9 security property
+/// as [`reveal_rules_file_core`]: "JS never passes a path"): fetches the `DocView` for
+/// `(project_id, name)` and returns the path `opener::reveal` should be called with — always
+/// `view.doc.md_path`, i.e. the path the daemon's own `GetDoc` reply carried, never anything a
+/// caller could substitute. Pulled out from the `#[tauri::command]` wrapper for the same
+/// stub-daemon unit-testability.
+pub(crate) async fn reveal_doc_file_core(
+    client: &OrchdClient,
+    project_id: String,
+    name: String,
+) -> Result<String, CommandError> {
+    let view = expect_doc_view(
+        client
+            .request(OrchdRequest::GetDoc { project_id, name })
+            .await?,
+    )?;
+    Ok(view.doc.md_path)
+}
+
+#[tauri::command]
+pub async fn orchd_reveal_doc_file(
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+) -> Result<(), CommandError> {
+    let client = state.orchd()?;
+    let path = reveal_doc_file_core(&client, project_id, name).await?;
+    opener::reveal(&path)
+        .map_err(|e| CommandError::Internal(format!("failed to reveal doc file: {e}")))
 }
 
 /// Sanitize a string for safe use as a filename component: keeps alphanumerics/`-`/`_`, collapses
@@ -4661,6 +4800,7 @@ pub(crate) mod orchd_commands_over_stub_daemon {
                             spend_cap_usd: None,
                             approval_classes: vec![],
                             path_allowlist: vec![],
+                            supervisor: Default::default(),
                         },
                         created_at: 0,
                         updated_at: 0,
@@ -4677,6 +4817,41 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             .await
             .unwrap();
         assert_eq!(path, "/app-support/global-rules.md");
+    }
+
+    #[tokio::test]
+    async fn orchd_reveal_doc_file_core_uses_the_get_doc_returned_path() {
+        // SCN-054's "reveal file" carries the same spec §9-locked security property as the rules
+        // reveal above: the path handed to `opener::reveal` is ALWAYS whatever GetDoc's own reply
+        // carried, never anything JS could substitute. Asserted at this inner-fn boundary (never
+        // calling the real `opener::reveal`, which would open a Finder window inside the test
+        // process).
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::GetDoc { project_id, name } => {
+                assert_eq!(project_id, "p1");
+                assert_eq!(name, "notes");
+                OrchdResponse::DocView(bpa_orchd_proto::DocView {
+                    doc: bpa_orchd_proto::Doc {
+                        id: "doc-1".into(),
+                        project_id: "p1".into(),
+                        name: "notes".into(),
+                        md_path: "/app-support/rules/docs/p1/notes.md".into(),
+                        md_hash: "abc123".into(),
+                        created_at: 0,
+                        updated_at: 0,
+                    },
+                    md_content: Some("# notes".into()),
+                    file_state: bpa_orchd_proto::RuleFileState::Ok,
+                })
+            }
+            other => panic!("expected GetDoc, got {other:?}"),
+        })
+        .await;
+
+        let path = super::reveal_doc_file_core(&client, "p1".into(), "notes".into())
+            .await
+            .unwrap();
+        assert_eq!(path, "/app-support/rules/docs/p1/notes.md");
     }
 
     #[tokio::test]

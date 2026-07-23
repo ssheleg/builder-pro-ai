@@ -95,6 +95,7 @@ fn sample_task() -> DomainTask {
         title: "Do the thing".into(),
         body: "Task body".into(),
         status: TaskStatus::Backlog,
+        priority: TaskPriority::Urgent,
         source: TaskSource::Idea,
         source_id: Some("idea-1".into()),
         tags: vec!["urgent".into()],
@@ -111,6 +112,13 @@ fn sample_policy() -> PolicyRules {
         spend_cap_usd: Some(100.0),
         approval_classes: vec!["deploy".into()],
         path_allowlist: vec!["/tmp".into()],
+        // SCN-046 / A-7 CEO supervisor config rides inside PolicyRules.
+        supervisor: SupervisorConfig {
+            enabled: true,
+            delegated_classes: vec!["safe-shell".into(), "file-write".into()],
+            instruction: "Keep changes small.".into(),
+            custom_rules: vec!["never push to main".into()],
+        },
     }
 }
 
@@ -460,6 +468,19 @@ fn all_requests() -> Vec<OrchdRequest> {
             source: TaskSource::Bug,
             source_id: None,
             tags: vec!["bug".into()],
+            priority: Some(TaskPriority::Urgent),
+        },
+        OrchdRequest::CreateTask {
+            project_id: "proj-1".into(),
+            parent_id: None,
+            title: "Task title".into(),
+            body: "Task body".into(),
+            status: None,
+            source: TaskSource::Plan,
+            source_id: None,
+            tags: vec![],
+            // `None` ⇒ the daemon defaults to `Normal` (SCN-051 create-form default).
+            priority: None,
         },
         OrchdRequest::UpdateTask {
             id: "task-1".into(),
@@ -693,6 +714,14 @@ fn all_requests() -> Vec<OrchdRequest> {
             kind: GraphEdgeKind::Supports,
         },
         OrchdRequest::ConnectorListProviders,
+        OrchdRequest::SetTaskPriority {
+            id: "task-1".into(),
+            priority: TaskPriority::Urgent,
+        },
+        OrchdRequest::SetTaskPriority {
+            id: "task-1".into(),
+            priority: TaskPriority::Normal,
+        },
     ]
 }
 
@@ -962,6 +991,64 @@ fn graph_entity_type_task_serializes_lowercase_on_the_wire() {
         }),
     };
     assert_wire_contains(&frame, "task");
+}
+
+#[test]
+fn task_priority_urgent_serializes_lowercase_on_the_wire() {
+    // SCN-051 (ST-037): exact tag equality (a broken `rename_all` producing "Urgent" fails)…
+    assert_serde_tag(&TaskPriority::Urgent, "urgent");
+    assert_serde_tag(&TaskPriority::Normal, "normal");
+    // …and prove the tag literally reaches the CBOR wire from a frame whose OTHER fields carry
+    // no "urgent" substring, so the only source of "urgent" in the bytes is the serialized tag.
+    let frame = OrchdFrame::Request {
+        id: 1,
+        req: OrchdRequest::SetTaskPriority {
+            id: "task-1".into(),
+            priority: TaskPriority::Urgent,
+        },
+    };
+    assert_wire_contains(&frame, "urgent");
+}
+
+#[test]
+fn task_priority_default_is_normal() {
+    // SCN-051: `Normal` is the contract-wide default — the DB column default, the create-form
+    // default, and the `#[serde(default)]` backfill below all hang off this one impl.
+    assert_eq!(TaskPriority::default(), TaskPriority::Normal);
+}
+
+#[test]
+fn domain_task_without_priority_key_deserializes_as_normal() {
+    // SCN-051 back-compat: a pre-priority export bundle (schema ≤ v4) serialized its tasks
+    // WITHOUT a `priority` key. `#[serde(default)]` on `DomainTask.priority` must decode such a
+    // payload as `Normal` instead of rejecting the whole bundle. (Codec-independent: the same
+    // derived `Deserialize` impl backs both this JSON input and the CBOR wire.)
+    let json = r#"{
+        "id": "task-1", "projectId": "proj-1", "parentId": null,
+        "title": "T", "body": "", "status": "backlog", "source": "plan",
+        "sourceId": null, "tags": [], "rank": 1024.0, "rankAgent": null,
+        "rankAgentReasoning": "", "createdAt": 0, "updatedAt": 0
+    }"#;
+    let task: DomainTask = serde_json::from_str(json).expect("pre-priority task must deserialize");
+    assert_eq!(task.priority, TaskPriority::Normal);
+}
+
+#[test]
+fn create_task_without_priority_key_deserializes_as_none() {
+    // SCN-051 back-compat mirror of the entity test above, for the verb: a `CreateTask` frame
+    // from a pre-priority peer omits the `priority` key entirely — `#[serde(default)]` decodes
+    // it as `None` (⇒ daemon defaults to `Normal`) instead of failing the frame.
+    let json = r#"{"CreateTask": {
+        "project_id": "proj-1", "parent_id": null, "title": "T", "body": "",
+        "status": null, "source": "plan", "source_id": null, "tags": []
+    }}"#;
+    // NOTE: frame types are NOT camelCased (Hop-B wire-only) — field names stay snake_case;
+    // `TaskSource`'s tag itself IS camelCased ("plan") because the entity enum is TS-exported.
+    let req: OrchdRequest = serde_json::from_str(json).expect("pre-priority CreateTask decodes");
+    match req {
+        OrchdRequest::CreateTask { priority, .. } => assert_eq!(priority, None),
+        other => panic!("expected CreateTask, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1375,4 +1462,56 @@ fn research_start_run_request_stays_snake_case_on_the_wire() {
     assert_wire_contains(&frame, "server_id");
     assert_wire_contains(&frame, "tool_name");
     assert_wire_contains(&frame, "args_json");
+}
+
+// ---- SCN-046 / A-7 CEO supervisor: PolicyRules additive field ----
+
+#[test]
+fn policy_rules_round_trips_supervisor_config_over_cbor() {
+    // The whole point of A-7: the CEO config rides inside PolicyRules, so it must survive the same
+    // Hop-B CBOR round-trip every other entity does. `sample_policy` now carries a fully-populated
+    // supervisor; the ruleset-view response variant already threads it through the wire.
+    let frame = OrchdFrame::Response {
+        id: 7,
+        res: OrchdResponse::RuleSetView(sample_ruleset_view()),
+    };
+    // The delegated-class tags reach the raw wire bytes verbatim (checked before the round-trip
+    // consumes the frame by value).
+    assert_wire_contains(&frame, "safe-shell");
+    assert_wire_contains(&frame, "delegatedClasses");
+    assert_frame_roundtrip(frame);
+}
+
+#[test]
+fn supervisor_config_json_round_trips_via_policy_rules() {
+    let policy = sample_policy();
+    let json = serde_json::to_string(&policy).expect("serialize");
+    let back: PolicyRules = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(policy, back);
+    // camelCase field names on the JSON wire (ts-rs parity with the generated TS type).
+    assert!(json.contains("delegatedClasses"), "got: {json}");
+    assert!(json.contains("customRules"), "got: {json}");
+}
+
+#[test]
+fn policy_rules_without_supervisor_key_decodes_to_default_disabled() {
+    // A-7 "old rows/bundles decode": a PolicyRules JSON blob predating SCN-046 has no `supervisor`
+    // key; `#[serde(default)]` on the field must backfill it to a disabled/empty config instead of
+    // erroring on a missing field.
+    let json = r#"{"spendCapUsd":null,"approvalClasses":[],"pathAllowlist":[]}"#;
+    let policy: PolicyRules = serde_json::from_str(json).expect("legacy policy JSON must decode");
+    assert_eq!(policy.supervisor, SupervisorConfig::default());
+    assert!(!policy.supervisor.enabled);
+    assert!(policy.supervisor.delegated_classes.is_empty());
+    assert!(policy.supervisor.custom_rules.is_empty());
+    assert_eq!(policy.supervisor.instruction, "");
+}
+
+#[test]
+fn supervisor_config_default_is_disabled_empty() {
+    let d = SupervisorConfig::default();
+    assert!(!d.enabled);
+    assert!(d.delegated_classes.is_empty());
+    assert!(d.custom_rules.is_empty());
+    assert_eq!(d.instruction, "");
 }

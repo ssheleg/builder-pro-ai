@@ -34,9 +34,45 @@ reason: string | null, invocationId: string | null, };
 export type ConnectorOp = { name: string, description: string | null, };
 
 /**
+ * A per-project markdown document's DB-row half (SCN-054). Field set mirrors [`RuleSet`]
+ * column-for-column minus the ruleset-only `scope`/`policy` (a doc is always project-scoped and
+ * carries no policy) plus the owner-chosen `name` — the doc's identity within its project
+ * (unique per project+name pair, validated against `[a-z0-9._-]`, never a path). NOTE: this doc
+ * comment is copied into the generated TS verbatim by ts-rs, so field names here are camelCase
+ * (`mdPath`/`mdHash`) — same discipline as [`StorageStatus`]'s doc.
+ */
+export type Doc = { id: string, projectId: string, name: string, mdPath: string, mdHash: string, createdAt: number, updatedAt: number, };
+
+/**
+ * `ListDocs`'s list-row shape (SCN-054: "the list shows name + last-modified"): name plus the
+ * doc FILE's mtime in unix-ms, read fresh per list (files-as-truth — an external edit moves it
+ * with no daemon write). When the file's mtime cannot be read (file lost/unreadable), the
+ * dispatch layer falls back to the DB row's `updatedAt` — the last time orchd itself touched
+ * the doc — rather than fabricating a timestamp.
+ */
+export type DocMeta = { name: string, modifiedAt: number, };
+
+/**
+ * `GetDoc`/`UpsertDoc`/`AcknowledgeDocFile`'s reply — mirrors [`RuleSetView`] field-for-field
+ * (SCN-054 reuses the rules wire-state model wholesale): the DB row paired with a FRESH
+ * read-state classification of the file at `doc.mdPath` against `doc.mdHash`. Reuses
+ * [`RuleFileState`] verbatim — `ok` (healthy), `externallyModified` ("file changed externally"
+ * with the Accept banner), and `missing` ("file lost" with the Recreate banner) are exactly the
+ * three SCN-054 states, so a parallel enum would be pure drift surface.
+ */
+export type DocView = { doc: Doc, mdContent: string | null, fileState: RuleFileState, };
+
+/**
  * named `DomainTask` to avoid the `tokio::task` clash (spec §4.2).
  */
-export type DomainTask = { id: string, projectId: string, parentId: string | null, title: string, body: string, status: TaskStatus, source: TaskSource, sourceId: string | null, tags: Array<string>, rank: number, rankAgent: number | null, rankAgentReasoning: string, createdAt: number, updatedAt: number, };
+export type DomainTask = { id: string, projectId: string, parentId: string | null, title: string, body: string, status: TaskStatus, 
+/**
+ * SCN-051 (ST-037): urgent/normal. `#[serde(default)]` (⇒ `Normal`) so pre-priority
+ * payloads — a schema-≤v4 export bundle's task rows, or a frame from a pre-priority peer —
+ * still decode instead of rejecting the whole bundle/frame; the daemon itself always sends
+ * the field, so the generated TS type keeps it required.
+ */
+priority: TaskPriority, source: TaskSource, sourceId: string | null, tags: Array<string>, rank: number, rankAgent: number | null, rankAgentReasoning: string, createdAt: number, updatedAt: number, };
 
 export type FitVerdict = "fit" | "noFit" | "unknown";
 
@@ -159,7 +195,18 @@ export type Policy = { id: string, scope: PolicyScope,
  */
 refId: string | null, spendCapUsd: number | null, ratePerMin: number | null, createdAt: number, updatedAt: number, };
 
-export type PolicyRules = { spendCapUsd: number | null, approvalClasses: Array<string>, pathAllowlist: Array<string>, };
+/**
+ * Per-ruleset owner-consent policy (S1, spec §5.2). Strict-validated before storage (the
+ * persistence `validate_policy` guard): `spendCapUsd >= 0`, non-empty confirmation-class and
+ * allowed-path entries, and `deny_unknown_fields`.
+ *
+ * `supervisor` (SCN-046, A-7) is an ADDITIVE field carrying the per-project CEO config — see
+ * [`SupervisorConfig`] for why it lives inside this policy rather than in its own table, and why
+ * its `#[serde(default)]` matters for decoding rows/bundles that predate it. Because the field is
+ * non-`Option`, an update that means to SET it must send it explicitly (same D11 discipline as the
+ * two lists); the `default` only backfills DECODING, never a partial wire write.
+ */
+export type PolicyRules = { spendCapUsd: number | null, approvalClasses: Array<string>, pathAllowlist: Array<string>, supervisor: SupervisorConfig, };
 
 /**
  * `policy.scope` (spec §4/§6, BL-22): which axis a cap applies to. `crate::trust`'s
@@ -227,6 +274,62 @@ export type StorageMode = "persistent" | "in_memory_fallback" | "recovered_from_
  * never changes without a daemon restart.
  */
 export type StorageStatus = { storageMode: StorageMode, quarantinedPath: string | null, };
+
+/**
+ * The per-project "CEO supervisor" config (SCN-046, FLW-19 JRN-10/#1, foundation §5 A-7). It
+ * rides INSIDE [`PolicyRules`] as one additive field rather than a table of its own precisely
+ * because A-7 says the CEO's authority is a view onto the existing policy: the caps it acts
+ * within are the pre-existing policy `spendCapUsd` plus the approval-class machinery, never a
+ * duplicate set of caps. This struct therefore carries only what the policy did not already model:
+ * the enable switch, WHICH confirmation classes are delegated, the operator's free-form
+ * instruction, and any extra rules.
+ *
+ * PLUMBING ONLY (honesty boundary, S6b). Persisting this config does NOT make a CEO act — the
+ * orchestrator-agent runtime that would READ this config and autonomously answer agent questions
+ * or continue workflows (SCN-047/SCN-049) does not exist yet (S6b). The UI carries a matching
+ * pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same
+ * register as the Skills tab's registry banner. Nothing here starts an agent.
+ *
+ * `#[serde(default)]` at the container level lets a policy JSON blob that predates this field
+ * (every ruleset policy row written before SCN-046, plus the DB's `'{}'` column default and any
+ * older export bundle) decode straight into [`SupervisorConfig::default`] — a disabled CEO with an
+ * empty scope — instead of failing with a "missing field" error. It also lets a partial object
+ * (say `{"enabled":true}` from a hand-edited bundle) fill the rest from `Default` rather than
+ * erroring, so a truncated blob degrades to "off" honestly.
+ */
+export type SupervisorConfig = { 
+/**
+ * Master switch, default `false` (SCN-046: "disabled by default until explicitly enabled").
+ * An enabled CEO with an empty delegation scope is an invalid save (SCN-046: "empty delegation
+ * scope with CEO on → blocked") — enforced client-side (the blocked alert) AND by the
+ * persistence `validate_policy` guard, so the invariant holds even against a racing or
+ * hand-crafted request, not just the UI.
+ */
+enabled: boolean, 
+/**
+ * The confirmation classes the operator has delegated to the CEO — the subset of the policy's
+ * approval-class machinery the CEO is allowed to answer on the operator's behalf (SCN-046 step
+ * 2). Each entry must be non-empty (validated alongside the policy's own list entries).
+ */
+delegatedClasses: Array<string>, 
+/**
+ * Free-form markdown the CEO must follow (SCN-046 step 3). Stored verbatim; never parsed here.
+ */
+instruction: string, 
+/**
+ * Optional extra CEO rules beyond the instruction — one editable line each (SCN-046
+ * "custom-rules editor"). Each entry must be non-empty, same rule as the delegated classes.
+ */
+customRules: Array<string>, };
+
+/**
+ * SCN-051 (ST-037): two-level task priority. `Urgent` renders visually distinct (danger-tone
+ * marker + chip) and sorts ahead of `Normal` within its status group (UI concern, SCN-051);
+ * workflow continuation (SCN-049) consumes urgent tasks first. `Normal` is the single
+ * contract-wide default — `#[default]` here backs the DB column default (`'normal'`), the
+ * `#[serde(default)]` decode backfill on [`DomainTask::priority`], and the create-form default.
+ */
+export type TaskPriority = "urgent" | "normal";
 
 export type TaskSource = "idea" | "insight" | "bug" | "plan";
 

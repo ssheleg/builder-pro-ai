@@ -70,6 +70,10 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdRulesetChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdDocsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdDocsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
   onOrchdGraphChanged: (cb: (p: unknown) => void) => {
     cbs.orchdGraphChanged = cb;
     return Promise.resolve(unlisten);
@@ -231,6 +235,19 @@ vi.mock("./ipc/fs", async (importOriginal) => {
   };
 });
 
+// SCN-045: App pushes the persisted keep-awake toggle into the core once at boot and syncs the
+// live-session count on every change — the store's actions call straight through to these,
+// mocked for the same deterministic-resolution reason as every wrapper above.
+const powerSetEnabledMock = vi.fn().mockResolvedValue({ enabled: true, active: false, error: null });
+const powerSyncSessionsMock = vi
+  .fn()
+  .mockResolvedValue({ enabled: true, active: false, error: null });
+vi.mock("./ipc/power", () => ({
+  powerSetEnabled: (...a: unknown[]) => powerSetEnabledMock(...a),
+  powerSyncSessions: (...a: unknown[]) => powerSyncSessionsMock(...a),
+  powerStatus: vi.fn(),
+}));
+
 const disposeMock = vi.fn();
 const openMock = vi.fn();
 const hideMock = vi.fn();
@@ -325,8 +342,13 @@ beforeEach(() => {
   orchdStorageStatusMock
     .mockReset()
     .mockResolvedValue({ storageMode: "persistent", quarantinedPath: null });
+  powerSetEnabledMock.mockReset().mockResolvedValue({ enabled: true, active: false, error: null });
+  powerSyncSessionsMock
+    .mockReset()
+    .mockResolvedValue({ enabled: true, active: false, error: null });
   useAppStore.setState(
     {
+      keepAwake: { enabled: true, active: false, error: null },
       sessions: {},
       workspaces: {},
       activeSessionId: null,
@@ -370,7 +392,7 @@ beforeEach(() => {
 });
 
 describe("App", () => {
-  it("registers all IPC subscriptions on mount (ten sessiond/fs + ten orchd + three MCP + one connectors + one skills + one research, S3 T13 + S4 T6 + S-EXT T8/T13b/T17 + S-IDEA T6)", async () => {
+  it("registers all IPC subscriptions on mount (ten sessiond/fs + eleven orchd + three MCP + one connectors + one skills + one research, S3 T13 + S4 T6 + S-EXT T8/T13b/T17 + S-IDEA T6 + SCN-054)", async () => {
     await act(async () => {
       render(<App manager={fakeManager} />);
     });
@@ -391,6 +413,7 @@ describe("App", () => {
       "orchdInsightsChanged",
       "orchdTasksChanged",
       "orchdRulesetChanged",
+      "orchdDocsChanged",
       "orchdGraphChanged",
       "orchdDown",
       "orchdUp",
@@ -740,6 +763,68 @@ describe("App", () => {
       screen.getByRole("button", { name: /new terminal/i }).click();
     });
     expect(createSessionMock).toHaveBeenCalledWith("w1", { cwd: "/p", cols: 80, rows: 24 });
+  });
+});
+
+describe("SCN-045: keep-awake wiring (FLW-18)", () => {
+  it("pushes the persisted keep-awake preference into the core exactly once on mount", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    // The core defaults ON but cannot read localStorage — a persisted "off" must win before any
+    // session exists, so the boot push happens regardless of the persisted value.
+    expect(powerSetEnabledMock).toHaveBeenCalledTimes(1);
+    expect(powerSetEnabledMock).toHaveBeenCalledWith(true);
+  });
+
+  it("syncs the live count on mount (0) and re-syncs as sessions appear and exit", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    expect(powerSyncSessionsMock.mock.lastCall).toEqual([0]);
+
+    // A session at prompt is LIVE (lifecycle.kind !== "exited") — an idle shell still means the
+    // owner left work open; only exited sessions stop counting.
+    await act(async () => {
+      cbs.created(meta());
+    });
+    expect(powerSyncSessionsMock.mock.lastCall).toEqual([1]);
+
+    await act(async () => {
+      cbs.created(meta({ id: "s2", lifecycle: { kind: "running" } }));
+    });
+    expect(powerSyncSessionsMock.mock.lastCall).toEqual([2]);
+
+    await act(async () => {
+      cbs.exited({ sessionId: "s2", code: 0, signal: null });
+    });
+    expect(powerSyncSessionsMock.mock.lastCall).toEqual([1]);
+
+    // The LAST live session ends (SCN-045 step 2) — the 0-sync is what releases the assertion.
+    await act(async () => {
+      cbs.exited({ sessionId: "s1", code: 0, signal: null });
+    });
+    expect(powerSyncSessionsMock.mock.lastCall).toEqual([0]);
+  });
+
+  it("does NOT re-sync on a store change that leaves the live count unchanged", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.created(meta());
+    });
+    powerSyncSessionsMock.mockClear();
+    // atPrompt → running: still one live session — the count-keyed effect must not re-fire.
+    await act(async () => {
+      cbs.state({
+        sessionId: "s1",
+        lifecycle: { kind: "running" },
+        waitingForInput: false,
+        cwd: "/tmp",
+      });
+    });
+    expect(powerSyncSessionsMock).not.toHaveBeenCalled();
   });
 });
 
@@ -1157,7 +1242,7 @@ describe("S3 T13: orchd domain event wiring", () => {
   it("orchd://tasks-changed refreshes ONLY the named project's tasks", async () => {
     orchdListTasksMock.mockResolvedValue([
       { id: "t1", projectId: "p1", parentId: null, title: "t", body: "", status: "todo",
-        source: "idea", sourceId: null, tags: [], rank: 0, rankAgent: null,
+        priority: "normal", source: "idea", sourceId: null, tags: [], rank: 0, rankAgent: null,
         rankAgentReasoning: "", createdAt: 1, updatedAt: 1 },
     ]);
     await act(async () => {
@@ -1239,7 +1324,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     orchdGetRulesetMock.mockResolvedValue({
       rule: {
         id: "r1", scope: "global", projectId: null, mdPath: "/x", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,
@@ -1259,7 +1349,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     orchdGetRulesetMock.mockResolvedValue({
       rule: {
         id: "r2", scope: "project", projectId: "p1", mdPath: "/x", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,
@@ -1317,7 +1412,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     orchdGetRulesetMock.mockResolvedValue({
       rule: {
         id: "r1", scope: "project", projectId: "p1", mdPath: "/x", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,
@@ -1369,7 +1469,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     const globalView = {
       rule: {
         id: "gr", scope: "global" as const, projectId: null, mdPath: "/g", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,

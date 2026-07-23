@@ -19,12 +19,13 @@ import { IdeasList } from "./IdeasList";
 import { TasksList } from "./TasksList";
 import { InsightsList } from "./InsightsList";
 import { RulesetPanel } from "./RulesetPanel";
+import { DocsPanel } from "./DocsPanel";
 import { OrchdDownBanner } from "./OrchdDownBanner";
 import { GraphCanvas } from "./graph/GraphCanvas";
 import { Badge, Button, Panel, Stat } from "../ui/primitives";
 import { strings } from "../strings";
 
-type TabKey = "overview" | "goals" | "ideas" | "tasks" | "insights" | "rules" | "graph";
+type TabKey = "overview" | "goals" | "ideas" | "tasks" | "insights" | "rules" | "graph" | "docs";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "overview", label: strings.project.tabs.overview },
@@ -34,6 +35,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "insights", label: strings.project.tabs.insights },
   { key: "rules", label: strings.project.tabs.rules },
   { key: "graph", label: strings.project.tabs.graph },
+  { key: "docs", label: strings.project.tabs.docs },
 ];
 
 const panelStyle: CSSProperties = {
@@ -84,8 +86,8 @@ function linkedWorkspaceIds(projects: { workspaceIds: string[] }[]): Set<string>
 }
 
 /**
- * Project workspace/detail panel (S3 spec §10, task-18; S4 §7 T7 added the 7th "Graph" tab). Seven
- * tabs; ONE is mounted at a time
+ * Project workspace/detail panel (S3 spec §10, task-18; S4 §7 T7 added the 7th "Graph" tab;
+ * SCN-054 added the 8th "Docs" tab). Eight tabs; ONE is mounted at a time
  * (unmounting the others, not just hiding them — cheapest way to keep each T14-T17 component's own
  * mount-fetch effect honest about "did I already load this project's data").
  *
@@ -111,9 +113,9 @@ function linkedWorkspaceIds(projects: { workspaceIds: string[] }[]): Set<string>
  *
  * Honest degradation (spec §10): the shared `<OrchdDownBanner/>` renders above the tab bar
  * whenever the store's `orchdDown` is `true` — this is the panel-level half of "every domain
- * surface shows the banner"; each of the six tab bodies (`GoalTree`/`IdeasList`/`TasksList`/
- * `InsightsList`/`RulesetPanel`/`GraphCanvas`) independently disables its own mutating controls
- * off the same flag.
+ * surface shows the banner"; each of the seven tab bodies (`GoalTree`/`IdeasList`/`TasksList`/
+ * `InsightsList`/`RulesetPanel`/`GraphCanvas`/`DocsPanel`) independently disables its own
+ * mutating controls off the same flag.
  */
 export function ProjectPanel(props: { projectId: string }): JSX.Element {
   const { projectId } = props;
@@ -497,6 +499,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
         {activeTab === "insights" && <InsightsList projectId={projectId} />}
         {activeTab === "rules" && <RulesetPanel scope="project" projectId={projectId} />}
         {activeTab === "graph" && <GraphCanvas projectId={projectId} />}
+        {activeTab === "docs" && <DocsPanel projectId={projectId} />}
       </div>
     </div>
   );
