@@ -115,6 +115,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   const view = useAppStore((s) => s.view);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const orchdDown = useAppStore((s) => s.orchdDown);
+  const syncKeepAwake = useAppStore((s) => s.syncKeepAwake);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<WorkspaceId | null>(null);
 
   useEffect(() => {
@@ -408,6 +409,41 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Keep-awake boot push (SCN-045, FLW-18): the core's `KeepAwakeState` defaults ON but cannot
+   * read localStorage, so the persisted toggle (already loaded into `keepAwake.enabled` at store
+   * creation) is pushed down exactly once at mount — a persisted "off" must win BEFORE the first
+   * live session could otherwise acquire an assertion the owner opted out of. Routed through
+   * `setKeepAwakeEnabled` (not a raw `powerSetEnabled`) so the reconciled reply and any denial
+   * take the same store path as a manual toggle; re-persisting the identical value is a no-op.
+   */
+  useEffect(() => {
+    const s = useAppStore.getState();
+    void s.setKeepAwakeEnabled(s.keepAwake.enabled);
+    // Mount-only by design (mirrors the subscription effect above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // LIVE session count for keep-awake (SCN-045): every non-exited session counts — running,
+  // waiting-for-input, even sitting at a prompt (an idle shell is still open work; only `exited`
+  // stops counting). Deliberately BROADER than `WorkspaceStatsChips`' "live" chip (which excludes
+  // waiting sessions for display purposes).
+  const liveSessionCount = Object.values(sessions).filter(
+    (m) => m.lifecycle.kind !== "exited",
+  ).length;
+
+  /**
+   * Keep-awake live-count sync (SCN-045): re-reconcile the core whenever the number of live
+   * sessions CHANGES — the 1st live session acquires the sleep assertion, the last one ending
+   * releases it (release also fires on toggle-off, via `setKeepAwakeEnabled` above). Keyed on the
+   * derived COUNT (a primitive), so unrelated session-map churn (lifecycle flips, cwd updates)
+   * never re-invokes the core; `syncKeepAwake` itself surfaces any OS denial honestly (toast +
+   * Diagnostics + pill failure state, once per failure streak — see `store.ts`).
+   */
+  useEffect(() => {
+    void syncKeepAwake(liveSessionCount);
+  }, [liveSessionCount, syncKeepAwake]);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   // `FilesRail` needs a real `Workspace` (its `roots`) to have anything to show; `undefined`

@@ -59,6 +59,16 @@ vi.mock("../ipc/orchd", () => ({
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
+// SCN-045 keep-awake: `setKeepAwakeEnabled`/`syncKeepAwake` call straight through to these —
+// mocked for the same determinism reason as the orchd wrappers above.
+const powerSetEnabledMock = vi.fn();
+const powerSyncSessionsMock = vi.fn();
+vi.mock("../ipc/power", () => ({
+  powerSetEnabled: (...a: unknown[]) => powerSetEnabledMock(...a),
+  powerSyncSessions: (...a: unknown[]) => powerSyncSessionsMock(...a),
+  powerStatus: vi.fn(),
+}));
+
 import { useAppStore } from "./store";
 import { toSupportBundle } from "../ipc/diag";
 
@@ -98,8 +108,13 @@ describe("useAppStore", () => {
     trustListPoliciesMock.mockReset();
     trustListAuditMock.mockReset();
     orchdStorageStatusMock.mockReset();
+    powerSetEnabledMock.mockReset().mockResolvedValue({ enabled: true, active: false, error: null });
+    powerSyncSessionsMock
+      .mockReset()
+      .mockResolvedValue({ enabled: true, active: false, error: null });
     useAppStore.setState(
       {
+        keepAwake: { enabled: true, active: false, error: null },
         sessions: {},
         workspaces: {},
         activeSessionId: null,
@@ -1243,5 +1258,127 @@ describe("useAppStore", () => {
     });
     useAppStore.getState().clearDiag();
     expect(useAppStore.getState().diagEvents).toEqual([]);
+  });
+
+  // ── keep-awake (SCN-045 / FLW-18) ────────────────────────────────────────────────────────────
+
+  describe("keepAwake (SCN-045)", () => {
+    beforeEach(async () => {
+      useAppStore.setState({ diagEvents: [], toast: null, toastQueue: [] });
+      // Drain the module-level once-per-streak gate (`lastPowerError` closure state survives
+      // across tests in this file): a successful sync resets it, so every test below starts from
+      // a clean "no active failure streak".
+      powerSyncSessionsMock.mockResolvedValueOnce({ enabled: true, active: false, error: null });
+      await useAppStore.getState().syncKeepAwake(0);
+      useAppStore.setState({ diagEvents: [], toast: null, toastQueue: [] });
+    });
+
+    it("defaults: enabled (SCN-045 default-on), not active, no error", () => {
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: true,
+        active: false,
+        error: null,
+      });
+    });
+
+    it("setKeepAwakeEnabled(false) calls powerSetEnabled and mirrors the reconciled status", async () => {
+      powerSetEnabledMock.mockResolvedValueOnce({ enabled: false, active: false, error: null });
+      await useAppStore.getState().setKeepAwakeEnabled(false);
+      expect(powerSetEnabledMock).toHaveBeenCalledWith(false);
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: false,
+        active: false,
+        error: null,
+      });
+      expect(useAppStore.getState().toast).toBeNull(); // a clean toggle is not an error
+    });
+
+    it("syncKeepAwake passes the live count through and mirrors active (assertion held)", async () => {
+      powerSyncSessionsMock.mockResolvedValueOnce({ enabled: true, active: true, error: null });
+      await useAppStore.getState().syncKeepAwake(2);
+      expect(powerSyncSessionsMock).toHaveBeenCalledWith(2);
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: true,
+        active: true,
+        error: null,
+      });
+    });
+
+    it("an OS denial surfaces honestly — failure state + toast + Diagnostics record — never a fake awake", async () => {
+      powerSyncSessionsMock.mockResolvedValue({ enabled: true, active: false, error: "os denied" });
+      await useAppStore.getState().syncKeepAwake(1);
+      const s = useAppStore.getState();
+      expect(s.keepAwake).toEqual({ enabled: true, active: false, error: "os denied" });
+      // SCN-045 copy: "keep-awake unavailable: {reason}" reaches the toast...
+      expect(s.toast).toContain("keep-awake unavailable: os denied");
+      // ...AND the diagnostics ring, classified under the Power kind.
+      expect(s.diagEvents).toHaveLength(1);
+      expect(s.diagEvents[0].kind).toBe("Power");
+      // `op` follows the store's action-name convention (`"refreshProjects"`, …).
+      expect(s.diagEvents[0].op).toBe("syncKeepAwake");
+    });
+
+    it("the same denial is reported ONCE per failure streak, not on every sync", async () => {
+      powerSyncSessionsMock.mockResolvedValue({ enabled: true, active: false, error: "os denied" });
+      await useAppStore.getState().syncKeepAwake(1);
+      await useAppStore.getState().syncKeepAwake(2);
+      await useAppStore.getState().syncKeepAwake(3);
+      const s = useAppStore.getState();
+      expect(s.diagEvents).toHaveLength(1);
+      expect(s.toastQueue).toHaveLength(1);
+      // The pill's failure state stays current even while the report is deduped.
+      expect(s.keepAwake.error).toBe("os denied");
+    });
+
+    it("recovery clears the failure state AND re-arms the once-per-streak gate", async () => {
+      powerSyncSessionsMock.mockResolvedValueOnce({
+        enabled: true,
+        active: false,
+        error: "os denied",
+      });
+      await useAppStore.getState().syncKeepAwake(1);
+      expect(useAppStore.getState().diagEvents).toHaveLength(1);
+
+      // The transient OS condition clears — a later sync succeeds (SCN-045 recovery).
+      powerSyncSessionsMock.mockResolvedValueOnce({ enabled: true, active: true, error: null });
+      await useAppStore.getState().syncKeepAwake(1);
+      expect(useAppStore.getState().keepAwake).toEqual({
+        enabled: true,
+        active: true,
+        error: null,
+      });
+
+      // A NEW failure streak after the recovery is reported again (it is not the same streak).
+      powerSyncSessionsMock.mockResolvedValueOnce({
+        enabled: true,
+        active: false,
+        error: "os denied",
+      });
+      await useAppStore.getState().syncKeepAwake(2);
+      expect(useAppStore.getState().diagEvents).toHaveLength(2);
+    });
+
+    it("a rejected powerSyncSessions invoke degrades honestly (active=false, reported once per streak)", async () => {
+      powerSyncSessionsMock.mockRejectedValue({ kind: "internal", message: "ipc down" });
+      await useAppStore.getState().syncKeepAwake(1);
+      await useAppStore.getState().syncKeepAwake(2);
+      const s = useAppStore.getState();
+      expect(s.keepAwake.active).toBe(false);
+      expect(s.keepAwake.error).toBe("ipc down");
+      expect(s.diagEvents).toHaveLength(1); // same streak — one report
+      expect(s.toast).toContain("keep-awake unavailable: ipc down");
+    });
+
+    it("a rejected powerSetEnabled keeps the persisted intent but never fakes an active hold", async () => {
+      powerSetEnabledMock.mockRejectedValueOnce({ kind: "internal", message: "ipc down" });
+      await useAppStore.getState().setKeepAwakeEnabled(false);
+      const s = useAppStore.getState();
+      // The toggle intent is the owner's persisted preference; the HOLD state stays honest.
+      expect(s.keepAwake.enabled).toBe(false);
+      expect(s.keepAwake.active).toBe(false);
+      expect(s.keepAwake.error).toBe("ipc down");
+      expect(s.diagEvents).toHaveLength(1);
+      expect(s.diagEvents[0].op).toBe("setKeepAwakeEnabled");
+    });
   });
 });

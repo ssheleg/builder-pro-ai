@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { readTheme, setThemePref, type Theme } from "../ui/theme";
 import { classifyError, scrubSecrets, pushCapped, DIAG_CAP, type DiagEvent } from "../ipc/diag";
+import { powerSetEnabled, powerSyncSessions, type PowerStatus } from "../ipc/power";
+import { strings } from "../strings";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { StateChangedPayload, ExitedPayload } from "../ipc/events";
@@ -403,6 +405,30 @@ export interface AppState {
   theme: Theme;
   /** Persist + apply + store the theme preference. */
   setTheme: (t: Theme) => void;
+
+  /**
+   * Keep-awake slice (SCN-045, FLW-18): `enabled` = the persisted toggle (localStorage
+   * `"bpa-keep-awake"`, default ON — mirrors `theme`'s FOUC-free localStorage persistence, see
+   * `../ui/theme.ts`); `active` = the macOS power assertion is GENUINELY held right now (the
+   * core's `SleepAsserter::is_held`, never the intent — spec §7 honesty); `error` = the current
+   * OS acquire denial while a hold is still wanted (`null` otherwise), driving the pill's
+   * failure state (`WorkspaceSidebar`).
+   */
+  keepAwake: { enabled: boolean; active: boolean; error: string | null };
+  /**
+   * Persist the toggle, push it into the core (`power_set_enabled`) and mirror the reconciled
+   * `PowerStatus` back. A denial/rejection surfaces honestly via `reportError` (toast + Diag
+   * record, SCN-045 "Errors & recovery") — never a silent fake "awake".
+   */
+  setKeepAwakeEnabled: (enabled: boolean) => Promise<void>;
+  /**
+   * Sync the live-session count into the core (`power_sync_sessions`; `App.tsx` calls this
+   * whenever the number of `lifecycle.kind !== "exited"` sessions changes) and mirror the
+   * reconciled status. An OS denial is surfaced ONCE per failure streak (not on every sync —
+   * the count changes with normal session churn, and re-toasting an unchanged denial each time
+   * would be pure noise), while `keepAwake.error` stays current on every call.
+   */
+  syncKeepAwake: (liveCount: number) => Promise<void>;
 }
 
 /** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
@@ -421,6 +447,44 @@ function parseRulesetKey(key: string): { scope: RuleScope; projectId: string | n
   if (key === "global") return { scope: "global", projectId: null };
   const projectId = key.startsWith("project:") ? key.slice("project:".length) : key;
   return { scope: "project", projectId };
+}
+
+/** localStorage key for the keep-awake toggle (SCN-045). Values `"on"`/`"off"`; absence = the
+ * default ON. Same synchronous, FOUC-free persistence path as the theme (`../ui/theme.ts`). */
+const KEEP_AWAKE_STORAGE_KEY = "bpa-keep-awake";
+
+/** Read the persisted keep-awake preference; defaults to ON (SCN-045 "default on"). Mirrors
+ * `readTheme`'s try/catch: localStorage can throw in a locked-down webview. */
+function readKeepAwakeEnabled(): boolean {
+  try {
+    const v = localStorage.getItem(KEEP_AWAKE_STORAGE_KEY);
+    if (v === "on") return true;
+    if (v === "off") return false;
+  } catch {
+    // localStorage unavailable — fall through to the default.
+  }
+  return true;
+}
+
+/** Persist the keep-awake toggle. Best-effort, mirrors `setThemePref`: a failed write only costs
+ * persistence across restarts, never this session's behavior. */
+function persistKeepAwakeEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(KEEP_AWAKE_STORAGE_KEY, enabled ? "on" : "off");
+  } catch {
+    // best-effort persistence; the core still reconciles this session.
+  }
+}
+
+/** Best human-readable reason out of an unknown power-IPC rejection (the `power_*` commands
+ * themselves are infallible — a rejection means the invoke/runtime layer broke). */
+function describePowerFailure(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (e !== null && typeof e === "object") {
+    const m = (e as { message?: unknown }).message;
+    if (typeof m === "string" && m) return m;
+  }
+  return String(e);
 }
 
 /** How long the visible toast stays up before auto-advancing to the next (Toast atom, spec §7). */
@@ -456,6 +520,36 @@ export const useAppStore = create<AppState>((set, get) => {
       toastTimer = undefined;
       get().dismissToast();
     }, TOAST_AUTO_DISMISS_MS);
+  };
+
+  // Keep-awake once-per-streak gate (SCN-045; closure state like `toastTimer` — write-only
+  // plumbing, not renderable state): the failure reason last REPORTED (toast + Diag record).
+  // `syncKeepAwake` fires on every live-count change, so an unchanged denial must not re-toast
+  // on each session start/stop; a recovery (`error: null`) re-arms the gate so the NEXT streak
+  // is reported again.
+  let lastPowerError: string | null = null;
+
+  // Surface a keep-awake failure honestly, once per streak: SCN-045's exact copy
+  // ("keep-awake unavailable: {reason}") through the store's ONE reporting path (`reportError`:
+  // toast + Diagnostics ring + console breadcrumb). Shaped as a `daemon`-kind error with the
+  // `Power` code so `classifyError` files the Diag event under `kind: "Power"` and
+  // `describeOrchdError` passes the message through verbatim.
+  const reportPowerFailure = (op: string, reason: string): void => {
+    if (reason === lastPowerError) return;
+    lastPowerError = reason;
+    get().reportError(op, {
+      kind: "daemon",
+      code: "Power",
+      message: strings.power.keepAwakeFailed(reason),
+    });
+  };
+
+  // Mirror a reconciled `PowerStatus` into the slice and route its error (if any) through the
+  // once-per-streak gate. A clean status re-arms the gate — the streak is over.
+  const applyPowerStatus = (op: string, status: PowerStatus): void => {
+    set({ keepAwake: { enabled: status.enabled, active: status.active, error: status.error } });
+    if (status.error !== null) reportPowerFailure(op, status.error);
+    else lastPowerError = null;
   };
 
   return {
@@ -859,5 +953,40 @@ export const useAppStore = create<AppState>((set, get) => {
     },
     setOrchdIncompatible: (v) => set({ orchdIncompatible: v }),
     setOrchdUpgradeDialogOpen: (v) => set({ orchdUpgradeDialogOpen: v }),
+
+    // ── keep-awake (SCN-045 / FLW-18) ────────────────────────────────────────────────────────
+    //
+    // `active`/`error` ALWAYS come from the core's reconciled `PowerStatus` (the assertion's
+    // real held-state), never from the toggle intent — the pill can therefore never claim an
+    // "awake" the OS denied (spec §7 / SCN-045 honesty). Failures follow the `refresh*` shape:
+    // caught here, surfaced via the store's one reporting path, never an unhandled rejection.
+
+    keepAwake: { enabled: readKeepAwakeEnabled(), active: false, error: null },
+
+    setKeepAwakeEnabled: async (enabled) => {
+      // Persist + optimistically flip the toggle so the pill answers the click immediately;
+      // `active` deliberately stays as-is until the core's reconcile below answers.
+      persistKeepAwakeEnabled(enabled);
+      set((s) => ({ keepAwake: { ...s.keepAwake, enabled } }));
+      try {
+        applyPowerStatus("setKeepAwakeEnabled", await powerSetEnabled(enabled));
+      } catch (e) {
+        // The invoke itself broke (the command is infallible at the wire layer): keep the
+        // persisted intent, but the HOLD state must degrade honestly — never claim active.
+        const reason = describePowerFailure(e);
+        set((s) => ({ keepAwake: { ...s.keepAwake, active: false, error: reason } }));
+        reportPowerFailure("setKeepAwakeEnabled", reason);
+      }
+    },
+
+    syncKeepAwake: async (liveCount) => {
+      try {
+        applyPowerStatus("syncKeepAwake", await powerSyncSessions(liveCount));
+      } catch (e) {
+        const reason = describePowerFailure(e);
+        set((s) => ({ keepAwake: { ...s.keepAwake, active: false, error: reason } }));
+        reportPowerFailure("syncKeepAwake", reason);
+      }
+    },
   };
 });

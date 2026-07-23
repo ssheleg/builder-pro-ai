@@ -612,6 +612,19 @@ export const strings = {
     },
   },
 
+  // ── keep-awake pill (SCN-045 / FLW-18; sidebar footer) ───────────────────────────────────────
+  power: {
+    /** Toggle ON and the assertion is genuinely held (≥1 live session) — green dot. */
+    keepAwakeOn: "keep-awake · on",
+    /** Toggle ON but nothing to hold (zero live sessions) — muted dot. */
+    keepAwakeIdle: "keep-awake · idle",
+    /** Toggle OFF — muted dot; the machine sleeps on the OS's normal schedule. */
+    keepAwakeOff: "keep-awake · off",
+    /** Honest OS-denial surface (SCN-045 "keep-awake unavailable: {reason}") — the toast, the
+     * Diagnostics record message, AND the pill's failure label. Never a silent fake "awake". */
+    keepAwakeFailed: (msg: string) => `keep-awake unavailable: ${msg}`,
+  },
+
   // ── storage-degraded banners (spec D3 wire; consumed by the P3 banner) ───────────────────────
   storage: {
     recovered: (path: string) =>

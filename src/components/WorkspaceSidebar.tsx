@@ -84,6 +84,10 @@ export function WorkspaceSidebar(props: {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showDiag, setShowDiag] = useState(false);
   const diagCount = useAppStore((s) => s.diagEvents.length);
+  // Keep-awake pill state (SCN-045): `active`/`error` are the core's reconciled truth (the
+  // assertion's REAL held-state), never the toggle intent — see the store slice's doc.
+  const keepAwake = useAppStore((s) => s.keepAwake);
+  const setKeepAwakeEnabled = useAppStore((s) => s.setKeepAwakeEnabled);
   // Orphan (`projectId === null`) ideas + insights — the Inbox nav badge (AUD-2026-07-19-11).
   // Select the two stable arrays and derive the count outside the selector: a computed-number
   // selector would be fine, but this mirrors the "select stable slices" convention used above.
@@ -440,6 +444,17 @@ export function WorkspaceSidebar(props: {
           )}
         </div>
 
+        {/* Keep-awake pill (SCN-045 / FLW-18, footer next to ThemeToggle/Diagnostics): click
+            toggles the persisted preference; the dot is the honest assertion indicator — ok
+            (green) only while the OS assertion is GENUINELY held, danger on an OS denial with
+            the "keep-awake unavailable: {reason}" copy, muted for idle/off. Tone tokens follow
+            `StatusDot.tsx`'s `var(--ok)`/`var(--muted)`/`var(--danger)` convention. */}
+        <KeepAwakePill
+          enabled={keepAwake.enabled}
+          active={keepAwake.active}
+          error={keepAwake.error}
+          onToggle={() => void setKeepAwakeEnabled(!keepAwake.enabled)}
+        />
         <ThemeToggle />
         <button
           type="button"
@@ -519,5 +534,80 @@ export function WorkspaceSidebar(props: {
       {showCreateDialog && <CreateProjectDialog onClose={() => setShowCreateDialog(false)} />}
       <DiagnosticsPanel open={showDiag} onClose={() => setShowDiag(false)} />
     </>
+  );
+}
+
+/**
+ * Sidebar-footer keep-awake pill (SCN-045 / FLW-18): toggle + active-assertion indicator in one
+ * control. Purely presentational over the store's `keepAwake` slice — the honest state machine
+ * (want/held/denied) lives in `src-tauri/src/power.rs`; the once-per-streak toast/Diag surfacing
+ * lives in `store.ts::syncKeepAwake`. Label/dot resolution, most-severe first:
+ * - `error` (OS denied the assertion) → danger dot + "keep-awake unavailable: {reason}" — the
+ *   pill-level failure state SCN-045 requires alongside the toast, never a silent fake "awake";
+ * - `active` (assertion genuinely held) → ok dot + "keep-awake · on";
+ * - enabled but idle (zero live sessions — nothing to hold) → muted dot + "keep-awake · idle";
+ * - disabled → muted dot + "keep-awake · off".
+ */
+function KeepAwakePill(props: {
+  enabled: boolean;
+  active: boolean;
+  error: string | null;
+  onToggle: () => void;
+}): JSX.Element {
+  const { enabled, active, error, onToggle } = props;
+  const label =
+    error !== null
+      ? strings.power.keepAwakeFailed(error)
+      : !enabled
+        ? strings.power.keepAwakeOff
+        : active
+          ? strings.power.keepAwakeOn
+          : strings.power.keepAwakeIdle;
+  // Same semantic tone tokens `StatusDot.tsx` resolves (theme-aware, light+dark valid): the dot
+  // never shows ok unless the assertion is really held.
+  const dotTone = error !== null ? "var(--danger)" : active ? "var(--ok)" : "var(--muted)";
+  return (
+    <button
+      type="button"
+      data-testid="keep-awake-pill"
+      aria-pressed={enabled}
+      aria-label={label}
+      title={label}
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--sp-2)",
+        margin: "var(--sp-2)",
+        marginBottom: 0,
+        padding: "var(--sp-2) var(--sp-3)",
+        border: "none",
+        background: "var(--panel-2)",
+        color: "var(--muted)",
+        cursor: "pointer",
+        fontSize: "var(--fs-sm)",
+        borderRadius: "var(--r-sm)",
+      }}
+    >
+      <span
+        data-testid="keep-awake-dot"
+        role="img"
+        aria-hidden="true"
+        style={{
+          display: "inline-block",
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          backgroundColor: dotTone,
+          flexShrink: 0,
+        }}
+      />
+      {/* A long denial reason must not blow the 200px rail open — ellipsize; `title` above
+          carries the full copy. */}
+      <span style={{ overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+        {label}
+      </span>
+    </button>
   );
 }

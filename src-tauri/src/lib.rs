@@ -67,6 +67,7 @@ pub mod fs_watcher;
 pub mod launchd;
 pub mod orchd_client;
 pub mod paths;
+pub mod power;
 pub mod socket_client;
 
 use std::sync::Arc;
@@ -595,6 +596,11 @@ pub fn run() {
         // `manage`d synchronously — inside `setup()` below, before either bring-up task is spawned,
         // BL-101 — so ALL commands are callable from the very first frame.)
         .manage(fs_watcher::new_watch_slot())
+        // Keep-awake slot (SCN-045, FLW-18): core-local like the watch slot above — no daemon
+        // dependency, so it's `manage`d here too. Holds the (macOS) IOPM asserter + reconciler;
+        // nothing is asserted until the frontend syncs a live session in. Process-scoped IOPM
+        // assertions auto-release at app quit/crash (see `power.rs` module docs — no orphan lock).
+        .manage(power::new_power_slot())
         .invoke_handler(tauri::generate_handler![
             ping,
             commands::create_session,
@@ -710,6 +716,9 @@ pub fn run() {
             fs_explorer::open_external,
             fs_watcher::start_workspace_watch,
             fs_watcher::stop_workspace_watch,
+            power::power_set_enabled,
+            power::power_sync_sessions,
+            power::power_status,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

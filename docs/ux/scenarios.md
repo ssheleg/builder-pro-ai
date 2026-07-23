@@ -861,7 +861,7 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** OS denies the assertion → honest banner/toast "keep-awake unavailable: {reason}" + Diagnostics record — never a silent fake "awake"; app quit/crash → assertion released by OS (no orphan lock)
 - **Status:** validated
-- **Coverage:** none yet
+- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-385, src-tauri/src/lib.rs:599-603,719-721, src/ipc/power.ts:13-48, src/store/store.ts:408-431,452-477,525-553,964-990, src/App.tsx:413-446, src/components/WorkspaceSidebar.tsx:87-90,447-458,540-613, src/strings.ts:615-627
 
 ## supervisor
 
