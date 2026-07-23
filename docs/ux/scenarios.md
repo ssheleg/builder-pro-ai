@@ -62,6 +62,7 @@
 | SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | — |
 | SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | — |
 | SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | — |
+| SCN-057 | Per-project auth context for terminals | auth | P-01 | ST-043 | draft | — |
 
 ## Personas
 
@@ -1043,3 +1044,29 @@ in different lifecycle states.
 - **Errors & recovery:** workspace creation errors — as SCN-002; auto-spawn fails → workspace view still opens with "+ New terminal" available and an honest toast (degradation = today's manual path, never a blocked first run)
 - **Status:** validated
 - **Coverage:** src/components/WorkspaceSidebar.tsx:115-146 (fast-path in onAdd), src/components/WorkspaceSidebar.test.tsx (3 SCN-056 tests), src/strings.ts:201
+
+## auth
+
+### SCN-057: Per-project auth context for terminals
+- **Persona:** P-01
+- **Traces:** ST-043, FLW-07 (JTBD-02, JTBD-06, JRN-07/#2)
+- **Feature:** auth
+- **Entry point:** project settings → "Auth context" section; effective on every terminal spawned in that project (SCN-013, SCN-056)
+- **Preconditions:** at least one project exists; the operator has credentials for the org/account they want to bind (Console API key, or an OAuth token from `claude setup-token`)
+- **Steps:**
+  1. In a project's settings the operator picks an auth context: "Inherit (default shell env)", "API key", or "Subscription token", and enters the secret; optionally pins an org UUID
+  2. The operator saves — the secret is written to the OS secret store (Keychain), never to project files or logs; the panel shows a masked fingerprint (last 4) + the bound org, not the raw value
+  3. The operator opens a terminal in this project (SCN-013 / SCN-056) → the app spawns the child process with the context injected as environment (`ANTHROPIC_API_KEY` **or** `CLAUDE_CODE_OAUTH_TOKEN`, plus a per-context `CLAUDE_CONFIG_DIR`, and `forceLoginOrgUUID` written into that dir's settings when an org was pinned)
+  4. The operator opens a terminal in a *different* project bound to a different org → that terminal runs under the other org; `claude /status` in each proves the split
+  5. The operator clears a project's context back to "Inherit" → new terminals fall back to the ambient shell login (today's behavior)
+- **Expected result:** each project's terminals authenticate under that project's bound org/account with no manual `export` and no cross-project bleed; the active context is visible per project (settings badge + terminal-tab tooltip: "org: {name}"); secrets never appear in project files, git, the command-history strip (SCN-017), or logs
+- **UI elements:** project-settings "Auth context" panel (mode picker, secret input with masked display, org-UUID field, "Test" button, "Clear" button), per-project auth badge, terminal-tab auth tooltip, save/clear toasts
+- **States covered:** empty (inherit — no context bound), success (bound + verified), loading (Test in flight), error
+- **Errors & recovery:**
+  - **macOS Keychain is process-global** — OAuth `/login` credentials in Keychain are shared regardless of `CLAUDE_CONFIG_DIR`, so a subscription `/login` done *inside* a terminal can leak across projects. The app only guarantees isolation for the **env-injected** context (API key / setup-token); the panel states this honestly and recommends API-key or `setup-token` mode over interactive `/login` for multi-org use. `forceLoginOrgUUID` is written as a guard so a mismatched login **fails fast** rather than acting under the wrong org.
+  - **Missing / empty secret** for a non-inherit mode → save rejected inline ("enter a key or token, or switch to Inherit"); no half-bound state.
+  - **"Test" fails** (invalid key, revoked token, wrong org vs pinned UUID) → red result with the reason; the context still saves but the badge shows "unverified".
+  - **Secret store unavailable** (Keychain locked / denied) → save fails with an honest toast; the app never silently falls back to writing the secret in plaintext.
+- **Design rationale:** env injection at spawn is the only cross-platform mechanism that truly isolates orgs (auth precedence: `ANTHROPIC_API_KEY` > `apiKeyHelper` > `CLAUDE_CODE_OAUTH_TOKEN` > `/login`); `CLAUDE_CONFIG_DIR` isolates config on Linux/Windows but **not** Keychain-backed creds on macOS — hence the honesty boundary above. Feasibility of the token/cost read-back is tracked by A-8; this scenario is the org-isolation half and is gated behind the same spike (A-9).
+- **Status:** draft
+- **Coverage:** none yet — integration point: terminal/session spawn env in the Tauri command + orchd session create (where cwd is set today, per SCN-013 coverage)

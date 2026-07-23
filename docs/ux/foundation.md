@@ -631,6 +631,17 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
 - **Priority:** must
 - **Status:** validated *(SCN-055 validated 2026-07-23 — supersedes the current Home triage scenario on ship)*
 
+### ST-043: Per-project auth context for terminals *(stated 2026-07-23)*
+- **Story:** As P-01, I want each project's terminals to run under that project's own Claude Code auth context (a specific org/account), so that one project can operate in org A and another in org B without manual `export`s or cross-project credential bleed.
+- **Traces:** JTBD-02, JTBD-06, JRN-07/#2
+- **Acceptance criteria:**
+  - Given a project with a bound auth context, when I spawn a terminal in it, then the child process authenticates under that context (env-injected key/token + per-context config dir), and `claude /status` in two differently-bound projects proves the split.
+  - Given a bound secret, when I save it, then it lives in the OS secret store and never appears in project files, git, the command-history strip, or logs; the panel shows only a masked fingerprint + bound org.
+  - Given macOS Keychain is process-global, when the panel is shown, then it states honestly that only env-injected (API-key / setup-token) contexts are isolation-guaranteed and writes `forceLoginOrgUUID` as a fail-fast guard against a mismatched interactive `/login`.
+  - Given I clear a context, when I spawn a terminal, then it falls back to the ambient shell login (today's behavior).
+- **Priority:** should
+- **Status:** draft *(SCN-057 draft 2026-07-23; gated behind the A-8/A-9 spike)*
+
 ---
 
 ## 5. Assumptions & open questions
@@ -678,6 +689,17 @@ Marked by risk dimension: **D**esirability / **V**iability / **F**easibility /
   Claude Code exposes usage locally (session JSONL / OTel). Feasibility spike
   needed; if a source is unavailable, scope narrows to MCP-call costs
   (already collected via SCN-035 plumbing).
+- **A-9 (F/U) — stated 2026-07-23.** Per-project org isolation (ST-043/SCN-057)
+  is feasible via env injection at terminal spawn (`ANTHROPIC_API_KEY` /
+  `CLAUDE_CODE_OAUTH_TOKEN` + per-context `CLAUDE_CONFIG_DIR`,
+  `forceLoginOrgUUID` guard). **Known boundary:** on macOS the Keychain is
+  process-global, so an interactive `/login` inside a terminal is NOT isolated
+  by `CLAUDE_CONFIG_DIR` — only env-injected key/token contexts are. Spike
+  (shared with A-8) must confirm: (1) child-process env plumbing at the spawn
+  site, (2) secret-store round-trip without plaintext leakage, (3) that
+  `forceLoginOrgUUID` fails fast on mismatch as documented. If (1) is blocked,
+  the feature degrades to a documented manual-`export` recipe rather than
+  shipping a false isolation guarantee.
 
 ## 6. Best-practices applicability
 
@@ -703,12 +725,13 @@ class and should not be force-fit in future scenario or audit work.
 
 ## Definition of done
 
-- Layers consistent, IDs stable (P-01..03, JTBD-01..11, JRN-01..11, ST-001..041).
+- Layers consistent, IDs stable (P-01..03, JTBD-01..11, JRN-01..11, ST-001..043).
 - All inferred entries marked; operator-stated entries carry
   `(stated 2026-07-22)`; risky assumptions flagged in §5.
 - Every scenario maps to ≥1 story; every must/should story has ≥1 scenario
   (delivered ones implemented; SCN-045..053 validated by the operator
   2026-07-22; SCN-054 draft awaiting design review).
-- **WHY layer validated by the operator 2026-07-22**; open items: A-7
-  delegation-boundary spec before ST-034 build, A-8 token-source spike
-  before ST-038 build, SCN-054 design approval.
+- **WHY layer validated by the operator 2026-07-22**; open items: A-8
+  token-source spike + A-9 org-isolation spike (shared) before ST-038/ST-043
+  build; SCN-057 awaiting operator approval. *(A-7 resolved 2026-07-22;
+  ST-041/SCN-054 shipped; SCN-055 validated.)*
