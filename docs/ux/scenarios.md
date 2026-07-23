@@ -50,19 +50,19 @@
 | SCN-042 | Diagnostics panel | diagnostics | P-01 | ST-032 | implemented | 2026-07-22 PASS |
 | SCN-043 | Render crash recovery | error-recovery | P-01 | ST-032 | implemented | 2026-07-22 PASS |
 | SCN-044 | Terminal attach failure surfaced | terminals | P-01 | ST-014 | implemented | 2026-07-22 PASS |
-| SCN-045 | Keep the machine awake while sessions run | power | P-01 | ST-033 | validated | — |
-| SCN-046 | Enable the CEO and set the delegation scope | supervisor | P-01 | ST-034 | validated | config plumbing only; CEO acts in S6b |
-| SCN-047 | CEO answers an agent's question autonomously | supervisor | P-01 | ST-034 | validated | — |
-| SCN-048 | CEO escalates an out-of-authority question | supervisor | P-01 | ST-034 | validated | — |
-| SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | — |
-| SCN-050 | Review decisions made while away | supervisor | P-03 | ST-036 | validated | — |
-| SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | validated | — |
-| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | — |
-| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | — |
-| SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | — |
-| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | — |
-| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | — |
-| SCN-057 | Per-project auth context for terminals | auth | P-01 | ST-043 | draft | — |
+| SCN-045 | Keep the machine awake while sessions run | power | P-01 | ST-033 | implemented | 2026-07-23 PASS |
+| SCN-046 | Enable the CEO and set the delegation scope | supervisor | P-01 | ST-034 | implemented | 2026-07-23 PASS (config plumbing only; CEO acts in S6b) |
+| SCN-047 | CEO answers an agent's question autonomously | supervisor | P-01 | ST-034 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-048 | CEO escalates an out-of-authority question | supervisor | P-01 | ST-034 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-050 | Review decisions made while away | supervisor | P-03 | ST-036 | validated | 2026-07-23 BLOCKED (not built — S6b) |
+| SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | implemented | 2026-07-23 PASS |
+| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | 2026-07-23 PARTIAL |
+| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | 2026-07-23 PARTIAL |
+| SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | 2026-07-23 PASS |
+| SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | 2026-07-23 BLOCKED (not built) |
+| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | 2026-07-23 PARTIAL |
+| SCN-057 | Per-project auth context for terminals | auth | P-01 | ST-043 | draft | 2026-07-23 BLOCKED (draft, gated A-9) |
 
 ## Personas
 
@@ -592,7 +592,7 @@ in different lifecycle states.
 - **UI elements:** priority control in create form, priority control on task row, urgent marker on task rows
 - **States covered:** success, error
 - **Errors & recovery:** priority save rejects → revert to stored value + toast; orchd down → priority control disabled like other mutations
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src/components/TasksList.tsx:40-49,102-118,258-292,404-414,531-544 (create-form + row selects, urgent marker/chip, urgent-first sort, reject→revert+toast, orchdDown gating); src/ipc/orchd.ts:241-290 (orchdCreateTask priority arg, orchdSetTaskPriority); src-tauri/src/commands.rs:1611-1710 (orchd_create_task priority, orchd_set_task_priority); crates/orchd-proto/src/lib.rs:203-215,1258-1265 (TaskPriority, SetTaskPriority verb); crates/orchd/src/persistence.rs:631-651,2406-2435 (migrate_v5 `task.priority`, set_task_priority)
 
 ## goals
@@ -861,7 +861,7 @@ in different lifecycle states.
 - **UI elements:** keep-awake toggle, active-assertion indicator, failure banner/toast
 - **States covered:** success, error
 - **Errors & recovery:** OS denies the assertion → honest banner/toast "keep-awake unavailable: {reason}" + Diagnostics record — never a silent fake "awake"; app quit/crash → assertion released by OS (no orphan lock)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-385, src-tauri/src/lib.rs:599-603,719-721, src/ipc/power.ts:13-48, src/store/store.ts:408-431,452-477,525-553,964-990, src/App.tsx:413-446, src/components/WorkspaceSidebar.tsx:87-90,447-458,540-613, src/strings.ts:615-627
 
 ## supervisor
@@ -881,7 +881,7 @@ in different lifecycle states.
 - **UI elements:** CEO enable toggle, "Recommended scope" preset button, delegated-class checkboxes, inherited-caps summary, CEO instruction textarea, custom-rules editor, info-access summary line, scope summary line, "MCP tools for the CEO — soon" placeholder note, "Save policy" (shared)
 - **States covered:** success, error
 - **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → controls disabled; empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
-- **Status:** validated
+- **Status:** implemented
 - **Note (honesty boundary, S6b):** this scenario ships the delegation CONFIG only. It persists the scope, instruction and custom rules and states what the CEO would read/decide; it does NOT execute anything. Autonomous execution — the CEO actually answering agent questions (SCN-047) and continuing workflows (SCN-049) — awaits the orchestrator-agent runtime (S6b). The UI carries a matching pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same register as the Skills-tab registry banner.
 - **Coverage:** crates/orchd-proto/src/lib.rs:225-284 (SupervisorConfig + PolicyRules.supervisor additive field), src/ipc/orchd-types.ts:209,300-305 (generated TS), crates/orchd/src/persistence.rs:2576-2585,2607-2634,2659-2683 (validate_policy supervisor guards, PolicyRulesStrict mirror, decode backfill), src/components/RulesetPanel.tsx:31,46-89,455-536,662-771 (validatePolicy + supervisor section, project scope only), src/strings.ts:319-352 (rules.supervisor.* incl. pendingNote); tests — crates/orchd/src/persistence.rs:6176-6320, crates/orchd-proto/tests/roundtrip.rs:1467-1516, crates/orchd-proto/tests/ts_export.rs:159-200, src/components/RulesetPanel.test.tsx:301-430
 
@@ -1049,9 +1049,9 @@ in different lifecycle states.
 
 ### SCN-057: Per-project auth context for terminals
 - **Persona:** P-01
-- **Traces:** ST-043, FLW-07 (JTBD-02, JTBD-06, JRN-07/#2)
+- **Traces:** ST-043, FLW-22, FLW-07 (JTBD-02, JTBD-06, JRN-07/#2)
 - **Feature:** auth
-- **Entry point:** project settings → "Auth context" section; effective on every terminal spawned in that project (SCN-013, SCN-056)
+- **Entry point:** project panel "Rules" tab → "Auth context" section (FLW-22; sibling of the SCN-046 supervisor section); effective on every terminal spawned in that project (SCN-013, SCN-056)
 - **Preconditions:** at least one project exists; the operator has credentials for the org/account they want to bind (Console API key, or an OAuth token from `claude setup-token`)
 - **Steps:**
   1. In a project's settings the operator picks an auth context: "Inherit (default shell env)", "API key", or "Subscription token", and enters the secret; optionally pins an org UUID
@@ -1067,6 +1067,6 @@ in different lifecycle states.
   - **Missing / empty secret** for a non-inherit mode → save rejected inline ("enter a key or token, or switch to Inherit"); no half-bound state.
   - **"Test" fails** (invalid key, revoked token, wrong org vs pinned UUID) → red result with the reason; the context still saves but the badge shows "unverified".
   - **Secret store unavailable** (Keychain locked / denied) → save fails with an honest toast; the app never silently falls back to writing the secret in plaintext.
-- **Design rationale:** env injection at spawn is the only cross-platform mechanism that truly isolates orgs (auth precedence: `ANTHROPIC_API_KEY` > `apiKeyHelper` > `CLAUDE_CODE_OAUTH_TOKEN` > `/login`); `CLAUDE_CONFIG_DIR` isolates config on Linux/Windows but **not** Keychain-backed creds on macOS — hence the honesty boundary above. Feasibility of the token/cost read-back is tracked by A-8; this scenario is the org-isolation half and is gated behind the same spike (A-9).
+- **Design rationale:** env injection at spawn is the only cross-platform mechanism that truly isolates orgs (auth precedence: `ANTHROPIC_API_KEY` > `apiKeyHelper` > `CLAUDE_CODE_OAUTH_TOKEN` > `/login`); `CLAUDE_CONFIG_DIR` isolates config on Linux/Windows but **not** Keychain-backed creds on macOS — hence the honesty boundary above. Feasibility of the token/cost read-back is tracked by A-8; this scenario is the org-isolation half and is gated behind the same spike (A-9). Interaction (A-8/SCN-052): a per-context `CLAUDE_CONFIG_DIR` relocates Claude Code's session JSONL, so the usage-stats scanner must also scan bound contexts' dirs — spike check 4. Injected env vars must pass sessiond's env-hygiene allowlist (pty_supervisor, spec §9.3).
 - **Status:** draft
 - **Coverage:** none yet — integration point: terminal/session spawn env in the Tauri command + orchd session create (where cwd is set today, per SCN-013 coverage)

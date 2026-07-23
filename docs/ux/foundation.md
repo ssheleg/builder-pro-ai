@@ -640,7 +640,7 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given macOS Keychain is process-global, when the panel is shown, then it states honestly that only env-injected (API-key / setup-token) contexts are isolation-guaranteed and writes `forceLoginOrgUUID` as a fail-fast guard against a mismatched interactive `/login`.
   - Given I clear a context, when I spawn a terminal, then it falls back to the ambient shell login (today's behavior).
 - **Priority:** should
-- **Status:** draft *(SCN-057 draft 2026-07-23; gated behind the A-8/A-9 spike)*
+- **Status:** proposed *(SCN-057 draft 2026-07-23; gated behind the A-8/A-9 spike)*
 
 ---
 
@@ -685,25 +685,45 @@ Marked by risk dimension: **D**esirability / **V**iability / **F**easibility /
   authority. Remaining build risk: grounding quality — covered by the
   decision log (every answer cites its source) and SCN-047's
   "never guesses" rule.
-- **A-8 (F)** — Token/cost data for terminal agents (ST-038) is obtainable:
-  Claude Code exposes usage locally (session JSONL / OTel). Feasibility spike
-  needed; if a source is unavailable, scope narrows to MCP-call costs
-  (already collected via SCN-035 plumbing).
+- **A-8 (F) — CONFIRMED 2026-07-23 by shipped code.** Token/cost data for
+  terminal agents (ST-038) IS obtainable from Claude Code's local session
+  logs: the SCN-052 stats scanner reads `~/.claude/projects/<dir>/<session>.jsonl`
+  incrementally with per-file caching and per-source honest degradation
+  (src-tauri/src/stats.rs:5,176,260-285,453 + scanner tests). No spike needed
+  for the read-back half. **Residual (moved to the A-9 spike, check 4):**
+  SCN-057's per-context `CLAUDE_CONFIG_DIR` would relocate session JSONL out
+  of `~/.claude/projects` — the scanner must also scan each bound context's
+  projects dir or usage silently undercounts.
 - **A-9 (F/U) — stated 2026-07-23.** Per-project org isolation (ST-043/SCN-057)
   is feasible via env injection at terminal spawn (`ANTHROPIC_API_KEY` /
   `CLAUDE_CODE_OAUTH_TOKEN` + per-context `CLAUDE_CONFIG_DIR`,
   `forceLoginOrgUUID` guard). **Known boundary:** on macOS the Keychain is
   process-global, so an interactive `/login` inside a terminal is NOT isolated
-  by `CLAUDE_CONFIG_DIR` — only env-injected key/token contexts are. Spike
-  (shared with A-8) must confirm: (1) child-process env plumbing at the spawn
-  site, (2) secret-store round-trip without plaintext leakage, (3) that
-  `forceLoginOrgUUID` fails fast on mismatch as documented. If (1) is blocked,
-  the feature degrades to a documented manual-`export` recipe rather than
-  shipping a false isolation guarantee.
+  by `CLAUDE_CONFIG_DIR` — only env-injected key/token contexts are.
+  **Spike (tracked, blocks the ST-043/SCN-057 build — FLW-22):**
+  - **Deliverable:** a throwaway branch + a result note appended to this
+    entry (CONFIRMED / BLOCKED per check), no product code.
+  - **Exit checks:**
+    1. child-process env plumbing at the spawn site — a terminal spawned via
+       the existing SCN-013 path receives injected `ANTHROPIC_API_KEY` /
+       `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CONFIG_DIR`, passing sessiond's
+       env-hygiene allowlist (pty_supervisor, spec §9.3); verify with
+       `claude /status`;
+    2. secret-store round-trip — write/read/delete a test secret via
+       `crates/secrets` (new service name alongside the existing MCP/account
+       ones, crates/secrets/src/lib.rs:14-17) with no plaintext on disk or in
+       logs;
+    3. `forceLoginOrgUUID` fails fast on an org-mismatched interactive
+       `/login` as documented;
+    4. stats interaction (from A-8) — with a custom `CLAUDE_CONFIG_DIR`, the
+       SCN-052 scanner sees the relocated session JSONL (or the build scopes
+       a scanner-roots extension into ST-043).
+  - **Degradation if check 1 fails:** documented manual-`export` recipe, no
+    false isolation guarantee.
 
 ## 6. Best-practices applicability
 
-The tagged catalog ([best-practices.md](../../../.claude/plugins/cache/super-ux/super-ux/0.7.0/skills/references/best-practices.md))
+The tagged catalog (super-ux reference `skills/references/best-practices.md`, shipped with the plugin)
 is **48 Laws of Subscription App Success** — paywall, freemium, push, and
 lifecycle-monetization mechanisms. Builder Pro AI is a **free local macOS
 developer tool**: no paywall, no monetization, no push channel, no store
