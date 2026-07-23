@@ -669,6 +669,39 @@ export const strings = {
     keepAwakeFailed: (msg: string) => `keep-awake unavailable: ${msg}`,
   },
 
+  // ── Stats view (SCN-052/053 / FLW-20; "✦ Stats" nav) ─────────────────────────────────────────
+  stats: {
+    nav: "✦  Stats",
+    title: "Stats",
+    rangeAria: "Stats range",
+    rangeAll: "All",
+    range30d: "30d",
+    range7d: "7d",
+    loading: "Scanning usage…",
+    tokens: "tokens",
+    /** Cost is an ESTIMATE from a public-price table (stats.rs::PRICING) — always labeled. */
+    costLabel: "est. cost",
+    /** Some contributing model family has no pricing row — the figure under-counts honestly. */
+    costPartialLabel: "est. cost (partial)",
+    partialMark: "*",
+    estimatedNote:
+      "Cost is estimated from public API prices; * marks projects where some models had no pricing row.",
+    sessions: "agent sessions",
+    commits: "commits",
+    code: "code",
+    activity: "Activity — tokens per day (last 30 days)",
+    activityAria: "Token activity heatmap, last 30 days",
+    byProject: "By project",
+    asOf: (t: string) => `as of ${t}`,
+    refresh: "Refresh",
+    noGit: "no git data",
+    otherBucket: "other",
+    emptyTitle: "No usage in this range.",
+    emptyHint: "Run agent sessions (or widen the range) and refresh.",
+    usageUnavailable: (msg: string) => `usage data unavailable: ${msg}`,
+    gitUnavailable: (msg: string) => `git data unavailable: ${msg}`,
+  },
+
   // ── storage-degraded banners (spec D3 wire; consumed by the P3 banner) ───────────────────────
   storage: {
     recovered: (path: string) =>

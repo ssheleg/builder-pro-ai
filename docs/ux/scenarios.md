@@ -966,7 +966,7 @@ in different lifecycle states.
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** no data in range → honest empty state (never zeros styled as data); collection source unavailable (A-8) → per-source "data unavailable: {source}" note, remaining sources still render; fetch fails → error card + Retry + toast
 - **Status:** validated
-- **Coverage:** none yet
+- **Coverage:** src-tauri/src/stats.rs (scanner+cache+pricing+commands), src/ipc/stats.ts, src/store/store.ts (stats slice + refreshStats), src/components/StatsView.tsx, src/components/StatsView.test.tsx, src/components/WorkspaceSidebar.tsx (stats-nav-button), src/App.tsx (stats branch), src/strings.ts (stats group)
 
 ### SCN-053: Output stats — commits and code per project
 - **Persona:** P-01
@@ -982,7 +982,7 @@ in different lifecycle states.
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** workspace without git or git read fails → that project shows honest "no git data" (never fabricated zeros); slow scan → visible loading, cancellable; scan failure → error + Retry
 - **Status:** validated
-- **Coverage:** none yet
+- **Coverage:** src-tauri/src/stats.rs (git_stats_for_root + numstat parse + honest unavailable), src/components/StatsView.tsx (git columns, no-git rows, as-of stamp, Refresh), src/components/StatsView.test.tsx
 
 ## docs
 

@@ -69,6 +69,7 @@ pub mod orchd_client;
 pub mod paths;
 pub mod power;
 pub mod socket_client;
+pub mod stats;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -726,6 +727,8 @@ pub fn run() {
             power::power_set_enabled,
             power::power_sync_sessions,
             power::power_status,
+            stats::stats_usage,
+            stats::stats_git,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

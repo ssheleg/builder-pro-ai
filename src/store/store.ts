@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { readTheme, setThemePref, type Theme } from "../ui/theme";
 import { classifyError, scrubSecrets, pushCapped, DIAG_CAP, type DiagEvent } from "../ipc/diag";
 import { powerSetEnabled, powerSyncSessions, type PowerStatus } from "../ipc/power";
+import { statsUsage, statsGit } from "../ipc/stats";
 import { strings } from "../strings";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
@@ -105,7 +106,7 @@ export interface AppState {
    * S-EXT Extensions panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management.
    * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
    */
-  view: "home" | "workspace" | "project" | "ext" | "inbox";
+  view: "home" | "workspace" | "project" | "ext" | "inbox" | "stats";
 
   /**
    * File-explorer slice (spec §6.6/§6.4). Every keyed map here uses the SAME key format:
@@ -292,7 +293,7 @@ export interface AppState {
   setActiveSession: (id: SessionId | null) => void;
 
   /** Switch the top-level view. See `view`'s doc above. */
-  setView: (v: "home" | "workspace" | "project" | "ext" | "inbox") => void;
+  setView: (v: "home" | "workspace" | "project" | "ext" | "inbox" | "stats") => void;
   /** Set (`open=true`) or clear (`open=false`) one directory's expanded flag. */
   setExpanded: (root: string, rel: string, open: boolean) => void;
   /** Insert or replace one directory's cached listing. */
@@ -454,6 +455,26 @@ export interface AppState {
    * would be pure noise), while `keepAwake.error` stays current on every call.
    */
   syncKeepAwake: (liveCount: number) => Promise<void>;
+
+  /**
+   * Stats view slice (SCN-052/053, FLW-20). Two independent sources with per-source honesty:
+   * `usage` (Claude Code session-log scan; its own `error` field carries scan failure) and
+   * `git` (per-root output stats; per-row `available:false` + reason). `gitError` is the
+   * IPC-level failure for the git call as a whole; `usageError` likewise for usage — either
+   * source failing must never blank the other (SCN-052 "Errors & recovery").
+   */
+  stats: {
+    range: import("../ipc/stats").StatsRange;
+    usage: import("../ipc/stats").UsageStats | null;
+    git: import("../ipc/stats").GitStats[] | null;
+    usageError: string | null;
+    gitError: string | null;
+    loading: boolean;
+  };
+  /** Switch the range pill and refetch (SCN-052 step 2). */
+  setStatsRange: (range: import("../ipc/stats").StatsRange) => Promise<void>;
+  /** Fetch both sources for the current range. Per-source failure capture — see `stats` doc. */
+  refreshStats: () => Promise<void>;
 }
 
 /** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
@@ -1056,6 +1077,52 @@ export const useAppStore = create<AppState>((set, get) => {
         set((s) => ({ keepAwake: { ...s.keepAwake, active: false, error: reason } }));
         reportPowerFailure("syncKeepAwake", reason);
       }
+    },
+
+    // ── stats slice (SCN-052/053) ───────────────────────────────────────────────────────────────
+
+    stats: { range: "30d", usage: null, git: null, usageError: null, gitError: null, loading: false },
+
+    setStatsRange: async (range) => {
+      set((s) => ({ stats: { ...s.stats, range } }));
+      await get().refreshStats();
+    },
+
+    refreshStats: async () => {
+      // Both sources fetch in parallel and fail INDEPENDENTLY (SCN-052 per-source honesty):
+      // a usage-scan failure must never blank the git section, and vice versa. Failures land
+      // in the slice (the view's inline notes) AND in Diagnostics via `reportError` — same
+      // one-path rule every other refresh follows.
+      const { range } = get().stats;
+      const roots = Object.values(get().workspaces).flatMap((w) => w.roots ?? [w.rootPath]);
+      set((s) => ({ stats: { ...s.stats, loading: true } }));
+      const [usageRes, gitRes] = await Promise.allSettled([
+        statsUsage(range),
+        statsGit(roots, range),
+      ]);
+      set((s) => {
+        const next = { ...s.stats, loading: false };
+        if (usageRes.status === "fulfilled") {
+          next.usage = usageRes.value;
+          next.usageError = usageRes.value.error;
+        } else {
+          next.usage = null;
+          next.usageError =
+            usageRes.reason instanceof Error ? usageRes.reason.message : String(usageRes.reason);
+        }
+        if (gitRes.status === "fulfilled") {
+          next.git = gitRes.value;
+          next.gitError = null;
+        } else {
+          next.git = null;
+          next.gitError =
+            gitRes.reason instanceof Error ? gitRes.reason.message : String(gitRes.reason);
+        }
+        return { stats: next };
+      });
+      const after = get().stats;
+      if (after.usageError) get().reportError("refreshStats", after.usageError);
+      if (after.gitError) get().reportError("refreshStats", after.gitError);
     },
   };
 });

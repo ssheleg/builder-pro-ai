@@ -289,6 +289,29 @@ export function WorkspaceSidebar(props: {
           )}
         </button>
 
+        <button
+          type="button"
+          data-testid="stats-nav-button"
+          aria-label={strings.stats.title}
+          aria-current={view === "stats" ? "true" : undefined}
+          onClick={() => setView("stats")}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "var(--sp-2) var(--sp-3)",
+            fontSize: "var(--fs-md)",
+            fontWeight: 600,
+            border: "none",
+            borderBottom: "1px solid var(--hairline)",
+            cursor: "pointer",
+            color: view === "stats" ? "var(--ink)" : "var(--muted)",
+            background: view === "stats" ? "var(--panel-2)" : "transparent",
+          }}
+        >
+          {strings.stats.nav}
+        </button>
+
         <div style={{ flex: 1, overflowY: "auto" }}>
           {sortedProjects.length === 0 && list.length === 0 && (
             <div
