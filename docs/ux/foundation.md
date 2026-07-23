@@ -264,7 +264,7 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given the sidebar, when I click "+ Add workspace" and pick a folder, then a workspace is created from the folder name and the app navigates into it.
   - Given the create fails, when it rejects, then a toast names the reason (disconnected / incompatible / too large / internal).
 - **Priority:** must
-- **Status:** delivered *(SCN-002; fast-path extension SCN-056 validated)*
+- **Status:** delivered *(SCN-002; fast-path extension SCN-056 implemented 2026-07-23 — cwd fix AUD-2026-07-23-17)*
 
 ### ST-003: Capture an idea without breaking flow
 - **Story:** As P-01/P-02, I want a global one-keystroke capture, so that ideas don't interrupt my terminal work.

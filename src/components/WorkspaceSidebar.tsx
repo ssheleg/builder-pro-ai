@@ -137,7 +137,11 @@ export function WorkspaceSidebar(props: {
       onSelectWorkspaceAndNavigate(ws.id);
       if (!hadSessions) {
         try {
-          await createSession(ws.id);
+          // cwd = the workspace's canonical root (just created from `dir`). Without it the
+          // omitted cwd makes sessiond default to $HOME, landing the fast-path terminal
+          // outside the repo (AUD-2026-07-23-17) — the very folder the user just picked.
+          // Mirrors the manual "+ New terminal" root-aware spawn (TerminalTabs.onNewTerminal).
+          await createSession(ws.id, { cwd: ws.roots[0] ?? dir, cols: 80, rows: 24 });
         } catch (e) {
           showToast(strings.terminal.tabs.newTerminalFailed(describeCommandError(e)));
         }

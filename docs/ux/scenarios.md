@@ -61,7 +61,7 @@
 | SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | 2026-07-23 PARTIAL |
 | SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | 2026-07-23 PASS |
 | SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | 2026-07-23 BLOCKED (not built) |
-| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | validated | 2026-07-23 PARTIAL |
+| SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | implemented | 2026-07-23 PARTIAL→fixed (AUD-17) |
 | SCN-057 | Per-project auth context for terminals | auth | P-01 | ST-043 | draft | 2026-07-23 BLOCKED (draft, gated A-9) |
 
 ## Personas
@@ -1042,8 +1042,8 @@ in different lifecycle states.
 - **UI elements:** "+ Add workspace" button, OS folder picker, auto-created session tab, focused terminal pane
 - **States covered:** success, error
 - **Errors & recovery:** workspace creation errors — as SCN-002; auto-spawn fails → workspace view still opens with "+ New terminal" available and an honest toast (degradation = today's manual path, never a blocked first run)
-- **Status:** validated
-- **Coverage:** src/components/WorkspaceSidebar.tsx:115-146 (fast-path in onAdd), src/components/WorkspaceSidebar.test.tsx (3 SCN-056 tests), src/strings.ts:201
+- **Status:** implemented
+- **Coverage:** src/components/WorkspaceSidebar.tsx:119-152 (fast-path in onAdd; auto-spawn cwd = ws.roots[0], AUD-2026-07-23-17), src/components/WorkspaceSidebar.test.tsx (3 SCN-056 tests incl. cwd assertion), src/strings.ts:201
 
 ## auth
 
