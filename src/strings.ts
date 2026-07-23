@@ -323,6 +323,10 @@ export const strings = {
       pendingNote: "The CEO acts on this once the orchestrator agent runtime lands (S6b).",
       enableLabel: "Enable the CEO",
       enableAria: "Enable the CEO supervisor",
+      /** Progressive disclosure (PRN-11): the only detail shown while the CEO toggle is OFF — the
+       * delegation/scope controls stay collapsed until enabled so a disabled CEO never reads as an
+       * active grant. */
+      disabledHint: "Enable to configure delegation.",
       delegatedLabel: "Delegated confirmation classes",
       /** Empty-universe hint: no confirmation classes exist yet to delegate (define some in the
        * policy above, or seed the recommended scope). */

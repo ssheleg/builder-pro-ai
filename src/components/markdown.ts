@@ -1,24 +1,27 @@
 /**
- * Honest minimal markdown block parser for the Docs preview (SCN-054 step 3: "switches a doc
- * between edit and rendered-preview modes"). The repo deliberately carries NO markdown-renderer
- * dependency — this small pure function covers exactly the block constructs SCN-054's preview
- * promises (headings, lists, paragraphs, fenced code) and nothing more. Inline markup (`**`,
- * `_`, links, …) is intentionally passed through verbatim: rendering a subset of inline syntax
- * would silently mangle the rest, and showing the literal source is the honest degradation
- * (design-system.md §1 "Honest state, always"). `DocsPanel.tsx` maps the returned blocks to
- * plain JSX — no HTML strings and no raw-HTML sink of any kind (the smoke test's injection-sink
- * guard stays clean), so doc content can never inject markup.
+ * Honest minimal markdown parser for the Docs preview (SCN-054 step 3: "switches a doc between
+ * edit and rendered-preview modes"). The repo deliberately carries NO markdown-renderer
+ * dependency — this small pure module covers exactly the block constructs SCN-054's preview
+ * promises (headings, lists, paragraphs, fenced code) plus the four inline marks (`**bold**`,
+ * `*em*`/`_em_`, `` `code` ``, `[text](url)`). `parseMarkdown` splits BLOCK structure; the block
+ * `text` stays the raw source string, and `renderInline` (below) turns that string into an array
+ * of React nodes at render time — `DocsPanel.tsx` maps blocks to plain JSX and feeds paragraph /
+ * heading / list-item text through `renderInline`. Everything is JSX only: no HTML strings and no
+ * raw-HTML sink of any kind (the smoke test's injection-sink guard stays clean, and any literal
+ * `<tag>` in doc content is escaped by React), so doc content can never inject markup.
  *
- * Parsing rules (line-oriented, one pass):
- * - ``` opens a fenced code block; everything up to the closing ``` is code verbatim. An
- *   UNCLOSED fence swallows the rest of the input as code — matching how the author sees the
- *   document mid-edit, rather than guessing at recovery.
+ * Block parsing rules (line-oriented, one pass):
+ * - ``` opens a fenced code block; everything up to the closing ``` is code verbatim (and is NOT
+ *   run through `renderInline`). An UNCLOSED fence swallows the rest of the input as code —
+ *   matching how the author sees the document mid-edit, rather than guessing at recovery.
  * - `#`–`######` + space ⇒ a heading of that level.
  * - `- ` / `* ` / `+ ` ⇒ an unordered list item; `N. ` ⇒ an ordered one. Consecutive items of
  *   the same kind coalesce into one list block.
  * - A blank line closes the current paragraph/list; consecutive plain lines join into one
  *   paragraph with single spaces (markdown soft-wrap semantics).
  */
+
+import { createElement, type CSSProperties, type ReactNode } from "react";
 
 export type MdBlock =
   | { kind: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
@@ -115,4 +118,165 @@ export function parseMarkdown(md: string): MdBlock[] {
   flushParagraph();
   flushList();
   return blocks;
+}
+
+/** Inline `<code>` styling — monospace on a subtly raised chip so it reads against the preview's
+ * `--panel-2` surface (the block-code register, one step lighter). */
+const inlineCodeStyle: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: "0.9em",
+  background: "var(--panel)",
+  borderRadius: "var(--r-sm)",
+  padding: "0 4px",
+};
+
+/** Inline link styling. The preview runs inside a Tauri webview, so a real `<a href>` would
+ * navigate the whole app away — links render as a NON-navigating accent-underlined span with the
+ * destination in a `title` tooltip instead (honest: the URL is visible, nothing is clickable). */
+const inlineLinkStyle: CSSProperties = {
+  color: "var(--accent)",
+  textDecoration: "underline",
+  cursor: "default",
+  wordBreak: "break-all",
+};
+
+const WORD_CHAR_RE = /[A-Za-z0-9]/;
+
+/** Whitespace (or out-of-bounds "") — used by the emphasis flanking rule: a `*`/`_`/`**` run is
+ * only a delimiter when it has no whitespace immediately inside it (so `2 * 3 * 4` and `** x **`
+ * stay literal, matching how a reader expects loose asterisks in prose to render). */
+function isSpace(c: string): boolean {
+  return c === "" || c === " " || c === "\t";
+}
+
+/**
+ * Turns one text string into an array of React nodes, rendering the four inline marks the Docs
+ * preview promises — dependency-free, single pass, and tolerant (any unmatched/unbalanced mark
+ * falls through as literal text rather than swallowing the rest of the line):
+ *
+ * - `` `code` `` → `<code>` (monospace); code wins over every other mark inside it.
+ * - `**bold**` → `<strong>`.
+ * - `*em*` / `_em_` → `<em>`. Underscore emphasis honors the GFM intraword rule (a `_` touching a
+ *   word character on the relevant side is literal), so `snake_case` / `a_b_c` are never mangled.
+ * - `[text](url)` → a non-navigating link span (see `inlineLinkStyle`) with `title={url}`.
+ *
+ * The content of a mark is emitted as a plain string child (no nested inline parsing) — enough for
+ * the preview, and it keeps the tokenizer small and predictable. NEVER emits HTML strings; React
+ * escapes any literal markup in the source, so this cannot become a raw-HTML sink.
+ */
+export function renderInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let buffer = "";
+  let key = 0;
+
+  function flush(): void {
+    if (buffer !== "") {
+      nodes.push(buffer);
+      buffer = "";
+    }
+  }
+
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i];
+
+    // `code` — highest precedence; content is verbatim, no inner marks.
+    if (ch === "`") {
+      const close = text.indexOf("`", i + 1);
+      if (close > i + 1) {
+        flush();
+        nodes.push(createElement("code", { key: key++, style: inlineCodeStyle }, text.slice(i + 1, close)));
+        i = close + 1;
+        continue;
+      }
+      buffer += ch;
+      i += 1;
+      continue;
+    }
+
+    // **bold** — checked before single-`*` emphasis. Flanking: the run must be non-empty with no
+    // whitespace just inside it (`** x **` stays literal).
+    if (ch === "*" && text[i + 1] === "*") {
+      if (!isSpace(text[i + 2] ?? "")) {
+        let from = i + 2;
+        let matched = false;
+        while (from < n) {
+          const close = text.indexOf("**", from);
+          if (close < i + 2) break;
+          if (close > i + 2 && !isSpace(text[close - 1] ?? "")) {
+            flush();
+            nodes.push(createElement("strong", { key: key++ }, text.slice(i + 2, close)));
+            i = close + 2;
+            matched = true;
+            break;
+          }
+          from = close + 2;
+        }
+        if (matched) continue;
+      }
+      buffer += "**";
+      i += 2;
+      continue;
+    }
+
+    // *em* / _em_. Flanking (no whitespace just inside the marks) plus, for `_`, the GFM intraword
+    // rule (a `_` touching a word character on that side is literal) so `snake_case` / paths survive.
+    if (ch === "*" || ch === "_") {
+      const validOpen =
+        !isSpace(text[i + 1] ?? "") &&
+        !(ch === "_" && WORD_CHAR_RE.test(i > 0 ? text[i - 1] : ""));
+      if (validOpen) {
+        let from = i + 1;
+        let matched = false;
+        while (from < n) {
+          const close = text.indexOf(ch, from);
+          if (close <= i) break;
+          const validClose =
+            close > i + 1 &&
+            !isSpace(text[close - 1] ?? "") &&
+            !(ch === "_" && WORD_CHAR_RE.test(close + 1 < n ? text[close + 1] : ""));
+          if (validClose) {
+            flush();
+            nodes.push(createElement("em", { key: key++ }, text.slice(i + 1, close)));
+            i = close + 1;
+            matched = true;
+            break;
+          }
+          from = close + 1;
+        }
+        if (matched) continue;
+      }
+      buffer += ch;
+      i += 1;
+      continue;
+    }
+
+    // [text](url) — non-navigating link span.
+    if (ch === "[") {
+      const closeBracket = text.indexOf("]", i + 1);
+      if (closeBracket > i && text[closeBracket + 1] === "(") {
+        const closeParen = text.indexOf(")", closeBracket + 2);
+        if (closeParen > closeBracket + 1) {
+          const linkText = text.slice(i + 1, closeBracket);
+          const url = text.slice(closeBracket + 2, closeParen);
+          flush();
+          nodes.push(
+            createElement("span", { key: key++, style: inlineLinkStyle, title: url }, linkText),
+          );
+          i = closeParen + 1;
+          continue;
+        }
+      }
+      buffer += ch;
+      i += 1;
+      continue;
+    }
+
+    buffer += ch;
+    i += 1;
+  }
+
+  flush();
+  return nodes;
 }

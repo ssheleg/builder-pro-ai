@@ -280,6 +280,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       <select
         data-testid={`task-priority-select-${task.id}`}
         aria-label={strings.tasks.priorityAria}
+        title={strings.tasks.priorityAria}
         value={task.priority}
         disabled={disabled}
         onChange={(e) => onPriorityChange(task.id, e.target.value as TaskPriority)}
@@ -294,6 +295,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       <select
         data-testid={`task-status-select-${task.id}`}
         aria-label={strings.tasks.statusAria}
+        title={strings.tasks.statusAria}
         value={task.status}
         disabled={disabled}
         onChange={(e) => onStatusChange(task.id, e.target.value as TaskStatus)}
@@ -519,6 +521,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         <select
           data-testid="task-create-source"
           aria-label={strings.tasks.newSourceAria}
+          title={strings.tasks.newSourceAria}
           value={createSource}
           onChange={(e) => setCreateSource(e.target.value as TaskSource)}
           style={selectStyle}
@@ -532,6 +535,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         <select
           data-testid="task-create-priority"
           aria-label={strings.tasks.newPriorityAria}
+          title={strings.tasks.newPriorityAria}
           value={createPriority}
           onChange={(e) => setCreatePriority(e.target.value as TaskPriority)}
           style={selectStyle}
@@ -545,6 +549,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         <select
           data-testid="task-create-parent"
           aria-label={strings.tasks.parentAria}
+          title={strings.tasks.parentAria}
           value={createParentId}
           onChange={(e) => setCreateParentId(e.target.value)}
           style={selectStyle}

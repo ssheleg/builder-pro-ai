@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 const orchdGetRulesetMock = vi.fn();
 const orchdUpsertRulesetMock = vi.fn();
@@ -308,12 +308,35 @@ describe("RulesetPanel — CEO supervisor (SCN-046)", () => {
     return render(<RulesetPanel scope="project" projectId="p1" />);
   }
 
-  it("renders the supervisor section on project scope: toggle (default off), info-access, scope summary, pending note", () => {
+  it("progressive disclosure (PRN-11): while OFF only the toggle, disabled hint and pending note render — no scope/info summaries", () => {
     mountProject();
 
     expect(screen.getByTestId("ruleset-supervisor")).toBeTruthy();
     const enable = screen.getByTestId("ruleset-supervisor-enable") as HTMLInputElement;
     expect(enable.checked).toBe(false);
+    // The muted "enable to configure" hint is the only detail shown while disabled.
+    expect(screen.getByTestId("ruleset-supervisor-disabled-hint").textContent).toBe(
+      strings.rules.supervisor.disabledHint,
+    );
+    // The detail controls / "active grant"-implying summaries are ABSENT while disabled.
+    expect(screen.queryByTestId("ruleset-supervisor-info-access")).toBeNull();
+    expect(screen.queryByTestId("ruleset-supervisor-scope-summary")).toBeNull();
+    expect(screen.queryByTestId("ruleset-supervisor-mcp-soon")).toBeNull();
+    expect(screen.queryByTestId("ruleset-supervisor-recommended")).toBeNull();
+    expect(screen.queryByTestId("ruleset-supervisor-instruction")).toBeNull();
+    expect(screen.queryByTestId("ruleset-supervisor-inherited-caps")).toBeNull();
+    // Honesty boundary (S6b): the pending note is always present, verbatim, even while disabled.
+    const pending = screen.getByTestId("ruleset-supervisor-pending");
+    expect(pending.textContent).toBe(strings.rules.supervisor.pendingNote);
+    expect(pending.textContent).toContain("S6b");
+  });
+
+  it("enabling the CEO reveals the detail controls (info-access, scope summary, MCP-soon) and hides the hint", () => {
+    mountProject();
+
+    fireEvent.click(screen.getByTestId("ruleset-supervisor-enable"));
+
+    expect(screen.queryByTestId("ruleset-supervisor-disabled-hint")).toBeNull();
     expect(screen.getByTestId("ruleset-supervisor-info-access").textContent).toBe(
       strings.rules.supervisor.infoAccess,
     );
@@ -324,13 +347,12 @@ describe("RulesetPanel — CEO supervisor (SCN-046)", () => {
         strings.rules.supervisor.inheritedNoSpendCap,
       ),
     );
-    // Honesty boundary (S6b): the pending note must be present, verbatim.
-    const pending = screen.getByTestId("ruleset-supervisor-pending");
-    expect(pending.textContent).toBe(strings.rules.supervisor.pendingNote);
-    expect(pending.textContent).toContain("S6b");
-    // "MCP tools — soon" placeholder present.
     expect(screen.getByTestId("ruleset-supervisor-mcp-soon").textContent).toBe(
       strings.rules.supervisor.mcpSoon,
+    );
+    // The pending note stays present alongside the revealed controls.
+    expect(screen.getByTestId("ruleset-supervisor-pending").textContent).toBe(
+      strings.rules.supervisor.pendingNote,
     );
   });
 
@@ -343,9 +365,10 @@ describe("RulesetPanel — CEO supervisor (SCN-046)", () => {
   it("enable + delegated class + instruction: Save sends the full supervisor config", async () => {
     mountProject();
 
-    // Seed the delegation scope via the Recommended-scope preset, then enable + write instruction.
-    fireEvent.click(screen.getByTestId("ruleset-supervisor-recommended"));
+    // Enable first (progressive disclosure — the detail controls only exist once enabled), then
+    // seed the delegation scope via the Recommended-scope preset and write the instruction.
     fireEvent.click(screen.getByTestId("ruleset-supervisor-enable"));
+    fireEvent.click(screen.getByTestId("ruleset-supervisor-recommended"));
     fireEvent.change(screen.getByTestId("ruleset-supervisor-instruction"), {
       target: { value: "Ship small." },
     });
@@ -370,6 +393,8 @@ describe("RulesetPanel — CEO supervisor (SCN-046)", () => {
   it("Recommended scope seeds the safe-shell + file-write delegated classes as checked", () => {
     mountProject();
 
+    // Enable to reveal the detail controls, then apply the preset.
+    fireEvent.click(screen.getByTestId("ruleset-supervisor-enable"));
     fireEvent.click(screen.getByTestId("ruleset-supervisor-recommended"));
 
     const safeShell = screen.getByTestId("ruleset-supervisor-class-safe-shell") as HTMLInputElement;
@@ -405,20 +430,31 @@ describe("RulesetPanel — CEO supervisor (SCN-046)", () => {
     expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
   });
 
-  it("orchd down: supervisor controls (toggle, recommended, Save policy) are disabled and Save is a no-op", () => {
+  it("orchd down (PRN-04): CEO controls stay editable as drafts; only Save policy is gated", () => {
     const view = makeView({ scope: "project", projectId: "p1" });
     useAppStore.setState({ rulesets: { "project:p1": view }, orchdDown: true }, false);
     orchdGetRulesetMock.mockResolvedValue(view);
 
     render(<RulesetPanel scope="project" projectId="p1" />);
 
-    expect((screen.getByTestId("ruleset-supervisor-enable") as HTMLInputElement).disabled).toBe(true);
+    // The toggle stays live while orchd is down (unified drafts-stay-live rule, not disabled).
+    const enable = screen.getByTestId("ruleset-supervisor-enable") as HTMLInputElement;
+    expect(enable.disabled).toBe(false);
+    // Enabling it reveals the now-live detail controls (progressive disclosure composes with the
+    // unified gating): recommended, instruction, and the custom-rule adder are all editable.
+    fireEvent.click(enable);
     expect(
       (screen.getByTestId("ruleset-supervisor-recommended") as HTMLButtonElement).disabled,
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      (screen.getByTestId("ruleset-supervisor-instruction") as HTMLTextAreaElement).disabled,
+    ).toBe(false);
+    expect((screen.getByTestId("ruleset-supervisor-rule-input") as HTMLInputElement).disabled).toBe(
+      false,
+    );
+    // Only "Save policy" stays gated (the correctness gate that protects the write).
     const savePolicy = screen.getByTestId("ruleset-save-policy") as HTMLButtonElement;
     expect(savePolicy.disabled).toBe(true);
-
     fireEvent.click(savePolicy);
     expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
   });
@@ -432,5 +468,73 @@ describe("RulesetPanel — CEO supervisor (SCN-046)", () => {
 
     await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalledWith(commandError));
     await waitFor(() => expect(useAppStore.getState().toast).toBe("orchestrator: error"));
+  });
+});
+
+// ── Dirty-draft guard (PRN-03) ─────────────────────────────────────────────────────────────────
+// A fresh view landing mid-edit (an `orchd://ruleset-changed` push or reconnect rehydrate) must
+// NOT clobber an in-progress unsaved policy draft when the ruleset identity is unchanged; a clean
+// field still re-hydrates, and navigating to a different ruleset always hydrates fully.
+describe("RulesetPanel — dirty-draft guard (PRN-03)", () => {
+  it("same-identity external update PRESERVES a dirty spend-cap draft", async () => {
+    const view = makeView({ scope: "project", projectId: "p1", spendCapUsd: 10 });
+    useAppStore.setState({ rulesets: { "project:p1": view } }, false);
+    orchdGetRulesetMock.mockResolvedValue(view);
+
+    render(<RulesetPanel scope="project" projectId="p1" />);
+    // Let the on-mount refresh settle so the baseline is the server's "10".
+    await waitFor(() => expect(orchdGetRulesetMock).toHaveBeenCalled());
+    const cap = () => screen.getByTestId("ruleset-spend-cap") as HTMLInputElement;
+    await waitFor(() => expect(cap().value).toBe("10"));
+
+    // User edits the cap (dirty), then a push lands for the SAME ruleset with a different value.
+    fireEvent.change(cap(), { target: { value: "99" } });
+    const external = makeView({ scope: "project", projectId: "p1", spendCapUsd: 20 });
+    act(() => {
+      useAppStore.setState({ rulesets: { "project:p1": external } }, false);
+    });
+
+    // The dirty draft survives — the push does not overwrite it.
+    expect(cap().value).toBe("99");
+  });
+
+  it("same-identity external update HYDRATES a clean spend-cap draft", async () => {
+    const view = makeView({ scope: "project", projectId: "p1", spendCapUsd: 10 });
+    useAppStore.setState({ rulesets: { "project:p1": view } }, false);
+    orchdGetRulesetMock.mockResolvedValue(view);
+
+    render(<RulesetPanel scope="project" projectId="p1" />);
+    const cap = () => screen.getByTestId("ruleset-spend-cap") as HTMLInputElement;
+    await waitFor(() => expect(cap().value).toBe("10"));
+
+    // No local edit (clean) — a push for the same ruleset re-hydrates to the server's new value.
+    const external = makeView({ scope: "project", projectId: "p1", spendCapUsd: 20 });
+    act(() => {
+      useAppStore.setState({ rulesets: { "project:p1": external } }, false);
+    });
+
+    expect(cap().value).toBe("20");
+  });
+
+  it("switching to a different ruleset always hydrates (navigation, not clobber)", async () => {
+    const p1 = makeView({ scope: "project", projectId: "p1", spendCapUsd: 10 });
+    const p2 = makeView({ scope: "project", projectId: "p2", spendCapUsd: 55 });
+    useAppStore.setState(
+      { rulesets: { "project:p1": p1, "project:p2": p2 } },
+      false,
+    );
+    orchdGetRulesetMock.mockImplementation((_scope: unknown, pid: unknown) =>
+      Promise.resolve(pid === "p2" ? p2 : p1),
+    );
+
+    const { rerender } = render(<RulesetPanel scope="project" projectId="p1" />);
+    const cap = () => screen.getByTestId("ruleset-spend-cap") as HTMLInputElement;
+    await waitFor(() => expect(cap().value).toBe("10"));
+
+    // Dirty p1's draft, then navigate to p2 — the identity change must hydrate p2's value fully,
+    // discarding the p1 draft (this is navigation, not an underneath-edit clobber).
+    fireEvent.change(cap(), { target: { value: "99" } });
+    rerender(<RulesetPanel scope="project" projectId="p2" />);
+    await waitFor(() => expect(cap().value).toBe("55"));
   });
 });

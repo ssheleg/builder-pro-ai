@@ -4,7 +4,7 @@
 // Accept/Recreate file-state banners (the SCN-036 rules pattern), delete behind the locked
 // "delete document?" confirm, "reveal file" (never a path from JS), and orchd-down gating.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 const orchdListDocsMock = vi.fn();
 const orchdGetDocMock = vi.fn();
@@ -360,6 +360,84 @@ describe("DocsPanel", () => {
     render(<DocsPanel projectId="p1" />);
 
     expect(screen.getByTestId("docs-select-prompt").textContent).toBe(strings.docs.selectPrompt);
+  });
+});
+
+// ── Dirty-draft guard (PRN-03) ─────────────────────────────────────────────────────────────────
+// A fresh doc view landing mid-edit (an `orchd://docs-changed` push or reconnect rehydrate) must
+// NOT wipe an in-progress unsaved editor draft for the SAME doc; a clean editor still re-hydrates,
+// and selecting a different doc always hydrates fully. The "file changed externally" banner
+// mediates the same-doc conflict.
+describe("DocsPanel — dirty-draft guard (PRN-03)", () => {
+  it("a same-doc external change PRESERVES a dirty editor draft (banner mediates)", async () => {
+    seedDoc(makeView({ name: "notes", mdContent: "old\n" }));
+    orchdGetDocMock.mockResolvedValue(makeView({ name: "notes", mdContent: "old\n" }));
+
+    render(<DocsPanel projectId="p1" />);
+    fireEvent.click(screen.getByTestId("docs-row-notes"));
+    const editor = () => screen.getByTestId("docs-content") as HTMLTextAreaElement;
+    await waitFor(() => expect(editor().value).toBe("old\n"));
+
+    // User edits (dirty), then the same doc changes on disk (externallyModified push).
+    fireEvent.change(editor(), { target: { value: "my unsaved edit\n" } });
+    const external = makeView({
+      name: "notes",
+      fileState: "externallyModified",
+      mdContent: "changed on disk\n",
+    });
+    act(() => {
+      useAppStore.setState({ docViews: { [docViewKey("p1", "notes")]: external } }, false);
+    });
+
+    // The draft is preserved (not clobbered); the banner is what surfaces the conflict.
+    expect(editor().value).toBe("my unsaved edit\n");
+    expect(screen.getByTestId("docs-banner-modified")).toBeTruthy();
+  });
+
+  it("a same-doc external change HYDRATES a clean editor draft", async () => {
+    seedDoc(makeView({ name: "notes", mdContent: "old\n" }));
+    orchdGetDocMock.mockResolvedValue(makeView({ name: "notes", mdContent: "old\n" }));
+
+    render(<DocsPanel projectId="p1" />);
+    fireEvent.click(screen.getByTestId("docs-row-notes"));
+    const editor = () => screen.getByTestId("docs-content") as HTMLTextAreaElement;
+    await waitFor(() => expect(editor().value).toBe("old\n"));
+
+    // No local edit (clean) — a same-doc push re-hydrates the editor to the server's new content.
+    const external = makeView({ name: "notes", mdContent: "server rewrite\n" });
+    act(() => {
+      useAppStore.setState({ docViews: { [docViewKey("p1", "notes")]: external } }, false);
+    });
+
+    expect(editor().value).toBe("server rewrite\n");
+  });
+
+  it("switching to a different doc always hydrates (navigation, not clobber)", async () => {
+    useAppStore.setState(
+      {
+        docsByProject: { p1: [makeMeta("notes"), makeMeta("spec")] },
+        docViews: {
+          [docViewKey("p1", "notes")]: makeView({ name: "notes", mdContent: "notes body\n" }),
+          [docViewKey("p1", "spec")]: makeView({ name: "spec", mdContent: "spec body\n" }),
+        },
+      },
+      false,
+    );
+    // The mount refresh re-lists the docs — return both rows so `docs-row-spec` survives it.
+    orchdListDocsMock.mockResolvedValue([makeMeta("notes"), makeMeta("spec")]);
+    orchdGetDocMock.mockImplementation((_p: unknown, name: unknown) =>
+      Promise.resolve(makeView({ name: name as string, mdContent: name === "spec" ? "spec body\n" : "notes body\n" })),
+    );
+
+    render(<DocsPanel projectId="p1" />);
+    fireEvent.click(screen.getByTestId("docs-row-notes"));
+    const editor = () => screen.getByTestId("docs-content") as HTMLTextAreaElement;
+    await waitFor(() => expect(editor().value).toBe("notes body\n"));
+
+    // Dirty the notes editor, then open a different doc — the identity change hydrates spec fully.
+    fireEvent.change(editor(), { target: { value: "dirtied\n" } });
+    fireEvent.click(screen.getByTestId("docs-row-spec"));
+    await waitFor(() => expect(editor().value).toBe("spec body\n"));
   });
 });
 
