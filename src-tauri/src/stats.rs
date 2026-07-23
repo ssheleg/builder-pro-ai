@@ -820,7 +820,10 @@ mod tests {
         assert!((opus.est_cost_usd.unwrap() - 30.0).abs() < 1e-9); // 2 MTok * $15/MTok input
         let fable = &out.families[1];
         assert_eq!(fable.family, "fable");
-        assert_eq!(fable.est_cost_usd, None, "unpriced family carries tokens, no cost");
+        assert_eq!(
+            fable.est_cost_usd, None,
+            "unpriced family carries tokens, no cost"
+        );
         assert_eq!(fable.sessions, 1);
     }
 
