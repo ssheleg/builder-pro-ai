@@ -112,6 +112,13 @@ fn sample_policy() -> PolicyRules {
         spend_cap_usd: Some(100.0),
         approval_classes: vec!["deploy".into()],
         path_allowlist: vec!["/tmp".into()],
+        // SCN-046 / A-7 CEO supervisor config rides inside PolicyRules.
+        supervisor: SupervisorConfig {
+            enabled: true,
+            delegated_classes: vec!["safe-shell".into(), "file-write".into()],
+            instruction: "Keep changes small.".into(),
+            custom_rules: vec!["never push to main".into()],
+        },
     }
 }
 
@@ -1455,4 +1462,56 @@ fn research_start_run_request_stays_snake_case_on_the_wire() {
     assert_wire_contains(&frame, "server_id");
     assert_wire_contains(&frame, "tool_name");
     assert_wire_contains(&frame, "args_json");
+}
+
+// ---- SCN-046 / A-7 CEO supervisor: PolicyRules additive field ----
+
+#[test]
+fn policy_rules_round_trips_supervisor_config_over_cbor() {
+    // The whole point of A-7: the CEO config rides inside PolicyRules, so it must survive the same
+    // Hop-B CBOR round-trip every other entity does. `sample_policy` now carries a fully-populated
+    // supervisor; the ruleset-view response variant already threads it through the wire.
+    let frame = OrchdFrame::Response {
+        id: 7,
+        res: OrchdResponse::RuleSetView(sample_ruleset_view()),
+    };
+    // The delegated-class tags reach the raw wire bytes verbatim (checked before the round-trip
+    // consumes the frame by value).
+    assert_wire_contains(&frame, "safe-shell");
+    assert_wire_contains(&frame, "delegatedClasses");
+    assert_frame_roundtrip(frame);
+}
+
+#[test]
+fn supervisor_config_json_round_trips_via_policy_rules() {
+    let policy = sample_policy();
+    let json = serde_json::to_string(&policy).expect("serialize");
+    let back: PolicyRules = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(policy, back);
+    // camelCase field names on the JSON wire (ts-rs parity with the generated TS type).
+    assert!(json.contains("delegatedClasses"), "got: {json}");
+    assert!(json.contains("customRules"), "got: {json}");
+}
+
+#[test]
+fn policy_rules_without_supervisor_key_decodes_to_default_disabled() {
+    // A-7 "old rows/bundles decode": a PolicyRules JSON blob predating SCN-046 has no `supervisor`
+    // key; `#[serde(default)]` on the field must backfill it to a disabled/empty config instead of
+    // erroring on a missing field.
+    let json = r#"{"spendCapUsd":null,"approvalClasses":[],"pathAllowlist":[]}"#;
+    let policy: PolicyRules = serde_json::from_str(json).expect("legacy policy JSON must decode");
+    assert_eq!(policy.supervisor, SupervisorConfig::default());
+    assert!(!policy.supervisor.enabled);
+    assert!(policy.supervisor.delegated_classes.is_empty());
+    assert!(policy.supervisor.custom_rules.is_empty());
+    assert_eq!(policy.supervisor.instruction, "");
+}
+
+#[test]
+fn supervisor_config_default_is_disabled_empty() {
+    let d = SupervisorConfig::default();
+    assert!(!d.enabled);
+    assert!(d.delegated_classes.is_empty());
+    assert!(d.custom_rules.is_empty());
+    assert_eq!(d.instruction, "");
 }

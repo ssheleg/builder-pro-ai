@@ -19,7 +19,17 @@ vi.mock("../ipc/orchd", () => ({
 import { RulesetPanel } from "./RulesetPanel";
 import { useAppStore } from "../store/store";
 import { strings } from "../strings";
-import type { RuleFileState, RuleSetView } from "../ipc/orchd-types";
+import type { RuleFileState, RuleSetView, SupervisorConfig } from "../ipc/orchd-types";
+
+/** Default CEO supervisor config (SCN-046): disabled/empty, the shape every fresh policy carries. */
+function makeSupervisor(over: Partial<SupervisorConfig> = {}): SupervisorConfig {
+  return {
+    enabled: over.enabled ?? false,
+    delegatedClasses: over.delegatedClasses ?? [],
+    instruction: over.instruction ?? "",
+    customRules: over.customRules ?? [],
+  };
+}
 
 function makeView(over: {
   fileState?: RuleFileState;
@@ -27,19 +37,24 @@ function makeView(over: {
   spendCapUsd?: number | null;
   approvalClasses?: string[];
   pathAllowlist?: string[];
+  supervisor?: SupervisorConfig;
+  scope?: "global" | "project";
+  projectId?: string | null;
 } = {}): RuleSetView {
   const fileState = over.fileState ?? "ok";
+  const scope = over.scope ?? "global";
   return {
     rule: {
-      id: "rule-global",
-      scope: "global",
-      projectId: null,
+      id: scope === "project" ? "rule-p1" : "rule-global",
+      scope,
+      projectId: over.projectId ?? (scope === "project" ? "p1" : null),
       mdPath: "/Users/x/Library/Application Support/BuilderProAI/rules/global.md",
       mdHash: "hash-1",
       policy: {
         spendCapUsd: over.spendCapUsd ?? null,
         approvalClasses: over.approvalClasses ?? [],
         pathAllowlist: over.pathAllowlist ?? [],
+        supervisor: over.supervisor ?? makeSupervisor(),
       },
       createdAt: 1,
       updatedAt: 1,
@@ -188,6 +203,7 @@ describe("RulesetPanel", () => {
         spendCapUsd: null,
         approvalClasses: [],
         pathAllowlist: [],
+        supervisor: makeSupervisor(),
       }),
     );
   });
@@ -216,6 +232,7 @@ describe("RulesetPanel", () => {
         spendCapUsd: null,
         approvalClasses: ["deploy"],
         pathAllowlist: ["/repo/src"],
+        supervisor: makeSupervisor(),
       }),
     );
   });
@@ -277,5 +294,143 @@ describe("RulesetPanel", () => {
 
     fireEvent.click(recreateButton);
     expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── CEO supervisor section (SCN-046, FLW-19, A-7) ──────────────────────────────────────────────
+describe("RulesetPanel — CEO supervisor (SCN-046)", () => {
+  /** Set up a project-scoped view in the store AND as the mount-refresh return value, so the
+   * on-mount re-Get doesn't clobber the fixture (same pattern as the "reveal file" test above). */
+  function mountProject(over: Parameters<typeof makeView>[0] = {}) {
+    const view = makeView({ ...over, scope: "project", projectId: "p1" });
+    useAppStore.setState({ rulesets: { "project:p1": view } }, false);
+    orchdGetRulesetMock.mockResolvedValue(view);
+    return render(<RulesetPanel scope="project" projectId="p1" />);
+  }
+
+  it("renders the supervisor section on project scope: toggle (default off), info-access, scope summary, pending note", () => {
+    mountProject();
+
+    expect(screen.getByTestId("ruleset-supervisor")).toBeTruthy();
+    const enable = screen.getByTestId("ruleset-supervisor-enable") as HTMLInputElement;
+    expect(enable.checked).toBe(false);
+    expect(screen.getByTestId("ruleset-supervisor-info-access").textContent).toBe(
+      strings.rules.supervisor.infoAccess,
+    );
+    // Scope summary with no classes and no cap reads the "no classes"/"no spend cap" fallbacks.
+    expect(screen.getByTestId("ruleset-supervisor-scope-summary").textContent).toBe(
+      strings.rules.supervisor.scopeSummary(
+        strings.rules.supervisor.scopeSummaryNoClasses,
+        strings.rules.supervisor.inheritedNoSpendCap,
+      ),
+    );
+    // Honesty boundary (S6b): the pending note must be present, verbatim.
+    const pending = screen.getByTestId("ruleset-supervisor-pending");
+    expect(pending.textContent).toBe(strings.rules.supervisor.pendingNote);
+    expect(pending.textContent).toContain("S6b");
+    // "MCP tools — soon" placeholder present.
+    expect(screen.getByTestId("ruleset-supervisor-mcp-soon").textContent).toBe(
+      strings.rules.supervisor.mcpSoon,
+    );
+  });
+
+  it("does not render the supervisor section on the global rules view", () => {
+    useAppStore.setState({ rulesets: { global: makeView() } }, false);
+    render(<RulesetPanel scope="global" projectId={null} />);
+    expect(screen.queryByTestId("ruleset-supervisor")).toBeNull();
+  });
+
+  it("enable + delegated class + instruction: Save sends the full supervisor config", async () => {
+    mountProject();
+
+    // Seed the delegation scope via the Recommended-scope preset, then enable + write instruction.
+    fireEvent.click(screen.getByTestId("ruleset-supervisor-recommended"));
+    fireEvent.click(screen.getByTestId("ruleset-supervisor-enable"));
+    fireEvent.change(screen.getByTestId("ruleset-supervisor-instruction"), {
+      target: { value: "Ship small." },
+    });
+
+    fireEvent.click(screen.getByTestId("ruleset-save-policy"));
+
+    await waitFor(() =>
+      expect(orchdUpsertRulesetMock).toHaveBeenCalledWith("project", "p1", null, null, {
+        spendCapUsd: null,
+        approvalClasses: [],
+        pathAllowlist: [],
+        supervisor: {
+          enabled: true,
+          delegatedClasses: ["safe-shell", "file-write"],
+          instruction: "Ship small.",
+          customRules: [],
+        },
+      }),
+    );
+  });
+
+  it("Recommended scope seeds the safe-shell + file-write delegated classes as checked", () => {
+    mountProject();
+
+    fireEvent.click(screen.getByTestId("ruleset-supervisor-recommended"));
+
+    const safeShell = screen.getByTestId("ruleset-supervisor-class-safe-shell") as HTMLInputElement;
+    const fileWrite = screen.getByTestId("ruleset-supervisor-class-file-write") as HTMLInputElement;
+    expect(safeShell.checked).toBe(true);
+    expect(fileWrite.checked).toBe(true);
+  });
+
+  it("enabled CEO with an empty delegation scope: blocked alert shown, Save NOT sent", () => {
+    mountProject();
+
+    // No classes delegated; enable the CEO, then attempt Save.
+    fireEvent.click(screen.getByTestId("ruleset-supervisor-enable"));
+    fireEvent.click(screen.getByTestId("ruleset-save-policy"));
+
+    const alert = screen.getByTestId("ruleset-policy-error");
+    expect(alert.textContent).toBe(strings.rules.supervisor.blockedNoClasses);
+    expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
+  });
+
+  it("unchecking the last delegated class then Save re-blocks (guard is on the live scope, not stale)", async () => {
+    mountProject({ supervisor: makeSupervisor({ enabled: true, delegatedClasses: ["safe-shell"] }) });
+
+    // Starts valid (enabled + one class) — uncheck it, then Save must block.
+    const safeShell = screen.getByTestId("ruleset-supervisor-class-safe-shell") as HTMLInputElement;
+    expect(safeShell.checked).toBe(true);
+    fireEvent.click(safeShell);
+    fireEvent.click(screen.getByTestId("ruleset-save-policy"));
+
+    expect(screen.getByTestId("ruleset-policy-error").textContent).toBe(
+      strings.rules.supervisor.blockedNoClasses,
+    );
+    expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
+  });
+
+  it("orchd down: supervisor controls (toggle, recommended, Save policy) are disabled and Save is a no-op", () => {
+    const view = makeView({ scope: "project", projectId: "p1" });
+    useAppStore.setState({ rulesets: { "project:p1": view }, orchdDown: true }, false);
+    orchdGetRulesetMock.mockResolvedValue(view);
+
+    render(<RulesetPanel scope="project" projectId="p1" />);
+
+    expect((screen.getByTestId("ruleset-supervisor-enable") as HTMLInputElement).disabled).toBe(true);
+    expect(
+      (screen.getByTestId("ruleset-supervisor-recommended") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    const savePolicy = screen.getByTestId("ruleset-save-policy") as HTMLButtonElement;
+    expect(savePolicy.disabled).toBe(true);
+
+    fireEvent.click(savePolicy);
+    expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
+  });
+
+  it("a server Validation reject on a supervisor save surfaces via toast (honest error surface)", async () => {
+    mountProject({ supervisor: makeSupervisor({ enabled: true, delegatedClasses: ["safe-shell"] }) });
+    const commandError = { kind: "daemon", code: "Validation", message: "invalid policy" };
+    orchdUpsertRulesetMock.mockRejectedValueOnce(commandError);
+
+    fireEvent.click(screen.getByTestId("ruleset-save-policy"));
+
+    await waitFor(() => expect(describeOrchdErrorMock).toHaveBeenCalledWith(commandError));
+    await waitFor(() => expect(useAppStore.getState().toast).toBe("orchestrator: error"));
   });
 });

@@ -51,7 +51,7 @@
 | SCN-043 | Render crash recovery | error-recovery | P-01 | ST-032 | implemented | 2026-07-22 PASS |
 | SCN-044 | Terminal attach failure surfaced | terminals | P-01 | ST-014 | implemented | 2026-07-22 PASS |
 | SCN-045 | Keep the machine awake while sessions run | power | P-01 | ST-033 | validated | — |
-| SCN-046 | Enable the CEO and set the delegation scope | supervisor | P-01 | ST-034 | validated | — |
+| SCN-046 | Enable the CEO and set the delegation scope | supervisor | P-01 | ST-034 | validated | config plumbing only; CEO acts in S6b |
 | SCN-047 | CEO answers an agent's question autonomously | supervisor | P-01 | ST-034 | validated | — |
 | SCN-048 | CEO escalates an out-of-authority question | supervisor | P-01 | ST-034 | validated | — |
 | SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | — |
@@ -881,7 +881,8 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → controls disabled; empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
 - **Status:** validated
-- **Coverage:** none yet
+- **Note (honesty boundary, S6b):** this scenario ships the delegation CONFIG only. It persists the scope, instruction and custom rules and states what the CEO would read/decide; it does NOT execute anything. Autonomous execution — the CEO actually answering agent questions (SCN-047) and continuing workflows (SCN-049) — awaits the orchestrator-agent runtime (S6b). The UI carries a matching pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same register as the Skills-tab registry banner.
+- **Coverage:** crates/orchd-proto/src/lib.rs:225-284 (SupervisorConfig + PolicyRules.supervisor additive field), src/ipc/orchd-types.ts:209,300-305 (generated TS), crates/orchd/src/persistence.rs:2576-2585,2607-2634,2659-2683 (validate_policy supervisor guards, PolicyRulesStrict mirror, decode backfill), src/components/RulesetPanel.tsx:31,46-89,455-536,662-771 (validatePolicy + supervisor section, project scope only), src/strings.ts:319-352 (rules.supervisor.* incl. pendingNote); tests — crates/orchd/src/persistence.rs:6176-6320, crates/orchd-proto/tests/roundtrip.rs:1467-1516, crates/orchd-proto/tests/ts_export.rs:159-200, src/components/RulesetPanel.test.tsx:301-430
 
 ### SCN-047: CEO answers an agent's question autonomously
 - **Persona:** P-01

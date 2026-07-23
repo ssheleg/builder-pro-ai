@@ -862,7 +862,12 @@ describe("useAppStore", () => {
       projectId: null,
       mdPath: "/rules.md",
       mdHash: "abc",
-      policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+      policy: {
+        spendCapUsd: null,
+        approvalClasses: [],
+        pathAllowlist: [],
+        supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+      },
       createdAt: 1,
       updatedAt: 1,
     },

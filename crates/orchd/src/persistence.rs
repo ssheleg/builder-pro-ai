@@ -41,7 +41,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bpa_orchd_proto::{
     AuditRow, Doc, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEntityType, Idea,
     IdeaLifecycle, Insight, InsightStatus, McpArtifact, McpInvocation, Policy, PolicyRules,
-    PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, TaskPriority, TaskSource, TaskStatus,
+    PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, SupervisorConfig, TaskPriority,
+    TaskSource, TaskStatus,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
@@ -2565,12 +2566,21 @@ fn decode_rule_scope(s: &str) -> Result<RuleScope, OrchdPersistError> {
 ///    instead of a spurious "missing field" error — `PolicyRules` itself has no such defaults
 ///    (`approval_classes`/`path_allowlist` are non-`Option` on the wire, by design: an update that
 ///    actually SETS them must send them explicitly, spec D11).
+///
+/// The `supervisor` field (SCN-046, A-7) reuses the WIRE [`SupervisorConfig`] type directly rather
+/// than a parallel strict mirror: because both this validator and the wire type share one struct,
+/// they can never drift, and `SupervisorConfig`'s own container-level `#[serde(default)]` means a
+/// stored policy without a `supervisor` key (every pre-SCN-046 row, the `'{}'` default) still
+/// decodes cleanly. The lockstep guarantee still holds at the `PolicyRules` level — this struct's
+/// `deny_unknown_fields` fails loudly if `PolicyRules` grows a NEW top-level field this mirror does
+/// not list.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 struct PolicyRulesStrict {
     spend_cap_usd: Option<f64>,
     approval_classes: Vec<String>,
     path_allowlist: Vec<String>,
+    supervisor: SupervisorConfig,
 }
 
 /// Validates `policy` (spec §5.2) and returns its canonical JSON encoding (camelCase, matching
@@ -2599,6 +2609,32 @@ fn validate_policy(policy: &PolicyRules) -> Result<String, OrchdPersistError> {
     if strict.path_allowlist.iter().any(|s| s.is_empty()) {
         return Err(OrchdPersistError::Validation(
             "policy.path_allowlist entries must be non-empty".to_string(),
+        ));
+    }
+    // SCN-046 / A-7 CEO supervisor: the same non-empty-entry discipline as the two lists above, plus
+    // the core SCN-046 invariant — an ENABLED CEO with no delegated classes is a contradiction ("a
+    // supervisor authorized to decide nothing"). The client blocks this with the "delegate at least
+    // one class or disable the CEO" alert; this is the authoritative guard so the invariant also
+    // holds against a racing/hand-crafted request, exactly like the negative-cap guard above.
+    if strict
+        .supervisor
+        .delegated_classes
+        .iter()
+        .any(|s| s.is_empty())
+    {
+        return Err(OrchdPersistError::Validation(
+            "policy.supervisor.delegatedClasses entries must be non-empty".to_string(),
+        ));
+    }
+    if strict.supervisor.custom_rules.iter().any(|s| s.is_empty()) {
+        return Err(OrchdPersistError::Validation(
+            "policy.supervisor.customRules entries must be non-empty".to_string(),
+        ));
+    }
+    if strict.supervisor.enabled && strict.supervisor.delegated_classes.is_empty() {
+        return Err(OrchdPersistError::Validation(
+            "policy.supervisor: an enabled CEO must delegate at least one confirmation class"
+                .to_string(),
         ));
     }
     Ok(json)
@@ -2640,6 +2676,9 @@ impl RuleSetRow {
             spend_cap_usd: decoded.spend_cap_usd,
             approval_classes: decoded.approval_classes,
             path_allowlist: decoded.path_allowlist,
+            // SCN-046: pre-supervisor rows decode `supervisor` from `PolicyRulesStrict`'s
+            // `#[serde(default)]` to a disabled/empty config — see that struct's doc.
+            supervisor: decoded.supervisor,
         };
         Ok(RuleSet {
             id: self.id,
@@ -6029,6 +6068,7 @@ mod ruleset_tests {
             spend_cap_usd: Some(-1.0),
             approval_classes: vec![],
             path_allowlist: vec![],
+            supervisor: SupervisorConfig::default(),
         };
 
         let err = db
@@ -6052,6 +6092,7 @@ mod ruleset_tests {
             spend_cap_usd: None,
             approval_classes: vec!["".to_string()],
             path_allowlist: vec![],
+            supervisor: SupervisorConfig::default(),
         };
 
         let err = db
@@ -6075,6 +6116,7 @@ mod ruleset_tests {
             spend_cap_usd: None,
             approval_classes: vec![],
             path_allowlist: vec!["".to_string()],
+            supervisor: SupervisorConfig::default(),
         };
 
         let err = db
@@ -6098,6 +6140,7 @@ mod ruleset_tests {
             spend_cap_usd: Some(12.5),
             approval_classes: vec!["deploy".to_string()],
             path_allowlist: vec!["/tmp".to_string()],
+            supervisor: SupervisorConfig::default(),
         };
 
         let updated = db
@@ -6128,6 +6171,187 @@ mod ruleset_tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    // ---- SCN-046 / A-7 CEO supervisor: persistence round-trip + serde-default backfill + guards ----
+
+    #[test]
+    fn upsert_ruleset_persists_and_round_trips_supervisor_config() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: Some(25.0),
+            approval_classes: vec!["deploy".to_string(), "safe-shell".to_string()],
+            path_allowlist: vec!["/repo".to_string()],
+            supervisor: SupervisorConfig {
+                enabled: true,
+                delegated_classes: vec!["safe-shell".to_string(), "file-write".to_string()],
+                instruction: "Ship small, ask on anything risky.".to_string(),
+                custom_rules: vec!["never touch main".to_string()],
+            },
+        };
+
+        let updated = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap();
+        assert_eq!(updated.policy, policy);
+        // Persisted (fresh load from a new query), not merely echoed back.
+        assert_eq!(
+            project_ruleset(&db, &project.id).policy.supervisor,
+            policy.supervisor
+        );
+    }
+
+    #[test]
+    fn policy_json_without_supervisor_key_decodes_to_disabled_empty() {
+        // A `ruleset.policy` blob written before SCN-046 has no `supervisor` key at all — the
+        // `#[serde(default)]` backfill (PolicyRulesStrict) must decode it to a disabled/empty CEO
+        // rather than erroring on a missing field. This is the exact "old rows/bundles decode"
+        // guarantee A-7 requires; proved directly at the decode layer.
+        let decoded: PolicyRulesStrict =
+            serde_json::from_str(r#"{"spendCapUsd":null,"approvalClasses":[],"pathAllowlist":[]}"#)
+                .expect("pre-supervisor policy JSON must decode via serde default");
+        assert_eq!(decoded.supervisor, SupervisorConfig::default());
+        assert!(!decoded.supervisor.enabled);
+        assert!(decoded.supervisor.delegated_classes.is_empty());
+    }
+
+    #[test]
+    fn create_project_ruleset_backfills_disabled_supervisor() {
+        // Every project row is created with `policy = '{}'` (Db::create_project) — reading it back
+        // must yield a disabled/empty supervisor, the same backfill path a pre-SCN-046 row takes.
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        assert_eq!(
+            project_ruleset(&db, &project.id).policy.supervisor,
+            SupervisorConfig::default()
+        );
+    }
+
+    #[test]
+    fn upsert_ruleset_enabled_supervisor_with_empty_classes_is_validation() {
+        // SCN-046 core invariant, authoritative backend guard: enabled CEO + zero delegated classes
+        // is rejected (the client shows the "delegate at least one class or disable the CEO" alert).
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: None,
+            approval_classes: vec![],
+            path_allowlist: vec![],
+            supervisor: SupervisorConfig {
+                enabled: true,
+                delegated_classes: vec![],
+                instruction: String::new(),
+                custom_rules: vec![],
+            },
+        };
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn upsert_ruleset_disabled_supervisor_with_empty_classes_is_allowed() {
+        // The mirror case: DISABLED + empty scope is the default and must save cleanly (the invariant
+        // only bites when the CEO is on).
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: None,
+            approval_classes: vec![],
+            path_allowlist: vec![],
+            supervisor: SupervisorConfig::default(),
+        };
+
+        let updated = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap();
+        assert!(!updated.policy.supervisor.enabled);
+    }
+
+    #[test]
+    fn upsert_ruleset_empty_delegated_class_entry_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: None,
+            approval_classes: vec![],
+            path_allowlist: vec![],
+            supervisor: SupervisorConfig {
+                enabled: true,
+                delegated_classes: vec!["".to_string()],
+                instruction: String::new(),
+                custom_rules: vec![],
+            },
+        };
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn upsert_ruleset_empty_custom_rule_entry_is_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let policy = PolicyRules {
+            spend_cap_usd: None,
+            approval_classes: vec![],
+            path_allowlist: vec![],
+            supervisor: SupervisorConfig {
+                enabled: true,
+                delegated_classes: vec!["safe-shell".to_string()],
+                instruction: String::new(),
+                custom_rules: vec!["".to_string()],
+            },
+        };
+
+        let err = db
+            .upsert_ruleset(
+                RuleScope::Project,
+                Some(&project.id),
+                None,
+                None,
+                Some(&policy),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got: {err:?}"
+        );
     }
 
     // ---- acknowledge_rule_file ----

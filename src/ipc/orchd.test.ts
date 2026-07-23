@@ -382,7 +382,12 @@ describe("ipc/orchd", () => {
   });
 
   it("orchdUpsertRuleset sends scope/projectId/mdContent/mdPath/policy", async () => {
-    const policy = { spendCapUsd: 10, approvalClasses: ["deploy"], pathAllowlist: ["/x"] };
+    const policy = {
+      spendCapUsd: 10,
+      approvalClasses: ["deploy"],
+      pathAllowlist: ["/x"],
+      supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+    };
     await orchdUpsertRuleset("project", "p1", "# rules", "/path/rules.md", policy);
     expect(invokeMock).toHaveBeenCalledWith("orchd_upsert_ruleset", {
       scope: "project",

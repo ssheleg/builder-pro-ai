@@ -4800,6 +4800,7 @@ pub(crate) mod orchd_commands_over_stub_daemon {
                             spend_cap_usd: None,
                             approval_classes: vec![],
                             path_allowlist: vec![],
+                            supervisor: Default::default(),
                         },
                         created_at: 0,
                         updated_at: 0,

@@ -1324,7 +1324,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     orchdGetRulesetMock.mockResolvedValue({
       rule: {
         id: "r1", scope: "global", projectId: null, mdPath: "/x", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,
@@ -1344,7 +1349,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     orchdGetRulesetMock.mockResolvedValue({
       rule: {
         id: "r2", scope: "project", projectId: "p1", mdPath: "/x", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,
@@ -1402,7 +1412,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     orchdGetRulesetMock.mockResolvedValue({
       rule: {
         id: "r1", scope: "project", projectId: "p1", mdPath: "/x", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,
@@ -1454,7 +1469,12 @@ describe("S3 T13: orchd domain event wiring", () => {
     const globalView = {
       rule: {
         id: "gr", scope: "global" as const, projectId: null, mdPath: "/g", mdHash: "h",
-        policy: { spendCapUsd: null, approvalClasses: [], pathAllowlist: [] },
+        policy: {
+          spendCapUsd: null,
+          approvalClasses: [],
+          pathAllowlist: [],
+          supervisor: { enabled: false, delegatedClasses: [], instruction: "", customRules: [] },
+        },
         createdAt: 1, updatedAt: 1,
       },
       mdContent: null,

@@ -35,6 +35,7 @@ fn export_and_read() -> String {
     TaskPriority::export_all_to(types_ts_dir()).expect("export TaskPriority");
     TaskSource::export_all_to(types_ts_dir()).expect("export TaskSource");
     PolicyRules::export_all_to(types_ts_dir()).expect("export PolicyRules");
+    SupervisorConfig::export_all_to(types_ts_dir()).expect("export SupervisorConfig");
     RuleSet::export_all_to(types_ts_dir()).expect("export RuleSet");
     RuleScope::export_all_to(types_ts_dir()).expect("export RuleScope");
     RuleFileState::export_all_to(types_ts_dir()).expect("export RuleFileState");
@@ -152,6 +153,49 @@ fn ruleset_uses_camelcase_md_path() {
     assert!(
         !ts.contains("md_path"),
         "generated TS must not contain snake_case `md_path`"
+    );
+}
+
+// ---- SCN-046 / A-7 CEO supervisor export tests ----
+
+#[test]
+fn supervisor_config_type_is_exported_with_camelcase_fields() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "export type SupervisorConfig"),
+        "expected \"export type SupervisorConfig\" in generated orchd-types.ts; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "enabled: boolean"),
+        "SupervisorConfig.enabled must be TS `boolean`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "delegatedClasses: Array<string>")
+            || contains_normalized(&ts, "delegatedClasses: string[]"),
+        "SupervisorConfig.delegated_classes must serialize as camelCase `delegatedClasses`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "instruction: string"),
+        "SupervisorConfig.instruction must be TS `string`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "customRules: Array<string>")
+            || contains_normalized(&ts, "customRules: string[]"),
+        "SupervisorConfig.custom_rules must serialize as camelCase `customRules`; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("delegated_classes") && !ts.contains("custom_rules"),
+        "generated TS must not contain snake_case `delegated_classes`/`custom_rules`"
+    );
+}
+
+#[test]
+fn policy_rules_carries_typed_supervisor_field() {
+    let ts = export_and_read();
+    assert!(
+        contains_normalized(&ts, "supervisor: SupervisorConfig"),
+        "PolicyRules.supervisor must be typed `supervisor: SupervisorConfig` (required — the daemon \
+         always sends it, `#[serde(default)]` only backfills DECODING of pre-SCN-046 blobs); got:\n{ts}"
     );
 }
 

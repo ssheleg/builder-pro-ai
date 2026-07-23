@@ -222,6 +222,56 @@ pub enum TaskSource {
     Plan,
 }
 
+/// The per-project "CEO supervisor" config (SCN-046, FLW-19 JRN-10/#1, foundation §5 A-7). It
+/// rides INSIDE [`PolicyRules`] as one additive field rather than a table of its own precisely
+/// because A-7 says the CEO's authority is a view onto the existing policy: the caps it acts
+/// within are the pre-existing policy `spendCapUsd` plus the approval-class machinery, never a
+/// duplicate set of caps. This struct therefore carries only what the policy did not already model:
+/// the enable switch, WHICH confirmation classes are delegated, the operator's free-form
+/// instruction, and any extra rules.
+///
+/// PLUMBING ONLY (honesty boundary, S6b). Persisting this config does NOT make a CEO act — the
+/// orchestrator-agent runtime that would READ this config and autonomously answer agent questions
+/// or continue workflows (SCN-047/SCN-049) does not exist yet (S6b). The UI carries a matching
+/// pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same
+/// register as the Skills tab's registry banner. Nothing here starts an agent.
+///
+/// `#[serde(default)]` at the container level lets a policy JSON blob that predates this field
+/// (every ruleset policy row written before SCN-046, plus the DB's `'{}'` column default and any
+/// older export bundle) decode straight into [`SupervisorConfig::default`] — a disabled CEO with an
+/// empty scope — instead of failing with a "missing field" error. It also lets a partial object
+/// (say `{"enabled":true}` from a hand-edited bundle) fill the rest from `Default` rather than
+/// erroring, so a truncated blob degrades to "off" honestly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export_to = "orchd-types.ts")]
+pub struct SupervisorConfig {
+    /// Master switch, default `false` (SCN-046: "disabled by default until explicitly enabled").
+    /// An enabled CEO with an empty delegation scope is an invalid save (SCN-046: "empty delegation
+    /// scope with CEO on → blocked") — enforced client-side (the blocked alert) AND by the
+    /// persistence `validate_policy` guard, so the invariant holds even against a racing or
+    /// hand-crafted request, not just the UI.
+    pub enabled: bool,
+    /// The confirmation classes the operator has delegated to the CEO — the subset of the policy's
+    /// approval-class machinery the CEO is allowed to answer on the operator's behalf (SCN-046 step
+    /// 2). Each entry must be non-empty (validated alongside the policy's own list entries).
+    pub delegated_classes: Vec<String>,
+    /// Free-form markdown the CEO must follow (SCN-046 step 3). Stored verbatim; never parsed here.
+    pub instruction: String,
+    /// Optional extra CEO rules beyond the instruction — one editable line each (SCN-046
+    /// "custom-rules editor"). Each entry must be non-empty, same rule as the delegated classes.
+    pub custom_rules: Vec<String>,
+}
+
+/// Per-ruleset owner-consent policy (S1, spec §5.2). Strict-validated before storage (the
+/// persistence `validate_policy` guard): `spendCapUsd >= 0`, non-empty confirmation-class and
+/// allowed-path entries, and `deny_unknown_fields`.
+///
+/// `supervisor` (SCN-046, A-7) is an ADDITIVE field carrying the per-project CEO config — see
+/// [`SupervisorConfig`] for why it lives inside this policy rather than in its own table, and why
+/// its `#[serde(default)]` matters for decoding rows/bundles that predate it. Because the field is
+/// non-`Option`, an update that means to SET it must send it explicitly (same D11 discipline as the
+/// two lists); the `default` only backfills DECODING, never a partial wire write.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "orchd-types.ts")]
@@ -229,6 +279,8 @@ pub struct PolicyRules {
     pub spend_cap_usd: Option<f64>,
     pub approval_classes: Vec<String>,
     pub path_allowlist: Vec<String>,
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

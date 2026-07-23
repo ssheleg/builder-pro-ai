@@ -64,6 +64,7 @@ fn planted_ruleset_secrets_never_appear_in_logs() {
                 spend_cap_usd: Some(1.0),
                 approval_classes: vec!["deploy".to_string()],
                 path_allowlist: vec!["/tmp".to_string()],
+                supervisor: Default::default(),
             }),
         )
         .expect("upsert ruleset with secret content");

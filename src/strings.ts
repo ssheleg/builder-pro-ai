@@ -311,6 +311,44 @@ export const strings = {
     allowedPathAria: "New allowed path",
     allowedPathPlaceholder: "path",
     savePolicy: "Save policy",
+
+    // ── CEO supervisor section (SCN-046, FLW-19, A-7) — the per-project delegation config that
+    // rides inside PolicyRules. PLUMBING ONLY: `pendingNote` is the honesty-boundary equivalent of
+    // the Skills tab's registry banner — persisting this config does not start a CEO; the
+    // orchestrator-agent runtime that acts on it lands in S6b (SCN-047/049). ──
+    supervisor: {
+      sectionLabel: "CEO supervisor",
+      /** Verbatim honesty-boundary note (S6b) — mirrors the Skills tab's registry banner register.
+       * Persisting the config never makes a CEO act; the runtime that reads it lands in S6b. */
+      pendingNote: "The CEO acts on this once the orchestrator agent runtime lands (S6b).",
+      enableLabel: "Enable the CEO",
+      enableAria: "Enable the CEO supervisor",
+      delegatedLabel: "Delegated confirmation classes",
+      /** Empty-universe hint: no confirmation classes exist yet to delegate (define some in the
+       * policy above, or seed the recommended scope). */
+      noClasses: "No confirmation classes yet — add classes above or use the recommended scope.",
+      delegateClassAria: (c: string) => `Delegate the "${c}" class to the CEO`,
+      inheritedCapsLabel: "Inherited caps",
+      inheritedSpendCap: (cap: string) => `spend cap $${cap}`,
+      inheritedNoSpendCap: "no spend cap",
+      recommendedScope: "Recommended scope",
+      instructionLabel: "CEO instruction",
+      instructionAria: "CEO instruction (markdown the CEO must follow)",
+      instructionPlaceholder: "What the CEO must always follow (markdown)…",
+      customRulesLabel: "Custom rules",
+      customRuleAria: "New custom CEO rule",
+      customRulePlaceholder: "rule",
+      /** SCN-046 locked info-access summary line. */
+      infoAccess:
+        "CEO reads: project goals, tasks, ideas, insights, graph, rules + your instruction",
+      /** SCN-046 scope summary: "CEO may: {classes} within {caps}". */
+      scopeSummary: (classes: string, caps: string) => `CEO may: ${classes} within ${caps}`,
+      scopeSummaryNoClasses: "no classes delegated",
+      /** Placeholder for the not-yet-built MCP-tool delegation (S6b-adjacent). */
+      mcpSoon: "MCP tools for the CEO — soon",
+      /** SCN-046 blocked alert: enabled CEO with an empty delegation scope. */
+      blockedNoClasses: "delegate at least one class or disable the CEO",
+    },
   },
 
   // ── docs panel (SCN-054: per-project markdown documents, the 8th project tab) ────────────────
