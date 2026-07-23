@@ -582,14 +582,14 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
 - **Priority:** should
 - **Status:** validated *(SCN-051 validated)*
 
-### ST-038: See token and cost usage per agent and project *(stated 2026-07-22)*
-- **Story:** As P-01, I want token and cost statistics per agent and per project over selectable ranges, so that I know where the money goes.
+### ST-038: See token and cost usage per model family and project *(stated 2026-07-22)*
+- **Story:** As P-01, I want token and cost statistics per model family and per project over selectable ranges, so that I know where the money goes.
 - **Traces:** JTBD-11, JRN-11/#2, JRN-11/#3
 - **Acceptance criteria:**
-  - Given usage occurred, when I open the stats view and pick a range (All | 30d | 7d), then tokens and cost render per project and per agent for that range.
-  - Given no data for a range, when I view it, then an honest empty state shows — never zeros styled as data.
+  - Given usage occurred, when I open the stats view and pick a range (All | 30d | 7d), then tokens and cost render per project and per model family for that range.
+  - Given no data for a range, when I view it, then an honest empty state shows — never zeros styled as data (and a failed source shows "—", never a styled zero).
 - **Priority:** must
-- **Status:** validated *(SCN-052 validated)*
+- **Status:** implemented *(SCN-052 implemented 2026-07-23; "per agent" honestly narrowed to "per model family" — session logs carry no per-instance agent id, AUD-2026-07-23-07)*
 
 ### ST-039: See output statistics — commits and code *(stated 2026-07-22)*
 - **Story:** As P-01, I want commit counts and code-change stats per project per period, so that I can see what the operation actually produced.

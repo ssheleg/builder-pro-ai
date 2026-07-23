@@ -470,11 +470,21 @@ export interface AppState {
     usageError: string | null;
     gitError: string | null;
     loading: boolean;
+    /** Monotonic request token. Every `refreshStats`/`cancelStats` bumps it; a settled reply is
+     * applied ONLY when it still matches — a slower, stale scan can never overwrite a newer range
+     * (AUD-2026-07-23-25). */
+    epoch: number;
+    /** Unix ms at the last applied refresh completion — the "as of" fallback when the usage
+     * source itself failed (git table is never left stampless, AUD-2026-07-23-13). */
+    lastRefreshMs: number | null;
   };
   /** Switch the range pill and refetch (SCN-052 step 2). */
   setStatsRange: (range: import("../ipc/stats").StatsRange) => Promise<void>;
   /** Fetch both sources for the current range. Per-source failure capture — see `stats` doc. */
   refreshStats: () => Promise<void>;
+  /** Abandon the in-flight scan (SCN-053 "slow scan → cancellable"): bump the epoch so the
+   * pending reply is discarded, and clear `loading`. Idempotent when nothing is in flight. */
+  cancelStats: () => void;
 }
 
 /** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
@@ -1081,11 +1091,25 @@ export const useAppStore = create<AppState>((set, get) => {
 
     // ── stats slice (SCN-052/053) ───────────────────────────────────────────────────────────────
 
-    stats: { range: "30d", usage: null, git: null, usageError: null, gitError: null, loading: false },
+    stats: {
+      range: "30d",
+      usage: null,
+      git: null,
+      usageError: null,
+      gitError: null,
+      loading: false,
+      epoch: 0,
+      lastRefreshMs: null,
+    },
 
     setStatsRange: async (range) => {
       set((s) => ({ stats: { ...s.stats, range } }));
       await get().refreshStats();
+    },
+
+    cancelStats: () => {
+      // Bump the epoch so any in-flight reply is discarded on arrival, and drop the spinner.
+      set((s) => ({ stats: { ...s.stats, epoch: s.stats.epoch + 1, loading: false } }));
     },
 
     refreshStats: async () => {
@@ -1095,13 +1119,18 @@ export const useAppStore = create<AppState>((set, get) => {
       // one-path rule every other refresh follows.
       const { range } = get().stats;
       const roots = Object.values(get().workspaces).flatMap((w) => w.roots ?? [w.rootPath]);
-      set((s) => ({ stats: { ...s.stats, loading: true } }));
+      // Claim an epoch for THIS scan. A range switch, a Refresh, or a Cancel mid-flight bumps it;
+      // when our two calls settle we only apply if the epoch is still ours — otherwise a slower,
+      // stale scan would overwrite the newer range's figures under the wrong label (AUD-…-25).
+      const myEpoch = get().stats.epoch + 1;
+      set((s) => ({ stats: { ...s.stats, epoch: myEpoch, loading: true } }));
       const [usageRes, gitRes] = await Promise.allSettled([
         statsUsage(range),
         statsGit(roots, range),
       ]);
+      if (get().stats.epoch !== myEpoch) return; // superseded or cancelled — discard silently
       set((s) => {
-        const next = { ...s.stats, loading: false };
+        const next = { ...s.stats, loading: false, lastRefreshMs: Date.now() };
         if (usageRes.status === "fulfilled") {
           next.usage = usageRes.value;
           next.usageError = usageRes.value.error;

@@ -716,6 +716,8 @@ export const strings = {
     range30d: "30d",
     range7d: "7d",
     loading: "Scanning usage…",
+    cancel: "Cancel",
+    retry: "Retry",
     tokens: "tokens",
     /** Cost is an ESTIMATE from a public-price table (stats.rs::PRICING) — always labeled. */
     costLabel: "est. cost",
@@ -727,9 +729,12 @@ export const strings = {
     sessions: "agent sessions",
     commits: "commits",
     code: "code",
-    activity: "Activity — tokens per day (last 30 days)",
-    activityAria: "Token activity heatmap, last 30 days",
+    activity: (days: number) => `Activity — tokens per day (last ${days} days)`,
+    activityAria: (days: number) => `Token activity heatmap, last ${days} days`,
     byProject: "By project",
+    byModel: "By model family",
+    /** Per-model-family cut header note: the only agent-side dimension the logs expose. */
+    byModelHint: "grouped by model family — session logs carry no per-agent id",
     asOf: (t: string) => `as of ${t}`,
     refresh: "Refresh",
     noGit: "no git data",

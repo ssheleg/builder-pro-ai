@@ -57,8 +57,8 @@
 | SCN-049 | Workflow continuation after a task ends | supervisor | P-01 | ST-035 | validated | 2026-07-23 BLOCKED (not built — S6b) |
 | SCN-050 | Review decisions made while away | supervisor | P-03 | ST-036 | validated | 2026-07-23 BLOCKED (not built — S6b) |
 | SCN-051 | Set task priority (urgent / normal) | tasks | P-01 | ST-037 | implemented | 2026-07-23 PASS |
-| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | 2026-07-23 PARTIAL |
-| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | 2026-07-23 PARTIAL |
+| SCN-052 | Usage stats dashboard — tokens, cost, activity | analytics | P-01 | ST-038 | validated | 2026-07-23 PARTIAL→fixed (AUD-07/08/09/10/25) |
+| SCN-053 | Output stats — commits and code per project | analytics | P-01 | ST-039 | validated | 2026-07-23 PARTIAL→fixed (AUD-11/12/13/14) |
 | SCN-054 | Project documentation | docs | P-01 | ST-041 | implemented | 2026-07-23 PASS |
 | SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | 2026-07-23 BLOCKED (not built) |
 | SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | implemented | 2026-07-23 PARTIAL→fixed (AUD-17) |
@@ -958,17 +958,17 @@ in different lifecycle states.
 - **Feature:** analytics
 - **Traces:** ST-038, FLW-20, ST-040 (JTBD-11, JRN-11/#2, JRN-11/#3)
 - **Entry point:** stats view in app chrome (sidebar nav)
-- **Preconditions:** usage data exists (agent sessions and/or MCP invocations)
+- **Preconditions:** usage data exists (Claude Code agent sessions — the local session logs)
 - **Steps:**
   1. User opens the stats view
   2. User picks a range with the SegmentedPill (All | 30d | 7d)
-  3. User reads tokens/cost per project and per agent, and the activity Heatmap
-- **Expected result:** figures render for the chosen range; activity density shows as a Heatmap; per-project and per-agent cuts are visible; the orphan atoms SegmentedPill + Heatmap ship here (closes COV-01)
-- **UI elements:** stats nav item, SegmentedPill range switcher, per-project/per-agent stat tiles, activity Heatmap, honest empty state
+  3. User reads tokens/cost per project and per model family, and the activity Heatmap (windowed to the range)
+- **Expected result:** figures render for the chosen range; activity density shows as a Heatmap windowed to the range; per-project and per-model-family cuts are visible; a stale scan reply never overwrites a newer range (request-epoch guard); the orphan atoms SegmentedPill + Heatmap ship here (closes COV-01). Note: "per model family" is the honest name of the only agent-side dimension the session logs expose — there is no per-instance agent id (AUD-2026-07-23-07).
+- **UI elements:** stats nav item, SegmentedPill range switcher, per-project stat tiles, per-model-family table, activity Heatmap, freshness stamp, Refresh / Cancel (while scanning), honest empty state
 - **States covered:** loading, empty, error, success
-- **Errors & recovery:** no data in range → honest empty state (never zeros styled as data); collection source unavailable (A-8) → per-source "data unavailable: {source}" note, remaining sources still render; fetch fails → error card + Retry + toast
+- **Errors & recovery:** no data in range → honest empty state, shown only when BOTH sources are empty (never zeros styled as data); a failed/loading source shows "—" for its derived tiles, never a styled zero; collection source unavailable (A-8) → per-source "data unavailable: {source}" note WITH a Retry, remaining sources still render; scan is cancellable while in flight
 - **Status:** validated
-- **Coverage:** src-tauri/src/stats.rs (scanner+cache+pricing+commands), src/ipc/stats.ts, src/store/store.ts (stats slice + refreshStats), src/components/StatsView.tsx, src/components/StatsView.test.tsx, src/components/WorkspaceSidebar.tsx (stats-nav-button), src/App.tsx (stats branch), src/strings.ts (stats group)
+- **Coverage:** src-tauri/src/stats.rs (scanner+cache+pricing+per-family cut+commands; git worker-failure honesty), src/ipc/stats.ts (DayUsage/FamilyUsage/GitStats wire), src/store/store.ts (stats slice: epoch guard + cancelStats + lastRefreshMs + refreshStats), src/components/StatsView.tsx (tiles, "—"-on-fail, per-model table, range-windowed Heatmap, Retry/Cancel, gitReason title), src/components/StatsView.test.tsx (16 tests incl. epoch race, cancel, family cut, heatmap window), src/components/WorkspaceSidebar.tsx (stats-nav-button), src/App.tsx (stats branch), src/strings.ts (stats group)
 
 ### SCN-053: Output stats — commits and code per project
 - **Persona:** P-01
@@ -982,9 +982,9 @@ in different lifecycle states.
 - **Expected result:** commit and code-change figures per project for the range, derived from workspace git; cached honestly with a "as of {time}" stamp
 - **UI elements:** output stat tiles per project, freshness stamp, per-project "no git data" note
 - **States covered:** loading, empty, error, success
-- **Errors & recovery:** workspace without git or git read fails → that project shows honest "no git data" (never fabricated zeros); slow scan → visible loading, cancellable; scan failure → error + Retry
+- **Errors & recovery:** workspace without git or git read fails → that project shows honest "no git data" with the reason on hover (never fabricated zeros); a panicked git worker surfaces as per-root "no git data", never a fake-empty success; slow scan → visible loading, cancellable (Cancel abandons the in-flight scan); scan failure → error note + Retry
 - **Status:** validated
-- **Coverage:** src-tauri/src/stats.rs (git_stats_for_root + numstat parse + honest unavailable), src/components/StatsView.tsx (git columns, no-git rows, as-of stamp, Refresh), src/components/StatsView.test.tsx
+- **Coverage:** src-tauri/src/stats.rs (git_stats_for_root + numstat parse + honest unavailable; stats_git worker-failure → honest per-root unavailable, not unwrap_or_default), src/components/StatsView.tsx (git columns, no-git rows w/ gitReason title, freshness stamp incl. lastRefreshMs fallback, Cancel), src/store/store.ts (cancelStats, lastRefreshMs), src/components/StatsView.test.tsx
 
 ## docs
 

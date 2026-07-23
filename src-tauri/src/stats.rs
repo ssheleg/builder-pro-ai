@@ -53,6 +53,25 @@ pub struct DayUsage {
     pub sessions: u32,
 }
 
+/// One model FAMILY (opus / sonnet / haiku / fable / other …) of aggregated usage across the
+/// whole range — the "per model family" cut (SCN-052; honest naming of the only agent-side
+/// dimension the session logs expose, there is no per-instance agent id). Pricing follows the
+/// same rules as [`DayUsage`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FamilyUsage {
+    /// `model_family` key: "opus" | "sonnet" | "haiku" | "fable" | "other" | …
+    pub family: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    /// Estimated USD for this family (None when the family has no pricing row).
+    pub est_cost_usd: Option<f64>,
+    /// Distinct session files that touched this family in range.
+    pub sessions: u32,
+}
+
 /// `stats_usage` reply. `error` is the whole-scan failure surface (projects dir unreadable …);
 /// per-file parse problems are tolerated line-by-line and never fail the scan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -61,6 +80,8 @@ pub struct UsageStats {
     /// Unix ms at scan completion — the view's "as of" stamp (SCN-053 freshness rule).
     pub as_of: i64,
     pub days: Vec<DayUsage>,
+    /// Per-model-family cut for the range (SCN-052 "per model family" tiles/table).
+    pub families: Vec<FamilyUsage>,
     pub error: Option<String>,
 }
 
@@ -134,6 +155,7 @@ struct ScanCache {
 #[derive(Debug)]
 pub struct ScanOutcome {
     pub days: Vec<DayUsage>,
+    pub families: Vec<FamilyUsage>,
     pub parsed_files: usize,
 }
 
@@ -372,7 +394,71 @@ pub fn scan_usage(
             sessions: b.sessions,
         })
         .collect();
-    Ok(ScanOutcome { days, parsed_files })
+
+    // Per-model-family cut (SCN-052): fold the SAME cached aggregates by family across the range.
+    // Family is already retained per-file in `FileAgg.days` (no cache change), it was only folded
+    // away above — so this is a second, independent pass over the same data.
+    #[derive(Default)]
+    struct FamBucket {
+        t: [u64; 4],
+        cost: f64,
+        priced: bool,
+        sessions: u32,
+    }
+    let mut fam_buckets: BTreeMap<String, FamBucket> = BTreeMap::new();
+    for agg in cache.files.values() {
+        let mut touched: HashSet<String> = HashSet::new();
+        for (day, _cwd, fam, t) in &agg.days {
+            if let Some(c) = &cutoff {
+                if day < c {
+                    continue;
+                }
+            }
+            let b = fam_buckets.entry(fam.clone()).or_default();
+            for (slot, add) in b.t.iter_mut().zip(t.iter()) {
+                *slot += add;
+            }
+            if let Some((pi, po, pw, pr)) = price_for(fam) {
+                b.priced = true;
+                b.cost +=
+                    (t[0] as f64 * pi + t[1] as f64 * po + t[2] as f64 * pw + t[3] as f64 * pr)
+                        / 1_000_000.0;
+            }
+            touched.insert(fam.clone());
+        }
+        for f in touched {
+            if let Some(b) = fam_buckets.get_mut(&f) {
+                b.sessions += 1;
+            }
+        }
+    }
+    // Largest spend first, ties broken by token volume then name — a stable, meaningful order.
+    let mut families: Vec<FamilyUsage> = fam_buckets
+        .into_iter()
+        .map(|(family, b)| FamilyUsage {
+            family,
+            tokens_in: b.t[0],
+            tokens_out: b.t[1],
+            cache_write: b.t[2],
+            cache_read: b.t[3],
+            est_cost_usd: b.priced.then_some(b.cost),
+            sessions: b.sessions,
+        })
+        .collect();
+    families.sort_by(|a, b| {
+        let ca = a.est_cost_usd.unwrap_or(0.0);
+        let cb = b.est_cost_usd.unwrap_or(0.0);
+        cb.partial_cmp(&ca)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then((b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out)))
+            .then(a.family.cmp(&b.family))
+    });
+
+    Ok(ScanOutcome {
+        days,
+        families,
+        parsed_files,
+    })
 }
 
 // ── git output stats (SCN-053) ──────────────────────────────────────────────────────────────────
@@ -478,16 +564,19 @@ pub async fn stats_usage(range: String, app: tauri::AppHandle) -> UsageStats {
         Ok((Ok(outcome), now)) => UsageStats {
             as_of: now,
             days: outcome.days,
+            families: outcome.families,
             error: None,
         },
         Ok((Err(e), now)) => UsageStats {
             as_of: now,
             days: Vec::new(),
+            families: Vec::new(),
             error: Some(e),
         },
         Err(e) => UsageStats {
             as_of: now_unix_ms(),
             days: Vec::new(),
+            families: Vec::new(),
             error: Some(format!("stats worker failed: {e}")),
         },
     }
@@ -497,6 +586,10 @@ pub async fn stats_usage(range: String, app: tauri::AppHandle) -> UsageStats {
 /// never fails the others.
 #[tauri::command]
 pub async fn stats_git(roots: Vec<String>, range: String) -> Vec<GitStats> {
+    // Keep the roots for the worker-failure path: a panicked blocking task must surface as an
+    // honest per-root "no git data" (available:false + reason), NOT `unwrap_or_default()`'s empty
+    // Vec, which the view would read as "success, nothing to show" — a fake-empty (AUD-2026-07-23-12).
+    let roots_for_err = roots.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let now = now_unix_ms();
         roots
@@ -505,7 +598,20 @@ pub async fn stats_git(roots: Vec<String>, range: String) -> Vec<GitStats> {
             .collect::<Vec<_>>()
     })
     .await;
-    res.unwrap_or_default()
+    match res {
+        Ok(v) => v,
+        Err(e) => roots_for_err
+            .into_iter()
+            .map(|root| GitStats {
+                root,
+                commits: 0,
+                added: 0,
+                deleted: 0,
+                available: false,
+                reason: Some(format!("git worker failed: {e}")),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -677,6 +783,45 @@ mod tests {
             "only the opus share is priced"
         );
         assert!(!row.cost_complete);
+    }
+
+    #[test]
+    fn family_cut_folds_across_cwds_and_days_priced_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (projects, cache) = setup(tmp.path());
+        let d = projects.join("-Users-x-proj-a");
+        // opus in two files (distinct sessions) across two cwds + one unpriced fable session.
+        write_jsonl(
+            &d,
+            "s1.jsonl",
+            &[
+                entry("2026-07-10", "/x/a", "claude-opus-4-8", 1_000_000, 0, 0, 0),
+                entry("2026-07-11", "/x/b", "claude-opus-4-8", 1_000_000, 0, 0, 0),
+            ],
+        );
+        write_jsonl(
+            &d,
+            "s2.jsonl",
+            &[entry("2026-07-10", "/x/a", "claude-opus-4-8", 0, 0, 0, 0)],
+        );
+        write_jsonl(
+            &d,
+            "s3.jsonl",
+            &[entry("2026-07-10", "/x/a", "claude-fable-5", 42, 42, 0, 0)],
+        );
+
+        let out = scan_usage(&projects, &cache, "all", NOW_MS).unwrap();
+        // opus sorts first (has cost), fable second (unpriced).
+        assert_eq!(out.families.len(), 2);
+        let opus = &out.families[0];
+        assert_eq!(opus.family, "opus");
+        assert_eq!(opus.tokens_in, 2_000_000);
+        assert_eq!(opus.sessions, 2, "two distinct opus session files");
+        assert!((opus.est_cost_usd.unwrap() - 30.0).abs() < 1e-9); // 2 MTok * $15/MTok input
+        let fable = &out.families[1];
+        assert_eq!(fable.family, "fable");
+        assert_eq!(fable.est_cost_usd, None, "unpriced family carries tokens, no cost");
+        assert_eq!(fable.sessions, 1);
     }
 
     #[test]

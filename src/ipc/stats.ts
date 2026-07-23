@@ -24,10 +24,27 @@ export interface DayUsage {
   sessions: number;
 }
 
+/** One model FAMILY of aggregated usage across the range (SCN-052 "per model family" cut —
+ * the only agent-side dimension the session logs expose; there is no per-instance agent id). */
+export interface FamilyUsage {
+  /** "opus" | "sonnet" | "haiku" | "fable" | "other" | … */
+  family: string;
+  tokensIn: number;
+  tokensOut: number;
+  cacheWrite: number;
+  cacheRead: number;
+  /** Estimated USD for this family; `null` when the family has no pricing row. */
+  estCostUsd: number | null;
+  /** Distinct session files that touched this family in range. */
+  sessions: number;
+}
+
 export interface UsageStats {
   /** Unix ms at scan completion — the "as of" stamp (SCN-053 freshness rule). */
   asOf: number;
   days: DayUsage[];
+  /** Per-model-family cut for the range (largest spend first). */
+  families: FamilyUsage[];
   /** Whole-scan failure (projects dir unreadable, worker died) — the per-source honesty note. */
   error: string | null;
 }
