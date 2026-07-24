@@ -900,6 +900,108 @@ pub struct DocView {
     pub file_state: RuleFileState,
 }
 
+// ---- SW1 Workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md; appended — order
+// FROZEN append-only). A reusable "workflow-as-data": ordered stages (each an agent block with a
+// prompt, skills, gate, context scope and outputs), plus global skills and a CEO-oversight config,
+// scoped global/project and file-backed (files-as-truth, mirrors `Skill`/`Doc` — D4/D11). This is
+// AUTHORING/CONFIG ONLY: persisting a workflow does NOT run it — the executor that spawns a
+// terminal per agent block and drives the stages is S6b and does not exist yet, so nothing here
+// starts an agent (the same honesty boundary the `SupervisorConfig` doc above spells out). The
+// `supervisor` field REUSES the wire `SupervisorConfig` verbatim (the same CEO config the ruleset
+// policy carries), and `fileState` REUSES `SkillFileState` (the same files-as-truth
+// Present/Modified/Missing model the skill registry uses). ----
+
+/// A workflow's scope (mirrors `SkillScope`/`RuleScope`): a `global` workflow is reusable across
+/// every project; a `project` workflow belongs to one project (its `projectId` is then `Some`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum WorkflowScope {
+    Global,
+    Project,
+}
+
+/// Whether a stage advances on its own or waits for the operator (SCN-062). `auto`: the S6b
+/// runtime continues to the next stage without a stop; `manual`: it pauses at a gate for an
+/// explicit operator confirmation. Consumed by the S6b executor — inert authoring config today.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum Gate {
+    Auto,
+    Manual,
+}
+
+/// What context a stage's agent starts from (SCN-065). `inherit`: keep the current terminal's
+/// context (the default WITHIN a terminal); `handoff`: start from the previous stage's outputs
+/// (the default AT a terminal boundary, where the agent changes); `project`: start from the
+/// project's own context only; `selected`: start from an owner-picked subset. Consumed by the S6b
+/// executor — inert authoring config today.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub enum ContextScope {
+    Inherit,
+    Handoff,
+    Project,
+    Selected,
+}
+
+/// One stage of a workflow (SCN-061). Order is the enclosing [`Workflow`]`.stages` Vec index —
+/// there is no separate ordinal field, a reorder is a reordering of that Vec. `agent: None` means
+/// the stage inherits the workflow's `defaultAgent` (SCN-061 "inherit"); `Some` pins a specific
+/// known agent (validated against the known-agent set at save time). `skillIds` are the stage's
+/// own skills — the effective set the S6b runtime would load is the workflow's global skills ∪
+/// these (a pure view, never stored). `outputs` names the artifacts the stage is expected to
+/// produce (free-form owner labels the S6b handoff logic will consume). `gate`/`contextScope`
+/// carry the per-stage run behavior above.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct Stage {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub skill_ids: Vec<String>,
+    /// `None` ⇒ inherit the workflow's `defaultAgent`; `Some` ⇒ a specific known agent.
+    pub agent: Option<String>,
+    pub context_scope: ContextScope,
+    pub outputs: Vec<String>,
+    pub gate: Gate,
+}
+
+/// A reusable workflow definition (SCN-060/061/062/065), file-backed (files-as-truth, mirrors
+/// `Skill`/`Doc`): the full definition is serialized to a JSON file under the app-support rules
+/// tree, the DB row is the index, and `hash`/`fileState` give the same external-change honesty the
+/// skill/doc registries have. `defaultAgent` is the fallback agent for every stage whose own
+/// `agent` is `None`; it must be one of the known agents the app launches. `supervisor` REUSES the
+/// wire `SupervisorConfig` (the per-workflow CEO-oversight config, same shape as the ruleset
+/// policy's). `fileState` REUSES `SkillFileState` and is computed FRESH at read time (re-hashing
+/// the JSON file at `jsonPath` against the stored `hash`), never a stored column. NOTE: this doc
+/// comment is copied into the generated TS verbatim by ts-rs, so any field named here uses its
+/// camelCase wire form (`projectId`/`defaultAgent`/`fileState`/…) — same discipline as [`Doc`]'s.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "orchd-types.ts")]
+pub struct Workflow {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub scope: WorkflowScope,
+    pub project_id: Option<String>,
+    pub default_agent: String,
+    pub stages: Vec<Stage>,
+    pub global_skill_ids: Vec<String>,
+    pub supervisor: SupervisorConfig,
+    pub file_state: SkillFileState,
+    pub json_path: String,
+    pub hash: String,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
 // ================================================================================
 // ---- frames (spec §4.2). Hop-B wire only (core ⇄ bpa-orchd). NOT exported to TS. ----
 // ================================================================================
@@ -1414,6 +1516,44 @@ pub enum OrchdRequest {
     AcknowledgeDocFile {
         id: String,
     },
+    // SW1 Workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md, appended — order
+    // FROZEN append-only, wire stays [1,1]). Authoring/config only — NO runtime/executor (S6b).
+    /// → `OrchdResponse::Workflows`. Read-only, broadcasts nothing. `scope: None` ⇒ all scopes;
+    /// `scope: Some(Project)` with `project_id: Some(id)` ⇒ that project's workflows plus the
+    /// global ones (mirrors `McpListServers`/`SkillList`'s "global ∪ this project" scoping); an
+    /// unknown `project_id` yields the global set (read leniency, mirrors `ListDocs`).
+    WorkflowList {
+        scope: Option<WorkflowScope>,
+        project_id: Option<String>,
+    },
+    /// → `OrchdResponse::Workflow`. Read-only, broadcasts nothing; the JSON file is read FRESH
+    /// each time (files-as-truth — mirrors `GetDoc`). Unknown `id` ⇒ `Error{NotFound}`.
+    WorkflowGet {
+        id: String,
+    },
+    /// → `OrchdResponse::Workflow` + pushes `WorkflowsChanged`. THE one write verb: an empty `id`
+    /// creates (a fresh uuid is stamped), a non-empty `id` updates in place (the exact
+    /// `UpsertDoc`/`WorkflowUpsert` create-or-save shape). Validated fail-closed BEFORE any row/
+    /// file side effect (name-rule, scope⇒project_id, known `default_agent`/stage agents, no empty
+    /// skill/output entries, the SupervisorConfig guard) — an invalid save is `Error{Validation}`
+    /// and writes nothing; a non-empty unknown `id` ⇒ `Error{NotFound}`.
+    WorkflowUpsert {
+        id: String,
+        name: String,
+        description: String,
+        scope: WorkflowScope,
+        project_id: Option<String>,
+        default_agent: String,
+        stages: Vec<Stage>,
+        global_skill_ids: Vec<String>,
+        supervisor: SupervisorConfig,
+    },
+    /// → `OrchdResponse::Ack` + pushes `WorkflowsChanged`. Removes the row AND the JSON file
+    /// (a missing file is tolerated — deleting a "file lost" workflow must still work, mirrors
+    /// `DeleteDoc`). Unknown `id` ⇒ `Error{NotFound}`.
+    WorkflowDelete {
+        id: String,
+    },
 }
 
 impl OrchdRequest {
@@ -1519,6 +1659,10 @@ impl OrchdRequest {
             Self::UpsertDoc { .. } => "UpsertDoc",
             Self::DeleteDoc { .. } => "DeleteDoc",
             Self::AcknowledgeDocFile { .. } => "AcknowledgeDocFile",
+            Self::WorkflowList { .. } => "WorkflowList",
+            Self::WorkflowGet { .. } => "WorkflowGet",
+            Self::WorkflowUpsert { .. } => "WorkflowUpsert",
+            Self::WorkflowDelete { .. } => "WorkflowDelete",
         }
     }
 }
@@ -1594,6 +1738,12 @@ pub enum OrchdResponse {
     // projection, not full rows (the list needs only name + last-modified, SCN-054).
     DocView(DocView),
     Docs(Vec<DocMeta>),
+    // SW1 Workflow authoring (appended — order FROZEN append-only). `Workflow` is the full
+    // file-backed definition (`WorkflowGet`/`WorkflowUpsert` reply); `Workflows` is the
+    // `WorkflowList` result — full definitions, not a metadata projection (the library needs the
+    // stage count, scope and skill counts, all of which live in the definition).
+    Workflow(Workflow),
+    Workflows(Vec<Workflow>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1654,6 +1804,11 @@ pub enum OrchdPush {
     DocsChanged {
         project_id: String,
     },
+    // SW1 Workflow authoring (appended — order FROZEN append-only): a bare invalidation with no
+    // payload — a workflow can be global- or project-scoped, so there is no single natural scope
+    // to name coarsely (mirrors `ConnectorsChanged`/`PoliciesChanged`'s "nothing to name"
+    // precedent). Fired by every successful `WorkflowUpsert`/`WorkflowDelete`.
+    WorkflowsChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

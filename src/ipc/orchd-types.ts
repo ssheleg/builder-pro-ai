@@ -34,6 +34,15 @@ reason: string | null, invocationId: string | null, };
 export type ConnectorOp = { name: string, description: string | null, };
 
 /**
+ * What context a stage's agent starts from (SCN-065). `inherit`: keep the current terminal's
+ * context (the default WITHIN a terminal); `handoff`: start from the previous stage's outputs
+ * (the default AT a terminal boundary, where the agent changes); `project`: start from the
+ * project's own context only; `selected`: start from an owner-picked subset. Consumed by the S6b
+ * executor — inert authoring config today.
+ */
+export type ContextScope = "inherit" | "handoff" | "project" | "selected";
+
+/**
  * A per-project markdown document's DB-row half (SCN-054). Field set mirrors [`RuleSet`]
  * column-for-column minus the ruleset-only `scope`/`policy` (a doc is always project-scoped and
  * carries no policy) plus the owner-chosen `name` — the doc's identity within its project
@@ -75,6 +84,13 @@ export type DomainTask = { id: string, projectId: string, parentId: string | nul
 priority: TaskPriority, source: TaskSource, sourceId: string | null, tags: Array<string>, rank: number, rankAgent: number | null, rankAgentReasoning: string, createdAt: number, updatedAt: number, };
 
 export type FitVerdict = "fit" | "noFit" | "unknown";
+
+/**
+ * Whether a stage advances on its own or waits for the operator (SCN-062). `auto`: the S6b
+ * runtime continues to the next stage without a stop; `manual`: it pauses at a gate for an
+ * explicit operator confirmation. Consumed by the S6b executor — inert authoring config today.
+ */
+export type Gate = "auto" | "manual";
 
 export type Goal = { id: string, projectId: string, parentId: string | null, kind: GoalKind, title: string, body: string, ord: number, status: GoalStatus, metricRefs: Array<string>, createdAt: number, updatedAt: number, };
 
@@ -263,6 +279,22 @@ export type SkillFileState = "present" | "modified" | "missing";
 
 export type SkillScope = "global" | "project";
 
+/**
+ * One stage of a workflow (SCN-061). Order is the enclosing [`Workflow`]`.stages` Vec index —
+ * there is no separate ordinal field, a reorder is a reordering of that Vec. `agent: None` means
+ * the stage inherits the workflow's `defaultAgent` (SCN-061 "inherit"); `Some` pins a specific
+ * known agent (validated against the known-agent set at save time). `skillIds` are the stage's
+ * own skills — the effective set the S6b runtime would load is the workflow's global skills ∪
+ * these (a pure view, never stored). `outputs` names the artifacts the stage is expected to
+ * produce (free-form owner labels the S6b handoff logic will consume). `gate`/`contextScope`
+ * carry the per-stage run behavior above.
+ */
+export type Stage = { id: string, name: string, prompt: string, skillIds: Array<string>, 
+/**
+ * `None` ⇒ inherit the workflow's `defaultAgent`; `Some` ⇒ a specific known agent.
+ */
+agent: string | null, contextScope: ContextScope, outputs: Array<string>, gate: Gate, };
+
 export type StorageMode = "persistent" | "in_memory_fallback" | "recovered_from_corruption";
 
 /**
@@ -334,3 +366,23 @@ export type TaskPriority = "urgent" | "normal";
 export type TaskSource = "idea" | "insight" | "bug" | "plan";
 
 export type TaskStatus = "backlog" | "todo" | "waiting" | "progress" | "testing" | "done";
+
+/**
+ * A reusable workflow definition (SCN-060/061/062/065), file-backed (files-as-truth, mirrors
+ * `Skill`/`Doc`): the full definition is serialized to a JSON file under the app-support rules
+ * tree, the DB row is the index, and `hash`/`fileState` give the same external-change honesty the
+ * skill/doc registries have. `defaultAgent` is the fallback agent for every stage whose own
+ * `agent` is `None`; it must be one of the known agents the app launches. `supervisor` REUSES the
+ * wire `SupervisorConfig` (the per-workflow CEO-oversight config, same shape as the ruleset
+ * policy's). `fileState` REUSES `SkillFileState` and is computed FRESH at read time (re-hashing
+ * the JSON file at `jsonPath` against the stored `hash`), never a stored column. NOTE: this doc
+ * comment is copied into the generated TS verbatim by ts-rs, so any field named here uses its
+ * camelCase wire form (`projectId`/`defaultAgent`/`fileState`/…) — same discipline as [`Doc`]'s.
+ */
+export type Workflow = { id: string, name: string, description: string, scope: WorkflowScope, projectId: string | null, defaultAgent: string, stages: Array<Stage>, globalSkillIds: Array<string>, supervisor: SupervisorConfig, fileState: SkillFileState, jsonPath: string, hash: string, createdAt: number, updatedAt: number, };
+
+/**
+ * A workflow's scope (mirrors `SkillScope`/`RuleScope`): a `global` workflow is reusable across
+ * every project; a `project` workflow belongs to one project (its `projectId` is then `Some`).
+ */
+export type WorkflowScope = "global" | "project";

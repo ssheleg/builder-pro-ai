@@ -126,6 +126,10 @@ vi.mock("./ipc/events", () => ({
     cbs.orchdResearchRunsChanged = cb;
     return Promise.resolve(unlisten);
   },
+  onOrchdWorkflowsChanged: (cb: (p: unknown) => void) => {
+    cbs.orchdWorkflowsChanged = cb;
+    return Promise.resolve(unlisten);
+  },
 }));
 
 // T8 (S-EXT §8): ExtPanel is mocked here — its own tests (`components/ext/ExtPanel.test.tsx`)
@@ -177,6 +181,9 @@ const trustListAuditMock = vi.fn().mockResolvedValue([]);
 const orchdStorageStatusMock = vi
   .fn()
   .mockResolvedValue({ storageMode: "persistent", quarantinedPath: null });
+// SW1: the workflow slice's `refreshWorkflows` (`store.ts`) is called on the initial connect and on
+// every orchd://up — mocked here for the same deterministic-resolution reason as the wrappers above.
+const orchdListWorkflowsMock = vi.fn().mockResolvedValue([]);
 vi.mock("./ipc/orchd", () => ({
   orchdListProjects: (...a: unknown[]) => orchdListProjectsMock(...a),
   orchdListGoals: (...a: unknown[]) => orchdListGoalsMock(...a),
@@ -200,6 +207,7 @@ vi.mock("./ipc/orchd", () => ({
   trustListPolicies: (...a: unknown[]) => trustListPoliciesMock(...a),
   trustListAudit: (...a: unknown[]) => trustListAuditMock(...a),
   orchdStorageStatus: (...a: unknown[]) => orchdStorageStatusMock(...a),
+  orchdListWorkflows: (...a: unknown[]) => orchdListWorkflowsMock(...a),
   describeOrchdError: (e: unknown) => `mapped: ${JSON.stringify(e)}`,
 }));
 
@@ -440,6 +448,7 @@ describe("App", () => {
       "orchdConnectorsChanged",
       "orchdSkillsChanged",
       "orchdResearchRunsChanged",
+      "orchdWorkflowsChanged",
     ]) {
       expect(typeof cbs[key]).toBe("function");
     }

@@ -5,18 +5,19 @@
 Seeded 2026-07-24 with the **workflow feature** (SW1 / SCN-060..064). Figma is
 enabled for this feature (foundation → Design tooling); the rest of the app is
 still text-only and will be reverse-mapped into this file over time. Each screen
-below has a real Figma frame in the project file. The frames are built directly
-on the **Soft Control Room** tokens — they are design mockups (`designed`); no
-product code exists yet (the runtime is S6b, foundation A-10).
+below has a real Figma frame in the project file, built directly on the **Soft
+Control Room** tokens. The **authoring** screens (SCR-01..04) are now `built`
+(SW1, 2026-07-24); the **run** screens (SCR-05..07) stay `designed` — their live
+behaviour is the S6b orchestrator runtime (foundation A-10/A-11).
 
 ## Index
 
 | ID | Screen | Used by | Figma | Status | Coverage |
 |----|--------|---------|-------|--------|----------|
-| SCR-01 | Workflows library | FLW-23 | [frame 3-7](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-7) | designed | none yet |
-| SCR-02 | Workflow editor | FLW-23 | [frame 3-11](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-11) | designed | none yet |
-| SCR-03 | Stage detail | FLW-23 | [frame 3-15](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-15) | designed | none yet |
-| SCR-04 | Run workflow picker | FLW-24 | [frame 3-19](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-19) | designed | none yet |
+| SCR-01 | Workflows library | FLW-23 | [frame 3-7](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-7) | built | src/components/workflows/WorkflowsView.tsx |
+| SCR-02 | Workflow editor | FLW-23 | [frame 3-11](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-11) | built | src/components/workflows/WorkflowEditor.tsx |
+| SCR-03 | Stage detail | FLW-23 | [frame 3-15](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-15) | built | src/components/workflows/StageDetail.tsx |
+| SCR-04 | Run workflow picker | FLW-24 | [frame 3-19](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-19) | built | src/components/workflows/RunWorkflowPicker.tsx |
 | SCR-05 | Run detail | FLW-24 | [frame 3-23](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-23) | designed | none yet |
 | SCR-06 | Home digest (workflows) | FLW-24 | [frame 3-27](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-27) | designed | none yet |
 | SCR-07 | Run journal (heartbeat) | FLW-24 | [frame 17-2](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=17-2) | designed | none yet |
@@ -33,30 +34,30 @@ product code exists yet (the runtime is S6b, foundation A-10).
 ### SCR-01: Workflows library
 - **Used by:** FLW-23 (step 1)
 - **Purpose:** the home of workflow-as-data — list saved workflows, scoped global/project, and start a new one (SCN-060)
-- **Elements:** "⚙ Workflows" nav entry, "Workflows" title, scope segmented pill (All | Global | Project), "+ New workflow" *(primary)*, per-workflow row (name, description, stage-count chip, scope chip, skills-count chip, Run → / Open / Duplicate / Delete)
+- **Elements:** "⛓ Workflows" nav entry, "Workflows" title, scope segmented pill (All | Global | Project), "+ New workflow" *(primary)*, per-workflow row (name, description, stage-count chip, scope chip, skills-count chip, Run → / Open / Duplicate / Delete)
 - **States:**
   | State | Trigger | Figma frame | Behavior |
   |-------|---------|-------------|----------|
   | success | ≥1 workflow saved | [3-7](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-7) | rows listed, scope filter active |
   | empty | none saved | [3-7](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-7) | "No workflows yet — compose one to reuse across projects." (depicted inline) |
-- **Coverage:** none yet
+- **Coverage:** src/components/workflows/WorkflowsView.tsx (+ .test) — scope filter, rows, new/open/duplicate/delete + confirm, empty state; wired via src/App.tsx (view "workflows") + src/components/WorkspaceSidebar.tsx (⛓ nav)
 - **Scenarios:** SCN-060
 - **Resources:** reuses the file-backed scoped-entity pattern of RuleSets/Docs; skills come from the registry (SCN-035)
-- **Status:** designed
+- **Status:** built
 
 ### SCR-02: Workflow editor
 - **Used by:** FLW-23 (steps 2-6)
 - **Purpose:** author the workflow — ordered stages grouped into terminals by agent, global skills, CEO oversight (SCN-061/062/065)
-- **Elements:** breadcrumb (⚙ Workflows › name › scope), **default-agent chip**, "unsaved changes" hint, "Save workflow" *(primary)*, stage list **grouped into terminal brackets** (Terminal N · agent · stage-count; a boundary where the agent changes), reorderable stage rows (drag handle, order badge, name, skills summary, gate chip auto|manual), "+ Add stage", global-skills picker (chips + add), effective-skills note, CEO oversight panel (enable toggle, delegated gate-class chips, inherited-caps line, S6b pending note)
+- **Elements:** breadcrumb (⛓ Workflows › name › scope), **default-agent chip**, "unsaved changes" hint, "Save workflow" *(primary)*, stage list **grouped into terminal brackets** (Terminal N · agent · stage-count; a boundary where the agent changes), reorderable stage rows (drag handle, order badge, name, skills summary, gate chip auto|manual), "+ Add stage", global-skills picker (chips + add), effective-skills note, CEO oversight panel (enable toggle, delegated gate-class chips, inherited-caps line, S6b pending note)
 - **States:**
   | State | Trigger | Figma frame | Behavior |
   |-------|---------|-------------|----------|
   | success | editing a saved workflow | [3-11](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-11) | stages + global skills + CEO section |
   | error | invalid (stage without a prompt, empty CEO scope) | [3-11](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-11) | inline flag on the offending stage/section, Save blocked |
-- **Coverage:** none yet
+- **Coverage:** src/components/workflows/WorkflowEditor.tsx (+ .test) — default-agent picker, terminal-grouped stage list, global skills, CEO section, validation-blocked Save; src/components/workflows/agents.ts (computeTerminalGroups) + .test
 - **Scenarios:** SCN-061, SCN-062, SCN-065
 - **Resources:** CEO section reuses the RulesetPanel supervisor pattern (`SupervisorConfig`, SCN-046); the terminal grouping is derived from the per-stage agent (consecutive same-agent stages = one terminal)
-- **Status:** designed
+- **Status:** built
 
 ### SCR-03: Stage detail
 - **Used by:** FLW-23 (step 3)
@@ -67,10 +68,10 @@ product code exists yet (the runtime is S6b, foundation A-10).
   |-------|---------|-------------|----------|
   | success | stage open, all skills present | [3-15](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-15) | prompt + skills + gate editable |
   | error | a bound skill was removed from the registry | [3-15](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-15) | "missing from the registry — fix or remove before running" (depicted inline) |
-- **Coverage:** none yet
+- **Coverage:** src/components/workflows/StageDetail.tsx (+ .test) — prompt editor, skill picker, gate, Agent & context panel (agent/context-scope/outputs), missing-binding marker
 - **Scenarios:** SCN-061, SCN-065
 - **Resources:** skills referenced by id from the registry (SCN-035); an agent-turn stage (v1); agents are the ones the app already launches; context `handoff` = run journal + declared outputs
-- **Status:** designed
+- **Status:** built
 
 ### SCR-04: Run workflow picker
 - **Used by:** FLW-24 (step 1)
@@ -79,11 +80,11 @@ product code exists yet (the runtime is S6b, foundation A-10).
 - **States:**
   | State | Trigger | Figma frame | Behavior |
   |-------|---------|-------------|----------|
-  | success | ≥1 saved workflow | [3-19](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-19) | selectable list, Run enabled |
-- **Coverage:** none yet
-- **Scenarios:** SCN-063
-- **Resources:** honest S6b boundary — trigger is live, execution awaits the runtime (A-10)
-- **Status:** designed
+  | success | ≥1 saved workflow | [3-19](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-19) | selectable list; "Run" shows the S6b pending note and fabricates no execution (no run record) |
+- **Coverage:** src/components/workflows/RunWorkflowPicker.tsx (+ .test) — global-workflow list, S6b pending note, Run is an inert no-op (asserted: no run created). The actual RUN (SCN-063) is S6b
+- **Scenarios:** SCN-063 (trigger stub only; execution S6b)
+- **Resources:** honest S6b boundary — the trigger/picker is built, execution awaits the runtime (A-10)
+- **Status:** built
 
 ### SCR-05: Run detail
 - **Used by:** FLW-24 (steps 2-3)

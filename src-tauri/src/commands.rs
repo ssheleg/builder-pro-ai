@@ -32,7 +32,8 @@ use bpa_orchd_proto::{
     Idea, IdeaLifecycle, Insight, InsightStatus, McpArtifact, McpAuthKind, McpCallResult,
     McpConnectReport, McpInvocation, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge,
     OrchdRequest, OrchdResponse, Policy, PolicyRules, PolicyScope, Project, ResearchRun, RuleScope,
-    RuleSetView, Skill, SkillScope, StorageStatus, TaskPriority, TaskSource, TaskStatus,
+    RuleSetView, Skill, SkillScope, Stage, StorageStatus, SupervisorConfig, TaskPriority,
+    TaskSource, TaskStatus, Workflow, WorkflowScope,
 };
 use bpa_protocol::{
     CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
@@ -865,6 +866,24 @@ fn expect_skill(res: OrchdResponse) -> Result<Skill, CommandError> {
 fn expect_skills(res: OrchdResponse) -> Result<Vec<Skill>, CommandError> {
     match res {
         OrchdResponse::Skills(v) => Ok(v),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+// ── SW1 Workflow-authoring orchd response unwrappers (docs/ux/plans/2026-07-24-workflow-
+// authoring.md, appended — order FROZEN append-only) — mirrors the Skills block above exactly,
+// one unwrapper per `OrchdResponse::{Workflow,Workflows}` variant ────────────────────────────────
+
+fn expect_workflow(res: OrchdResponse) -> Result<Workflow, CommandError> {
+    match res {
+        OrchdResponse::Workflow(w) => Ok(w),
+        other => Err(err_from_orchd_response(other)),
+    }
+}
+
+fn expect_workflows(res: OrchdResponse) -> Result<Vec<Workflow>, CommandError> {
+    match res {
+        OrchdResponse::Workflows(v) => Ok(v),
         other => Err(err_from_orchd_response(other)),
     }
 }
@@ -2961,6 +2980,101 @@ pub async fn orchd_storage_status(
         state
             .orchd()?
             .request(OrchdRequest::GetStorageStatus)
+            .await?,
+    )
+}
+
+// ── SW1 Workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md, appended — task 4)
+// ───────────────────────────────────────────────────────────────────────────────────────────
+//
+// Four thin pass-through commands over the `OrchdRequest::Workflow*` verbs, mirroring the ruleset
+// (`orchd_get_ruleset`/`orchd_upsert_ruleset`) + skills (`skill_*`) blocks above verb-for-verb.
+// The daemon owns ALL validation (name-rule, scope⇒project_id, known agents, no empty skill/output
+// entries, the SupervisorConfig guard), file I/O and the `WorkflowsChanged` push — these commands
+// only build the request, `.request(..).await?`, and unwrap the expected `OrchdResponse` variant.
+// AUTHORING/CONFIG ONLY — there is NO runtime/executor here (S6b): saving a workflow never spawns
+// a run.
+
+/// → `Vec<Workflow>`. Read-only, broadcasts nothing. `scope: None` ⇒ all scopes; `scope:
+/// Some(Project)` with `project_id: Some(id)` ⇒ that project's workflows plus the global ones
+/// (mirrors `mcp_list_servers`/`skill_list`'s "global ∪ this project" scoping on the daemon side).
+#[tauri::command]
+pub async fn workflow_list(
+    state: State<'_, AppState>,
+    scope: Option<WorkflowScope>,
+    project_id: Option<String>,
+) -> Result<Vec<Workflow>, CommandError> {
+    expect_workflows(
+        state
+            .orchd()?
+            .request(OrchdRequest::WorkflowList { scope, project_id })
+            .await?,
+    )
+}
+
+/// → `Workflow`. Read-only, broadcasts nothing; the JSON file is read FRESH each time
+/// (files-as-truth — mirrors `orchd_get_doc`). An unknown `id` surfaces as
+/// `CommandError::Daemon{code:"NotFound"}`.
+#[tauri::command]
+pub async fn workflow_get(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Workflow, CommandError> {
+    expect_workflow(
+        state
+            .orchd()?
+            .request(OrchdRequest::WorkflowGet { id })
+            .await?,
+    )
+}
+
+/// THE one write command — create (`id: ""`) OR save in place (a non-empty `id`), the exact
+/// create-or-save shape `orchd_upsert_doc` uses. The daemon validates fail-closed BEFORE any
+/// row/file side effect (name-rule, scope⇒project_id, known `default_agent`/stage agents, no empty
+/// skill/output entries, the enabled-CEO⇒≥1-class `SupervisorConfig` guard) — an invalid save is
+/// `CommandError::Daemon{code:"Validation"}` and writes nothing; a non-empty unknown `id` is
+/// `NotFound`. On success the daemon pushes `WorkflowsChanged`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn workflow_upsert(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    description: String,
+    scope: WorkflowScope,
+    project_id: Option<String>,
+    default_agent: String,
+    stages: Vec<Stage>,
+    global_skill_ids: Vec<String>,
+    supervisor: SupervisorConfig,
+) -> Result<Workflow, CommandError> {
+    expect_workflow(
+        state
+            .orchd()?
+            .request(OrchdRequest::WorkflowUpsert {
+                id,
+                name,
+                description,
+                scope,
+                project_id,
+                default_agent,
+                stages,
+                global_skill_ids,
+                supervisor,
+            })
+            .await?,
+    )
+}
+
+/// → `Ack` + a `WorkflowsChanged` push. Removes the row AND the JSON file (a missing file is
+/// tolerated — mirrors `orchd_delete_doc`). An unknown `id` surfaces as
+/// `CommandError::Daemon{code:"NotFound"}`.
+#[tauri::command]
+pub async fn workflow_delete(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    expect_orchd_ack(
+        state
+            .orchd()?
+            .request(OrchdRequest::WorkflowDelete { id })
             .await?,
     )
 }
@@ -5563,6 +5677,144 @@ pub(crate) mod orchd_commands_over_stub_daemon {
             }
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }
+    }
+
+    // ── SW1 Workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md) — mirrors the
+    // `SkillAdd` round-trip + validation-error pair above exactly, over `WorkflowUpsert`. ────────
+
+    #[tokio::test]
+    async fn workflow_upsert_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::WorkflowUpsert {
+                id,
+                name,
+                description,
+                scope,
+                project_id,
+                default_agent,
+                stages,
+                global_skill_ids,
+                supervisor,
+            } => OrchdResponse::Workflow(Workflow {
+                // An empty request id ⇒ the daemon stamps a fresh uuid; echo a fixed one here.
+                id: if id.is_empty() { "wf-1".into() } else { id },
+                name,
+                description,
+                scope,
+                project_id,
+                default_agent,
+                stages,
+                global_skill_ids,
+                supervisor,
+                file_state: bpa_orchd_proto::SkillFileState::Present,
+                json_path: "/tmp/rules/workflows/global/wf-1.json".into(),
+                hash: "deadbeef".into(),
+                created_at: 0,
+                updated_at: 0,
+            }),
+            other => panic!("expected WorkflowUpsert, got {other:?}"),
+        })
+        .await;
+
+        let stage = Stage {
+            id: "st-1".into(),
+            name: "Draft".into(),
+            prompt: "Write the draft".into(),
+            skill_ids: vec!["sk-1".into()],
+            agent: None,
+            context_scope: bpa_orchd_proto::ContextScope::Inherit,
+            outputs: vec!["draft.md".into()],
+            gate: bpa_orchd_proto::Gate::Auto,
+        };
+        let req = OrchdRequest::WorkflowUpsert {
+            id: String::new(),
+            name: "Ship it".into(),
+            description: "end to end".into(),
+            scope: WorkflowScope::Global,
+            project_id: None,
+            default_agent: "claude-code".into(),
+            stages: vec![stage.clone()],
+            global_skill_ids: vec!["gsk-1".into()],
+            supervisor: SupervisorConfig {
+                enabled: false,
+                delegated_classes: vec![],
+                instruction: String::new(),
+                custom_rules: vec![],
+            },
+        };
+        let res = client.request(req).await.unwrap();
+        let workflow = expect_workflow(res).unwrap();
+        assert_eq!(workflow.id, "wf-1");
+        assert_eq!(workflow.name, "Ship it");
+        assert_eq!(workflow.scope, WorkflowScope::Global);
+        assert_eq!(workflow.default_agent, "claude-code");
+        assert_eq!(workflow.stages, vec![stage]);
+        assert_eq!(
+            workflow.file_state,
+            bpa_orchd_proto::SkillFileState::Present
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_upsert_validation_error_response_becomes_command_error_daemon_validation() {
+        let (client, _sock) = connect_orchd_to_stub(|_req| OrchdResponse::Error {
+            code: bpa_orchd_proto::OrchdErrorCode::Validation,
+            message: "workflow: enabled CEO needs at least one delegated class".into(),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::WorkflowUpsert {
+                id: String::new(),
+                name: "bad".into(),
+                description: String::new(),
+                scope: WorkflowScope::Global,
+                project_id: None,
+                default_agent: "claude-code".into(),
+                stages: vec![],
+                global_skill_ids: vec![],
+                supervisor: SupervisorConfig {
+                    enabled: true,
+                    delegated_classes: vec![],
+                    instruction: String::new(),
+                    custom_rules: vec![],
+                },
+            })
+            .await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "Validation");
+                assert_eq!(
+                    message,
+                    "workflow: enabled CEO needs at least one delegated class"
+                );
+            }
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_list_round_trips_through_real_orchd_client() {
+        let (client, _sock) = connect_orchd_to_stub(|req| match req {
+            OrchdRequest::WorkflowList { scope, project_id } => {
+                assert_eq!(scope, Some(WorkflowScope::Project));
+                assert_eq!(project_id, Some("p1".to_string()));
+                OrchdResponse::Workflows(vec![])
+            }
+            other => panic!("expected WorkflowList, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(OrchdRequest::WorkflowList {
+                scope: Some(WorkflowScope::Project),
+                project_id: Some("p1".into()),
+            })
+            .await
+            .unwrap();
+        let workflows = expect_workflows(res).unwrap();
+        assert!(workflows.is_empty());
     }
 
     // ── S-IDEA research (spec §5/§6, task T5) — mirrors the `CreateProject`/`SkillAdd` round-trip
