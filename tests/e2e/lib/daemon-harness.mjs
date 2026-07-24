@@ -659,7 +659,16 @@ function decodePush(value) {
         message: inner.message,
       };
     default:
-      throw new Error(`decodePush: unknown Push variant ${variant}`);
+      // FORWARD-COMPATIBLE by design: `Push` is append-only at the enum tail, so a daemon newer
+      // than this harness can legitimately broadcast a variant we have never heard of
+      // (`WorkspaceUpdated`, `WorkspaceRemoved`, …). Throwing here was a real hazard rather than a
+      // safety net: `decodePush` runs inside the socket's `data` listener, so the throw is
+      // UNCATCHABLE by the awaiting test — it killed the process with exit 1 and masked an
+      // otherwise-green run. Every consumer already correlates the push it cares about by variant
+      // name and ignores the rest, so an opaque passthrough is both safe and strictly more useful
+      // than a crash: an assertion that needs a new variant will fail on the missing field with a
+      // readable message instead of taking the whole harness down.
+      return { t: variant, unknownVariant: true, raw: inner };
   }
 }
 

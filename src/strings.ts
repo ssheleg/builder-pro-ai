@@ -113,6 +113,36 @@ export const strings = {
       /** Header of the collapsed, dimmed group of archived projects (O-3, spec D7). */
       archivedGroup: (count: number) => `Archived (${count})`,
       archivedGroupToggleAria: "Toggle archived projects",
+
+      // ── remove a workspace (SCN-058) ───────────────────────────────────────────────────────
+      /** Per-row control. The glyph is the affordance; this is its accessible name. */
+      removeWorkspaceAria: (name: string) => `Remove workspace ${name}`,
+      /**
+       * SCN-058 requires the CONSEQUENCE to be stated before anything is committed: the workspace
+       * is named, and the fact that its live terminals get closed and their scrollback discarded
+       * is spelled out in the confirmation itself, not discovered afterwards.
+       */
+      removeWorkspaceConfirm: (name: string) =>
+        `Remove workspace "${name}"? Its terminals will be closed and their scrollback discarded. This cannot be undone.`,
+      /** Honest toast for a rejected `remove_workspace` — the row stays exactly where it was. */
+      removeWorkspaceFailed: (msg: string) => `Failed to remove workspace: ${msg}`,
+
+      // ── clear out workspaces whose folder is gone (SCN-059) ────────────────────────────────
+      /** Row marker: this workspace's folder(s) no longer exist on disk. */
+      rootMissing: "folder missing",
+      /** Full explanation behind the marker (title attribute) — names the path that is gone. */
+      rootMissingTitle: (path: string) => `Folder no longer exists on disk: ${path}`,
+      /** Bulk clean-up control, shown ONLY when at least one workspace is missing (no dead
+       * control) — states the exact count it would remove. */
+      cleanupMissing: (count: number) =>
+        `Clean up ${count} missing ${count === 1 ? "workspace" : "workspaces"}`,
+      /** SCN-059 step 2: the confirmation states exactly how many will be removed. */
+      cleanupMissingConfirm: (count: number) =>
+        `Remove ${count} ${count === 1 ? "workspace whose folder" : "workspaces whose folders"} no longer ${count === 1 ? "exists" : "exist"}? Their terminals will be closed and their scrollback discarded. This cannot be undone.`,
+      /** SCN-059 "no silent partial success": the successes stand, and the toast names how many
+       * of the attempted removals failed. */
+      cleanupMissingPartial: (failed: number, total: number) =>
+        `Removed ${total - failed} of ${total} missing workspaces — ${failed} failed`,
     },
   },
 
@@ -133,6 +163,24 @@ export const strings = {
     withError: "with error",
     goals: "Goals",
     goalsLoading: "Goals are loading…",
+  },
+
+  /**
+   * Session-accounting vocabulary shared by Home and the workspace stat chips (SCN-004/SCN-016).
+   * The four buckets are an exhaustive partition (`store.ts::partitionSessions`); this is the
+   * copy for the one bucket that had no name before — a session restored from the daemon's store
+   * whose shell is gone. It is deliberately NOT called "live": there is no PTY behind it.
+   */
+  sessions: {
+    /** Workspace stat chip (spec §6.3), alongside "N live · K waiting · M exited". */
+    restoredChip: (count: number) => `${count} restored`,
+    /** Home section heading for the same bucket. */
+    restoredSection: "Restored (no live shell)",
+    /** Per-row meta text on Home — what the owner can still expect from such a session. */
+    restoredNote: "restored — scrollback only",
+    /** One dim line under the section heading, so the state is explained where it is shown. */
+    restoredHint:
+      "These came back after a restart: their scrollback was kept, but the shell that produced it is gone.",
   },
 
   // ── files: rail, tree, preview ───────────────────────────────────────────────────────────────

@@ -34,10 +34,22 @@ function describeCommandError(err: unknown): string {
 }
 
 /**
- * Tab strip: one tab per live session (active switch is metadata-only — `setActiveSession`
- * — so hidden terminals stay alive, spec §12 keep-alive). "New terminal" creates a session
- * in the App-level active workspace (disabled if none is selected). Closing a tab kills the
- * session and disposes its Terminal (the only place `dispose()` is called for a user close).
+ * Tab strip: one tab per session OF THE ACTIVE WORKSPACE (active switch is metadata-only —
+ * `setActiveSession` — so hidden terminals stay alive, spec §12 keep-alive). "New terminal"
+ * creates a session in the App-level active workspace (disabled if none is selected). Closing a
+ * tab kills the session and disposes its Terminal (the only place `dispose()` is called for a
+ * user close).
+ *
+ * The workspace scoping is not cosmetic: the strip used to render `Object.values(sessions)` —
+ * every session in the store — while everything around it (the stat chips, the files rail, the
+ * "+ New terminal" target) is scoped to the active workspace, so the two surfaces could never
+ * agree. Ten sessions across three workspaces put ten tabs above a single workspace's pane, and
+ * with no workspace selected there is nothing to show at all.
+ *
+ * Overflow: the tablist scrolls horizontally on its own (`overflowX: "auto"`) and both the tabs
+ * and the "+ New terminal" button refuse to shrink (`flexShrink: 0`) — flex's default
+ * `min-width: auto` on the tablist otherwise let the tabs overrun their box and paint underneath
+ * the button, which then sat on top of the last tab's close control.
  */
 export function TerminalTabs(props: {
   manager: TerminalManager;
@@ -52,7 +64,11 @@ export function TerminalTabs(props: {
   const removeSession = useAppStore((s) => s.removeSession);
   const showToast = useAppStore((s) => s.showToast);
 
-  const list = Object.values(sessions).sort((a, b) => a.createdAt - b.createdAt);
+  // Scoped to the active workspace (see the component doc); no workspace selected ⇒ no tabs, which
+  // is the honest reading of "there is no workspace whose terminals these would be".
+  const list = Object.values(sessions)
+    .filter((s) => activeWorkspaceId !== null && s.workspaceId === activeWorkspaceId)
+    .sort((a, b) => a.createdAt - b.createdAt);
 
   async function onNewTerminal(): Promise<void> {
     if (!activeWorkspaceId) return; // no workspace selected -> sidebar must create/select one first
@@ -108,7 +124,18 @@ export function TerminalTabs(props: {
         borderBottom: "1px solid var(--hairline)",
       }}
     >
-      <div role="tablist" style={{ display: "flex", alignItems: "stretch", flex: 1, minWidth: 0 }}>
+      <div
+        role="tablist"
+        style={{
+          display: "flex",
+          alignItems: "stretch",
+          flex: 1,
+          minWidth: 0,
+          // The tabs scroll INSIDE this box instead of overflowing it (measured: 8 tabs at 1200px
+          // ran 203px past its right edge and under the "+ New terminal" button).
+          overflowX: "auto",
+        }}
+      >
         {list.map((s) => {
           const selected = s.id === activeSessionId;
           return (
@@ -139,10 +166,14 @@ export function TerminalTabs(props: {
                 background: selected ? "var(--bg)" : "transparent",
                 borderRight: "1px solid var(--hairline)",
                 fontSize: "var(--fs-md)",
+                // Keep every tab at its natural width and let the strip scroll instead — squeezed
+                // tabs collapse their title to a few pixels long before the strip admits it needs
+                // to scroll.
+                flexShrink: 0,
               }}
             >
               <StatusDot lifecycle={s.lifecycle} waitingForInput={s.waitingForInput} />
-              <span>{s.title}</span>
+              <span style={{ whiteSpace: "nowrap" }}>{s.title}</span>
               <button
                 type="button"
                 aria-label={strings.terminal.tabs.closeAria(s.title)}
@@ -177,6 +208,9 @@ export function TerminalTabs(props: {
           cursor: activeWorkspaceId ? "pointer" : "not-allowed",
           padding: "var(--sp-2) var(--sp-3)",
           fontSize: "var(--fs-lg)",
+          // Always reachable: the primary action of this strip must never be squeezed to nothing
+          // (or overlapped) by a long tab list.
+          flexShrink: 0,
         }}
       >
         {strings.terminal.tabs.newTerminal}

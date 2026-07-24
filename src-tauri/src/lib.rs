@@ -615,6 +615,8 @@ pub fn run() {
             commands::create_workspace,
             commands::add_workspace_root,
             commands::remove_workspace_root,
+            commands::remove_workspace,
+            commands::paths_exist,
             commands::get_command_events,
             commands::get_session_state,
             commands::pick_folder,

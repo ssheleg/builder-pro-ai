@@ -1911,23 +1911,60 @@ async function cleanupAll() {
   // Best-effort safety net: if phase7 created a connector account (the real invoke account OR the
   // throwaway keychain-availability probe — BOTH are REAL Keychain entries, not just isolated-
   // tempdir state) but a LATER assertion in that same phase threw before its own explicit
-  // `ConnectorDeleteAccount` ran, clean it up here too — via the most recently tracked LIVE
-  // connection, BEFORE the daemon is torn down below (a dead daemon can't service this request). A
-  // failure here is swallowed: this is cleanup for an already-failing run, not itself a test
-  // assertion; the happy path always clears both ids itself (phase7), so this branch is normally a
-  // no-op.
+  // `ConnectorDeleteAccount` ran, clean it up here too — BEFORE the daemon is torn down below (a
+  // dead daemon can't service this request). This is cleanup for an already-failing run, not a
+  // test assertion, so nothing here throws or changes the run's verdict.
+  //
+  // Everything EXCEPT these entries lives under `isolatedTmpDir`/`isolatedHomeDir` and is deleted
+  // wholesale at the end of this function, so a Keychain entry is the ONE thing this harness can
+  // leave behind on the real machine — which is exactly why a failure here is REPORTED (loudly,
+  // with the id and a copy-pasteable remedy) instead of swallowed. A silently skipped delete is
+  // indistinguishable from a clean run, and that is how leaks survive unnoticed.
   const orphanedConnectorAccountIds = [
     cleanup.connectorAccountId,
     cleanup.connectorProbeAccountId,
   ].filter((id) => id != null);
-  if (orphanedConnectorAccountIds.length > 0 && cleanup.conns.length > 0) {
-    const liveConn = cleanup.conns[cleanup.conns.length - 1];
-    for (const id of orphanedConnectorAccountIds) {
-      try {
-        await orchdRequest(liveConn, { t: "ConnectorDeleteAccount", id });
-      } catch {
-        /* best-effort cleanup */
+  if (orphanedConnectorAccountIds.length > 0) {
+    // The most recent tracked connection may already be dead — `shutdownAndWaitExit()` empties
+    // `cleanup.conns` at every phase boundary, and a run that died between a shutdown and the next
+    // `bootAndConnect()` leaves none at all. Pick the last LIVE one; failing that, open a fresh one
+    // if the daemon process is still up.
+    let conn = null;
+    for (let i = cleanup.conns.length - 1; i >= 0; i--) {
+      const c = cleanup.conns[i];
+      if (c?.sock && !c.sock.destroyed) {
+        conn = c;
+        break;
       }
+    }
+    if (conn == null && cleanup.daemonPid != null && pidAlive(cleanup.daemonPid)) {
+      try {
+        conn = await orchdConnect(SOCK);
+        cleanup.conns.push(conn);
+      } catch {
+        conn = null;
+      }
+    }
+    for (const id of orphanedConnectorAccountIds) {
+      let failure = "no live orchd connection (daemon already gone?)";
+      if (conn != null) {
+        try {
+          const res = await orchdRequest(conn, { t: "ConnectorDeleteAccount", id });
+          failure = res.t === "Ack" ? null : `orchd answered ${JSON.stringify(res)}`;
+        } catch (e) {
+          failure = e.message;
+        }
+      }
+      if (failure == null) {
+        log(`cleanup: deleted orphaned connector account ${id}`);
+        continue;
+      }
+      console.error(
+        `[e2e-orchd] !! LEAKED KEYCHAIN ENTRY: connector account ${id} could not be deleted ` +
+          `(${failure}). Unlike everything else this harness creates, this lives in your REAL ` +
+          `login keychain (the isolated HOME only symlinks Library/Keychains). Remove it with: ` +
+          `security delete-generic-password -s ai.builderpro.desktop.account -a "${id}:apikey"`,
+      );
     }
     cleanup.connectorAccountId = null;
     cleanup.connectorProbeAccountId = null;

@@ -81,7 +81,13 @@ vi.mock("../ipc/power", () => ({
   powerStatus: vi.fn(),
 }));
 
-import { useAppStore, docViewKey } from "./store";
+// SCN-058: the store's `removeWorkspace` action is the only place this file talks to sessiond.
+const removeWorkspaceCmdMock = vi.fn();
+vi.mock("../ipc/commands", () => ({
+  removeWorkspace: (...a: unknown[]) => removeWorkspaceCmdMock(...a),
+}));
+
+import { useAppStore, docViewKey, partitionSessions } from "./store";
 import { toSupportBundle } from "../ipc/diag";
 
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
@@ -122,6 +128,7 @@ describe("useAppStore", () => {
     trustListPoliciesMock.mockReset();
     trustListAuditMock.mockReset();
     orchdStorageStatusMock.mockReset();
+    removeWorkspaceCmdMock.mockReset().mockResolvedValue(undefined);
     powerSetEnabledMock.mockReset().mockResolvedValue({ enabled: true, active: false, error: null });
     powerSyncSessionsMock
       .mockReset()
@@ -484,6 +491,32 @@ describe("useAppStore", () => {
     expect(s.waitingForInput).toBe(false);
     expect(s.isActive).toBe(false);
     expect(s.lifecycle).toEqual({ kind: "exited", code: 1, signal: null });
+  });
+
+  it("setLifecycle marks a rehydrated (isActive:false) session live again — the daemon only pushes state-changed for a session whose PTY is alive", () => {
+    // Exactly what sessiond hands back after a restart: no PTY, so `isActive:false`. Before this
+    // fix such a session could NEVER be shown as live again, however loudly the daemon said so.
+    useAppStore.getState().upsertSession(meta({ isActive: false, lifecycle: { kind: "atPrompt" } }));
+    useAppStore.getState().setLifecycle({
+      sessionId: "s1",
+      lifecycle: { kind: "running" },
+      waitingForInput: false,
+      cwd: "/work",
+    });
+    const s = useAppStore.getState().sessions["s1"];
+    expect(s.isActive).toBe(true);
+    expect(s.lifecycle).toEqual({ kind: "running" });
+  });
+
+  it("setLifecycle does NOT invent liveness for an exited payload", () => {
+    useAppStore.getState().upsertSession(meta({ isActive: false, lifecycle: { kind: "running" } }));
+    useAppStore.getState().setLifecycle({
+      sessionId: "s1",
+      lifecycle: { kind: "exited", code: 0, signal: null },
+      waitingForInput: false,
+      cwd: "/work",
+    });
+    expect(useAppStore.getState().sessions["s1"].isActive).toBe(false);
   });
 
   it("setDaemonConnected toggles the flag", () => {
@@ -1479,5 +1512,185 @@ describe("useAppStore", () => {
       expect(s.diagEvents).toHaveLength(1);
       expect(s.diagEvents[0].op).toBe("setKeepAwakeEnabled");
     });
+  });
+});
+
+// ── session accounting: the four buckets are an exhaustive partition (SCN-004/SCN-016) ─────────
+
+describe("partitionSessions", () => {
+  const m = (over: Partial<SessionMeta>): SessionMeta => ({
+    id: "x",
+    workspaceId: "w1",
+    title: "zsh",
+    shell: "/bin/zsh",
+    cwd: "/tmp",
+    cols: 80,
+    rows: 24,
+    lifecycle: { kind: "atPrompt" },
+    waitingForInput: false,
+    isActive: true,
+    createdAt: 1,
+    ...over,
+  });
+
+  /** Every combination of the three inputs the buckets are derived from. */
+  const matrix: SessionMeta[] = [];
+  for (const lifecycle of [
+    { kind: "atPrompt" } as const,
+    { kind: "running" } as const,
+    { kind: "typing" } as const,
+    { kind: "exited", code: 0, signal: null } as const,
+  ]) {
+    for (const waitingForInput of [true, false]) {
+      for (const isActive of [true, false]) {
+        matrix.push(
+          m({
+            id: `${lifecycle.kind}-${waitingForInput}-${isActive}`,
+            lifecycle,
+            waitingForInput,
+            isActive,
+          }),
+        );
+      }
+    }
+  }
+
+  it("THE regression guard: the four counts always sum to the session total", () => {
+    // This is the invariant the old three hand-rolled predicates violated — a cold-rehydrated
+    // session matched none of them and simply vanished from every count. Any future predicate
+    // that stops covering some state fails HERE, loudly, instead of silently under-reporting.
+    const b = partitionSessions(matrix);
+    expect(b.live.length + b.waiting.length + b.restored.length + b.exited.length).toBe(
+      matrix.length,
+    );
+  });
+
+  it("no session lands in two buckets (the partition is disjoint)", () => {
+    const b = partitionSessions(matrix);
+    const ids = [...b.live, ...b.waiting, ...b.restored, ...b.exited].map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set(ids)).toEqual(new Set(matrix.map((s) => s.id)));
+  });
+
+  it("classifies the four canonical shapes honestly", () => {
+    const live = m({ id: "live", isActive: true, waitingForInput: false, lifecycle: { kind: "running" } });
+    const waiting = m({ id: "waiting", isActive: true, waitingForInput: true, lifecycle: { kind: "running" } });
+    // sessiond's restore shape (persistence.rs): no PTY, not waiting, non-exited lifecycle.
+    const restored = m({ id: "restored", isActive: false, waitingForInput: false, lifecycle: { kind: "atPrompt" } });
+    const exited = m({
+      id: "exited",
+      isActive: false,
+      waitingForInput: false,
+      lifecycle: { kind: "exited", code: 0, signal: null },
+    });
+
+    const b = partitionSessions([live, waiting, restored, exited]);
+    expect(b.live.map((s) => s.id)).toEqual(["live"]);
+    expect(b.waiting.map((s) => s.id)).toEqual(["waiting"]);
+    expect(b.restored.map((s) => s.id)).toEqual(["restored"]);
+    expect(b.exited.map((s) => s.id)).toEqual(["exited"]);
+  });
+
+  it("a restored session is NEVER reported as live (no live PTY behind it)", () => {
+    const restored = m({ id: "r", isActive: false, waitingForInput: false, lifecycle: { kind: "running" } });
+    const b = partitionSessions([restored]);
+    expect(b.live).toEqual([]);
+    expect(b.restored.map((s) => s.id)).toEqual(["r"]);
+  });
+
+  it("exited wins over a stale waitingForInput:true (a dead session is never 'needs you')", () => {
+    const stale = m({
+      id: "s",
+      isActive: false,
+      waitingForInput: true,
+      lifecycle: { kind: "exited", code: 1, signal: null },
+    });
+    const b = partitionSessions([stale]);
+    expect(b.exited.map((s) => s.id)).toEqual(["s"]);
+    expect(b.waiting).toEqual([]);
+  });
+
+  it("an empty input yields four empty buckets", () => {
+    expect(partitionSessions([])).toEqual({ live: [], waiting: [], restored: [], exited: [] });
+  });
+});
+
+// ── SCN-058: remove a workspace ────────────────────────────────────────────────────────────────
+
+describe("removeWorkspace / dropWorkspace", () => {
+  const ws: Workspace = { id: "w1", name: "alpha", rootPath: "/p/alpha", roots: ["/p/alpha"] };
+  const other: Workspace = { id: "w2", name: "beta", rootPath: "/p/beta", roots: ["/p/beta"] };
+  const session = (id: string, workspaceId: string): SessionMeta => ({
+    id,
+    workspaceId,
+    title: id,
+    shell: "/bin/zsh",
+    cwd: "/tmp",
+    cols: 80,
+    rows: 24,
+    lifecycle: { kind: "atPrompt" },
+    waitingForInput: false,
+    isActive: true,
+    createdAt: 1,
+  });
+
+  beforeEach(() => {
+    removeWorkspaceCmdMock.mockReset().mockResolvedValue(undefined);
+    useAppStore.setState(
+      {
+        workspaces: { w1: ws, w2: other },
+        sessions: { s1: session("s1", "w1"), s2: session("s2", "w1"), s3: session("s3", "w2") },
+        activeSessionId: "s1",
+        view: "workspace",
+        toast: null,
+        toastQueue: [],
+      },
+      false,
+    );
+  });
+
+  it("removes the workspace AND its sessions on success, leaving every other workspace alone", async () => {
+    await useAppStore.getState().removeWorkspace("w1");
+    const s = useAppStore.getState();
+    expect(removeWorkspaceCmdMock).toHaveBeenCalledWith("w1");
+    expect(Object.keys(s.workspaces)).toEqual(["w2"]);
+    expect(Object.keys(s.sessions)).toEqual(["s3"]);
+  });
+
+  it("clears activeSessionId when it pointed into the removed workspace (never a pane with no session)", async () => {
+    await useAppStore.getState().removeWorkspace("w1");
+    expect(useAppStore.getState().activeSessionId).toBeNull();
+  });
+
+  it("keeps activeSessionId when it points at a surviving session", async () => {
+    useAppStore.setState({ activeSessionId: "s3" }, false);
+    await useAppStore.getState().removeWorkspace("w1");
+    expect(useAppStore.getState().activeSessionId).toBe("s3");
+  });
+
+  it("a rejected removal changes NOTHING and propagates the error for the caller to surface", async () => {
+    const err = { kind: "disconnected" };
+    removeWorkspaceCmdMock.mockRejectedValueOnce(err);
+    await expect(useAppStore.getState().removeWorkspace("w1")).rejects.toEqual(err);
+    const s = useAppStore.getState();
+    expect(Object.keys(s.workspaces).sort()).toEqual(["w1", "w2"]);
+    expect(Object.keys(s.sessions).sort()).toEqual(["s1", "s2", "s3"]);
+    expect(s.activeSessionId).toBe("s1");
+  });
+
+  it("dropWorkspace is idempotent — the local action and the workspace://removed push cannot fight", () => {
+    useAppStore.getState().dropWorkspace("w1");
+    const after = useAppStore.getState();
+    useAppStore.getState().dropWorkspace("w1");
+    const again = useAppStore.getState();
+    expect(again.workspaces).toBe(after.workspaces); // same reference: no needless re-render
+    expect(again.sessions).toBe(after.sessions);
+  });
+
+  it("dropWorkspace on an unknown id is a no-op", () => {
+    const before = useAppStore.getState();
+    useAppStore.getState().dropWorkspace("nope");
+    expect(useAppStore.getState().workspaces).toBe(before.workspaces);
+    expect(useAppStore.getState().sessions).toBe(before.sessions);
   });
 });

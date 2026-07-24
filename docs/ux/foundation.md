@@ -275,6 +275,17 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
 - **Priority:** must
 - **Status:** delivered *(SCN-003)*
 
+### ST-044: Remove a workspace I no longer want *(stated 2026-07-23)*
+- **Story:** As P-01, I want to remove a workspace from the app — and to clear out in bulk the ones whose folder no longer exists — so that the sidebar keeps showing only places I actually work.
+- **Traces:** JTBD-01, JTBD-09, JRN-01/#3, JRN-02/#2
+- **Acceptance criteria:**
+  - Given a workspace I no longer want, when I remove it and confirm, then it disappears from the sidebar along with its terminal sessions, and nothing about it survives a restart.
+  - Given the workspace has live terminals, when I confirm removal, then those shells are terminated as part of the removal — never left running with no tab to reach them — and the confirmation says so before I commit.
+  - Given a workspace whose folder no longer exists on disk, when I look at the sidebar, then it is visibly marked as missing rather than looking like a working workspace.
+  - Given several workspaces whose folders are gone, when I use the bulk clean-up, then it names exactly how many will be removed, removes only those, and leaves every workspace whose folder still exists untouched.
+- **Priority:** must
+- **Status:** validated *(SCN-058/059 built 2026-07-23 — the app previously had NO removal path at all: the wire carried CreateWorkspace / AddWorkspaceRoot / RemoveWorkspaceRoot and nothing that deletes a workspace, so anything ever created was permanent. A real install accumulated 151 undeletable workspaces, all pointing at deleted temp dirs, from test harnesses that attached to the live daemon.)*
+
 ### ST-004: Triage what needs me across projects
 - **Story:** As P-01, I want a single attention view grouping waiting / running / finished sessions, so that I act on blocked agents first.
 - **Traces:** JTBD-01, JRN-02/#2, JRN-02/#4

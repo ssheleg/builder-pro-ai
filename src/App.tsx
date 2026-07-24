@@ -1,10 +1,11 @@
-import { useEffect, useState, type CSSProperties, type JSX } from "react";
-import { useAppStore, docViewKey } from "./store/store";
+import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
+import { useAppStore, docViewKey, partitionSessions } from "./store/store";
 import {
   onSessionCreated,
   onSessionStateChanged,
   onSessionExited,
   onWorkspaceCreated,
+  onWorkspaceRemoved,
   onDaemonDisconnected,
   onDaemonReconnected,
   onDaemonIncompatible,
@@ -53,6 +54,7 @@ import { ExtPanel } from "./components/ext/ExtPanel";
 import { InboxPanel } from "./components/InboxPanel";
 import { StatsView } from "./components/StatsView";
 import { Toast } from "./components/Toast";
+import { strings } from "./strings";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 /** Module singleton (used by main.tsx). Tests inject a fake via the `manager` prop. */
@@ -119,6 +121,14 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
   const orchdDown = useAppStore((s) => s.orchdDown);
   const syncKeepAwake = useAppStore((s) => s.syncKeepAwake);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<WorkspaceId | null>(null);
+  /**
+   * Latest `activeWorkspaceId` for the mount-only event handlers below (they capture their
+   * closure once, at mount, so reading the state variable directly would pin them to `null`
+   * forever). Assigned during render — the standard "latest value" ref: handlers fire from IPC
+   * events, never during render, so they always observe the value of the last committed render.
+   */
+  const activeWorkspaceIdRef = useRef<WorkspaceId | null>(null);
+  activeWorkspaceIdRef.current = activeWorkspaceId;
 
   useEffect(() => {
     let disposed = false;
@@ -136,7 +146,19 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
       onSessionCreated((m) => {
         const s = useAppStore.getState();
         s.upsertSession(m);
-        if (s.activeSessionId === null) s.setActiveSession(m.id);
+        if (s.activeSessionId !== null) return;
+        // Auto-activate the first session — but only one the tab strip can actually SHOW.
+        // `TerminalTabs` is scoped to the active workspace, so activating a session belonging to
+        // a DIFFERENT workspace would mount its pane with no tab above it (nothing to switch back
+        // from). With no workspace selected yet there is no conflict to have: adopt the new
+        // session's own workspace, which is exactly what the owner just acted on.
+        const activeWs = activeWorkspaceIdRef.current;
+        if (activeWs === null) {
+          setActiveWorkspaceId(m.workspaceId);
+          s.setActiveSession(m.id);
+        } else if (activeWs === m.workspaceId) {
+          s.setActiveSession(m.id);
+        }
       }),
     );
     track(onSessionStateChanged((p) => useAppStore.getState().setLifecycle(p)));
@@ -146,6 +168,29 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // (add/removeWorkspaceRoot, from ANY client, including this one) — its payload IS a
     // Workspace, so upserting it is a direct passthrough.
     track(onWorkspaceUpdated((w) => useAppStore.getState().upsertWorkspace(w)));
+    // `workspace://removed` (SCN-058) — broadcast to EVERY client after a successful
+    // `remove_workspace`, including the one that asked. The single place the app reacts to a
+    // workspace disappearing, whichever window (or client) triggered it:
+    //   1. drop the workspace + its sessions from the store (idempotent — the local
+    //      `removeWorkspace` action already did it for the originating window),
+    //   2. tear down the xterm instances of the sessions that just went away. Computed as "every
+    //      terminal the manager still holds that the store no longer knows about", so it works
+    //      regardless of whether (1) ran here or in the local action first — the removed sessions
+    //      are gone from the store either way, and nothing else can be in that set (a live session
+    //      is always in the store),
+    //   3. never leave a dead view behind (SCN-058): if the removed workspace was the one on
+    //      screen, fall back to Home with no workspace selected.
+    track(
+      onWorkspaceRemoved((p) => {
+        const s = useAppStore.getState();
+        s.dropWorkspace(p.workspaceId);
+        manager.disposeMissing(new Set(Object.keys(useAppStore.getState().sessions)));
+        if (activeWorkspaceIdRef.current === p.workspaceId) {
+          setActiveWorkspaceId(null);
+          useAppStore.getState().setView("home");
+        }
+      }),
+    );
     // Live file-watch signals (spec §5): a debounced batch of changed dirs is a POINT REFRESH
     // (`invalidateDirs` never touches `expanded` — a still-open directory just re-fetches), and
     // a dead watcher pauses live updates honestly rather than failing silently (spec §7).
@@ -455,25 +500,30 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // LIVE session count for keep-awake (SCN-045): every non-exited session counts — running,
-  // waiting-for-input, even sitting at a prompt (an idle shell is still open work; only `exited`
-  // stops counting). Deliberately BROADER than `WorkspaceStatsChips`' "live" chip (which excludes
-  // waiting sessions for display purposes).
-  const liveSessionCount = Object.values(sessions).filter(
+  /**
+   * OPEN sessions — every session that has not exited (SCN-045's keep-awake input). This is
+   * deliberately a DIFFERENT question from the "live" bucket the stat chips and Home show
+   * (`partitionSessions`, which counts only non-waiting sessions with a live PTY): keep-awake
+   * asserts while any session is still open work — running, blocked on the owner, idle at a
+   * prompt, or restored-but-unattached — and releases only when every one of them has ended.
+   * Renamed from `liveSessionCount` so one label ("live") means exactly one thing app-wide; the
+   * INPUT semantics are unchanged (SCN-045 is audited PASS on exactly this predicate).
+   */
+  const openSessionCount = Object.values(sessions).filter(
     (m) => m.lifecycle.kind !== "exited",
   ).length;
 
   /**
-   * Keep-awake live-count sync (SCN-045): re-reconcile the core whenever the number of live
-   * sessions CHANGES — the 1st live session acquires the sleep assertion, the last one ending
+   * Keep-awake open-count sync (SCN-045): re-reconcile the core whenever the number of open
+   * (non-exited) sessions CHANGES — the 1st acquires the sleep assertion, the last one ending
    * releases it (release also fires on toggle-off, via `setKeepAwakeEnabled` above). Keyed on the
    * derived COUNT (a primitive), so unrelated session-map churn (lifecycle flips, cwd updates)
    * never re-invokes the core; `syncKeepAwake` itself surfaces any OS denial honestly (toast +
    * Diagnostics + pill failure state, once per failure streak — see `store.ts`).
    */
   useEffect(() => {
-    void syncKeepAwake(liveSessionCount);
-  }, [liveSessionCount, syncKeepAwake]);
+    void syncKeepAwake(openSessionCount);
+  }, [openSessionCount, syncKeepAwake]);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   // `FilesRail` needs a real `Workspace` (its `roots`) to have anything to show; `undefined`
@@ -608,7 +658,11 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
                       fontSize: "var(--fs-md)",
                     }}
                   >
-                    {Object.keys(sessions).length === 0
+                    {/* Scoped to the ACTIVE workspace, exactly like the tab strip above it
+                        (`TerminalTabs`): with a whole-store count, a workspace with no terminals
+                        of its own but sessions elsewhere told the owner to "select a terminal tab"
+                        while the strip beside it was empty. */}
+                    {workspaceSessions.length === 0
                       ? "No terminals yet — pick a workspace and press + New terminal."
                       : "Select a terminal tab."}
                   </div>
@@ -629,7 +683,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
 
 const MONO_FONT = "var(--font-mono)";
 
-type StatKey = "live" | "waiting" | "exited" | "roots";
+type StatKey = "live" | "waiting" | "restored" | "exited" | "roots";
 
 const statChipStyle: CSSProperties = {
   display: "inline-flex",
@@ -645,14 +699,18 @@ const statChipStyle: CSSProperties = {
 };
 
 /**
- * Stat chips row for the workspace view (spec §6.3): `N live · K waiting · M exited · R roots`
- * for the ACTIVE workspace's sessions. Mirrors HomeView's three-way session split — waiting
- * (`waitingForInput`, exited always wins over a stale flag), live (`isActive` and not waiting,
- * i.e. actually running), exited (`!isActive` with an `exited` lifecycle) — scoped to ONE
- * workspace's sessions instead of the whole store, plus the workspace's roots count (multi-root,
- * spec §3.3). Clicking a chip toggles a minimal inline detail list (session titles, or root
- * paths for the roots chip); only one chip's detail is open at a time (design-system.md §1
- * "detail is one drill-down away, never on the first screen").
+ * Stat chips row for the workspace view (spec §6.3): `N live · K waiting · P restored · M exited ·
+ * R roots` for the ACTIVE workspace's sessions, plus the workspace's roots count (multi-root, spec
+ * §3.3). The session split is `partitionSessions` (`store.ts`) — the SAME function Home uses, so
+ * "live" means one thing in both places and the four counts are an exhaustive partition of this
+ * workspace's sessions: `live + waiting + restored + exited` always equals the number of tabs on
+ * screen. The old hand-rolled trio silently dropped restored sessions from every chip, so a
+ * workspace freshly back from a daemon restart read `0 live / 0 waiting / 0 exited` with a full
+ * tab strip beside it.
+ *
+ * Clicking a chip toggles a minimal inline detail list (session titles, or root paths for the
+ * roots chip); only one chip's detail is open at a time (design-system.md §1 "detail is one
+ * drill-down away, never on the first screen").
  */
 function WorkspaceStatsChips(props: {
   workspace: Workspace | undefined;
@@ -663,13 +721,16 @@ function WorkspaceStatsChips(props: {
 
   if (!workspace) return null;
 
-  const waiting = sessions.filter((m) => m.waitingForInput && m.lifecycle.kind !== "exited");
-  const live = sessions.filter((m) => m.isActive && !m.waitingForInput);
-  const exited = sessions.filter((m) => !m.isActive && m.lifecycle.kind === "exited");
+  const { live, waiting, restored, exited } = partitionSessions(sessions);
 
   const chips: { key: StatKey; label: string; items: string[] }[] = [
     { key: "live", label: `${live.length} live`, items: live.map((m) => m.title) },
     { key: "waiting", label: `${waiting.length} waiting`, items: waiting.map((m) => m.title) },
+    {
+      key: "restored",
+      label: strings.sessions.restoredChip(restored.length),
+      items: restored.map((m) => m.title),
+    },
     { key: "exited", label: `${exited.length} exited`, items: exited.map((m) => m.title) },
     { key: "roots", label: `${workspace.roots.length} roots`, items: workspace.roots },
   ];

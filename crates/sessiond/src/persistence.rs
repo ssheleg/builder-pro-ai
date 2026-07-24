@@ -659,6 +659,124 @@ impl Db {
         Ok(())
     }
 
+    /// The ids of every session persisted under `workspace_id`, ordered `created_at, id` (the same
+    /// order [`query_sessions`](Self::query_sessions) uses). Read-only companion to
+    /// [`delete_workspace`](Self::delete_workspace): `Request::RemoveWorkspace`'s dispatch arm needs
+    /// this list BEFORE it deletes anything, so it can kill each session's live PTY through the
+    /// existing `KillSession` machinery first (a removal that deleted the rows but left the child
+    /// process running would be exactly the orphan/zombie failure D3 exists to prevent).
+    ///
+    /// An unknown `workspace_id` is an ERROR, not an empty `Vec` — this is the existence check the
+    /// removal path gates on, and it returns the SAME not-found shape
+    /// [`remove_workspace_root`](Self::remove_workspace_root) already returns for an unknown id
+    /// (`PersistError::Sql("workspace {id} not found")`, wire code `"DbSql"`), deliberately mirrored
+    /// rather than given a new variant so clients need no new error handling for the new verb.
+    pub fn workspace_session_ids(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<Vec<SessionId>, PersistError> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM workspace WHERE id = ?1",
+            rusqlite::params![workspace_id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(PersistError::Sql(format!(
+                "workspace {workspace_id} not found"
+            )));
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM session WHERE workspace_id = ?1 ORDER BY created_at, id")?;
+        let ids: Vec<SessionId> = stmt
+            .query_map(rusqlite::params![workspace_id], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
+    }
+
+    /// Permanently remove a workspace and EVERYTHING persisted under it — its `workspace_root`
+    /// rows, every `session` row whose `workspace_id` is it, and those sessions' `scrollback` and
+    /// `command_events` rows — in ONE transaction. Returns the ids of the sessions that were
+    /// deleted. This is the persistence half of `Request::RemoveWorkspace`; the caller
+    /// (`socket_server.rs`) is responsible for killing those sessions' live PTYs first.
+    ///
+    /// **Explicit ordered deletes, NOT `ON DELETE CASCADE`.** The v1/v3 schema declares plain
+    /// `REFERENCES workspace(id)` / `REFERENCES session(id)` with no `ON DELETE` action (see
+    /// [`migrate_v1`]/[`migrate_v2`]/[`migrate_v3`]), and both open paths set
+    /// `PRAGMA foreign_keys = ON` — so those constraints are ENFORCED and deleting the parent first
+    /// would simply fail. Retro-fitting cascades would mean a v4 migration that rebuilds four
+    /// tables (SQLite cannot `ALTER` a foreign key), which is a far larger, riskier change than the
+    /// five ordered statements below; children first, parents last:
+    /// `command_events` → `scrollback` → `session` → `workspace_root` → `workspace`.
+    ///
+    /// **Transaction boundary:** the existence check, the id capture and all five deletes run
+    /// inside the SAME `unchecked_transaction`, committed once at the end. Any failure returns via
+    /// `?`, which drops the `Transaction` un-committed and therefore rolls the whole thing back —
+    /// a partial removal (e.g. sessions deleted but the workspace row surviving, or a workspace
+    /// gone while orphaned `scrollback` rows remain) is impossible. The dependent-row deletes match
+    /// on `session_id IN (SELECT id FROM session WHERE workspace_id = ?)` rather than on a
+    /// pre-captured id list, so a row written by a concurrent best-effort flush between the capture
+    /// and the delete is still caught.
+    ///
+    /// An unknown `workspace_id` yields the same not-found error as
+    /// [`workspace_session_ids`](Self::workspace_session_ids) — never a silent "success" for a
+    /// workspace that was never there.
+    pub fn delete_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<Vec<SessionId>, PersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM workspace WHERE id = ?1",
+            rusqlite::params![workspace_id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(PersistError::Sql(format!(
+                "workspace {workspace_id} not found"
+            )));
+        }
+
+        let mut stmt =
+            tx.prepare("SELECT id FROM session WHERE workspace_id = ?1 ORDER BY created_at, id")?;
+        let deleted: Vec<SessionId> = stmt
+            .query_map(rusqlite::params![workspace_id], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+
+        tx.execute(
+            "DELETE FROM command_events
+               WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.execute(
+            "DELETE FROM scrollback
+               WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.execute(
+            "DELETE FROM session WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.execute(
+            "DELETE FROM workspace_root WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.execute(
+            "DELETE FROM workspace WHERE id = ?1",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.commit()?;
+
+        info!(
+            workspace = %workspace_id,
+            sessions = deleted.len(),
+            "workspace removed (roots, sessions, scrollback, command_events)"
+        );
+        Ok(deleted)
+    }
+
     /// Read back the `ts` column of the `scrollback` row at `(session_id, seq=0)` (test-support,
     /// D1: proves whether a flush sweep re-wrote a session's scrollback blob — `append_scrollback`
     /// upserts `ts` on every write, so an unchanged `ts` across two sweeps means the row was
@@ -677,6 +795,31 @@ impl Db {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
         }
+    }
+
+    /// Test-support (crate-internal, compiled out of every real build): install a `BEFORE DELETE`
+    /// trigger on `workspace` that `RAISE(ABORT)`s, so [`delete_workspace`](Self::delete_workspace)
+    /// fails on its LAST statement — after the four child deletes have already run. That is the
+    /// only deterministic way to prove the whole removal is one transaction: the abort makes
+    /// `delete_workspace` return via `?`, dropping the un-committed `Transaction`, which must roll
+    /// the child deletes back. Paired with [`clear_delete_failure_for_test`](Self::clear_delete_failure_for_test).
+    #[cfg(test)]
+    pub(crate) fn inject_delete_failure_for_test(&self) -> Result<(), PersistError> {
+        self.conn.execute_batch(
+            "CREATE TRIGGER bpa_test_block_workspace_delete BEFORE DELETE ON workspace
+             BEGIN SELECT RAISE(ABORT, 'test-injected failure'); END;",
+        )?;
+        Ok(())
+    }
+
+    /// Remove the trigger installed by
+    /// [`inject_delete_failure_for_test`](Self::inject_delete_failure_for_test), so a retry can
+    /// prove the rolled-back database is still fully workable rather than wedged.
+    #[cfg(test)]
+    pub(crate) fn clear_delete_failure_for_test(&self) -> Result<(), PersistError> {
+        self.conn
+            .execute_batch("DROP TRIGGER bpa_test_block_workspace_delete;")?;
+        Ok(())
     }
 
     /// Read back the most recent command-history rows for a session, newest-first
@@ -1641,6 +1784,307 @@ mod tests {
             after_remove.roots,
             vec!["/tmp/b".to_string()],
             "removing /tmp/a leaves exactly /tmp/b, proving no phantom duplicate survived"
+        );
+    }
+
+    // ---- `Request::RemoveWorkspace` persistence half (`delete_workspace`): a workspace whose
+    // roots have been deleted off disk was previously UNDELETABLE, so this must actually delete —
+    // totally, and without leaving orphans behind. ----
+
+    /// Raw row count for one table filtered by one string column — the tests below assert against
+    /// the physical tables (not just the public accessors) so an orphaned `workspace_root` /
+    /// `scrollback` / `command_events` row can't hide behind a JOIN that filters it out.
+    fn count_where(db: &Db, table: &str, column: &str, value: &str) -> i64 {
+        db.conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                rusqlite::params![value],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn delete_workspace_removes_roots_sessions_and_every_dependent_row() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("doomed", &["/tmp/a", "/tmp/b", "/tmp/c"]))
+            .unwrap();
+        db.upsert_workspace(&ws_multi("keeper", &["/tmp/k"]))
+            .unwrap();
+
+        for sid in ["d1", "d2"] {
+            db.upsert_session(&meta(sid, "doomed", SessionLifecycle::Running))
+                .unwrap();
+            db.append_scrollback(&sid.to_string(), 0, b"doomed bytes", 1)
+                .unwrap();
+            db.append_command_event(sid, 0, 1_700_000_000, "started", None, "gui")
+                .unwrap();
+            db.append_command_event(sid, 1, 1_700_000_001, "finished", Some(0), "gui")
+                .unwrap();
+        }
+        db.upsert_session(&meta("k1", "keeper", SessionLifecycle::Running))
+            .unwrap();
+        db.append_scrollback(&"k1".to_string(), 0, b"kept bytes", 1)
+            .unwrap();
+        db.append_command_event("k1", 0, 1_700_000_000, "started", None, "gui")
+            .unwrap();
+
+        let deleted = db.delete_workspace(&"doomed".to_string()).unwrap();
+        assert_eq!(
+            deleted,
+            vec!["d1".to_string(), "d2".to_string()],
+            "delete_workspace must report exactly the sessions it removed"
+        );
+
+        // The workspace itself and its roots are gone.
+        assert!(
+            db.list_workspaces()
+                .unwrap()
+                .iter()
+                .all(|w| w.id != "doomed"),
+            "the workspace row must be gone"
+        );
+        assert_eq!(
+            count_where(&db, "workspace", "id", "doomed"),
+            0,
+            "no workspace row may survive"
+        );
+        assert_eq!(
+            count_where(&db, "workspace_root", "workspace_id", "doomed"),
+            0,
+            "all three workspace_root rows must be gone — no orphaned roots"
+        );
+
+        // Its sessions and every dependent row are gone.
+        for sid in ["d1", "d2"] {
+            assert!(
+                db.list_sessions().unwrap().iter().all(|m| m.id != sid),
+                "{sid}'s session row must be gone"
+            );
+            assert_eq!(
+                db.load_scrollback(&sid.to_string()).unwrap(),
+                Vec::<u8>::new(),
+                "{sid}'s scrollback rows must be gone — no orphans"
+            );
+            assert!(
+                db.list_command_events(&sid.to_string(), 10)
+                    .unwrap()
+                    .is_empty(),
+                "{sid}'s command_events rows must be gone — no orphans"
+            );
+            assert_eq!(count_where(&db, "scrollback", "session_id", sid), 0);
+            assert_eq!(count_where(&db, "command_events", "session_id", sid), 0);
+        }
+
+        // A restart-equivalent (rehydrate) must not resurrect any of it.
+        assert!(
+            db.rehydrate()
+                .unwrap()
+                .iter()
+                .all(|m| m.workspace_id != "doomed"),
+            "a removed workspace's sessions must never be resurrected by rehydrate"
+        );
+
+        // The sibling workspace is completely untouched.
+        let keeper = db
+            .list_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.id == "keeper")
+            .expect("the other workspace must survive");
+        assert_eq!(keeper.roots, vec!["/tmp/k".to_string()]);
+        assert_eq!(
+            db.load_scrollback(&"k1".to_string()).unwrap(),
+            b"kept bytes"
+        );
+        assert_eq!(
+            db.list_command_events(&"k1".to_string(), 10).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn delete_workspace_with_no_sessions_still_removes_the_workspace_and_its_roots() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("empty", &["/tmp/a", "/tmp/b"]))
+            .unwrap();
+
+        let deleted = db.delete_workspace(&"empty".to_string()).unwrap();
+        assert!(
+            deleted.is_empty(),
+            "a session-less workspace reports no deleted sessions"
+        );
+        assert!(db.list_workspaces().unwrap().is_empty());
+        assert_eq!(
+            count_where(&db, "workspace_root", "workspace_id", "empty"),
+            0
+        );
+    }
+
+    /// Unknown id ⇒ the SAME not-found shape `remove_workspace_root` already returns, asserted by
+    /// direct comparison of both the wire `code()` and the rendered message. This is the contract
+    /// `Request::RemoveWorkspace` inherits, so a client needs no new error handling for the verb.
+    #[test]
+    fn delete_workspace_unknown_id_is_the_same_not_found_error_as_remove_workspace_root() {
+        let db = Db::open_in_memory().unwrap();
+        let unknown = "no-such-workspace".to_string();
+
+        let del_err = db.delete_workspace(&unknown).unwrap_err();
+        let ids_err = db.workspace_session_ids(&unknown).unwrap_err();
+        let root_err = db.remove_workspace_root(&unknown, "/tmp/a").unwrap_err();
+
+        assert!(
+            matches!(del_err, PersistError::Sql(_)),
+            "unknown workspace must be an honest error, not a silent success: {del_err:?}"
+        );
+        assert_eq!(del_err.code(), "DbSql");
+        assert_eq!(del_err.code(), root_err.code());
+        assert_eq!(del_err.to_string(), root_err.to_string());
+        assert_eq!(ids_err.code(), root_err.code());
+        assert_eq!(ids_err.to_string(), root_err.to_string());
+        assert!(
+            del_err.to_string().contains("not found"),
+            "message must say what happened, got {del_err}"
+        );
+    }
+
+    /// The whole removal is ONE transaction: a failure on the LAST statement
+    /// (`DELETE FROM workspace`) must roll back the four deletes that already ran, leaving the
+    /// workspace exactly as it was — never half-removed. The failure is injected deterministically
+    /// with a `BEFORE DELETE` trigger that `RAISE(ABORT)`s, which aborts that statement and makes
+    /// `delete_workspace` return via `?`, dropping the un-committed `Transaction` (rusqlite's
+    /// default drop behaviour is rollback).
+    #[test]
+    fn delete_workspace_is_atomic_a_failure_leaves_no_partially_removed_state() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws_multi("doomed", &["/tmp/a", "/tmp/b"]))
+            .unwrap();
+        db.upsert_session(&meta("d1", "doomed", SessionLifecycle::Running))
+            .unwrap();
+        db.append_scrollback(&"d1".to_string(), 0, b"still here", 1)
+            .unwrap();
+        db.append_command_event("d1", 0, 1_700_000_000, "started", None, "gui")
+            .unwrap();
+
+        db.inject_delete_failure_for_test().unwrap();
+
+        let e = db
+            .delete_workspace(&"doomed".to_string())
+            .expect_err("the injected failure must surface as an error, never a silent success");
+        assert!(matches!(e, PersistError::Sql(_)), "got {e:?}");
+
+        // NOTHING was removed: every row the earlier statements had already deleted is back.
+        assert_eq!(count_where(&db, "workspace", "id", "doomed"), 1);
+        assert_eq!(
+            count_where(&db, "workspace_root", "workspace_id", "doomed"),
+            2,
+            "workspace_root deletes must have rolled back"
+        );
+        assert_eq!(
+            count_where(&db, "session", "workspace_id", "doomed"),
+            1,
+            "session deletes must have rolled back"
+        );
+        assert_eq!(
+            count_where(&db, "scrollback", "session_id", "d1"),
+            1,
+            "scrollback deletes must have rolled back"
+        );
+        assert_eq!(
+            count_where(&db, "command_events", "session_id", "d1"),
+            1,
+            "command_events deletes must have rolled back"
+        );
+        assert_eq!(
+            db.load_scrollback(&"d1".to_string()).unwrap(),
+            b"still here"
+        );
+
+        // With the injected failure removed, the same call now removes everything — proving the
+        // rollback left the DB in a fully workable (not wedged) state.
+        db.clear_delete_failure_for_test().unwrap();
+        assert_eq!(
+            db.delete_workspace(&"doomed".to_string()).unwrap(),
+            vec!["d1".to_string()]
+        );
+        assert_eq!(count_where(&db, "workspace", "id", "doomed"), 0);
+        assert_eq!(
+            count_where(&db, "workspace_root", "workspace_id", "doomed"),
+            0
+        );
+        assert_eq!(count_where(&db, "session", "workspace_id", "doomed"), 0);
+        assert_eq!(count_where(&db, "scrollback", "session_id", "d1"), 0);
+        assert_eq!(count_where(&db, "command_events", "session_id", "d1"), 0);
+    }
+
+    #[test]
+    fn workspace_session_ids_lists_only_that_workspaces_sessions() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws("w1")).unwrap();
+        db.upsert_workspace(&ws("w2")).unwrap();
+        db.upsert_session(&meta("a", "w1", SessionLifecycle::Running))
+            .unwrap();
+        db.upsert_session(&meta("b", "w1", SessionLifecycle::AtPrompt))
+            .unwrap();
+        db.upsert_session(&meta("c", "w2", SessionLifecycle::Running))
+            .unwrap();
+
+        assert_eq!(
+            db.workspace_session_ids(&"w1".to_string()).unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            db.workspace_session_ids(&"w2".to_string()).unwrap(),
+            vec!["c".to_string()]
+        );
+
+        // A workspace that exists but has no sessions is an empty Vec, NOT an error — only an
+        // unknown workspace id is an error.
+        db.upsert_workspace(&ws("w3")).unwrap();
+        assert!(db
+            .workspace_session_ids(&"w3".to_string())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Guard on the "explicit ordered deletes, not ON DELETE CASCADE" decision: if a future
+    /// migration ever adds real cascades, this documents that today's schema has none AND that
+    /// foreign keys are enforced (which is exactly why the delete order in `delete_workspace`
+    /// matters). Deleting the parent first must fail.
+    #[test]
+    fn schema_has_no_cascade_and_enforces_foreign_keys() {
+        let db = Db::open_in_memory().unwrap();
+        let fk_on: i64 = db
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk_on, 1, "foreign keys must be ENFORCED");
+
+        let ddl: String = db
+            .conn
+            .query_row(
+                "SELECT group_concat(sql, ';') FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('session','scrollback','command_events','workspace_root')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !ddl.to_uppercase().contains("ON DELETE"),
+            "no ON DELETE action is declared today, so delete_workspace must delete children \
+             explicitly, in order; schema was: {ddl}"
+        );
+
+        db.upsert_workspace(&ws("w1")).unwrap();
+        db.upsert_session(&meta("s1", "w1", SessionLifecycle::Running))
+            .unwrap();
+        let e = db
+            .conn
+            .execute("DELETE FROM workspace WHERE id = 'w1'", [])
+            .expect_err("without a cascade, deleting a referenced workspace must violate the FK");
+        assert!(
+            e.to_string().to_uppercase().contains("FOREIGN KEY"),
+            "expected a foreign-key violation, got {e}"
         );
     }
 }

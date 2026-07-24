@@ -156,6 +156,9 @@ fn all_requests() -> Vec<Request> {
             session_id: "sess-1".into(),
             limit: 50,
         },
+        Request::RemoveWorkspace {
+            workspace_id: "ws-1".into(),
+        },
     ]
 }
 
@@ -224,6 +227,9 @@ fn all_pushes() -> Vec<Push> {
             session_id: None,
             code: "Internal".into(),
             message: "x".into(),
+        },
+        Push::WorkspaceRemoved {
+            workspace_id: "ws-1".into(),
         },
     ];
     for lc in all_lifecycles() {

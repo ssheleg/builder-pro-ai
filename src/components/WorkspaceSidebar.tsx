@@ -1,6 +1,6 @@
-import { useState, type JSX } from "react";
+import { useEffect, useState, type JSX } from "react";
 import { useAppStore } from "../store/store";
-import { pickFolder, createWorkspace, createSession } from "../ipc/commands";
+import { pickFolder, createWorkspace, createSession, pathsExist } from "../ipc/commands";
 import type { WorkspaceId } from "../ipc/commands";
 import { orchdAddProjectWorkspace, describeOrchdError } from "../ipc/orchd";
 import type { Project } from "../ipc/orchd-types";
@@ -69,10 +69,13 @@ function linkedWorkspaceIds(projects: Project[]): Set<string> {
  */
 export function WorkspaceSidebar(props: {
   activeWorkspaceId: WorkspaceId | null;
-  onSelectWorkspace: (id: WorkspaceId) => void;
+  /** `null` clears the selection — used after removing the workspace currently on screen
+   * (SCN-058: the app must fall back to Home rather than keep a dead view). */
+  onSelectWorkspace: (id: WorkspaceId | null) => void;
 }): JSX.Element {
   const { activeWorkspaceId, onSelectWorkspace } = props;
   const workspaces = useAppStore((s) => s.workspaces);
+  const removeWorkspace = useAppStore((s) => s.removeWorkspace);
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
   const projects = useAppStore((s) => s.projects);
@@ -101,8 +104,105 @@ export function WorkspaceSidebar(props: {
   // the active-project navigation stays uncluttered.
   const [showArchived, setShowArchived] = useState(false);
 
+  /**
+   * SCN-059 root-presence map, `path -> exists`. A path is present unless the local check said
+   * DEFINITELY not (`paths_exist` reports an unreadable path as present — never remove on a
+   * guess), and a path absent from this map is treated as present too: an unknown answer (check
+   * not run yet, or the whole check failed) must never mark a healthy workspace as missing.
+   */
+  const [rootPresence, setRootPresence] = useState<Record<string, boolean>>({});
+
   const list = Object.values(workspaces).sort((a, b) => a.name.localeCompare(b.name));
   const sortedProjects = [...projects].sort((a, b) => a.name.localeCompare(b.name));
+  // Stable primitive dependency for the presence effect: re-check when the SET of roots changes
+  // (workspace added/removed, root added/removed), not on every unrelated store update.
+  const rootsKey = JSON.stringify(list.map((w) => w.roots));
+
+  useEffect(() => {
+    let cancelled = false;
+    const paths = Array.from(new Set(Object.values(workspaces).flatMap((w) => w.roots)));
+    if (paths.length === 0) {
+      setRootPresence({});
+      return;
+    }
+    void (async () => {
+      try {
+        const flags = await pathsExist(paths);
+        if (cancelled) return;
+        const next: Record<string, boolean> = {};
+        paths.forEach((p, i) => {
+          // A short/garbled reply defaults to PRESENT for the same reason a permission error does.
+          next[p] = flags[i] ?? true;
+        });
+        setRootPresence(next);
+      } catch {
+        // The check itself failed (core down, IPC error). Honest degradation: forget every verdict
+        // so no row is marked missing and the bulk clean-up offers nothing — never the reverse.
+        if (!cancelled) setRootPresence({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // `rootsKey` is the value-identity of `workspaces`' roots; `workspaces` itself is read inside.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootsKey]);
+
+  /**
+   * A workspace counts as MISSING only when EVERY one of its roots is definitely gone (SCN-059).
+   * A multi-root workspace with one surviving root still has a folder to work in, so it is
+   * untouched — the conservative reading of "the workspace's folder is gone", matching the
+   * scenario's "never removed on a guess".
+   */
+  function isMissing(w: Workspace): boolean {
+    return w.roots.length > 0 && w.roots.every((r) => rootPresence[r] === false);
+  }
+
+  const missingWorkspaces = list.filter(isMissing);
+
+  /** SCN-058: state the consequence, take the confirmation, then (and only then) remove. */
+  async function onRemoveWorkspace(w: Workspace): Promise<void> {
+    if (!window.confirm(strings.chrome.sidebar.removeWorkspaceConfirm(w.name))) return;
+    try {
+      await removeWorkspace(w.id);
+    } catch (e) {
+      // Rejected ⇒ nothing was removed and the row stays exactly where it was.
+      showToast(strings.chrome.sidebar.removeWorkspaceFailed(describeCommandError(e)));
+      return;
+    }
+    // Never leave a dead view behind. (`workspace://removed` reaches App with the same fix for
+    // every other window — and for this one, should this local path ever be beaten to it.)
+    if (activeWorkspaceId === w.id) {
+      onSelectWorkspace(null);
+      setView("home");
+    }
+  }
+
+  /**
+   * SCN-059 bulk clean-up: remove ONLY the workspaces whose folders are definitely gone, after
+   * confirming the exact count. Each removal is independent — the successes stand and a single
+   * toast names how many failed (no silent partial success, and no toast storm either).
+   */
+  async function onCleanupMissing(): Promise<void> {
+    const doomed = missingWorkspaces;
+    if (doomed.length === 0) return; // defensive: the control is not rendered in this state
+    if (!window.confirm(strings.chrome.sidebar.cleanupMissingConfirm(doomed.length))) return;
+    const results = await Promise.allSettled(doomed.map((w) => removeWorkspace(w.id)));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    if (failed > 0) {
+      showToast(strings.chrome.sidebar.cleanupMissingPartial(failed, doomed.length));
+    }
+    // The active workspace may have been one of the removed ones (a missing folder does not stop
+    // it from being on screen) — same dead-view rule as the single removal above.
+    if (activeWorkspaceId !== null && doomed.some((w) => w.id === activeWorkspaceId)) {
+      const stillThere = useAppStore.getState().workspaces[activeWorkspaceId] !== undefined;
+      if (!stillThere) {
+        onSelectWorkspace(null);
+        setView("home");
+      }
+    }
+  }
+
   // Only ACTIVE projects get a first-class navigation group; archived ones are relegated to the
   // dimmed «Archived» group below (spec D7). `linkedIds` still counts EVERY project (incl.
   // archived), so an archived project's workspaces never leak into the «No project» group.
@@ -165,31 +265,73 @@ export function WorkspaceSidebar(props: {
 
   /** The exact row button that used to be the whole of the flat `list.map` body — unchanged
    * style/click behavior, just factored out so both the project groups and the «No project»
-   * group can render it (task-18: "reuse the current row JSX, don't rewrite it"). */
+   * group can render it (task-18: "reuse the current row JSX, don't rewrite it"). Now sits in a
+   * row alongside the SCN-059 "folder missing" marker and the SCN-058 remove control, which both
+   * belong to the same workspace and must appear wherever that workspace is listed. */
   function renderWorkspaceButton(w: Workspace): JSX.Element {
     const selected = view === "workspace" && w.id === activeWorkspaceId;
+    const missing = isMissing(w);
     return (
-      <button
-        type="button"
-        title={w.rootPath}
-        onClick={() => onSelectWorkspaceAndNavigate(w.id)}
-        style={{
-          display: "block",
-          width: "100%",
-          textAlign: "left",
-          padding: "var(--sp-2) var(--sp-3)",
-          fontSize: "var(--fs-md)",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          border: "none",
-          cursor: "pointer",
-          color: selected ? "var(--ink)" : "var(--muted)",
-          background: selected ? "var(--panel-2)" : "transparent",
-        }}
-      >
-        {w.name}
-      </button>
+      <div style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
+        <button
+          type="button"
+          title={w.rootPath}
+          onClick={() => onSelectWorkspaceAndNavigate(w.id)}
+          style={{
+            display: "block",
+            flex: 1,
+            minWidth: 0,
+            textAlign: "left",
+            padding: "var(--sp-2) var(--sp-3)",
+            fontSize: "var(--fs-md)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            border: "none",
+            cursor: "pointer",
+            color: selected ? "var(--ink)" : "var(--muted)",
+            background: selected ? "var(--panel-2)" : "transparent",
+          }}
+        >
+          {w.name}
+        </button>
+        {missing && (
+          // SCN-059 step 1: a missing workspace is visibly distinct from a healthy one, with the
+          // gone path spelled out on hover. Marker only — nothing is removed without a
+          // confirmation.
+          <span
+            data-testid={`workspace-missing-${w.id}`}
+            title={strings.chrome.sidebar.rootMissingTitle(w.roots.join(", "))}
+            style={{
+              flexShrink: 0,
+              fontSize: "var(--fs-xs)",
+              color: "var(--warn)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {strings.chrome.sidebar.rootMissing}
+          </span>
+        )}
+        <button
+          type="button"
+          data-testid={`remove-workspace-${w.id}`}
+          aria-label={strings.chrome.sidebar.removeWorkspaceAria(w.name)}
+          title={strings.chrome.sidebar.removeWorkspaceAria(w.name)}
+          onClick={() => void onRemoveWorkspace(w)}
+          style={{
+            flexShrink: 0,
+            border: "none",
+            background: "transparent",
+            color: "var(--muted)",
+            cursor: "pointer",
+            padding: "0 var(--sp-2)",
+            fontSize: "var(--fs-md)",
+            lineHeight: 1,
+          }}
+        >
+          ×
+        </button>
+      </div>
     );
   }
 
@@ -316,7 +458,23 @@ export function WorkspaceSidebar(props: {
           {strings.stats.nav}
         </button>
 
-        <div style={{ flex: 1, overflowY: "auto" }}>
+        {/* Scroll region for the workspace/project list. `minHeight: 0` is what actually lets it
+            shrink: without it a flex item's `min-height: auto` keeps it at its CONTENT height, so
+            a long list pushed the footer controls off the bottom of the window instead of
+            scrolling — and at small window heights the region collapsed while the footer walked
+            out of view. `paddingBottom` keeps the last row off the footer's hairline (it used to
+            be sliced mid-row, flush against it) and `scrollbarGutter` reserves the scrollbar's
+            width so rows don't shift sideways the moment the list becomes scrollable. */}
+        <div
+          data-testid="sidebar-scroll"
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflowY: "auto",
+            paddingBottom: "var(--sp-2)",
+            scrollbarGutter: "stable",
+          }}
+        >
           {sortedProjects.length === 0 && list.length === 0 && (
             <div
               data-testid="sidebar-empty"
@@ -471,92 +629,129 @@ export function WorkspaceSidebar(props: {
           )}
         </div>
 
-        {/* Keep-awake pill (SCN-045 / FLW-18, footer next to ThemeToggle/Diagnostics): click
+        {/* Footer block. One wrapper around every footer control so the group is a SINGLE
+            non-shrinking flex item with one separating hairline: as bare siblings each control was
+            individually shrinkable, which at small window heights squeezed them (and eventually
+            walked them out of the window) while the list above kept its content height. The
+            children's own styles are deliberately untouched. */}
+        <div
+          data-testid="sidebar-footer"
+          style={{ flexShrink: 0, borderTop: "1px solid var(--hairline)" }}
+        >
+          {/* SCN-059 bulk clean-up: rendered ONLY while at least one workspace's folder is
+              definitely gone — no dead control when there is nothing to clean up — and it names
+              the exact count it would remove, both here and in the confirmation. */}
+          {missingWorkspaces.length > 0 && (
+            <button
+              type="button"
+              data-testid="cleanup-missing-workspaces"
+              aria-label={strings.chrome.sidebar.cleanupMissing(missingWorkspaces.length)}
+              onClick={() => void onCleanupMissing()}
+              style={{
+                display: "block",
+                width: "calc(100% - 2 * var(--sp-2))",
+                margin: "var(--sp-2)",
+                marginBottom: 0,
+                padding: "var(--sp-2) var(--sp-3)",
+                border: "none",
+                background: "var(--panel-2)",
+                color: "var(--warn)",
+                cursor: "pointer",
+                fontSize: "var(--fs-sm)",
+                borderRadius: "var(--r-sm)",
+                textAlign: "left",
+              }}
+            >
+              {strings.chrome.sidebar.cleanupMissing(missingWorkspaces.length)}
+            </button>
+          )}
+          {/* Keep-awake pill (SCN-045 / FLW-18, footer next to ThemeToggle/Diagnostics): click
             toggles the persisted preference; the dot is the honest assertion indicator — ok
             (green) only while the OS assertion is GENUINELY held, danger on an OS denial with
             the "keep-awake unavailable: {reason}" copy, muted for idle/off. Tone tokens follow
             `StatusDot.tsx`'s `var(--ok)`/`var(--muted)`/`var(--danger)` convention. */}
-        <KeepAwakePill
-          enabled={keepAwake.enabled}
-          active={keepAwake.active}
-          error={keepAwake.error}
-          onToggle={() => void setKeepAwakeEnabled(!keepAwake.enabled)}
-        />
-        <ThemeToggle />
-        <button
-          type="button"
-          data-testid="create-project-open"
-          onClick={() => setShowCreateDialog(true)}
-          style={{
-            margin: "var(--sp-2)",
-            marginBottom: 0,
-            padding: "var(--sp-2) var(--sp-3)",
-            border: "none",
-            background: "var(--panel-2)",
-            color: "var(--ink)",
-            cursor: "pointer",
-            fontSize: "var(--fs-md)",
-            borderRadius: "var(--r-sm)",
-          }}
-        >
-          {strings.chrome.sidebar.addProject}
-        </button>
-        <button
-          type="button"
-          aria-label={strings.chrome.sidebar.addWorkspaceAria}
-          onClick={() => void onAdd()}
-          style={{
-            margin: "var(--sp-2)",
-            padding: "var(--sp-2) var(--sp-3)",
-            border: "none",
-            background: "var(--panel-2)",
-            color: "var(--ink)",
-            cursor: "pointer",
-            fontSize: "var(--fs-md)",
-            borderRadius: "var(--r-sm)",
-          }}
-        >
-          {strings.chrome.sidebar.addWorkspace}
-        </button>
-        <button
-          type="button"
-          data-testid="diag-open"
-          aria-label="Open diagnostics"
-          onClick={() => setShowDiag(true)}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "var(--sp-2)",
-            margin: "var(--sp-2)",
-            padding: "var(--sp-2) var(--sp-3)",
-            border: "none",
-            background: "var(--panel-2)",
-            color: "var(--muted)",
-            cursor: "pointer",
-            fontSize: "var(--fs-sm)",
-            borderRadius: "var(--r-sm)",
-          }}
-        >
-          Diagnostics
-          {diagCount > 0 && (
-            <span
-              data-testid="diag-count"
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontVariantNumeric: "tabular-nums",
-                fontSize: "var(--fs-xs)",
-                fontWeight: 600,
-                color: "var(--danger)",
-                background: "var(--danger-weak)",
-                borderRadius: 999,
-                padding: "0 var(--sp-2)",
-              }}
-            >
-              {diagCount}
-            </span>
-          )}
-        </button>
+          <KeepAwakePill
+            enabled={keepAwake.enabled}
+            active={keepAwake.active}
+            error={keepAwake.error}
+            onToggle={() => void setKeepAwakeEnabled(!keepAwake.enabled)}
+          />
+          <ThemeToggle />
+          <button
+            type="button"
+            data-testid="create-project-open"
+            onClick={() => setShowCreateDialog(true)}
+            style={{
+              margin: "var(--sp-2)",
+              marginBottom: 0,
+              padding: "var(--sp-2) var(--sp-3)",
+              border: "none",
+              background: "var(--panel-2)",
+              color: "var(--ink)",
+              cursor: "pointer",
+              fontSize: "var(--fs-md)",
+              borderRadius: "var(--r-sm)",
+            }}
+          >
+            {strings.chrome.sidebar.addProject}
+          </button>
+          <button
+            type="button"
+            aria-label={strings.chrome.sidebar.addWorkspaceAria}
+            onClick={() => void onAdd()}
+            style={{
+              margin: "var(--sp-2)",
+              padding: "var(--sp-2) var(--sp-3)",
+              border: "none",
+              background: "var(--panel-2)",
+              color: "var(--ink)",
+              cursor: "pointer",
+              fontSize: "var(--fs-md)",
+              borderRadius: "var(--r-sm)",
+            }}
+          >
+            {strings.chrome.sidebar.addWorkspace}
+          </button>
+          <button
+            type="button"
+            data-testid="diag-open"
+            aria-label="Open diagnostics"
+            onClick={() => setShowDiag(true)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "var(--sp-2)",
+              margin: "var(--sp-2)",
+              padding: "var(--sp-2) var(--sp-3)",
+              border: "none",
+              background: "var(--panel-2)",
+              color: "var(--muted)",
+              cursor: "pointer",
+              fontSize: "var(--fs-sm)",
+              borderRadius: "var(--r-sm)",
+            }}
+          >
+            Diagnostics
+            {diagCount > 0 && (
+              <span
+                data-testid="diag-count"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontVariantNumeric: "tabular-nums",
+                  fontSize: "var(--fs-xs)",
+                  fontWeight: 600,
+                  color: "var(--danger)",
+                  background: "var(--danger-weak)",
+                  borderRadius: 999,
+                  padding: "0 var(--sp-2)",
+                }}
+              >
+                {diagCount}
+              </span>
+            )}
+          </button>
+        </div>
       </aside>
       {showCreateDialog && <CreateProjectDialog onClose={() => setShowCreateDialog(false)} />}
       <DiagnosticsPanel open={showDiag} onClose={() => setShowDiag(false)} />

@@ -930,6 +930,77 @@ async fn dispatch_inner(
             }
         }
 
+        // spec §3.3: remove a whole workspace — destructive and TOTAL. Ordering is the whole design:
+        //
+        //   1. existence gate (an unknown id must not kill anything),
+        //   2. collect every session that belongs to the workspace — the persisted rows UNION the
+        //      live ones the supervisor tracks, because persistence is best-effort (spec §11) and a
+        //      running PTY whose row failed to write is exactly the one we must not miss,
+        //   3. kill/close each one through [`close_session`] — the SAME machinery `KillSession`
+        //      uses, never a second teardown — so a removal can never leave an orphaned child
+        //      process behind (the "zombie" failure D3 already guards against elsewhere),
+        //   4. await the final-flush tasks those kills scheduled, so no detached best-effort write
+        //      can land AFTER the delete and leave a resurrected row, and
+        //   5. delete the workspace + its roots + its sessions + those sessions' dependent rows in
+        //      ONE transaction (`Db::delete_workspace`).
+        //
+        // The DB lock is taken and released around each step — never held across a kill or across
+        // the flush drain, both of which take that same lock themselves.
+        //
+        // The push is `Push::WorkspaceRemoved`, NOT `WorkspaceUpdated`: consumers upsert an
+        // `Updated` payload into their store, so reusing it here would re-insert the workspace the
+        // user just deleted. Broadcast (not `push_sink`) for the same multi-window reason as
+        // `Add`/`RemoveWorkspaceRoot`. An unknown `workspace_id` is `Db::workspace_session_ids`'s
+        // not-found error, byte-identical in code+message to what `RemoveWorkspaceRoot` already
+        // returns for an unknown id.
+        Request::RemoveWorkspace { workspace_id } => {
+            let mut victims: std::collections::BTreeSet<bpa_protocol::SessionId> = {
+                let db = deps.db.lock().await;
+                match db.workspace_session_ids(&workspace_id) {
+                    Ok(ids) => ids.into_iter().collect(),
+                    Err(e) => return err(e.code(), e),
+                }
+            };
+            let tracked: Vec<bpa_protocol::SessionId> =
+                deps.live_sessions.lock().unwrap().iter().cloned().collect();
+            for id in tracked {
+                if let Ok(meta) = deps.supervisor.meta(&id) {
+                    if meta.workspace_id == workspace_id {
+                        victims.insert(id);
+                    }
+                }
+            }
+
+            for id in &victims {
+                // A per-session failure is logged and the sweep continues: leaving the remaining
+                // sessions alive AND the workspace half-removed would be strictly worse than
+                // finishing. `close_session` already Acks the honest-close (inactive) case, so the
+                // only errors reachable here are genuine PTY/IO failures.
+                if let Response::Error { code, message } = close_session(deps, id).await {
+                    tracing::warn!(
+                        session = %id, workspace = %workspace_id, code = %code, message = %message,
+                        "RemoveWorkspace: session teardown failed (continuing with the removal)"
+                    );
+                }
+                deps.live_sessions.lock().unwrap().remove(id);
+            }
+            deps.await_pending_final_flushes().await;
+
+            let deleted = {
+                let db = deps.db.lock().await;
+                db.delete_workspace(&workspace_id)
+            };
+            match deleted {
+                Ok(_session_ids) => {
+                    broadcaster.broadcast(Frame::Push(Push::WorkspaceRemoved {
+                        workspace_id: workspace_id.clone(),
+                    }));
+                    Response::Ack
+                }
+                Err(e) => err(e.code(), e),
+            }
+        }
+
         // spec §3.3: read back a session's command history, newest-first, capped at `limit` — pure
         // read, no push (nothing else changed). An unknown `session_id` is `Db::list_command_events`'s
         // honest empty `Vec`, not an error (matches `ListSessions`/`ListWorkspaces`'s style: only a
@@ -1058,39 +1129,7 @@ async fn dispatch_inner(
             Err(e) => err(code_for(&e), e),
         },
 
-        Request::KillSession { session_id } => match deps.supervisor.kill(&session_id) {
-            Ok(()) => Response::Ack,
-            Err(SupervisorError::NoSuchSession(_)) => {
-                // D3: `kill()` fails `NoSuchSession` for a PTY-less entry too — an inactive
-                // (cold-rehydrated or exited-but-unreaped) session has nothing to signal, but
-                // pre-fix that left it an unkillable zombie: still in the supervisor map (so
-                // `ListSessions` kept surfacing it) and its rows still in the DB (so every future
-                // restart kept resurrecting it). Distinguish "genuinely unknown" from "known but
-                // inactive" via `meta()`, and for the latter perform an honest close: drop any
-                // replay-only attach entries, remove the supervisor map entry, and delete the
-                // persisted rows — so ListSessions stops showing it and it never comes back.
-                match deps.supervisor.meta(&session_id) {
-                    Ok(meta) if !meta.is_active => {
-                        let _ = deps.attach.remove_session(&session_id);
-                        let _ = deps.supervisor.remove_inactive(&session_id);
-                        deps.live_sessions.lock().unwrap().remove(&session_id);
-                        let db = deps.db.lock().await;
-                        if let Err(e) = db.delete_session(&session_id) {
-                            tracing::warn!(
-                                session = %session_id, error = %e,
-                                "KillSession: honest-close delete_session failed (best-effort)"
-                            );
-                        }
-                        Response::Ack
-                    }
-                    _ => Response::Error {
-                        code: "NoSuchSession".into(),
-                        message: format!("no session {session_id}"),
-                    },
-                }
-            }
-            Err(e) => err(code_for(&e), e),
-        },
+        Request::KillSession { session_id } => close_session(deps, &session_id).await,
 
         Request::GetSessionState { session_id } => match deps.supervisor.meta(&session_id) {
             Ok(meta) => Response::Session(meta),
@@ -1136,6 +1175,45 @@ async fn dispatch_inner(
             let _ = deps.shutdown_tx.send(true);
             Response::Ack
         }
+    }
+}
+
+/// The ONE session-teardown path (spec §9.8 + D3). Extracted verbatim from what was
+/// `Request::KillSession`'s dispatch arm, and now shared by BOTH that arm and
+/// `Request::RemoveWorkspace`'s per-session sweep — deliberately not duplicated, so a workspace
+/// removal terminates a PTY through exactly the same `killpg → grace → SIGKILL → reap` machinery a
+/// direct kill does, and inherits the same honest-close behaviour for PTY-less entries.
+///
+/// Live session ⇒ [`Supervisor::kill`] (`Ack`). PTY-less/inactive entry ⇒ `kill()` fails
+/// `NoSuchSession`, which pre-D3 left it an unkillable zombie: still in the supervisor map (so
+/// `ListSessions` kept surfacing it) and its rows still in the DB (so every future restart kept
+/// resurrecting it). Distinguish "genuinely unknown" from "known but inactive" via `meta()`, and
+/// for the latter perform an honest close: drop any replay-only attach entries, remove the
+/// supervisor map entry, and delete the persisted rows — so `ListSessions` stops showing it and it
+/// never comes back. A genuinely unknown id is the honest `NoSuchSession` error.
+async fn close_session(deps: &Arc<ServerDeps>, session_id: &bpa_protocol::SessionId) -> Response {
+    match deps.supervisor.kill(session_id) {
+        Ok(()) => Response::Ack,
+        Err(SupervisorError::NoSuchSession(_)) => match deps.supervisor.meta(session_id) {
+            Ok(meta) if !meta.is_active => {
+                let _ = deps.attach.remove_session(session_id);
+                let _ = deps.supervisor.remove_inactive(session_id);
+                deps.live_sessions.lock().unwrap().remove(session_id);
+                let db = deps.db.lock().await;
+                if let Err(e) = db.delete_session(session_id) {
+                    tracing::warn!(
+                        session = %session_id, error = %e,
+                        "KillSession: honest-close delete_session failed (best-effort)"
+                    );
+                }
+                Response::Ack
+            }
+            _ => Response::Error {
+                code: "NoSuchSession".into(),
+                message: format!("no session {session_id}"),
+            },
+        },
+        Err(e) => err(code_for(&e), e),
     }
 }
 
@@ -4633,5 +4711,212 @@ mod tests {
             b_saw_exit,
             "B must receive ChildExited after KillSession (both forwarders must terminate)"
         );
+    }
+
+    // ---- `Request::RemoveWorkspace` (spec §3.3): the missing capability. A workspace whose roots
+    // were deleted off disk used to be undeletable, so real DBs accumulated hundreds of dead
+    // workspaces the sidebar still rendered.
+    //
+    // These two cases are the CHEAP ones (no PTY): the not-found contract and the failed-removal
+    // atomicity contract, both driven through the real dispatch arm over the wire. The full
+    // destructive path — a real live `/bin/sh` killed rather than orphaned, every dependent row
+    // gone, `Push::WorkspaceRemoved` broadcast, an unrelated workspace untouched — lives in
+    // `crates/sessiond/tests/remove_workspace.rs`, which compiles into its own test binary so its
+    // PTY burst does not run concurrently with this binary's load-sensitive attach timing tests
+    // (see that file's module doc).
+    //
+    // `spawn_server`/`test_deps_with_shutdown` use an in-memory `Db` and a tempdir runtime root, so
+    // nothing here can touch the developer's real `~/Library/Application Support/…/bpa.db` — the
+    // very database this feature exists to let a user clean up. ----
+
+    /// Drain frames on `c` until the response correlated to `id` arrives, skipping any pushes that
+    /// happen to interleave (a `RemoveWorkspace` that kills sessions also broadcasts `ChildExited`
+    /// / `StateChanged` on the requester's own connection).
+    async fn recv_response_for(c: &mut UnixStream, id: u64) -> Response {
+        for _ in 0..64 {
+            match recv_frame_t(c).await {
+                Frame::Response { id: rid, res } if rid == id => return res,
+                other => assert!(
+                    !matches!(other, Frame::Request { .. }),
+                    "the daemon must never send a Request frame, got {other:?}"
+                ),
+            }
+        }
+        panic!("no response for request id {id} after 64 frames");
+    }
+
+    /// Unknown workspace id ⇒ the SAME `Response::Error` a client already gets from
+    /// `RemoveWorkspaceRoot` for an unknown id (code AND message), asserted by direct comparison —
+    /// no new error code for a client to learn.
+    #[tokio::test]
+    async fn remove_workspace_unknown_id_is_the_same_not_found_error_as_remove_workspace_root() {
+        let (path, _tx, _jh, _d, _r) = spawn_server().await;
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
+
+        let unknown = "no-such-workspace".to_string();
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 1,
+                req: Request::RemoveWorkspace {
+                    workspace_id: unknown.clone(),
+                },
+            },
+        )
+        .await;
+        let removed = recv_response_for(&mut c, 1).await;
+
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 2,
+                req: Request::RemoveWorkspaceRoot {
+                    workspace_id: unknown.clone(),
+                    path: "/tmp".into(),
+                },
+            },
+        )
+        .await;
+        let root = recv_response_for(&mut c, 2).await;
+
+        match (&removed, &root) {
+            (
+                Response::Error { code, message },
+                Response::Error {
+                    code: rcode,
+                    message: rmessage,
+                },
+            ) => {
+                assert_eq!(
+                    code, rcode,
+                    "not-found code must mirror RemoveWorkspaceRoot"
+                );
+                assert_eq!(
+                    message, rmessage,
+                    "not-found message must mirror RemoveWorkspaceRoot"
+                );
+                assert!(
+                    message.contains("not found") && message.contains(&unknown),
+                    "the error must say which workspace was missing, got {message}"
+                );
+            }
+            other => panic!("both verbs must report an error for an unknown id, got {other:?}"),
+        }
+    }
+
+    /// A failed removal must not half-apply: the workspace and its sessions are still there and
+    /// still usable. Driven through the real dispatch arm with the DB-level failure injected the
+    /// same deterministic way `delete_workspace_is_atomic_…` does (a `BEFORE DELETE` trigger that
+    /// `RAISE(ABORT)`s), so the arm's error path is exercised end to end over the wire.
+    #[tokio::test]
+    async fn remove_workspace_failure_leaves_no_partially_removed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let (deps, _runtime) = test_deps_with_shutdown(tx.clone());
+        let jh = tokio::spawn({
+            let deps = deps.clone();
+            async move {
+                let _ = serve(listener, deps, rx).await;
+            }
+        });
+
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        assert!(matches!(
+            preamble(&mut c).await,
+            DaemonReply::Accepted { .. }
+        ));
+        let workspace_id = create_workspace(&mut c, 1, "w", "/tmp").await.id;
+
+        let sid = "s-atomic".to_string();
+        {
+            let db = deps.db.lock().await;
+            db.upsert_session(&SessionMeta {
+                id: sid.clone(),
+                workspace_id: workspace_id.clone(),
+                title: "t".into(),
+                shell: "/bin/sh".into(),
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                lifecycle: bpa_protocol::SessionLifecycle::Exited {
+                    code: Some(0),
+                    signal: None,
+                },
+                waiting_for_input: false,
+                is_active: false,
+                created_at: 1_700_000_000,
+            })
+            .unwrap();
+            db.append_scrollback(&sid, 0, b"STILL HERE", 1).unwrap();
+            db.append_command_event(&sid, 0, 1_700_000_000, "started", None, "gui")
+                .unwrap();
+            db.inject_delete_failure_for_test().unwrap();
+        }
+
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 2,
+                req: Request::RemoveWorkspace {
+                    workspace_id: workspace_id.clone(),
+                },
+            },
+        )
+        .await;
+        match recv_response_for(&mut c, 2).await {
+            Response::Error { code, .. } => assert_eq!(code, "DbSql"),
+            other => panic!("a failed removal must report an honest error, got {other:?}"),
+        }
+
+        {
+            let db = deps.db.lock().await;
+            assert!(
+                db.list_workspaces()
+                    .unwrap()
+                    .iter()
+                    .any(|w| w.id == workspace_id),
+                "a failed removal must leave the workspace in place, not half-removed"
+            );
+            assert_eq!(
+                db.workspace_session_ids(&workspace_id).unwrap(),
+                vec![sid.clone()],
+                "the session row must survive a failed removal"
+            );
+            assert_eq!(db.load_scrollback(&sid).unwrap(), b"STILL HERE");
+            assert_eq!(db.list_command_events(&sid, 10).unwrap().len(), 1);
+            db.clear_delete_failure_for_test().unwrap();
+        }
+
+        // With the injected failure gone, a retry removes everything — the failure left the DB
+        // fully workable, not wedged.
+        send_frame(
+            &mut c,
+            &Frame::Request {
+                id: 3,
+                req: Request::RemoveWorkspace {
+                    workspace_id: workspace_id.clone(),
+                },
+            },
+        )
+        .await;
+        match recv_response_for(&mut c, 3).await {
+            Response::Ack => {}
+            other => panic!("the retry must succeed, got {other:?}"),
+        }
+        {
+            let db = deps.db.lock().await;
+            assert!(db.list_workspaces().unwrap().is_empty());
+            assert!(db.list_sessions().unwrap().is_empty());
+            assert_eq!(db.load_scrollback(&sid).unwrap(), Vec::<u8>::new());
+        }
+
+        tx.send(true).unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), jh).await;
     }
 }
