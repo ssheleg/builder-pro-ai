@@ -38,6 +38,10 @@ vi.mock("./ipc/events", () => ({
     cbs.wsUpdated = cb;
     return Promise.resolve(unlisten);
   },
+  onWorkspaceRemoved: (cb: (p: unknown) => void) => {
+    cbs.wsRemoved = cb;
+    return Promise.resolve(unlisten);
+  },
   onFsChanged: (cb: (p: unknown) => void) => {
     cbs.fsChanged = cb;
     return Promise.resolve(unlisten);
@@ -207,12 +211,19 @@ const createWorkspaceMock = vi.fn().mockResolvedValue(undefined);
 const pickFolderMock = vi.fn().mockResolvedValue(null);
 const daemonStatusMock = vi.fn().mockResolvedValue({ kind: "disconnected" });
 const getCommandEventsMock = vi.fn().mockResolvedValue([]);
+// SCN-058/059: the sidebar's removal flow + its local root-presence check (`WorkspaceSidebar` is
+// rendered by App on every view) — mocked for the same deterministic-resolution reason as the
+// wrappers above. `pathsExist` defaults to "every root is there", the healthy state.
+const removeWorkspaceMock = vi.fn().mockResolvedValue(undefined);
+const pathsExistMock = vi.fn(async (paths: string[]) => paths.map(() => true));
 vi.mock("./ipc/commands", () => ({
   listSessions: (...a: unknown[]) => listSessionsMock(...a),
   listWorkspaces: (...a: unknown[]) => listWorkspacesMock(...a),
   createSession: (...a: unknown[]) => createSessionMock(...a),
   killSession: (...a: unknown[]) => killSessionMock(...a),
   createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
+  removeWorkspace: (...a: unknown[]) => removeWorkspaceMock(...a),
+  pathsExist: (...a: [string[]]) => pathsExistMock(...a),
   pickFolder: (...a: unknown[]) => pickFolderMock(...a),
   daemonStatus: (...a: unknown[]) => daemonStatusMock(...a),
   getCommandEvents: (...a: unknown[]) => getCommandEventsMock(...a),
@@ -249,6 +260,7 @@ vi.mock("./ipc/power", () => ({
 }));
 
 const disposeMock = vi.fn();
+const disposeMissingMock = vi.fn();
 const openMock = vi.fn();
 const hideMock = vi.fn();
 const focusMock = vi.fn();
@@ -270,6 +282,7 @@ const fakeManager = {
   hide: hideMock,
   focus: focusMock,
   dispose: disposeMock,
+  disposeMissing: disposeMissingMock,
   disposeAll: vi.fn(),
   // Attach-error surface (AUD-2026-07-19-01): TerminalPane subscribes on mount.
   getAttachError: vi.fn(() => undefined),
@@ -301,6 +314,7 @@ beforeEach(() => {
   for (const k of Object.keys(cbs)) delete cbs[k];
   unlisten.mockClear();
   disposeMock.mockReset();
+  disposeMissingMock.mockReset();
   openMock.mockReset();
   hideMock.mockReset();
   focusMock.mockReset();
@@ -314,6 +328,8 @@ beforeEach(() => {
   createSessionMock.mockClear();
   killSessionMock.mockClear();
   createWorkspaceMock.mockClear();
+  removeWorkspaceMock.mockReset().mockResolvedValue(undefined);
+  pathsExistMock.mockReset().mockImplementation(async (paths: string[]) => paths.map(() => true));
   pickFolderMock.mockClear();
   daemonStatusMock.mockReset().mockResolvedValue({ kind: "disconnected" });
   getCommandEventsMock.mockReset().mockResolvedValue([]);
@@ -1703,5 +1719,258 @@ describe("S-EXT §8 T8: «Extensions» view + MCP event wiring", () => {
       cbs.orchdPoliciesChanged(null);
     });
     expect(trustListPoliciesMock).toHaveBeenCalledWith();
+  });
+});
+
+// ── session accounting is honest (SCN-004/SCN-016) ─────────────────────────────────────────────
+
+describe("workspace stat chips: the four buckets are an exhaustive partition", () => {
+  /** Sessions covering all four buckets in ONE workspace, plus one in another workspace. */
+  function seed(): void {
+    useAppStore.setState(
+      {
+        sessions: {
+          live: meta({ id: "live", workspaceId: "w1", title: "live-one", isActive: true, waitingForInput: false, lifecycle: { kind: "running" } }),
+          wait: meta({ id: "wait", workspaceId: "w1", title: "wait-one", isActive: true, waitingForInput: true, lifecycle: { kind: "running" } }),
+          // Cold-rehydrated: sessiond's restore shape (persistence.rs) — no PTY, not waiting.
+          cold: meta({ id: "cold", workspaceId: "w1", title: "cold-one", isActive: false, waitingForInput: false, lifecycle: { kind: "atPrompt" } }),
+          dead: meta({ id: "dead", workspaceId: "w1", title: "dead-one", isActive: false, waitingForInput: false, lifecycle: { kind: "exited", code: 0, signal: null } }),
+          away: meta({ id: "away", workspaceId: "w2", title: "away-one", isActive: true, waitingForInput: false, lifecycle: { kind: "running" } }),
+        },
+        workspaces: {
+          w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] },
+          w2: { id: "w2", name: "other", rootPath: "/o", roots: ["/o"] },
+        },
+        activeSessionId: null,
+        daemonConnected: true,
+      },
+      false,
+    );
+  }
+
+  async function openW1(): Promise<void> {
+    seed();
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click();
+    });
+  }
+
+  it("a cold-rehydrated session is counted as «restored» — never as live, never dropped", async () => {
+    await openW1();
+    expect(screen.getByTestId("workspace-stat-live").textContent).toBe("1 live");
+    expect(screen.getByTestId("workspace-stat-waiting").textContent).toBe("1 waiting");
+    expect(screen.getByTestId("workspace-stat-restored").textContent).toBe(
+      strings.sessions.restoredChip(1),
+    );
+    expect(screen.getByTestId("workspace-stat-exited").textContent).toBe("1 exited");
+  });
+
+  it("THE regression guard: the four chip counts sum to the workspace's session total", async () => {
+    await openW1();
+    const count = (key: string): number =>
+      Number(/^\d+/.exec(screen.getByTestId(`workspace-stat-${key}`).textContent ?? "")?.[0] ?? NaN);
+    const total = Object.values(useAppStore.getState().sessions).filter(
+      (m) => m.workspaceId === "w1",
+    ).length;
+    expect(count("live") + count("waiting") + count("restored") + count("exited")).toBe(total);
+    expect(total).toBe(4);
+  });
+
+  it("the restored chip drills down to the session titles like every other chip", async () => {
+    await openW1();
+    await act(async () => {
+      screen.getByTestId("workspace-stat-restored").click();
+    });
+    expect(screen.getByTestId("workspace-stat-detail").textContent).toContain("cold-one");
+  });
+});
+
+// ── the tab strip and the pane beside it agree (Part 2) ────────────────────────────────────────
+
+describe("workspace-scoped terminal surfaces", () => {
+  it("the empty-pane placeholder is scoped to the active workspace, not the whole store", async () => {
+    useAppStore.setState(
+      {
+        // A session exists — but in ANOTHER workspace, so this workspace's strip is empty and
+        // "Select a terminal tab." would point at tabs that are not there.
+        sessions: { away: meta({ id: "away", workspaceId: "w2" }) },
+        workspaces: {
+          w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] },
+          w2: { id: "w2", name: "other", rootPath: "/o", roots: ["/o"] },
+        },
+        activeSessionId: null,
+        daemonConnected: true,
+      },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click();
+    });
+    expect(screen.getByText(/No terminals yet/)).toBeTruthy();
+  });
+
+  it("a session created in ANOTHER workspace is not auto-activated (never a pane with no tab)", async () => {
+    useAppStore.setState(
+      {
+        sessions: {},
+        workspaces: {
+          w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] },
+          w2: { id: "w2", name: "other", rootPath: "/o", roots: ["/o"] },
+        },
+        activeSessionId: null,
+        daemonConnected: true,
+      },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click(); // active workspace = w1
+    });
+    await act(async () => {
+      cbs.created(meta({ id: "elsewhere", workspaceId: "w2" }));
+    });
+    expect(useAppStore.getState().sessions["elsewhere"]).toBeTruthy(); // still stored
+    expect(useAppStore.getState().activeSessionId).toBeNull(); // but not activated
+  });
+
+  it("a session created in the ACTIVE workspace is auto-activated", async () => {
+    useAppStore.setState(
+      {
+        sessions: {},
+        workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } },
+        activeSessionId: null,
+        daemonConnected: true,
+      },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click();
+    });
+    await act(async () => {
+      cbs.created(meta({ id: "mine", workspaceId: "w1" }));
+    });
+    expect(useAppStore.getState().activeSessionId).toBe("mine");
+  });
+
+  it("with no workspace selected yet, a created session also adopts its own workspace (tab + pane agree)", async () => {
+    useAppStore.setState(
+      { sessions: {}, workspaces: { w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] } }, activeSessionId: null, daemonConnected: true },
+      false,
+    );
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.created(meta({ id: "first", workspaceId: "w1" }));
+    });
+    expect(useAppStore.getState().activeSessionId).toBe("first");
+    await act(async () => {
+      useAppStore.getState().setView("workspace");
+    });
+    // The strip now belongs to w1, so the newly-active session has a tab of its own.
+    expect(screen.getByRole("tab", { name: /zsh/i })).toBeTruthy();
+  });
+});
+
+// ── SCN-058: workspace://removed reaches every window ──────────────────────────────────────────
+
+describe("workspace://removed (SCN-058)", () => {
+  beforeEach(() => {
+    useAppStore.setState(
+      {
+        sessions: {
+          s1: meta({ id: "s1", workspaceId: "w1" }),
+          s2: meta({ id: "s2", workspaceId: "w2" }),
+        },
+        workspaces: {
+          w1: { id: "w1", name: "proj", rootPath: "/p", roots: ["/p"] },
+          w2: { id: "w2", name: "other", rootPath: "/o", roots: ["/o"] },
+        },
+        activeSessionId: "s1",
+        daemonConnected: true,
+      },
+      false,
+    );
+  });
+
+  it("drops the workspace and its sessions — a removal by ANOTHER window updates this one", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.wsRemoved({ workspaceId: "w1" });
+    });
+    const s = useAppStore.getState();
+    expect(Object.keys(s.workspaces)).toEqual(["w2"]);
+    expect(Object.keys(s.sessions)).toEqual(["s2"]);
+    expect(s.activeSessionId).toBeNull();
+  });
+
+  it("tears down the xterm instances the removal orphaned (no leaked terminals)", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.wsRemoved({ workspaceId: "w1" });
+    });
+    expect(disposeMissingMock).toHaveBeenCalledTimes(1);
+    // "Keep exactly what the store still knows about" — s2 survives, s1 is gone.
+    const keep = disposeMissingMock.mock.calls[0][0] as Set<string>;
+    expect(Array.from(keep)).toEqual(["s2"]);
+  });
+
+  it("falls back to Home when the removed workspace was the one on screen", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click(); // active workspace = w1, view = workspace
+    });
+    expect(useAppStore.getState().view).toBe("workspace");
+    await act(async () => {
+      cbs.wsRemoved({ workspaceId: "w1" });
+    });
+    expect(useAppStore.getState().view).toBe("home");
+    // …and the stat chips (which read the active workspace) are gone with it — no dead view.
+    expect(screen.queryByTestId("workspace-stats")).toBeNull();
+  });
+
+  it("leaves the current view alone when a DIFFERENT workspace is removed", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      screen.getByText("proj").click(); // active workspace = w1
+    });
+    await act(async () => {
+      cbs.wsRemoved({ workspaceId: "w2" });
+    });
+    expect(useAppStore.getState().view).toBe("workspace");
+    expect(useAppStore.getState().workspaces["w1"]).toBeTruthy();
+  });
+
+  it("is idempotent — a push for an already-dropped workspace changes nothing", async () => {
+    await act(async () => {
+      render(<App manager={fakeManager} />);
+    });
+    await act(async () => {
+      cbs.wsRemoved({ workspaceId: "w1" });
+    });
+    const after = useAppStore.getState().workspaces;
+    await act(async () => {
+      cbs.wsRemoved({ workspaceId: "w1" });
+    });
+    expect(useAppStore.getState().workspaces).toBe(after);
   });
 });

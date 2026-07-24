@@ -89,10 +89,10 @@ flowchart TD
   | Home v2 | loading, empty, success | digest strip, triage tiles, escalation cards (question + reason + Go, primary), running rows (project·task·elapsed), hand-off rows, goals glance |
 
 ### FLW-04: Navigate and link workspaces
-- **Traces:** ST-006, ST-007 (JTBD-01, JTBD-06)
-- **Goal:** reach any surface in one click; unlinked workspace attached to its project
+- **Traces:** ST-006, ST-007, ST-044 (JTBD-01, JTBD-06, JTBD-09)
+- **Goal:** reach any surface in one click; unlinked workspace attached to its project; a workspace you no longer want is gone for good
 - **Entry points:** sidebar (always visible)
-- **Success exit:** target view active / workspace row moves under its project
+- **Success exit:** target view active / workspace row moves under its project / removed row disappears
 - **Flow:**
 ```mermaid
 flowchart TD
@@ -101,11 +101,19 @@ flowchart TD
   L -->|yes| S2[Row moves under project]
   L -->|no| L_err[Toast describeOrchdError, selection resets]
   L_err --> S
+  S -->|Remove workspace SCN-058| RC{confirm - names ws, warns live terminals close}
+  RC -->|cancel| S
+  RC -->|confirm| R{RemoveWorkspace OK?}
+  R -->|yes| RG[Row gone, sessions gone, PTYs killed; active ws falls back to Home]
+  R -->|no| R_err[Toast reason, row stays] --> S
+  S -->|folder-missing rows present| CU[Bulk clean-up offered with exact count SCN-059]
+  CU -->|confirm| R
+  CU -->|no missing roots| S
 ```
 - **Screens & states:**
   | Screen | States | Key elements |
   |--------|--------|--------------|
-  | Sidebar | empty, success | nav items, project groups, link select, archived toggle, footer |
+  | Sidebar | empty, success, error | nav items, project groups, link select, archived toggle, per-row remove, folder-missing marker, bulk clean-up (primary: workspace row), footer |
 
 ### FLW-05: Create a project
 - **Traces:** ST-008 (JTBD-06, JRN-07/#1)

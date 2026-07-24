@@ -1103,6 +1103,64 @@ pub async fn remove_workspace_root(
     )
 }
 
+/// Remove a workspace permanently (SCN-058). The daemon deletes the workspace, its roots, EVERY
+/// session that belongs to it and those sessions' scrollback/command-events in one transaction —
+/// terminating any live PTY first through the same `KillSession` machinery, so a removal can never
+/// leave an orphaned child with no tab to reach it. There is no soft-delete: this is why the
+/// confirmation the UI shows must state the consequence BEFORE the round-trip, not after.
+///
+/// An unknown `workspace_id` rejects with the SAME shape the other workspace verbs already use for
+/// an unknown id (`CommandError::Daemon { code: "DbSql", .. }`), so no new client-side error
+/// handling is needed. On success the daemon also broadcasts `Push::WorkspaceRemoved` (see
+/// `broker::EV_WORKSPACE_REMOVED`) to every connected client, including this one — that broadcast
+/// is what makes every open window drop the workspace, not just the one that asked.
+///
+/// Deliberately does NOT touch `state.broker`'s attachment map (unlike `kill_session`): the core
+/// never learns which session ids belonged to the workspace (the daemon replies with a bare `Ack`),
+/// and a stale attachment entry is inert — its `Channel` simply has no producer left, exactly like
+/// a session that exits on its own.
+#[tauri::command]
+pub async fn remove_workspace(
+    state: State<'_, AppState>,
+    workspace_id: WorkspaceId,
+) -> Result<(), CommandError> {
+    expect_ack(
+        state
+            .client()?
+            .request(Request::RemoveWorkspace { workspace_id })
+            .await?,
+    )
+}
+
+/// `true` when `path` definitely exists on disk; `true` ALSO when its existence cannot be
+/// determined (permission denied, I/O error) — SCN-059's "Errors & recovery": a root that cannot
+/// be stat'd counts as PRESENT, because the only consumer of this answer is a bulk removal and a
+/// workspace must never be removed on a guess. Only a definite "this path is not there"
+/// (`Ok(false)`) is reported as missing.
+fn path_present_unless_definitely_missing(path: &str) -> bool {
+    std::path::Path::new(path).try_exists().unwrap_or(true)
+}
+
+/// CORE-ONLY (SCN-059): a pure LOCAL existence check for workspace roots — no daemon round-trip
+/// (the daemon has no verb for it and none is warranted: this is a `stat` on the GUI process's own
+/// filesystem view). Returns one boolean per input path, positionally, so the caller can map them
+/// back without re-sending the paths.
+///
+/// Deliberately NOT modeled on `fs_explorer`'s untrusted-root pattern (canonicalize + containment
+/// check): there is no traversal to constrain here — nothing is read, listed, written or returned
+/// except a boolean per path, so a `..` or a symlink can leak at most "something exists there",
+/// which the caller already knew the path of. The inputs are the app's own workspace roots.
+///
+/// Unreadable paths are reported as PRESENT (see
+/// [`path_present_unless_definitely_missing`]) — never as missing.
+#[tauri::command]
+pub async fn paths_exist(paths: Vec<String>) -> Result<Vec<bool>, CommandError> {
+    Ok(paths
+        .iter()
+        .map(|p| path_present_unless_definitely_missing(p))
+        .collect())
+}
+
 /// Fetch a session's recent command lifecycle events (spec §3.3, Pv2 §7 `command_events` table),
 /// newest-first, capped at `limit`.
 #[tauri::command]
@@ -3277,6 +3335,7 @@ mod tests {
                 | Request::DaemonShutdown { .. }
                 | Request::AddWorkspaceRoot { .. }
                 | Request::RemoveWorkspaceRoot { .. }
+                | Request::RemoveWorkspace { .. }
                 | Request::GetCommandEvents { .. } => false,
             }
         }
@@ -4099,6 +4158,116 @@ pub(crate) mod commands_over_stub_daemon {
             CommandError::Daemon { code, .. } => assert_eq!(code, "LastRoot"),
             other => panic!("expected CommandError::Daemon, got {other:?}"),
         }
+    }
+
+    // ── SCN-058 `remove_workspace` / SCN-059 `paths_exist` ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn remove_workspace_round_trips_and_expects_an_ack() {
+        let (client, _sock) = connect_to_stub(|req| match req {
+            Request::RemoveWorkspace { workspace_id } => {
+                assert_eq!(workspace_id, "w-1");
+                Response::Ack
+            }
+            other => panic!("expected RemoveWorkspace, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(Request::RemoveWorkspace {
+                workspace_id: "w-1".to_string(),
+            })
+            .await
+            .unwrap();
+        expect_ack(res).expect("Ack must map to Ok(())");
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_unknown_id_maps_to_command_error_daemon() {
+        // SCN-058 "Errors & recovery": an unknown id rejects with the same shape every other
+        // workspace verb uses (`DbSql`), so the UI needs no new error handling — it just toasts.
+        let (client, _sock) = connect_to_stub(|req| match req {
+            Request::RemoveWorkspace { .. } => Response::Error {
+                code: "DbSql".into(),
+                message: "db sql error: workspace w-gone not found".into(),
+            },
+            other => panic!("expected RemoveWorkspace, got {other:?}"),
+        })
+        .await;
+
+        let res = client
+            .request(Request::RemoveWorkspace {
+                workspace_id: "w-gone".to_string(),
+            })
+            .await;
+        let err: CommandError = res.unwrap_err().into();
+        match err {
+            CommandError::Daemon { code, .. } => assert_eq!(code, "DbSql"),
+            other => panic!("expected CommandError::Daemon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paths_exist_reports_missing_only_when_definitely_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().to_string_lossy().into_owned();
+        let gone = dir
+            .path()
+            .join("no-such-dir")
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(
+            path_present_unless_definitely_missing(&present),
+            "an existing directory must read as present"
+        );
+        assert!(
+            !path_present_unless_definitely_missing(&gone),
+            "a definitely-absent path must read as missing"
+        );
+    }
+
+    #[test]
+    fn paths_exist_treats_an_unreadable_path_as_present_never_missing() {
+        // SCN-059 "Errors & recovery": a root that cannot be checked (permission error) counts as
+        // PRESENT — the clean-up must never remove a workspace on a guess. Root bypasses POSIX
+        // permission checks, so the assertion is skipped there rather than made flaky.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let child = locked.join("root");
+        std::fs::create_dir(&child).unwrap();
+        // 0o000 on the PARENT makes `stat` of `child` fail with EACCES — "cannot tell", not "gone".
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let unreadable = child.to_string_lossy().into_owned();
+        let verdict = path_present_unless_definitely_missing(&unreadable);
+
+        // Restore before asserting so the tempdir can always be cleaned up.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            verdict,
+            "an unreadable path must count as PRESENT (never removed on a guess)"
+        );
+    }
+
+    #[tokio::test]
+    async fn paths_exist_returns_one_verdict_per_input_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().to_string_lossy().into_owned();
+        let gone = dir.path().join("nope").to_string_lossy().into_owned();
+
+        // The command body is a pure map over the same helper — assert the positional contract the
+        // frontend relies on to map verdicts back onto its workspace roots.
+        let verdicts: Vec<bool> = [present.clone(), gone.clone(), present.clone()]
+            .iter()
+            .map(|p| path_present_unless_definitely_missing(p))
+            .collect();
+        assert_eq!(verdicts, vec![true, false, true]);
     }
 
     #[tokio::test]

@@ -5,10 +5,16 @@ import { render, screen, cleanup, act, fireEvent, within, waitFor } from "@testi
 const pickFolderMock = vi.fn();
 const createWorkspaceMock = vi.fn();
 const createSessionMock = vi.fn();
+// SCN-058: the store's `removeWorkspace` action calls straight through to this wrapper.
+const removeWorkspaceMock = vi.fn();
+// SCN-059: the sidebar's LOCAL root-presence check. Defaults to "every root is there".
+const pathsExistMock = vi.fn(async (paths: string[]) => paths.map(() => true));
 vi.mock("../ipc/commands", () => ({
   pickFolder: (...a: unknown[]) => pickFolderMock(...a),
   createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
   createSession: (...a: unknown[]) => createSessionMock(...a),
+  removeWorkspace: (...a: unknown[]) => removeWorkspaceMock(...a),
+  pathsExist: (...a: [string[]]) => pathsExistMock(...a),
 }));
 
 const orchdAddProjectWorkspaceMock = vi.fn();
@@ -35,10 +41,15 @@ import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { useAppStore } from "../store/store";
 import { strings } from "../strings";
 import type { Workspace } from "../ipc/types";
+import type { WorkspaceId } from "../ipc/commands";
 import type { Project } from "../ipc/orchd-types";
 
 const wsA: Workspace = { id: "w1", name: "alpha", rootPath: "/p/alpha", roots: ["/p/alpha"] };
 const wsB: Workspace = { id: "w2", name: "beta", rootPath: "/p/beta", roots: ["/p/beta"] };
+
+/** Destructive flows go through `window.confirm` here, matching every other destructive surface
+ * in the repo (FileTree delete, TasksList delete, ProjectPanel archive). */
+const confirmMock = vi.fn((_message?: string) => true);
 
 function makeProject(over: Partial<Project> = {}): Project {
   return {
@@ -72,6 +83,10 @@ beforeEach(() => {
   createWorkspaceMock.mockReset();
   createWorkspaceMock.mockResolvedValue({ id: "w3", name: "gamma", rootPath: "/p/gamma", roots: ["/p/gamma"] });
   createSessionMock.mockReset().mockResolvedValue({ id: "s-auto" });
+  removeWorkspaceMock.mockReset().mockResolvedValue(undefined);
+  pathsExistMock.mockReset().mockImplementation(async (paths: string[]) => paths.map(() => true));
+  confirmMock.mockReset().mockReturnValue(true);
+  vi.stubGlobal("confirm", confirmMock);
   orchdAddProjectWorkspaceMock.mockReset().mockResolvedValue(makeProject());
   orchdCreateProjectMock.mockReset().mockResolvedValue(makeProject());
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
@@ -406,6 +421,258 @@ describe("keep-awake pill (SCN-045 / FLW-18)", () => {
       error: null,
     });
     expect(localStorage.getItem("bpa-keep-awake")).toBe("on");
+  });
+});
+
+// ── SCN-058: remove a workspace ────────────────────────────────────────────────────────────────
+
+describe("remove a workspace (SCN-058)", () => {
+  /** Let the mount-time `pathsExist` effect settle before asserting. */
+  async function renderSidebar(
+    activeWorkspaceId: WorkspaceId | null = null,
+    onSelect: (id: WorkspaceId | null) => void = () => {},
+  ): Promise<void> {
+    await act(async () => {
+      render(
+        <WorkspaceSidebar activeWorkspaceId={activeWorkspaceId} onSelectWorkspace={onSelect} />,
+      );
+    });
+  }
+
+  it("every workspace row carries a «Remove workspace» control", async () => {
+    await renderSidebar();
+    expect(screen.getByTestId("remove-workspace-w1")).toBeTruthy();
+    expect(screen.getByTestId("remove-workspace-w2")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: strings.chrome.sidebar.removeWorkspaceAria("alpha") }),
+    ).toBeTruthy();
+  });
+
+  it("confirms FIRST, naming the workspace and the live-terminal consequence, and only then removes", async () => {
+    await renderSidebar();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remove-workspace-w1"));
+    });
+    expect(confirmMock).toHaveBeenCalledWith(
+      strings.chrome.sidebar.removeWorkspaceConfirm("alpha"),
+    );
+    // The confirmation states the consequence before anything is committed.
+    const shown = String(confirmMock.mock.calls[0][0]);
+    expect(shown).toContain("alpha");
+    expect(shown).toContain("terminals will be closed");
+    expect(shown).toContain("scrollback");
+    expect(removeWorkspaceMock).toHaveBeenCalledWith("w1");
+  });
+
+  it("a successful removal drops the workspace and its sessions from the store", async () => {
+    useAppStore.setState(
+      {
+        sessions: {
+          s1: { id: "s1", workspaceId: "w1" } as unknown as never,
+          s2: { id: "s2", workspaceId: "w2" } as unknown as never,
+        },
+      },
+      false,
+    );
+    await renderSidebar();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remove-workspace-w1"));
+    });
+    expect(Object.keys(useAppStore.getState().workspaces)).toEqual(["w2"]);
+    expect(Object.keys(useAppStore.getState().sessions)).toEqual(["s2"]);
+  });
+
+  it("cancelling the confirmation removes nothing and has no side effects", async () => {
+    confirmMock.mockReturnValue(false);
+    await renderSidebar();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remove-workspace-w1"));
+    });
+    expect(removeWorkspaceMock).not.toHaveBeenCalled();
+    expect(Object.keys(useAppStore.getState().workspaces).sort()).toEqual(["w1", "w2"]);
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
+  it("a rejected removal keeps the row and surfaces an honest toast", async () => {
+    removeWorkspaceMock.mockRejectedValueOnce({ kind: "disconnected" });
+    await renderSidebar();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remove-workspace-w1"));
+      await Promise.resolve();
+    });
+    expect(useAppStore.getState().workspaces["w1"]).toBeTruthy();
+    expect(screen.getByTestId("remove-workspace-w1")).toBeTruthy();
+    expect(useAppStore.getState().toast).toBe(
+      strings.chrome.sidebar.removeWorkspaceFailed(strings.errors.command.disconnected),
+    );
+  });
+
+  it("removing the workspace currently on screen falls back to Home — never a dead view", async () => {
+    const onSelect = vi.fn();
+    useAppStore.setState({ view: "workspace" }, false);
+    await renderSidebar("w1", onSelect);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remove-workspace-w1"));
+    });
+    expect(onSelect).toHaveBeenCalledWith(null);
+    expect(useAppStore.getState().view).toBe("home");
+  });
+
+  it("removing a DIFFERENT workspace leaves the current view alone", async () => {
+    const onSelect = vi.fn();
+    useAppStore.setState({ view: "workspace" }, false);
+    await renderSidebar("w1", onSelect);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remove-workspace-w2"));
+    });
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(useAppStore.getState().view).toBe("workspace");
+  });
+});
+
+// ── SCN-059: clear out workspaces whose folder is gone ─────────────────────────────────────────
+
+describe("stale workspace clean-up (SCN-059)", () => {
+  async function renderSidebar(
+    activeWorkspaceId: WorkspaceId | null = null,
+    onSelect: (id: WorkspaceId | null) => void = () => {},
+  ): Promise<void> {
+    await act(async () => {
+      render(
+        <WorkspaceSidebar activeWorkspaceId={activeWorkspaceId} onSelectWorkspace={onSelect} />,
+      );
+    });
+  }
+
+  /** `paths_exist` verdicts by path — anything unlisted counts as present. */
+  function presence(map: Record<string, boolean>): void {
+    pathsExistMock.mockImplementation(async (paths: string[]) =>
+      paths.map((p) => map[p] ?? true),
+    );
+  }
+
+  it("marks only the workspaces whose folder is definitely gone", async () => {
+    presence({ "/p/alpha": false });
+    await renderSidebar();
+    expect(screen.getByTestId("workspace-missing-w1").textContent).toBe(
+      strings.chrome.sidebar.rootMissing,
+    );
+    expect(screen.queryByTestId("workspace-missing-w2")).toBeNull();
+  });
+
+  it("offers NO clean-up control when every folder is there (no dead control)", async () => {
+    await renderSidebar();
+    expect(screen.queryByTestId("cleanup-missing-workspaces")).toBeNull();
+  });
+
+  it("the clean-up control names the exact count, and so does its confirmation", async () => {
+    presence({ "/p/alpha": false, "/p/beta": false });
+    await renderSidebar();
+    const button = screen.getByTestId("cleanup-missing-workspaces");
+    expect(button.textContent).toBe(strings.chrome.sidebar.cleanupMissing(2));
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(confirmMock).toHaveBeenCalledWith(strings.chrome.sidebar.cleanupMissingConfirm(2));
+    expect(String(confirmMock.mock.calls[0][0])).toContain("2");
+  });
+
+  it("removes ONLY the missing workspaces — a healthy one is never touched", async () => {
+    presence({ "/p/alpha": false });
+    await renderSidebar();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("cleanup-missing-workspaces"));
+    });
+    expect(removeWorkspaceMock).toHaveBeenCalledTimes(1);
+    expect(removeWorkspaceMock).toHaveBeenCalledWith("w1");
+    expect(Object.keys(useAppStore.getState().workspaces)).toEqual(["w2"]);
+  });
+
+  it("cancelling the clean-up removes nothing", async () => {
+    presence({ "/p/alpha": false });
+    confirmMock.mockReturnValue(false);
+    await renderSidebar();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("cleanup-missing-workspaces"));
+    });
+    expect(removeWorkspaceMock).not.toHaveBeenCalled();
+  });
+
+  it("a partial failure keeps the successes and names how many failed (no silent partial success)", async () => {
+    presence({ "/p/alpha": false, "/p/beta": false });
+    removeWorkspaceMock.mockImplementation(async (id: string) => {
+      if (id === "w1") throw { kind: "disconnected" };
+    });
+    await renderSidebar();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("cleanup-missing-workspaces"));
+      await Promise.resolve();
+    });
+    expect(Object.keys(useAppStore.getState().workspaces)).toEqual(["w1"]); // w2 removed, w1 stands
+    expect(useAppStore.getState().toast).toBe(
+      strings.chrome.sidebar.cleanupMissingPartial(1, 2),
+    );
+  });
+
+  it("a multi-root workspace with ONE surviving root is NOT missing (never removed on a guess)", async () => {
+    useAppStore.setState(
+      {
+        workspaces: {
+          w1: { id: "w1", name: "alpha", rootPath: "/p/alpha", roots: ["/p/alpha", "/p/second"] },
+        },
+      },
+      false,
+    );
+    presence({ "/p/alpha": false, "/p/second": true });
+    await renderSidebar();
+    expect(screen.queryByTestId("workspace-missing-w1")).toBeNull();
+    expect(screen.queryByTestId("cleanup-missing-workspaces")).toBeNull();
+  });
+
+  it("an unreadable root (reported present by the core) leaves the row healthy", async () => {
+    // `paths_exist` maps a permission error to `true` — the frontend must simply believe it.
+    presence({ "/p/alpha": true });
+    await renderSidebar();
+    expect(screen.queryByTestId("workspace-missing-w1")).toBeNull();
+  });
+
+  it("a FAILED presence check marks nothing missing and offers no clean-up", async () => {
+    pathsExistMock.mockRejectedValue(new Error("core down"));
+    await renderSidebar();
+    expect(screen.queryByTestId("workspace-missing-w1")).toBeNull();
+    expect(screen.queryByTestId("cleanup-missing-workspaces")).toBeNull();
+  });
+});
+
+// ── sidebar layout contract (Part 3; jsdom does no layout, so the STYLE contract is asserted) ──
+
+describe("WorkspaceSidebar layout", () => {
+  it("the list region can actually shrink and does not sit flush against the footer", async () => {
+    await act(async () => {
+      render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    });
+    const region = screen.getByTestId("sidebar-scroll");
+    expect(region.style.flex).toContain("1");
+    expect(region.style.minHeight).toBe("0"); // without it, a long list pushes the footer away
+    expect(region.style.overflowY).toBe("auto");
+    expect(region.style.paddingBottom).not.toBe("");
+    expect(region.style.scrollbarGutter).toBe("stable");
+  });
+
+  it("the footer is one non-shrinking block with a separating hairline", async () => {
+    await act(async () => {
+      render(<WorkspaceSidebar activeWorkspaceId={null} onSelectWorkspace={() => {}} />);
+    });
+    const footer = screen.getByTestId("sidebar-footer");
+    expect(footer.style.flexShrink).toBe("0");
+    expect(footer.style.borderTop).toContain("var(--hairline)");
+    // Every footer control lives inside it — none is a bare, individually-shrinkable sibling.
+    expect(footer.contains(screen.getByTestId("keep-awake-pill"))).toBe(true);
+    expect(footer.contains(screen.getByTestId("create-project-open"))).toBe(true);
+    expect(footer.contains(screen.getByTestId("diag-open"))).toBe(true);
+    expect(
+      footer.contains(screen.getByRole("button", { name: /add workspace/i })),
+    ).toBe(true);
   });
 });
 

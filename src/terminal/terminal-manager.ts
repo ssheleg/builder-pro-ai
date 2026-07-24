@@ -660,6 +660,22 @@ export class TerminalManager {
     for (const cb of this.attachErrorListeners) cb();
   }
 
+  /**
+   * Dispose every Terminal whose session id is NOT in `keep` (SCN-058). The bulk counterpart of
+   * `dispose()` for a removal that takes several sessions at once — a removed WORKSPACE takes all
+   * of its sessions with it, and the caller only learns the workspace id, never the session ids.
+   *
+   * Deliberately expressed as "forget what the store no longer knows" rather than "dispose these
+   * ids": the store is the authority on which sessions exist, so this is order-independent — it
+   * cleans up correctly whether the store dropped the sessions before or after this call. A live
+   * session is always in the store, so it can never be caught by this sweep.
+   */
+  disposeMissing(keep: Set<SessionId>): void {
+    for (const id of Array.from(this.entries.keys())) {
+      if (!keep.has(id)) this.dispose(id);
+    }
+  }
+
   disposeAll(): void {
     for (const id of Array.from(this.entries.keys())) this.dispose(id);
   }

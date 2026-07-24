@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { SessionMeta, SessionLifecycle, Workspace } from "./types";
-import type { SessionId } from "./commands";
+import type { SessionId, WorkspaceId } from "./commands";
 import type { RuleScope } from "./orchd-types";
 
 /**
@@ -86,6 +86,26 @@ export function onFsWatchError(cb: (p: FsWatchErrorPayload) => void): Promise<Un
  */
 export function onWorkspaceUpdated(cb: (w: Workspace) => void): Promise<UnlistenFn> {
   return listen<Workspace>("workspace://updated", (e) => cb(e.payload));
+}
+
+/** Payload of `workspace://removed` (SCN-058): the id of the workspace the daemon just deleted.
+ * Deliberately NOT a `Workspace` — there is no surviving record to send, and reusing the
+ * `workspace://updated` channel (whose handler upserts) would resurrect the removed row. */
+export interface WorkspaceRemovedPayload {
+  workspaceId: WorkspaceId;
+}
+
+/**
+ * Subscribe to `workspace://removed` (SCN-058), emitted by `src-tauri/src/broker.rs`'s
+ * `EV_WORKSPACE_REMOVED` mapping of `Push::WorkspaceRemoved`. Fires after a successful
+ * `removeWorkspace` from ANY connected client (including this one — the daemon broadcasts to
+ * every client), which is what makes every open window drop the workspace, its sessions and its
+ * scrollback rather than keeping a row that no longer exists.
+ */
+export function onWorkspaceRemoved(
+  cb: (p: WorkspaceRemovedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<WorkspaceRemovedPayload>("workspace://removed", (e) => cb(e.payload));
 }
 
 /** `daemon://disconnected` carries no payload (the core emits `()`, which decodes as `null`). */

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { readTheme, setThemePref, type Theme } from "../ui/theme";
 import { classifyError, scrubSecrets, pushCapped, DIAG_CAP, type DiagEvent } from "../ipc/diag";
 import { powerSetEnabled, powerSyncSessions, type PowerStatus } from "../ipc/power";
+import { removeWorkspace as removeWorkspaceCmd } from "../ipc/commands";
 import { statsUsage, statsGit } from "../ipc/stats";
 import { strings } from "../strings";
 import type { SessionMeta, Workspace } from "../ipc/types";
@@ -290,6 +291,23 @@ export interface AppState {
    * listener's handler (spec §6.6): that event's payload IS a `Workspace`, so wiring it is
    * literally `onWorkspaceUpdated(upsertWorkspace)` — no separate action needed. */
   upsertWorkspace: (ws: Workspace) => void;
+  /**
+   * Drop a workspace AND every session that belonged to it from the slice (SCN-058), clearing
+   * `activeSessionId` if it pointed at one of those sessions. Idempotent — an id that is already
+   * gone is a no-op, which is what lets the local `removeWorkspace` path and the
+   * `workspace://removed` broadcast (which reaches this client too, and every other window) both
+   * call it without fighting each other. Pure state: it neither talks to the daemon nor decides
+   * which view to show — the removal's caller owns the "was I looking at it?" fallback, because
+   * the active WORKSPACE is App-level UI selection, not store data.
+   */
+  dropWorkspace: (workspaceId: WorkspaceId) => void;
+  /**
+   * Remove a workspace permanently (SCN-058): daemon round-trip first, then `dropWorkspace` on
+   * success. REJECTS with the raw `CommandError` when the daemon refuses (down, unknown id),
+   * leaving the slice completely untouched so the row stays exactly where it was — the caller
+   * surfaces the honest toast.
+   */
+  removeWorkspace: (workspaceId: WorkspaceId) => Promise<void>;
   setActiveSession: (id: SessionId | null) => void;
 
   /** Switch the top-level view. See `view`'s doc above. */
@@ -516,6 +534,58 @@ export function docViewKey(projectId: string, name: string): string {
   return `${projectId}/${name}`;
 }
 
+/**
+ * The four session buckets, as an EXHAUSTIVE PARTITION (SCN-004/SCN-016) — see
+ * [`partitionSessions`]. Every session in the input lands in exactly one array, so
+ * `live + waiting + restored + exited === total` always holds.
+ */
+export interface SessionBuckets {
+  /** Not exited, not waiting, and the daemon says the PTY is live. */
+  live: SessionMeta[];
+  /** Not exited and blocked on the owner (`waitingForInput`). */
+  waiting: SessionMeta[];
+  /**
+   * Not exited, not waiting — but NO live PTY (`isActive === false`). This is what a session
+   * rehydrated from the daemon's store looks like after a restart: sessiond hard-codes
+   * `is_active:false`/`waiting_for_input:false` with an `atPrompt`/`running` lifecycle on restore
+   * (`crates/sessiond/src/persistence.rs`), because the shell it describes is gone. Reporting one
+   * of these as "live" would be a lie, and dropping it from every bucket (the pre-SCN-058 bug) hid
+   * it from Home entirely — hence its own, honestly-named bucket.
+   */
+  restored: SessionMeta[];
+  /** Finished — the lifecycle the daemon persisted or pushed on exit. */
+  exited: SessionMeta[];
+}
+
+/**
+ * THE definition of "live"/"waiting"/"restored"/"exited" for the whole frontend (SCN-004,
+ * SCN-016): one function, so a label means the same thing on Home, on the workspace stat chips and
+ * anywhere else that counts sessions. Before this existed, three surfaces each hand-rolled their
+ * own three NON-EXHAUSTIVE predicates, and a cold-rehydrated session (`isActive:false`,
+ * `waitingForInput:false`, lifecycle `atPrompt`) matched NONE of them — it was invisible in the
+ * counts and absent from every Home section while its tab sat on screen.
+ *
+ * Order matters and is intentional: `exited` wins over everything (belt-and-suspenders against a
+ * stale `waitingForInput:true` on a dead session — mirrors `StatusDot.dotStateOf`), then
+ * `waiting` (a human is needed) over liveness, then a live PTY, and finally the honest remainder.
+ * Because the branches are an if/else chain over one pass, the buckets cannot overlap and cannot
+ * lose a session — the partition invariant is structural, not a convention.
+ *
+ * NOTE: `live` here deliberately EXCLUDES waiting sessions (they have their own bucket/label);
+ * "how many sessions are open at all" is a different question — `App.tsx` computes that
+ * separately for the keep-awake assertion (SCN-045) and names it so.
+ */
+export function partitionSessions(list: SessionMeta[]): SessionBuckets {
+  const buckets: SessionBuckets = { live: [], waiting: [], restored: [], exited: [] };
+  for (const meta of list) {
+    if (meta.lifecycle.kind === "exited") buckets.exited.push(meta);
+    else if (meta.waitingForInput) buckets.waiting.push(meta);
+    else if (meta.isActive) buckets.live.push(meta);
+    else buckets.restored.push(meta);
+  }
+  return buckets;
+}
+
 /** localStorage key for the keep-awake toggle (SCN-045). Values `"on"`/`"off"`; absence = the
  * default ON. Same synchronous, FOUC-free persistence path as the theme (`../ui/theme.ts`). */
 const KEEP_AWAKE_STORAGE_KEY = "bpa-keep-awake";
@@ -691,6 +761,15 @@ export const useAppStore = create<AppState>((set, get) => {
               lifecycle: p.lifecycle,
               waitingForInput: p.waitingForInput,
               cwd: p.cwd,
+              // The daemon only ever emits `session://state-changed` from a LIVE session's own
+              // reader/ticker threads (`pty_supervisor::emit_status` is called from nowhere else,
+              // and the ticker exits the moment `is_active` flips false) — so receiving one for a
+              // non-exited lifecycle IS the daemon telling us the PTY is alive. Without this, a
+              // session that came back `isActive:false` from a rehydrate (persistence.rs hard-codes
+              // that on restore) could NEVER be shown as live again client-side, no matter what the
+              // daemon reported. This is not inventing liveness: an `exited` payload is left
+              // inactive, and no other path here sets `isActive` true.
+              isActive: p.lifecycle.kind !== "exited",
             },
           },
         };
@@ -730,6 +809,36 @@ export const useAppStore = create<AppState>((set, get) => {
 
     upsertWorkspace: (ws) =>
       set((s) => ({ workspaces: { ...s.workspaces, [ws.id]: ws } })),
+
+    dropWorkspace: (workspaceId) =>
+      set((s) => {
+        const hadWorkspace = workspaceId in s.workspaces;
+        const doomed = Object.values(s.sessions).filter((m) => m.workspaceId === workspaceId);
+        if (!hadWorkspace && doomed.length === 0) return {}; // idempotent: nothing left to drop
+        const workspaces = { ...s.workspaces };
+        delete workspaces[workspaceId];
+        const sessions: Record<SessionId, SessionMeta> = {};
+        for (const [id, meta] of Object.entries(s.sessions)) {
+          if (meta.workspaceId !== workspaceId) sessions[id] = meta;
+        }
+        const activeGone =
+          s.activeSessionId !== null && !(s.activeSessionId in sessions);
+        return {
+          workspaces,
+          sessions,
+          activeSessionId: activeGone ? null : s.activeSessionId,
+        };
+      }),
+
+    removeWorkspace: async (workspaceId) => {
+      // Daemon first, state second: the workspace/sessions are dropped ONLY after the daemon has
+      // actually committed the removal (SCN-058 "removal rejects → the row stays"). A rejection
+      // propagates untouched so the calling surface can name the failure in its own vocabulary
+      // (`WorkspaceSidebar`'s `describeCommandError` — this file's `reportError` speaks the
+      // orchestrator's, which would mislabel a sessiond outage).
+      await removeWorkspaceCmd(workspaceId);
+      get().dropWorkspace(workspaceId);
+    },
 
     setActiveSession: (id) => set({ activeSessionId: id }),
 

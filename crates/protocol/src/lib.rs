@@ -200,6 +200,25 @@ pub enum Request {
         session_id: SessionId,
         limit: u32,
     },
+    /// → `Response::Ack` + broadcasts [`Push::WorkspaceRemoved`]. Permanently and TOTALLY removes
+    /// one workspace: its `workspace_root` rows, EVERY session that belongs to it (the live PTY is
+    /// killed through the same `KillSession` machinery first, so a removal can never leave an
+    /// orphaned/zombie child), those sessions' `session` rows, and their dependent `scrollback` +
+    /// `command_events` rows — all of it, in one transaction (`Db::delete_workspace`). There is no
+    /// soft-delete and no "detach only" mode: the verb exists because a workspace whose roots have
+    /// been deleted off disk was previously UNDELETABLE, so it must actually delete.
+    ///
+    /// An unknown `workspace_id` ⇒ the SAME not-found error shape the other workspace verbs already
+    /// return for an unknown id (`RemoveWorkspaceRoot`'s `PersistError::Sql`, wire code `"DbSql"`,
+    /// message `db sql error: workspace <id> not found`) — deliberately mirrored rather than given a
+    /// new code, so a client needs no new error handling for this verb.
+    ///
+    /// Appended at the enum TAIL (append-only wire rule — same rule `bpa-orchd-proto` states in its
+    /// module doc: variant order is FROZEN, new verbs only ever go last, so a peer decoding an
+    /// older/newer build never re-reads one verb as another).
+    RemoveWorkspace {
+        workspace_id: WorkspaceId,
+    },
 }
 
 impl Request {
@@ -228,6 +247,7 @@ impl Request {
             Self::AddWorkspaceRoot { .. } => "AddWorkspaceRoot",
             Self::RemoveWorkspaceRoot { .. } => "RemoveWorkspaceRoot",
             Self::GetCommandEvents { .. } => "GetCommandEvents",
+            Self::RemoveWorkspace { .. } => "RemoveWorkspace",
         }
     }
 }
@@ -279,6 +299,19 @@ pub enum Push {
     },
     /// emitted after Add/RemoveWorkspaceRoot
     WorkspaceUpdated(Workspace),
+    /// Emitted (broadcast to EVERY connected client) after a successful [`Request::RemoveWorkspace`].
+    ///
+    /// This is deliberately NOT [`Push::WorkspaceUpdated`]: that variant carries a whole
+    /// `Workspace` and every consumer of it *upserts* that payload into its store (see
+    /// `src-tauri`'s `map_push` → `workspace://updated`), so reusing it for a removal would
+    /// re-insert the very workspace the user just deleted — the daemon would be lying about what
+    /// happened. A removal has no surviving `Workspace` value to send, only an id, so it gets its
+    /// own variant carrying exactly that.
+    ///
+    /// Appended at the enum TAIL (append-only wire rule), like [`Request::RemoveWorkspace`].
+    WorkspaceRemoved {
+        workspace_id: WorkspaceId,
+    },
 }
 
 #[cfg(test)]
@@ -299,5 +332,81 @@ mod tests {
         assert_eq!(DAEMON_MIN_VERSION, 3);
         assert_eq!(DAEMON_MAX_VERSION, 3);
         assert_eq!(MAX_PREAMBLE_BUILD_LEN, 256);
+    }
+
+    /// `verb_name`'s match is compile-enforced exhaustive, so a new verb cannot ship UNnamed —
+    /// but nothing checks the string itself, and the daemon's per-request completion trace (spec
+    /// D4/O-6) is keyed on it. Pin the new verb's name, and pin a few pre-existing ones to catch
+    /// an append that accidentally disturbed them.
+    #[test]
+    fn remove_workspace_has_a_stable_trace_verb_name() {
+        assert_eq!(
+            Request::RemoveWorkspace {
+                workspace_id: "ws-1".into()
+            }
+            .verb_name(),
+            "RemoveWorkspace"
+        );
+        assert_eq!(Request::ListWorkspaces.verb_name(), "ListWorkspaces");
+        assert_eq!(
+            Request::KillSession {
+                session_id: "sess-1".into()
+            }
+            .verb_name(),
+            "KillSession"
+        );
+        assert_eq!(
+            Request::RemoveWorkspaceRoot {
+                workspace_id: "ws-1".into(),
+                path: "/tmp".into()
+            }
+            .verb_name(),
+            "RemoveWorkspaceRoot"
+        );
+    }
+
+    /// The append-only rule's payoff, asserted rather than assumed: ciborium encodes an
+    /// externally-tagged enum by variant NAME, not by index, so appending `RemoveWorkspace` /
+    /// `WorkspaceRemoved` at the TAIL is wire-transparent — a peer built before the append still
+    /// reads every pre-existing verb as itself, never as its neighbour.
+    #[test]
+    fn appending_a_tail_variant_cannot_renumber_the_existing_ones() {
+        for (frame, name) in [
+            (
+                Frame::Request {
+                    id: 7,
+                    req: Request::ListWorkspaces,
+                },
+                "ListWorkspaces",
+            ),
+            (
+                Frame::Request {
+                    id: 8,
+                    req: Request::KillSession {
+                        session_id: "sess-1".into(),
+                    },
+                },
+                "KillSession",
+            ),
+            (
+                Frame::Push(Push::WorkspaceCreated {
+                    workspace: Workspace {
+                        id: "ws-1".into(),
+                        name: "W".into(),
+                        root_path: "/tmp".into(),
+                        roots: vec!["/tmp".into()],
+                    },
+                }),
+                "WorkspaceCreated",
+            ),
+        ] {
+            let bytes = encode_frame(&frame).expect("encode");
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            assert!(
+                text.contains(name),
+                "{name} must still be encoded by its own name (index-based encoding would make \
+                 a tail append a silent wire break); got {bytes:?}"
+            );
+        }
     }
 }

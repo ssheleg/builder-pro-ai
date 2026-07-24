@@ -22,6 +22,7 @@ import {
   onFsChanged,
   onFsWatchError,
   onWorkspaceUpdated,
+  onWorkspaceRemoved,
   onOrchdProjectsChanged,
   onOrchdGoalsChanged,
   onOrchdIdeasChanged,
@@ -171,6 +172,14 @@ describe("ipc/events", () => {
     const w: Workspace = { id: "w1", name: "p", rootPath: "/p", roots: ["/p", "/q"] };
     registered.get("workspace://updated")!({ payload: w });
     expect(cb).toHaveBeenCalledWith(w);
+  });
+
+  it("onWorkspaceRemoved subscribes to workspace://removed and unwraps { workspaceId } (SCN-058)", async () => {
+    const cb = vi.fn();
+    await onWorkspaceRemoved(cb);
+    expect(listenMock).toHaveBeenCalledWith("workspace://removed", expect.any(Function));
+    registered.get("workspace://removed")!({ payload: { workspaceId: "w1" } });
+    expect(cb).toHaveBeenCalledWith({ workspaceId: "w1" });
   });
 
   // ── orchd coarse-invalidation + connection events (S3 T13) ─────────────────────────────────

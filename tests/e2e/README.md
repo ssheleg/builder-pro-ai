@@ -41,7 +41,10 @@ daemon through the full lifecycle:
   handshake (`connect()` performs this internally — see `preambleHandshake()` in
   `daemon-harness.mjs`). Asserts the negotiated `chosenVersion === 2`.
 - **phase1** — `CreateWorkspace` (rooted in a fresh temp dir under `target/`),
-  `CreateSession` (a real `/bin/zsh`).
+  `CreateSession` (a real `/bin/zsh`). The workspace is named `e2e-<pid>-<ms>`, not a
+  bare `e2e`: under the launchd-managed variant (§2) that row is written to the
+  **real** user database, so any leftover must be instantly attributable to a
+  specific harness run rather than passing for a workspace the user created.
 - **phase2** — `AttachSession` → first push is `Replay`; `WriteStdin` an
   `echo <unique-marker>` command; collect `Output` pushes until the marker appears.
 - **phase3** — `WriteStdin` a `sleep 1` command; assert a `StateChanged` push with
@@ -84,6 +87,31 @@ daemon through the full lifecycle:
 No assertion is weakened to pass vacuously — a missing daemon binary, a broken
 handshake, absent lifecycle pushes, or lost scrollback each fail with a specific,
 actionable message and a non-zero exit code.
+
+### Teardown (runs on every exit path)
+
+A top-level `finally` tears down **everything the run created**, whether it passed,
+failed an assertion mid-phase, or timed out:
+
+- the daemon it spawned (whole process group: SIGTERM → SIGKILL) — skipped for the
+  launchd-managed variant, which owns no daemon;
+- the temp workspace root, the isolated `XDG_RUNTIME_DIR`, and the isolated `HOME`;
+- **the daemon-side rows** — every session it created (`KillSession`), then the
+  workspace itself (`RemoveWorkspace { workspace_id }`). This runs on its own
+  short-lived connection with a deliberately tolerant frame reader (it correlates
+  only the response it is waiting for and ignores everything else), so a push or
+  response variant the shared `lib/daemon-harness.mjs` codec doesn't know cannot
+  throw out of a socket `data` listener and turn a green run red.
+
+Teardown is best-effort by construction: it never throws, never changes the exit
+code, and never masks the real verdict — a failure is *reported*, not raised. If the
+daemon it is talking to doesn't understand `RemoveWorkspace` (an older binary: it
+fails to decode the frame and disconnects without replying), the harness says so
+explicitly and names the workspace id it could not remove. Severity matches the
+blast radius: against the harness's own throwaway daemon it is a one-line note (that
+whole `bpa.db` is deleted seconds later); against a real daemon (§2) it is a loud
+`stderr` banner naming the id, the name, and the socket, because that row will show
+up in the app's sidebar until someone deletes it by hand.
 
 > **History note:** phase5's assertion 2 was blocked when first authored — at the
 > time, the daemon's `AttachRegistry` refused attach on any session absent from the
@@ -194,9 +222,27 @@ quit/relaunch, run the same harness against a launchd-managed daemon instead:
    BPA_E2E_EXTERNAL_DAEMON=1 npm run e2e:survive
    ```
    With `BPA_E2E_EXTERNAL_DAEMON=1`, phase0 skips `spawnDaemon()` and connects
-   directly to the already-running, launchd-managed daemon; cleanup skips the
-   `SIGTERM` and only kills the harness's own test session (`KillSession`), leaving
-   the daemon itself under launchd's supervision as it would be in production.
+   directly to the already-running, launchd-managed daemon, leaving the daemon itself
+   under launchd's supervision as it would be in production (cleanup skips the
+   `SIGTERM` for it).
+
+   > **This mode writes to your real database.** Attaching to the launchd daemon
+   > means the ambient `HOME`, i.e. the real
+   > `~/Library/Application Support/ai.builderpro.desktop/bpa.db` — the same rows the
+   > app's sidebar renders. That is intentional (it is the point of this variant);
+   > leaving droppings behind is not. The harness therefore **cleans up after
+   > itself**: the `finally` teardown kills every session it created and then removes
+   > its own workspace with `RemoveWorkspace { workspace_id }`, on the failure path
+   > too — which matters, because a run that fails mid-phase is exactly how earlier
+   > versions of this harness leaked 12 stray `e2e` workspaces (all pointing at
+   > long-deleted `target/e2e-ws-*` temp dirs) into a real user database.
+   >
+   > **Against a daemon that predates `RemoveWorkspace`** (it can't decode the frame,
+   > so it just drops the connection) the removal cannot happen. The harness does
+   > **not** fail the run over it — it prints a loud `stderr` banner naming the
+   > workspace id, its `e2e-<pid>-<ms>` name, its root path, and the socket, so the
+   > leftover is unmistakable and removable by hand. Rebuild/restart the daemon from
+   > a current checkout to get automatic cleanup back.
 5. To specifically prove the *crash-restart* half of `KeepAlive{Crashed}` (as opposed
    to the "client disconnects, daemon simply never dies" property phase4 already
    covers): `kill -9` the daemon pid mid-test and observe `launchctl print

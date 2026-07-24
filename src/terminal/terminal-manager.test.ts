@@ -435,6 +435,29 @@ describe("TerminalManager", () => {
     consoleWarn.mockRestore();
   });
 
+  // SCN-058: a removed WORKSPACE takes all of its sessions with it, and the caller only learns
+  // the workspace id — so the sweep is expressed as "forget whatever the store no longer knows".
+  it("disposeMissing tears down exactly the instances the store no longer knows about", () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    m.ensure("s2");
+    m.disposeMissing(new Set(["s2"]));
+    expect(m.has("s1")).toBe(false);
+    expect(m.has("s2")).toBe(true);
+    expect(terminals[0].disposed).toBe(true);
+    expect(terminals[1].disposed).toBe(false);
+  });
+
+  it("disposeMissing keeps every live instance when the store still knows them all (no-op)", () => {
+    const m = new TerminalManager();
+    m.ensure("s1");
+    m.ensure("s2");
+    m.disposeMissing(new Set(["s1", "s2"]));
+    expect(m.has("s1")).toBe(true);
+    expect(m.has("s2")).toBe(true);
+    expect(terminals.every((t) => !t.disposed)).toBe(true);
+  });
+
   it("disposeAll tears down every instance and empties the map", () => {
     const m = new TerminalManager();
     m.ensure("s1");

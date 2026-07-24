@@ -101,6 +101,35 @@ export function removeWorkspaceRoot(workspaceId: WorkspaceId, path: string): Pro
 }
 
 /**
+ * Remove a workspace permanently (SCN-058). The daemon deletes the workspace, its roots, EVERY
+ * session that belongs to it and those sessions' scrollback — terminating any live shell first, so
+ * a removal never leaves a PTY with no tab to reach it. There is no soft-delete and no undo: the
+ * calling surface MUST have stated that consequence and taken a confirmation before invoking this.
+ *
+ * Resolves with nothing (the daemon replies `Ack`); a rejection propagates the raw `CommandError`
+ * as-is (unknown id ⇒ `{ kind: "daemon", code: "DbSql" }`, daemon down ⇒
+ * `{ kind: "disconnected" }`), for the caller to surface honestly. Every connected client
+ * (including this one) also receives `workspace://removed` — see `./events.ts` — which is what
+ * drops the workspace from every open window.
+ */
+export function removeWorkspace(workspaceId: WorkspaceId): Promise<void> {
+  return invoke<void>("remove_workspace", { workspaceId });
+}
+
+/**
+ * CORE-ONLY (SCN-059): does each of these paths still exist on disk? A pure LOCAL `stat` in the
+ * GUI process — no daemon round-trip. Resolves one boolean per input path, POSITIONALLY (result
+ * `i` answers for `paths[i]`).
+ *
+ * A path whose existence cannot be determined (permission denied, I/O error) resolves as `true`
+ * — "present" — never `false`: the only consumer is the stale-workspace clean-up, and SCN-059
+ * forbids removing a workspace on a guess. Only a definite "not there" reports `false`.
+ */
+export function pathsExist(paths: string[]): Promise<boolean[]> {
+  return invoke<boolean[]>("paths_exist", { paths });
+}
+
+/**
  * Fetch a session's recent command lifecycle events (spec §3.3, Pv2 §7 `command_events` table),
  * newest-first, capped at `limit`. An unknown `sessionId` (e.g. a rehydrated session that predates
  * the v2 `command_events` table) resolves to an empty array — honest, not an error (spec §7).

@@ -41,6 +41,14 @@ pub const EV_WORKSPACE_CREATED: &str = "workspace://created";
 /// daemon broadcasts `Push::WorkspaceUpdated` to every connected client (same
 /// broadcast-to-all rationale as `EV_WORKSPACE_CREATED`) with the workspace's new `roots`.
 pub const EV_WORKSPACE_UPDATED: &str = "workspace://updated";
+/// Emitted after `Request::RemoveWorkspace` succeeds (SCN-058): the daemon broadcasts
+/// `Push::WorkspaceRemoved` to EVERY connected client (same broadcast-to-all rationale as
+/// `EV_WORKSPACE_CREATED`), carrying only the removed id — there is no surviving `Workspace`
+/// value to send, which is exactly why the protocol gave it its own variant instead of reusing
+/// `WorkspaceUpdated` (whose consumers *upsert* their payload and would re-insert the workspace
+/// the owner just deleted). Payload: `{ workspaceId }` (camelCase, like every other reshaped
+/// payload here).
+pub const EV_WORKSPACE_REMOVED: &str = "workspace://removed";
 pub const EV_DAEMON_DISCONNECTED: &str = "daemon://disconnected";
 pub const EV_DAEMON_RECONNECTED: &str = "daemon://reconnected";
 /// Emitted (no payload) when the handshake preamble (spec §4.5) finds the daemon's protocol range
@@ -139,6 +147,9 @@ pub enum BrokerAction {
 ///   broadcast-to-all rationale.
 /// - `Push::WorkspaceUpdated` -> `workspace://updated` with the raw `Workspace` payload (spec
 ///   §3.3/§6.6: fired after `Add`/`RemoveWorkspaceRoot`), same broadcast-to-all rationale.
+/// - `Push::WorkspaceRemoved` -> `workspace://removed`, reshaped to `{ workspaceId }` (SCN-058);
+///   same broadcast-to-all rationale — every open window must drop the workspace, not just the
+///   one that asked for the removal.
 /// - `Push::Error` -> `Ignore` (logged by the caller; async/un-correlated daemon errors are not
 ///   surfaced as a Hop-A event in S1 — spec §7 broker-mapping table: "log + mark session errored").
 pub fn map_push(push: Push) -> BrokerAction {
@@ -199,6 +210,10 @@ pub fn map_push(push: Push) -> BrokerAction {
             let payload = serde_json::to_value(workspace)
                 .expect("Workspace is a plain-data struct; serialization cannot fail");
             BrokerAction::Emit(EV_WORKSPACE_UPDATED, payload)
+        }
+        Push::WorkspaceRemoved { workspace_id } => {
+            let payload = serde_json::json!({ "workspaceId": workspace_id });
+            BrokerAction::Emit(EV_WORKSPACE_REMOVED, payload)
         }
         Push::Error {
             session_id,
@@ -702,6 +717,24 @@ mod tests {
                 assert_eq!(payload["id"], "w1");
                 assert_eq!(payload["rootPath"], "/root");
                 assert_eq!(payload["roots"], serde_json::json!(["/root", "/root2"]));
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_removed_maps_to_emit_with_camel_case_workspace_id_only() {
+        // SCN-058: a removal has no surviving `Workspace` to send — the payload is the id alone,
+        // camelCased like every other reshaped payload, and it must NOT reuse the
+        // `workspace://updated` channel (whose consumers upsert and would resurrect the row).
+        let action = map_push(Push::WorkspaceRemoved {
+            workspace_id: "w1".into(),
+        });
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_WORKSPACE_REMOVED);
+                assert_eq!(payload["workspaceId"], "w1");
+                assert!(payload.get("roots").is_none());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

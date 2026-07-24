@@ -123,7 +123,7 @@ describe("HomeView", () => {
     expect(focusMock).not.toHaveBeenCalled();
   });
 
-  it("stats strip shows accurate workspace/live/waiting counts", () => {
+  it("stats strip shows accurate workspace/live/waiting/restored counts", () => {
     useAppStore.setState({
       workspaces: { w1: wsA, w2: wsB },
       sessions: {
@@ -136,19 +136,30 @@ describe("HomeView", () => {
           waitingForInput: false,
           lifecycle: { kind: "exited", code: 0, signal: null },
         }),
+        // Cold-rehydrated (sessiond's restore shape): no live PTY, not waiting, not exited.
+        s4: meta({
+          id: "s4",
+          workspaceId: "w2",
+          isActive: false,
+          waitingForInput: false,
+          lifecycle: { kind: "atPrompt" },
+        }),
       },
     });
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
-    // 2 workspaces total; live = waiting(1) + running(1) = 2; waiting = 1. The exited session
-    // does not count toward "live". The strip is now a row of Stat tiles (S-UXR B redesign), so
-    // the counts are asserted per labelled tile rather than as one inline sentence.
+    // 2 workspaces total. The tiles use the SAME definitions as the workspace stat chips
+    // (`partitionSessions`): live = 1 (s2 — waiting has its own tile and is NOT double-counted
+    // here), waiting = 1 (s1), restored = 1 (s4 — never reported as live), and the exited session
+    // counts toward none of them.
     expect(screen.getByTestId("home-stats")).toBeTruthy();
     expect(screen.getByTestId("home-stat-workspaces").textContent).toContain("workspaces");
     expect(screen.getByTestId("home-stat-workspaces").textContent).toContain("2");
     expect(screen.getByTestId("home-stat-live").textContent).toContain("live");
-    expect(screen.getByTestId("home-stat-live").textContent).toContain("2");
+    expect(screen.getByTestId("home-stat-live").textContent).toContain("1");
     expect(screen.getByTestId("home-stat-waiting").textContent).toContain("waiting");
     expect(screen.getByTestId("home-stat-waiting").textContent).toContain("1");
+    expect(screen.getByTestId("home-stat-restored").textContent).toContain("restored");
+    expect(screen.getByTestId("home-stat-restored").textContent).toContain("1");
   });
 
   it("exited rows show ✓ for a zero exit code and ✗ (red) for a non-zero one", () => {
@@ -284,6 +295,82 @@ describe("HomeView", () => {
     render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
     expect(screen.queryByRole("region", { name: strings.home.needsYou })).toBeNull();
     expect(screen.queryByText(strings.home.needsYou)).toBeNull();
+  });
+
+  // ── SCN-004: a cold-rehydrated session must be REACHABLE from Home ───────────────────────────
+  //
+  // Shape straight from `crates/sessiond/src/persistence.rs`'s restore path: `isActive:false`,
+  // `waitingForInput:false`, a NON-exited lifecycle. It used to match none of Home's three
+  // predicates, so the attention-first screen silently omitted it entirely.
+
+  const restoredMeta = (over: Partial<SessionMeta> = {}): SessionMeta =>
+    meta({
+      id: "s-cold",
+      workspaceId: "w1",
+      title: "cold-one",
+      isActive: false,
+      waitingForInput: false,
+      lifecycle: { kind: "atPrompt" },
+      ...over,
+    });
+
+  it("SCN-004: a cold-rehydrated session appears in its own «Restored» section (never dropped from Home)", () => {
+    useAppStore.setState({ workspaces: { w1: wsA }, sessions: { "s-cold": restoredMeta() } });
+    render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
+
+    expect(screen.queryByTestId("home-empty")).toBeNull();
+    const section = screen.getByTestId("home-restored");
+    expect(section.textContent).toContain(strings.sessions.restoredSection);
+    const row = screen.getByTestId("home-row-s-cold");
+    expect(section.contains(row)).toBe(true);
+    // Honest label — it is NOT reported as running/live anywhere on the row.
+    expect(row.textContent).toContain(strings.sessions.restoredNote);
+    expect(row.textContent).not.toContain(strings.home.running);
+  });
+
+  it("SCN-004: a restored row navigates to its workspace + session, exactly like a running one", () => {
+    const setActiveWorkspaceId = vi.fn();
+    useAppStore.setState({ workspaces: { w1: wsA }, sessions: { "s-cold": restoredMeta() } });
+    render(<HomeView manager={fakeManager} setActiveWorkspaceId={setActiveWorkspaceId} />);
+
+    fireEvent.click(screen.getByTestId("home-row-s-cold"));
+
+    expect(setActiveWorkspaceId).toHaveBeenCalledWith("w1");
+    expect(useAppStore.getState().view).toBe("workspace");
+    expect(useAppStore.getState().activeSessionId).toBe("s-cold");
+    expect(focusMock).toHaveBeenCalledWith("s-cold");
+  });
+
+  it("SCN-004: every session in the store is rendered in exactly one section (no session is unreachable)", () => {
+    useAppStore.setState({
+      workspaces: { w1: wsA },
+      sessions: {
+        w: meta({ id: "w", workspaceId: "w1", waitingForInput: true, lifecycle: { kind: "running" } }),
+        r: meta({ id: "r", workspaceId: "w1", isActive: true, lifecycle: { kind: "running" } }),
+        c: restoredMeta({ id: "c" }),
+        e: meta({
+          id: "e",
+          workspaceId: "w1",
+          isActive: false,
+          lifecycle: { kind: "exited", code: 0, signal: null },
+        }),
+      },
+    });
+    render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
+
+    const rendered = Array.from(document.querySelectorAll('[data-testid^="home-row-"]')).map((el) =>
+      el.getAttribute("data-testid"),
+    );
+    expect(rendered.sort()).toEqual(["home-row-c", "home-row-e", "home-row-r", "home-row-w"]);
+  });
+
+  it("SCN-004: the «Restored» section is omitted entirely when nothing is restored (no dead heading)", () => {
+    useAppStore.setState({
+      workspaces: { w1: wsA },
+      sessions: { r: meta({ id: "r", workspaceId: "w1", isActive: true, lifecycle: { kind: "running" } }) },
+    });
+    render(<HomeView manager={fakeManager} setActiveWorkspaceId={() => {}} />);
+    expect(screen.queryByTestId("home-restored")).toBeNull();
   });
 
   it("task-19: HomeGoals renders BELOW all three attention sections — the amber «Needs you» block keeps its pinned-top position", () => {

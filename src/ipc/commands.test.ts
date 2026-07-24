@@ -24,6 +24,8 @@ import {
   daemonStatus,
   addWorkspaceRoot,
   removeWorkspaceRoot,
+  removeWorkspace,
+  pathsExist,
   getCommandEvents,
 } from "./commands";
 import { Channel } from "@tauri-apps/api/core";
@@ -177,6 +179,27 @@ describe("ipc/commands", () => {
     const err = { kind: "daemon", code: "LastRoot", message: "cannot remove the last root" };
     invokeMock.mockRejectedValueOnce(err);
     await expect(removeWorkspaceRoot("w1", "/p")).rejects.toEqual(err);
+  });
+
+  // ── SCN-058 / SCN-059 ────────────────────────────────────────────────────────────────────────
+
+  it("removeWorkspace sends only the workspaceId and resolves with nothing (daemon replies Ack)", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(removeWorkspace("w1")).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("remove_workspace", { workspaceId: "w1" });
+  });
+
+  it("removeWorkspace propagates a rejected CommandError as-is (unknown id ⇒ DbSql)", async () => {
+    const err = { kind: "daemon", code: "DbSql", message: "db sql error: workspace w-gone not found" };
+    invokeMock.mockRejectedValueOnce(err);
+    await expect(removeWorkspace("w-gone")).rejects.toEqual(err);
+  });
+
+  it("pathsExist sends the path list and resolves one positional boolean per path", async () => {
+    invokeMock.mockResolvedValueOnce([true, false]);
+    const res = await pathsExist(["/p", "/gone"]);
+    expect(invokeMock).toHaveBeenCalledWith("paths_exist", { paths: ["/p", "/gone"] });
+    expect(res).toEqual([true, false]);
   });
 
   it("getCommandEvents sends sessionId + limit, resolves CommandEvent[] newest-first", async () => {

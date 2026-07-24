@@ -205,3 +205,68 @@ describe("TerminalTabs", () => {
     );
   });
 });
+
+// ── the strip belongs to ONE workspace ─────────────────────────────────────────────────────────
+
+describe("TerminalTabs workspace scoping", () => {
+  beforeEach(() => {
+    useAppStore.setState(
+      {
+        sessions: {
+          s1: meta({ id: "s1", workspaceId: "w1", title: "mine" }),
+          s2: meta({ id: "s2", workspaceId: "w2", title: "theirs" }),
+        },
+        workspaces: {
+          w1: ws,
+          w2: { id: "w2", name: "other", rootPath: "/o", roots: ["/o"] },
+        },
+        activeSessionId: "s1",
+      },
+      false,
+    );
+  });
+
+  it("renders ONLY the active workspace's sessions — another workspace's tab never leaks in", () => {
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    expect(screen.getByRole("tab", { name: /mine/i })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: /theirs/i })).toBeNull();
+  });
+
+  it("switching the active workspace switches the whole strip", () => {
+    const { rerender } = render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    rerender(<TerminalTabs manager={fakeManager} activeWorkspaceId="w2" />);
+    expect(screen.getByRole("tab", { name: /theirs/i })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: /mine/i })).toBeNull();
+  });
+
+  it("renders no tabs at all while no workspace is selected (there is no workspace whose terminals these would be)", () => {
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId={null} />);
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+  });
+});
+
+// ── overflow contract (jsdom does no layout, so the STYLE contract is what is asserted) ────────
+
+describe("TerminalTabs overflow layout", () => {
+  it("the tablist scrolls horizontally instead of overflowing its box", () => {
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    const tablist = screen.getByRole("tablist");
+    expect(tablist.style.overflowX).toBe("auto");
+    expect(tablist.style.minWidth).toBe("0");
+  });
+
+  it("neither the tabs nor the «+ New terminal» button shrink (the button never paints over a tab)", () => {
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    for (const tab of screen.getAllByRole("tab")) {
+      expect((tab as HTMLElement).style.flexShrink).toBe("0");
+    }
+    const newTerminal = screen.getByRole("button", { name: /new terminal/i });
+    expect(newTerminal.style.flexShrink).toBe("0");
+  });
+
+  it("a tab title never wraps", () => {
+    render(<TerminalTabs manager={fakeManager} activeWorkspaceId="w1" />);
+    const title = screen.getByText("zsh");
+    expect((title as HTMLElement).style.whiteSpace).toBe("nowrap");
+  });
+});

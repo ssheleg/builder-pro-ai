@@ -8,6 +8,8 @@
 |----|-------|---------|---------|--------|--------|------------|
 | SCN-001 | First launch — empty app | onboarding | P-02 | ST-001 | implemented | 2026-07-22 PASS |
 | SCN-002 | Add first workspace | onboarding | P-02 | ST-002 | implemented | 2026-07-22 PASS |
+| SCN-058 | Remove a workspace | onboarding | P-01 | ST-044 | validated | — |
+| SCN-059 | Clear out workspaces whose folder is gone | onboarding | P-01 | ST-044 | validated | — |
 | SCN-003 | Capture first idea with ⌘K | capture | P-02 | ST-003 | implemented | 2026-07-22 PASS |
 | SCN-004 | Home attention triage | home | P-01 | ST-004 | implemented | 2026-07-22 PASS |
 | SCN-005 | Home goals overview | home | P-01 | ST-005 | implemented | 2026-07-22 PASS |
@@ -83,7 +85,7 @@ in different lifecycle states.
 - **Preconditions:** none
 - **Steps:**
   1. User opens the app for the first time
-- **Expected result:** Home view opens by default; sidebar shows "No workspaces yet — add a workspace or create a project to begin."; Home shows stat tiles (workspaces/live/waiting, all 0) and "No active sessions." with no action button; "+ project" and "+ Add workspace" CTAs visible in sidebar footer
+- **Expected result:** Home view opens by default; sidebar shows "No workspaces yet — add a workspace or create a project to begin."; Home shows stat tiles (workspaces / live / waiting / restored, all 0) and "No active sessions." with no action button; "+ project" and "+ Add workspace" CTAs visible in sidebar footer
 - **UI elements:** sidebar empty-state sentence, stat tiles, EmptyState "No active sessions.", "+ project" button, "+ Add workspace" button, ThemeToggle, Diagnostics button
 - **States covered:** empty
 - **Errors & recovery:** daemon not yet connected → red "Daemon disconnected — reconnecting…" banner, auto-retries with backoff [500,1000,2000,5000]ms
@@ -105,6 +107,41 @@ in different lifecycle states.
 - **Errors & recovery:** picker cancelled → silent no-op; createWorkspace rejects → toast "Failed to add workspace: {msg}" via describeCommandError (disconnected / incompatible / too large / internal)
 - **Status:** implemented
 - **Coverage:** src/components/WorkspaceSidebar.tsx:110-127,445-461, src/strings.ts:59-66,105
+
+### SCN-058: Remove a workspace
+- **Persona:** P-01
+- **Feature:** onboarding
+- **Traces:** ST-044, FLW-04 (JTBD-01, JTBD-09, JRN-01/#3)
+- **Entry point:** sidebar workspace row — "Remove workspace" affordance
+- **Preconditions:** at least one workspace exists
+- **Steps:**
+  1. User triggers "Remove workspace" on a sidebar row → system asks for confirmation, naming the workspace and stating that its terminals will be closed and its scrollback discarded
+  2. User confirms → system removes the workspace, terminating any live shells it owns, and the row disappears from the sidebar
+- **Expected result:** the workspace, its roots, its sessions and their scrollback are gone permanently — nothing reappears after a restart; if the removed workspace was the active one, the app falls back to Home rather than a dead view; the removal is broadcast so every open window updates
+- **Alt paths:** user cancels the confirmation → nothing is removed, no side effects
+- **UI elements:** per-row "Remove workspace" control, confirmation dialog naming the workspace + the live-terminal consequence, sidebar row, toast on failure
+- **States covered:** success, error
+- **Errors & recovery:** removal rejects (daemon down / unknown id) → toast with the reason, the row stays; a workspace with live terminals is NOT silently skipped — its shells are terminated as part of the removal, which the confirmation states up front (never an orphan PTY with no tab to reach it)
+- **Status:** validated
+- **Coverage:** crates/protocol/src/lib.rs:219 (`Request::RemoveWorkspace`, tail-appended),:312 (`Push::WorkspaceRemoved` — a dedicated id-only push, NOT `WorkspaceUpdated`, whose consumers upsert and would resurrect the removed row); crates/sessiond/src/socket_server.rs (`close_session` extracted from `KillSession` and reused, existence gate → kill victims → drain pending final flushes → delete → broadcast); crates/sessiond/src/persistence.rs (`delete_workspace`: command_events → scrollback → session → workspace_root → workspace in ONE transaction; schema has no ON DELETE cascade); crates/sessiond/tests/remove_workspace.rs (full destructive path incl. live PTY reaped, bystander workspace untouched, no resurrection on cold rehydrate); src-tauri/src/commands.rs:1123 (`remove_workspace`) + src-tauri/src/broker.rs (`workspace://removed`); src/ipc/commands.ts:115, src/ipc/events.ts:94,105; src/store/store.ts:833 (`removeWorkspace`),:813 (`dropWorkspace`); src/components/WorkspaceSidebar.tsx:317 (per-row remove + confirm); src/App.tsx:184-196 (push handling + dead-view fallback + `TerminalManager.disposeMissing`)
+
+### SCN-059: Clear out workspaces whose folder is gone
+- **Persona:** P-01
+- **Feature:** onboarding
+- **Traces:** ST-044, FLW-04 (JTBD-01, JRN-02/#2)
+- **Entry point:** sidebar — bulk "clean up missing workspaces" affordance, shown only when ≥1 workspace's root no longer exists
+- **Preconditions:** ≥1 workspace whose root path is absent on disk. **A workspace counts as missing only when EVERY one of its roots is definitely gone** — a multi-root workspace with one surviving root is still usable and is left alone. **Cadence:** roots are checked when the sidebar mounts and whenever the set of roots changes — there is no polling and no filesystem watcher, so a folder deleted while the app is open is marked on the next workspace-list change or restart, not instantly (deliberate: a watcher over every root is not worth the cost for a housekeeping affordance)
+- **Steps:**
+  1. User sees the missing workspaces marked as such in the sidebar (distinct from healthy rows)
+  2. User triggers the clean-up → system states exactly how many workspaces will be removed and asks to confirm
+  3. User confirms → system removes only those workspaces
+- **Expected result:** every workspace whose folder is gone is removed; every workspace whose folder still exists is untouched; the count in the confirmation matches the number actually removed
+- **Alt paths:** no workspace is missing → the affordance is not offered at all (no dead control); user cancels → nothing removed
+- **UI elements:** "folder missing" marker on the row, bulk clean-up control with count, confirmation dialog, toast on partial failure
+- **States covered:** empty, success, error
+- **Errors & recovery:** a root that cannot be checked (permission error) is treated as PRESENT and left alone — never removed on a guess; if some removals fail, the successful ones stand and a toast names how many failed (no silent partial success)
+- **Status:** validated
+- **Coverage:** src-tauri/src/commands.rs:1140 (`path_present_unless_definitely_missing` — `try_exists().unwrap_or(true)`, so an unreadable root counts as PRESENT and is never removed on a guess),:1157 (`paths_exist`); src/ipc/commands.ts:128; src/components/WorkspaceSidebar.tsx:121-149 (presence effect, re-runs on root-set change),:157 (`isMissing` = every root definitely gone),:303 (row marker),:647 (bulk control with exact count, rendered only when ≥1 missing); removal reuses SCN-058's path with `Promise.allSettled` so successes stand and one toast names the failures
 
 ### SCN-003: Capture first idea with ⌘K
 - **Persona:** P-02
@@ -133,10 +170,10 @@ in different lifecycle states.
 - **Preconditions:** sessions exist across workspaces
 - **Steps:**
   1. User opens Home
-  2. User scans "Needs you" (waiting), "Running", "Recently finished" groups
-  3. User clicks "Go →" on a waiting row (or any running/finished row)
-- **Expected result:** stat tiles show workspaces/live/waiting counts (live/waiting tone changes when > 0); clicking a row navigates to that workspace, activates the session, and focuses its terminal
-- **UI elements:** stat tiles, group headers, StatusDot, "waiting for input" badge, "Go →" button, running rows, finished rows with ✓/✗ glyph + "code {n}"
+  2. User scans "Needs you" (waiting), "Running", "Restored (no live shell)", "Recently finished" groups
+  3. User clicks "Go →" on a waiting row (or any running/restored/finished row)
+- **Expected result:** stat tiles show workspaces / live / waiting / restored counts (live/waiting tone changes when > 0); clicking a row navigates to that workspace, activates the session, and focuses its terminal. **Every session appears in exactly one group** — the four buckets are a disjoint, exhaustive partition of the store, so a session can never be rendered as a tab yet counted nowhere (the failure this scenario was audited into: sessions cold-rehydrated after a restart are `atPrompt` + not active, which matched none of the old live/waiting/exited predicates and so vanished from Home entirely). "live" means non-exited, not waiting, and holding a live PTY — waiting has its own tile and is never double-counted into live.
+- **UI elements:** stat tiles ×4, group headers, StatusDot, "waiting for input" badge, "Go →" button, running rows, restored rows with an honest "restored — scrollback only" note, finished rows with ✓/✗ glyph + "code {n}"
 - **States covered:** empty, success
 - **Errors & recovery:** no sessions → "No active sessions." + "Open {name}" button when a workspace exists (no button with zero workspaces)
 - **Status:** implemented
@@ -288,12 +325,12 @@ in different lifecycle states.
 - **Preconditions:** a workspace is active
 - **Steps:**
   1. User clicks "+ New terminal"
-- **Expected result:** session spawns (cwd = selected file's root or roots[0]); tab appears via session://created event and auto-activates if none active; terminal pane opens
+- **Expected result:** session spawns (cwd = selected file's root or roots[0]); tab appears via session://created event and auto-activates if none active; terminal pane opens. **The tab strip shows only the ACTIVE workspace's sessions** — it and the workspace stat chips read the same set, so the strip can never show terminals belonging to a workspace whose pane is not on screen (with no workspace selected there are no tabs, which is the honest reading of "there is no workspace whose terminals these would be")
 - **UI elements:** "+ New terminal" button, session tab (StatusDot + title + ×), terminal pane
 - **States covered:** empty, error, success
-- **Errors & recovery:** no active workspace → button disabled (not-allowed cursor); create_session rejects → toast "Failed to open a new terminal: {msg}", no tab; zero sessions → pane placeholder "No terminals yet — pick a workspace and press + New terminal."
+- **Errors & recovery:** no active workspace → button disabled (not-allowed cursor); create_session rejects → toast "Failed to open a new terminal: {msg}", no tab; zero sessions in this workspace → pane placeholder "No terminals yet — pick a workspace and press + New terminal."
 - **Status:** implemented
-- **Coverage:** src/components/TerminalTabs.tsx:57-81,166-181, src/App.tsx:133-137,525-546, src/strings.ts:198,201
+- **Coverage:** src/components/TerminalTabs.tsx (workspace-scoped list, tablist overflow + non-shrinking tabs/button), src/App.tsx (scoped placeholder + workspace-aware auto-activation), src/strings.ts:198,201
 
 ### SCN-014: Switch terminal tabs (keep-alive)
 - **Persona:** P-01
@@ -303,8 +340,8 @@ in different lifecycle states.
 - **Preconditions:** multiple live sessions
 - **Steps:**
   1. User clicks another tab (or Enter/Space on it)
-- **Expected result:** pane shows that session with full scrollback preserved; hidden sessions keep buffering output; no re-spawn, no duplicated replay
-- **UI elements:** session tabs (role=tab, aria-selected), terminal pane
+- **Expected result:** pane shows that session with full scrollback preserved; hidden sessions keep buffering output; no re-spawn, no duplicated replay. With more tabs than fit, the strip scrolls horizontally and the "+ New terminal" button stays reachable — tabs never overflow their box or get painted over by the button
+- **UI elements:** session tabs (role=tab, aria-selected), horizontally scrolling tablist, terminal pane
 - **States covered:** success
 - **Errors & recovery:** sessions exist but none active → "Select a terminal tab." placeholder; nothing else can fail (switch is local)
 - **Status:** implemented
@@ -333,7 +370,7 @@ in different lifecycle states.
 - **Preconditions:** session running
 - **Steps:**
   1. User watches the dot as the session runs, waits for input, and exits
-- **Expected result:** running → info dot; running + waitingForInput → warn dot "waiting for input"; atPrompt/typing → muted idle dot; exited → danger dot "exited"; exited tab stays with last scrollback until closed; a late state event cannot resurrect an exited session
+- **Expected result:** running → info dot; running + waitingForInput → warn dot "waiting for input"; atPrompt/typing → muted idle dot; exited → danger dot "exited"; exited tab stays with last scrollback until closed; a late state event cannot resurrect an exited session. A session cold-rehydrated after a daemon restart has no live PTY and is reported as **restored**, never as live — it keeps its scrollback and is reachable, but the app never claims a shell is running when it is not
 - **UI elements:** StatusDot (aria labels idle/running/exited/"waiting for input"), session tab, Home rows
 - **States covered:** success
 - **Errors & recovery:** nothing can fail (display of pushed state); exited always wins over stale updates

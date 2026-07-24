@@ -1,5 +1,5 @@
 import type { CSSProperties, JSX } from "react";
-import { useAppStore } from "../store/store";
+import { useAppStore, partitionSessions } from "../store/store";
 import type { SessionMeta, Workspace } from "../ipc/types";
 import type { SessionId, WorkspaceId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
@@ -173,12 +173,14 @@ function glyphStyle(ok: boolean): CSSProperties {
 
 /**
  * Attention-first Home (spec §6.2, design decision D6): a pure composition over the existing
- * store (sessions + workspaces + lifecycle) — no new backend, no polling. Three sections in a
+ * store (sessions + workspaces + lifecycle) — no new backend, no polling. Four sections in a
  * FIXED order (attention beats chronology, design-system.md §1 "glanceability beats
- * completeness"):
+ * completeness"), together covering EVERY session in the store — `partitionSessions` is an
+ * exhaustive partition, so nothing can be silently omitted from this screen again:
  *   ① «Needs you»          — `waitingForInput` sessions, amber Inbox-item rows, pinned top.
- *   ② «Running»            — active, non-waiting sessions; the whole row is the navigation target.
- *   ③ «Recently finished»  — exited sessions, ✓/✗ by exit code.
+ *   ② «Running»            — live, non-waiting sessions; the whole row is the navigation target.
+ *   ③ «Restored»           — back after a restart, no live shell; scrollback only.
+ *   ④ «Recently finished»  — exited sessions, ✓/✗ by exit code.
  * Every section groups its rows by workspace (a clickable group header jumps to that workspace
  * with no session selected). A whole-store metrics strip counts across ALL workspaces/sessions,
  * not just what's rendered below it — surfaced as `Stat` tiles (mono, tabular-nums) so the numbers
@@ -211,23 +213,29 @@ export function HomeView(props: {
   }
 
   const all = Object.values(sessions);
-  // Exited always wins (mirrors StatusDot.dotStateOf, spec §5/§10.4): belt-and-suspenders against
-  // a stale `waitingForInput:true` on a session whose process has already finished — `markExited`
-  // is the root fix (clears the flag), this guard is defense-in-depth so no other path can ever
-  // surface a dead session in the amber "Needs you" section (review finding F1).
-  const waiting = all.filter((m) => m.waitingForInput && m.lifecycle.kind !== "exited");
-  const running = all.filter((m) => m.isActive && !m.waitingForInput);
-  const exited = all.filter((m) => !m.isActive && m.lifecycle.kind === "exited");
+  // The four buckets come from `partitionSessions` (`store.ts`) — the SAME function the workspace
+  // stat chips use, so "live" means one thing app-wide and every session is reachable from exactly
+  // one section below. `exited` wins over a stale `waitingForInput:true` inside that helper
+  // (mirrors StatusDot.dotStateOf, spec §5/§10.4), so no dead session can surface in the amber
+  // "Needs you" section (review finding F1). Before it, three hand-rolled predicates left a
+  // cold-rehydrated session (`isActive:false`, not waiting, lifecycle `atPrompt`) in NO section at
+  // all — the attention-first screen silently omitted work that was sitting right there in a tab.
+  const { live, waiting, restored, exited } = partitionSessions(all);
 
   const waitingGroups = groupByWorkspace(waiting, workspaces);
-  const runningGroups = groupByWorkspace(running, workspaces);
+  const runningGroups = groupByWorkspace(live, workspaces);
+  const restoredGroups = groupByWorkspace(restored, workspaces);
   const exitedGroups = groupByWorkspace(exited, workspaces);
 
   // Stats count the WHOLE store, not just what's rendered below (spec §6.2 "N workspaces
   // · M live · K waiting" — the owner's context across ALL projects, not a filtered subset).
+  // `live` here EXCLUDES waiting (which has its own tile right next to it) — the same definition
+  // the workspace chips use; double-counting a waiting session as "live" was the naming rot that
+  // let three surfaces disagree about what the word meant.
   const workspaceCount = Object.keys(workspaces).length;
   const waitingCount = waiting.length;
-  const liveCount = waitingCount + running.length;
+  const liveCount = live.length;
+  const restoredCount = restored.length;
 
   const orderedWorkspaces = Object.values(workspaces).sort((a, b) =>
     a.name.localeCompare(b.name),
@@ -250,6 +258,16 @@ export function HomeView(props: {
             label="waiting"
             value={waitingCount}
             tone={waitingCount > 0 ? "warn" : "ink"}
+          />
+          {/* The fourth bucket gets a tile of its own so the strip adds up to the session total —
+              a restored session is neither live nor finished, and pretending it is either would be
+              the dishonest half of the old three-tile split. Neutral tone: nothing is wrong, and
+              nothing is running. */}
+          <Stat
+            data-testid="home-stat-restored"
+            label="restored"
+            value={restoredCount}
+            tone="ink"
           />
         </div>
       </Panel>
@@ -330,6 +348,51 @@ export function HomeView(props: {
                         {group.workspaceName}/{meta.title}
                       </span>
                       <span style={metaTextStyle}>{lifecycleText(meta)}</span>
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </section>
+          )}
+
+          {/* «Restored» (SCN-004): sessions the daemon handed back after a restart — scrollback
+              kept, shell gone. They sit BELOW «Running» (nothing is happening in them) and ABOVE
+              «Recently finished» (they have not finished — they are still open work the owner may
+              want to read or replace). Rows navigate exactly like running rows, which is the whole
+              point: before this section existed they were reachable from Home not at all. */}
+          {restoredGroups.length > 0 && (
+            <section
+              aria-label={strings.sessions.restoredSection}
+              data-testid="home-restored"
+              style={sectionStyle}
+            >
+              <h2 style={sectionHeadingStyle}>{strings.sessions.restoredSection}</h2>
+              <p style={{ ...metaTextStyle, margin: 0 }}>{strings.sessions.restoredHint}</p>
+              {restoredGroups.map((group) => (
+                <div key={group.workspaceId} style={groupStyle}>
+                  <button
+                    type="button"
+                    style={groupHeaderStyle}
+                    onClick={() => goTo(group.workspaceId)}
+                  >
+                    {group.workspaceName}
+                  </button>
+                  {group.sessions.map((meta) => (
+                    <button
+                      type="button"
+                      key={meta.id}
+                      data-testid={`home-row-${meta.id}`}
+                      style={clickableRowStyle}
+                      onClick={() => goTo(meta.workspaceId, meta.id)}
+                    >
+                      <StatusDot
+                        lifecycle={meta.lifecycle}
+                        waitingForInput={meta.waitingForInput}
+                      />
+                      <span style={monoNameStyle}>
+                        {group.workspaceName}/{meta.title}
+                      </span>
+                      <span style={metaTextStyle}>{strings.sessions.restoredNote}</span>
                     </button>
                   ))}
                 </div>
