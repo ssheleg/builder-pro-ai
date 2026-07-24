@@ -134,6 +134,13 @@ trust permanently.
 - **Forces:** push: flying blind on spend and output across 5–6 projects; pull: one in-app dashboard with per-project/per-agent cuts and time ranges; anxiety: stats that lie or cost more to collect than they're worth; habit: guessing, or scraping logs and git by hand.
 - **Success metric:** "where did this week's tokens/money/commits go, per project" answerable in-app in under a minute.
 
+### JTBD-12: Compose and re-run a repeatable development workflow *(stated 2026-07-24)*
+- **Statement:** When I keep driving the same multi-stage process by hand (docs → brainstorm → spec → plan → build → tests → deploy), I want to compose that process once as a reusable workflow — each stage with its own skills and instruction, plus skills shared across all stages — and run it on any project under my CEO's oversight, so the pipeline advances itself and I only step in where a stage needs me.
+- **Personas:** P-01
+- **Type:** functional
+- **Forces:** push: re-typing the same stage prompts and re-picking the same skills for every project is toil, and a hand-driven pipeline stalls whenever I look away; pull: a saved workflow-as-data (ordered stages, per-stage skills + prompt, global skills, gates) that the CEO advances within delegated authority and escalates out of it; anxiety: does a "running" workflow actually reflect live state, or is it lying — and will it act beyond what I delegated; habit: keeping the stage recipe in my head / a plugin like task-pipeline outside the app and steering every transition manually.
+- **Success metric:** a workflow authored once runs end-to-end on a new project with the operator touching only the stages whose gate is manual or that escalate — no re-authoring, no hand-driven transitions.
+
 ---
 
 ## 3. Customer journeys
@@ -239,6 +246,16 @@ Opportunity priority = Frequency × Severity × Solvability where scored.
 | 3 | Cut | Slices by project/agent: tokens, cost, calls | analytics view (SCN-052, draft) | 4 | data must be trustworthy | reuse InvocationLog cost plumbing (SCN-035) |
 | 4 | Output | Reads commits + code delta per project | output stats (SCN-053, draft) | 4 | git scraping cost | derive from workspace git, cache honestly |
 | 5 | Act | Spots an outlier → adjusts caps, kills an agent, rebalances | Rules tab / terminals | 5 | — | insight → action in one app |
+
+### JRN-12: Solo Builder — compose once, run everywhere (JTBD-12) *(stated 2026-07-24)*
+| # | Stage | User action | Touchpoint | Emotion (1-5) | Pain | Opportunity |
+|---|-------|------------|------------|---------------|------|-------------|
+| 1 | Recognise | "I keep hand-driving the same docs→spec→build→test pipeline" | — | 2 | recipe lives in my head / an external plugin | bring workflow-as-data into the app |
+| 2 | Compose | Creates a workflow, adds ordered stages | Workflows library (SCN-060, draft) | 4 | — | reuse the file-backed pattern of Rules/Docs |
+| 3 | Bind | Per stage: writes the prompt, picks skills, sets gate; sets global skills | stage editor (SCN-061/062, draft) | 4 | skills scattered; must pick the right ones | skills come from the existing registry (SCN-035) |
+| 4 | Delegate | Enables CEO oversight, delegates gate classes | CEO section (SCN-062, reuses SCN-046) | 3 | trust: will it act beyond what I set | reuse SupervisorConfig scope + caps |
+| 5 | Run | Runs the workflow on a project | project «Run workflow» (SCN-063, draft) | 4 | — | one trigger, then hands-off |
+| 6 | Oversee | Watches the run advance; steps in on manual gates / escalations | Home digest + run detail (SCN-063/064) | 5 | a "running" pipeline that lies | honest state; CEO escalates out-of-scope (SCN-048) |
 
 ---
 
@@ -653,6 +670,28 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
 - **Priority:** should
 - **Status:** proposed *(SCN-057 draft 2026-07-23; gated behind the A-8/A-9 spike)*
 
+### ST-045: Compose a reusable workflow of stages *(stated 2026-07-24)*
+- **Story:** As P-01, I want to author a reusable workflow — an ordered set of stages, each with its own bound skills and a prompt/command, plus a set of global skills applied to every stage — so that I capture a multi-stage process once and reuse it across projects instead of re-driving it by hand.
+- **Traces:** JTBD-12, JRN-12/#2-4
+- **Acceptance criteria:**
+  - Given the Workflows library, when I create a workflow and add stages, then the stages hold their order and each carries its own name, prompt, bound skills, and a gate (auto | manual).
+  - Given a stage, when I bind skills to it and set global skills on the workflow, then the stage's effective skills are the union of the global set and its own set (deduped), shown explicitly.
+  - Given a workflow, when I bind skills, then they are chosen from the existing skills registry (SCN-035) by id — a workflow references skills, it does not define them; a skill later removed from the registry surfaces as a missing binding, never a silent drop.
+  - Given I save, then the workflow persists file-backed (like Rules/Docs), scoped global or project, and survives a restart.
+- **Priority:** should
+- **Status:** proposed *(SCN-060/061/062 draft 2026-07-24 — authoring; buildable now, independent of the S6b runtime)*
+
+### ST-046: Run a workflow on a project under CEO oversight *(stated 2026-07-24)*
+- **Story:** As P-01, I want to run a saved workflow on a project and have my CEO advance it stage by stage within the authority I delegated — pausing at manual gates and escalating anything out of scope — so the pipeline runs itself and I only act where a stage genuinely needs me.
+- **Traces:** JTBD-12, JTBD-10, JRN-12/#5-6
+- **Acceptance criteria:**
+  - Given a saved workflow, when I run it on a project, then a run is created and each stage executes as an agent turn with the stage's effective skills + prompt, in a real session I can open.
+  - Given a stage completes with an `auto` gate, when the next transition is within the CEO's delegated classes, then the CEO advances the run and records the decision (basis + timestamp) in the decision log (SCN-050); a `manual` gate parks the run "needs you" instead.
+  - Given a transition falls outside the delegated scope, then the CEO escalates rather than advancing (SCN-048) — it never acts beyond what was delegated.
+  - Given a "running" workflow, then the displayed state reflects live run state — a stalled or failed stage is shown honestly, never a fake "running".
+- **Priority:** should
+- **Status:** proposed *(SCN-063/064 draft 2026-07-24 — the RUN is gated on the S6b orchestrator-agent runtime, the same boundary as SCN-046: the workflow-as-data and the trigger are authorable now; autonomous execution + CEO drive await S6b, with a matching in-UI pending note — A-10)*
+
 ---
 
 ## 5. Assumptions & open questions
@@ -731,6 +770,19 @@ Marked by risk dimension: **D**esirability / **V**iability / **F**easibility /
        a scanner-roots extension into ST-043).
   - **Degradation if check 1 fails:** documented manual-`export` recipe, no
     false isolation guarantee.
+- **A-10 (F) — stated 2026-07-24.** The workflow **runtime** (ST-046/SCN-063/064)
+  — an executor that runs each stage as an agent turn and a CEO that advances
+  the run between stages — is the **S6b orchestrator-agent runtime**, which does
+  NOT exist yet. This is the SAME honesty boundary already shipped for the CEO
+  config (SCN-046): the workflow-as-data (definition, stages, per-stage skills +
+  prompt, global skills, gates, CEO oversight config) and the manual run trigger
+  are authorable and persistable NOW, independent of S6b; the actual autonomous
+  execution + CEO drive light up when S6b lands, and until then the run surface
+  carries a matching in-UI pending note ("Workflows run once the orchestrator
+  agent runtime lands (S6b)."), in the same register as the CEO section's note.
+  The design deliberately splits the two so authoring ships without a dishonest
+  run screen. No spike — this is a scheduled roadmap slice (SW1 executor + S6b),
+  not an open feasibility question.
 
 ## 6. Best-practices applicability
 

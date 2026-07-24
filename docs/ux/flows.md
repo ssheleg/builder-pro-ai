@@ -526,6 +526,64 @@ flowchart TD
   | Rules tab — Auth context section | empty (inherit), loading (Test), error, success | mode picker, secret input (masked), org-UUID field, Test, Clear, Keychain honesty note (primary: Save) |
   | Terminal surfaces | success | per-project auth badge, tab tooltip "org: {name}" |
 
+### FLW-23: Author a workflow
+- **Traces:** ST-045 (JTBD-12, JRN-12/#2-4)
+- **Goal:** a reusable workflow-as-data saved — ordered stages, each with skills + prompt + gate, plus global skills and CEO oversight config
+- **Entry points:** top-nav "⚙ Workflows" → library → "+ New workflow"; edit an existing workflow
+- **Success exit:** workflow persisted (file-backed, scoped global|project), reusable across projects
+- **Task analysis:** name the workflow → add/reorder stages → per stage write prompt + pick skills + set gate → set global skills → configure CEO oversight → save. First-value = the saved definition that can be run without re-authoring.
+- **Flow:**
+```mermaid
+flowchart TD
+  L[Screen: Workflows library] -->|+ New / open| E[Screen: Workflow editor]
+  E -->|+ stage / reorder| ST[Stage list]
+  ST -->|open a stage| SD[Stage detail: prompt + skill picker + gate auto/manual]
+  SD -->|pick skills| SK{skill still in registry?}
+  SK -->|yes| SD
+  SK -->|removed from registry| SM[Missing-binding marker - never a silent drop]
+  E -->|global skills| G[Global skills picker - applied to every stage]
+  E -->|CEO oversight| CEO[Enable + delegated gate classes + instruction - reuses SupervisorConfig SCN-046]
+  E -->|Save| V{valid? at least one stage, each stage has a prompt}
+  V -->|no| V_err[Inline: fix the flagged stage] --> E
+  V -->|yes| P{persist OK?}
+  P -->|yes| SAVED[Saved - file-backed, survives restart]
+  P -->|no| P_err[Toast reason, draft preserved] --> E
+```
+- **Screens & states:**
+  | Screen | States | Key elements |
+  |--------|--------|--------------|
+  | Workflows library | empty, success | scope filter (global/project), workflow rows, "+ New workflow" (primary), per-row open/duplicate/delete |
+  | Workflow editor | error, success | reorderable stage list, global-skills picker, CEO oversight section, effective-skills summary per stage (primary: Save workflow) |
+  | Stage detail | error, success | name, prompt/command markdown editor, skill picker (from registry), gate toggle auto\|manual, missing-binding marker |
+
+### FLW-24: Run a workflow under CEO *(to-be — the run is gated on the S6b orchestrator runtime, A-10)*
+- **Traces:** ST-046 (JTBD-12, JTBD-10, JRN-12/#5-6)
+- **Goal:** a saved workflow runs on a project stage-by-stage; the CEO advances within delegated authority, parks manual gates, escalates out-of-scope; state is honest
+- **Entry points:** project → "Run workflow" → pick a global workflow; Home digest "open run"
+- **Success exit:** run reaches its last stage (or parks honestly "needs you" / escalated)
+- **Task analysis:** trigger once → the CEO runs the loop → the operator sees only manual gates and escalations. First-value = the first stage the CEO advances without the operator touching it.
+- **Flow:**
+```mermaid
+flowchart TD
+  TR[Project: Run workflow] -->|pick global workflow| RUN[WorkflowRun created]
+  RUN --> S[Stage runs: agent turn with effective skills + prompt in a session]
+  S --> D{stage done?}
+  D -->|failed/stalled| F[Honest failed/stalled state - never fake running]
+  D -->|done| GATE{gate}
+  GATE -->|auto AND in delegated scope| ADV[CEO advances -> next stage] --> LOG[Decision log entry w/ basis - SCN-050]
+  GATE -->|manual| PARK[Parked: needs you -> operator advances]
+  GATE -->|auto BUT out of scope| ESC[Escalate - needs-you badge + Home card, SCN-048] --> LOG
+  ADV --> S
+  PARK -->|operator advances| S
+  CEOFAIL[CEO backend fails] --> DEGR[Plain needs-you - degradation equals manual, SCN-047 E&R]
+```
+- **Screens & states:**
+  | Screen | States | Key elements |
+  |--------|--------|--------------|
+  | Run workflow picker | success | global-workflow list, run button |
+  | Run detail | loading, success, error | stage progress rail, per-stage session link, gate/escalation markers, decision log, honest failed/stalled state |
+  | Home digest | success | "since you left" workflow hand-offs + open escalations (SCN-050/055), "open run" link |
+
 ---
 
 ## Improvement findings (PRN pass 2026-07-23)
@@ -580,7 +638,7 @@ flowchart LR
 
 ## Definition of done
 
-- 22 flows, each traced to stories; every screen node states-declared; every
+- 24 flows, each traced to stories; every screen node states-declared; every
   error edge lands on recovery (verified per-diagram); entry points enumerated.
 - Scenario cross-links: every scenario Traces now carries its FLW id; every
   flow lists ≥1 covering scenario via the map in this file's flow Traces.
