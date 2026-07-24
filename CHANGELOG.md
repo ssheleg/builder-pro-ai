@@ -2,12 +2,59 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
-## [0.10.0] — UX audit remediation: stats honesty, first-run fast-path (2026-07-23)
+## [0.10.0] — UX audit remediation + workspace removal (2026-07-23)
 
 Deep UX audit of the 13 never-audited scenarios (SCN-045..057, report
 [`docs/ux/audits/2026-07-23.md`](docs/ux/audits/2026-07-23.md)) plus the remediation of every
 finding it produced. Post-fix re-audit: **PASS 7 / PARTIAL 0 / FAIL 0 / BLOCKED 6** (BLOCKED =
 documented-unbuilt, verified honest — no phantom UI, no chrome promising unbuilt behavior).
+
+### Added — workspace removal (SCN-058/059, ST-044)
+
+The app previously had **no way to delete a workspace**: the wire carried
+`CreateWorkspace` / `AddWorkspaceRoot` / `RemoveWorkspaceRoot` and nothing that removes one, so
+anything ever created was permanent (a real install had silently accumulated 151 undeletable
+workspaces, every root a deleted temp dir, from test harnesses that attached to the live daemon).
+
+- **`Request::RemoveWorkspace` + `Push::WorkspaceRemoved`** (appended at the enum tail; wire stays
+  `[1,1]`). Removal is total and honest: it terminates any live PTY the workspace owns through the
+  same teardown as `KillSession`, drains pending final flushes so a detached write cannot resurrect
+  a row, then deletes the workspace, its roots, its sessions and their scrollback in one
+  transaction — nothing survives a restart. A dedicated id-only push (not `WorkspaceUpdated`, whose
+  consumers upsert and would re-insert the removed row) refreshes every window.
+- **Per-row "Remove workspace"** with a confirmation that names the workspace and states its
+  terminals will be closed and scrollback discarded *before* committing.
+- **Bulk "clean up missing workspaces"** — workspaces whose folder no longer exists on disk are
+  marked, and a one-confirm action removes exactly those (a root that cannot be stat'd counts as
+  present — never removed on a guess).
+
+### Fixed — session accounting, tab strip, sidebar
+
+- **Dishonest session counters.** The header pills used three non-exhaustive predicates, so a
+  session cold-rehydrated after a daemon restart (`atPrompt`, no live PTY, not waiting) matched none
+  of live/waiting/exited and vanished from the count while still rendering as a tab — the reported
+  `0 live / 0 waiting / 0 exited` above a full tab strip. Replaced with one exhaustive, disjoint
+  partition (`live / waiting / restored / exited`) used by both surfaces and guarded by a
+  sum-invariant test. **Home had the same bug with a worse result** — it rendered only those buckets,
+  so rehydrated sessions appeared in no section at all; adds a "Restored (no live shell)" section.
+  "live" (which had meant three different things in three places) is now one definition; the
+  keep-awake predicate is unchanged.
+- **Tab strip.** It rendered every session in the store while the counters were workspace-scoped, so
+  the two could never agree; now scoped to the active workspace. Overflow fixed (13 tabs overran
+  their box and the "+ New terminal" button painted on top of them): the tablist scrolls and the
+  tabs and button no longer shrink.
+- **Sidebar.** The workspace list no longer slices a row under the pinned footer; the footer is a
+  non-shrinking group above a scroll region with reserved gutter.
+
+### Test-harness hygiene
+
+- `survive-restart.mjs` in external-daemon mode attached to the real daemon (by design) but never
+  removed the workspace + sessions it created — the source of the leak above. Teardown now cleans up
+  on the failure path too, names its workspaces `e2e-<pid>-<ts>`, and degrades loudly against a
+  daemon that predates `RemoveWorkspace`. Its phase 4 also asserted `pidAlive(null)` in that mode
+  (the mechanism of the 12 `e2e` leftovers). The push decoder no longer throws on an unknown
+  (append-only) `Push` variant inside a socket listener — that would have killed any still-connected
+  harness the moment this release's new push shipped.
 
 ### Fixed
 - **First-run fast-path spawned the terminal in `$HOME`, not the picked folder** (SCN-056): the
