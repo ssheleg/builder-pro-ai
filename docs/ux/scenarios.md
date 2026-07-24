@@ -70,6 +70,8 @@
 | SCN-062 | Global skills + CEO oversight for a workflow | workflows | P-01 | ST-045 | draft | — |
 | SCN-063 | Run a workflow on a project | workflows | P-01 | ST-046 | draft | — |
 | SCN-064 | CEO advances or escalates between stages | workflows | P-01 | ST-046 | draft | — |
+| SCN-065 | Assign a stage's agent and context — terminal grouping | workflows | P-01 | ST-045 | draft | — |
+| SCN-066 | Run journal — the heartbeat hand-off between agents | workflows | P-01 | ST-046 | draft | — |
 
 ## Personas
 
@@ -1144,7 +1146,7 @@ in different lifecycle states.
   1. User opens a stage and writes its prompt/command (markdown instruction the agent turn will follow)
   2. User binds skills to the stage from the skills registry (SCN-035)
   3. User sets the stage's gate to auto or manual
-- **Expected result:** the stage holds its name, prompt, bound skills, and gate; the editor shows the stage's **effective skills = global skills ∪ stage skills** (deduped), so what the stage will actually have is explicit; a stage is an **agent-turn** (skills + prompt) — approval pauses are the manual gate, not a separate step kind (v1)
+- **Expected result:** the stage holds its name, prompt, bound skills, and gate; the editor shows the stage's **effective skills = global skills ∪ stage skills** (deduped), so what the stage will actually have is explicit; a stage is an **agent-turn** (skills + prompt) — approval pauses are the manual gate, not a separate step kind (v1). The stage's **agent, context scope and outputs** are configured alongside on the same panel (SCN-065)
 - **Alt paths:** unset the gate back to auto/manual freely; remove a bound skill
 - **UI elements:** stage name input, prompt/command markdown editor, skill picker (registry-backed), gate toggle (auto | manual), effective-skills summary, "missing binding" marker
 - **States covered:** error, success
@@ -1179,8 +1181,8 @@ in different lifecycle states.
 - **Steps:**
   1. User clicks "Run workflow" on a project and picks a saved (global) workflow
   2. A run is created; the operator watches it advance on the run detail and the Home digest
-- **Expected result:** each stage executes as an agent turn with the stage's effective skills + prompt in a real session the operator can open; the run advances per each stage's gate (SCN-064); a "running" workflow reflects **live** state — a stalled or failed stage shows honestly, never a fake "running"
-- **UI elements:** project "Run workflow" button, workflow picker, run detail (stage progress rail, per-stage session link, decision log, honest failed/stalled state), Home "open run" link
+- **Expected result:** each **contiguous same-agent block of stages runs in its own terminal** (its agent, its effective skills + prompt) in a real session the operator can open — a single-agent workflow is one terminal running every stage; the run advances per each stage's gate (SCN-064); across an agent boundary the next terminal is handed the run journal + declared outputs (SCN-066); a "running" workflow reflects **live** state — a stalled or failed stage shows honestly, never a fake "running"
+- **UI elements:** project "Run workflow" button, workflow picker, run detail (terminal swimlanes — one per agent block — with a stage progress rail, per-terminal session link, the run-journal / heartbeat panel between terminals, decision log, honest failed/stalled state), Home "open run" link
 - **States covered:** loading, success, error
 - **Errors & recovery:** run trigger rejects → toast, no run created; a stage's session fails to spawn → the run parks in an honest failed state with the reason (never fake busy); orchd/runtime down → the run cannot start and says so
 - **Note (honesty boundary, S6b — A-10):** the RUN is gated on the S6b orchestrator-agent runtime, which does not exist yet. The trigger and the run surface are designed now; until S6b, "Run workflow" carries the pending note "Workflows run once the orchestrator agent runtime lands (S6b)." and does not fake execution — exactly the SCN-046 boundary
@@ -1197,9 +1199,48 @@ in different lifecycle states.
   1. A stage completes; the CEO evaluates the gate
   2. auto gate + transition within delegated classes → CEO advances to the next stage and records the decision (basis + timestamp) in the decision log (SCN-050); manual gate → the run parks "needs you" for the operator to advance; auto gate but out of delegated scope → the CEO escalates (SCN-048), never advancing beyond what was delegated
   3. The operator sees advances/hand-offs and open escalations in the Home digest (SCN-050/055)
-- **Expected result:** the pipeline advances without operator input for in-scope auto gates; every autonomous advance is auditable in the decision log; manual gates and escalations are the only things that stop for the operator; the CEO never acts beyond the delegated scope
-- **UI elements:** stage gate/escalation markers on the run detail, decision-log entries, needs-you badge (app chrome), Home hand-off + escalation cards
+- **Expected result:** the pipeline advances without operator input for in-scope auto gates; every autonomous advance is auditable in the decision log and **cites the run journal** (the heartbeat the finishing agent wrote — SCN-066) as its basis; manual gates and escalations are the only things that stop for the operator; the CEO never acts beyond the delegated scope
+- **UI elements:** stage gate/escalation markers on the run detail, decision-log entries (each linking the run-journal entry it acted on), needs-you badge (app chrome), Home hand-off + escalation cards
 - **States covered:** success, error
 - **Errors & recovery:** CEO cannot ground an advance in the delegated scope → treats it as escalation, never guesses (SCN-047 rule); CEO backend failure → the run parks as ordinary "needs you" + Diagnostics — degradation equals the manual path, nothing worse
 - **Status:** draft
 - **Coverage:** none yet — S6b runtime; the CEO decision model reuses SCN-046/047/048 (answer-within-scope vs escalate), applied to workflow gates
+
+### SCN-065: Assign a stage's agent and context — see the terminal grouping
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-045, FLW-23 (JTBD-12, JRN-12/#3)
+- **Entry point:** workflow editor → stage panel (agent + context) and the editor's terminal-grouping view
+- **Preconditions:** a workflow with ≥2 stages exists
+- **Steps:**
+  1. User sets the workflow's **default agent** (from the agents the app runs — claude-code / hermes / opencode / kilo)
+  2. On a stage, user leaves the agent as "inherit" or overrides it with a different agent
+  3. User sets the stage's **context scope** (inherit / handoff / project / selected) and declares the stage's named **outputs**
+  4. User reads the editor's terminal grouping
+- **Expected result:** the editor **groups consecutive same-agent stages into one terminal** and draws a boundary line where the agent changes ("Terminal 1 · claude-code · 3 stages" → "Terminal 2 · hermes · 2 stages"); a workflow with no agent change shows a single terminal running every stage. Each stage states what its agent will be handed (its context scope) and what it will leave behind (its outputs). Context scope defaults to `inherit` inside a terminal and to `handoff` (run journal + prior outputs) at a terminal boundary — the cheap, explicit, reproducible default; the operator can widen it to `project` or `selected`
+- **Alt paths:** set every stage to inherit → the whole workflow is one terminal/agent (no hand-off needed); override an agent mid-list → a new terminal boundary appears there
+- **UI elements:** workflow default-agent picker, per-stage agent picker (inherit + known agents), context-scope selector (inherit | handoff | project | selected) + subset picker for `selected`, stage outputs field, terminal-grouping bracket/boundary in the stage list
+- **States covered:** success, error
+- **Errors & recovery:** an agent that the app cannot launch (not installed) → the stage shows an honest "agent unavailable" marker and the workflow cannot run until it is changed or installed — never a silent fallback to a different agent; `selected` scope referencing a path/output that no longer exists → flagged like a missing skill binding
+- **Note (honesty boundary, S6b — A-11):** this configures the agent/terminal/context model and shows the grouping; the actual multi-terminal run and hand-off (SCN-066) await the S6b runtime. The grouping and context choices are fully legible now — nothing about them is faked
+- **Status:** draft
+- **Coverage:** none yet — agents are the ones the app already launches (README: claude-code/hermes/opencode/kilo); the terminal-collapse rule + context scope are config the runtime later consumes
+
+### SCN-066: Run journal — the heartbeat hand-off between agents
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-046, FLW-24 (JTBD-12, JTBD-02, JRN-12/#5-6)
+- **Entry point:** run detail → the run-journal panel (between terminal swimlanes); also readable as a file the agents write
+- **Preconditions:** a run in progress that crosses at least one agent boundary
+- **Steps:**
+  1. A stage's agent works and **appends to the run journal as it goes** — what it did, artifacts/commits it produced, explicit "for the next agent: pick up X, the spec is at Y, run Z", and a status
+  2. The run crosses an agent boundary; the next terminal's agent is spawned and **reads the run journal first**, picking up exactly what the prior agent left (at the `handoff` scope: the journal + the declared outputs)
+  3. The operator reads the same run journal to see the hand-off in plain language; the CEO's gate decisions cite the journal entries they acted on
+- **Expected result:** context crosses terminal boundaries through a **file-backed, human-readable run journal** (heartbeat) — not through hidden shared memory; a single-agent run needs no hand-off (one terminal keeps its own context, but the journal is still written for observability); the journal is the operator's and the CEO's shared source of truth for "what happened and what's next"; it versions with the run and never silently loses an entry
+- **Alt paths:** the operator edits/annotates the journal between stages to redirect the next agent (a manual steer); a single-agent workflow → the journal is a linear progress log, not a hand-off
+- **UI elements:** run-journal panel (per-stage entries: agent, terminal, what-it-did, outputs, "for next", status), the same content as a file the agents read/write (reuses the Docs file-backing, SCN-054), "open as file" affordance, per-entry link from the decision log
+- **States covered:** loading, empty, success, error
+- **Errors & recovery:** an agent writes nothing before an agent boundary → the next agent (and the operator) see an honest "no hand-off written — the previous stage left no journal entry" rather than proceeding blind; journal storage degraded → StorageBanner rules (SCN-041); the journal never silently truncates
+- **Note (honesty boundary, S6b — A-11):** the live hand-off (agents writing, next agent reading, CEO citing) awaits the S6b runtime. The journal format, its file-backing, and its place in the run surface are designed now; the honesty rule is explicit — no agent is ever assumed to "just know" context that is not in the journal
+- **Status:** draft
+- **Coverage:** none yet — reuses the file-backed Doc machinery (SCN-054) for the journal file; live writing/reading is S6b

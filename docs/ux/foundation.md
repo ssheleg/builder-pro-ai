@@ -677,20 +677,24 @@ scenario(s) that serve it; every scenario traces back to exactly one story.
   - Given the Workflows library, when I create a workflow and add stages, then the stages hold their order and each carries its own name, prompt, bound skills, and a gate (auto | manual).
   - Given a stage, when I bind skills to it and set global skills on the workflow, then the stage's effective skills are the union of the global set and its own set (deduped), shown explicitly.
   - Given a workflow, when I bind skills, then they are chosen from the existing skills registry (SCN-035) by id — a workflow references skills, it does not define them; a skill later removed from the registry surfaces as a missing binding, never a silent drop.
+  - Given a stage, when I assign an agent — from the agents the app already runs (claude-code / hermes / opencode / kilo) or "inherit the workflow's default agent" — then the editor groups consecutive same-agent stages into ONE terminal and marks an agent change as a terminal boundary; a workflow with no agent change is a single terminal running every stage in one conversation.
+  - Given a stage that begins a new terminal, when I set its context scope, then I choose exactly what its agent is handed — `inherit` (same terminal, already has it), `handoff` (the run journal + declared prior-stage outputs — the default at a boundary), `project` (the whole project), or `selected` (an explicit subset) — and I can declare the stage's named `outputs` for later stages to pick up.
   - Given I save, then the workflow persists file-backed (like Rules/Docs), scoped global or project, and survives a restart.
 - **Priority:** should
-- **Status:** proposed *(SCN-060/061/062 draft 2026-07-24 — authoring; buildable now, independent of the S6b runtime)*
+- **Status:** proposed *(SCN-060/061/062/065 draft 2026-07-24 — authoring; buildable now, independent of the S6b runtime)*
 
 ### ST-046: Run a workflow on a project under CEO oversight *(stated 2026-07-24)*
 - **Story:** As P-01, I want to run a saved workflow on a project and have my CEO advance it stage by stage within the authority I delegated — pausing at manual gates and escalating anything out of scope — so the pipeline runs itself and I only act where a stage genuinely needs me.
 - **Traces:** JTBD-12, JTBD-10, JRN-12/#5-6
 - **Acceptance criteria:**
-  - Given a saved workflow, when I run it on a project, then a run is created and each stage executes as an agent turn with the stage's effective skills + prompt, in a real session I can open.
+  - Given a saved workflow, when I run it on a project, then a run is created and each contiguous same-agent block of stages executes in its OWN terminal (its agent, its effective skills + prompt), in a real session I can open.
+  - Given the run crosses an agent boundary, when the next terminal starts, then its agent is handed the run journal (heartbeat) + the declared outputs of prior stages, reads it first, and picks up exactly what the previous agent left — no reliance on in-memory context crossing terminals; a single-agent workflow needs no hand-off (one terminal keeps its own context).
+  - Given any stage runs, then its agent appends to the run journal as it works (what it did, artifacts/commits, instructions for the next agent, status); the operator reads the same file and the CEO's gate decisions cite it.
   - Given a stage completes with an `auto` gate, when the next transition is within the CEO's delegated classes, then the CEO advances the run and records the decision (basis + timestamp) in the decision log (SCN-050); a `manual` gate parks the run "needs you" instead.
   - Given a transition falls outside the delegated scope, then the CEO escalates rather than advancing (SCN-048) — it never acts beyond what was delegated.
   - Given a "running" workflow, then the displayed state reflects live run state — a stalled or failed stage is shown honestly, never a fake "running".
 - **Priority:** should
-- **Status:** proposed *(SCN-063/064 draft 2026-07-24 — the RUN is gated on the S6b orchestrator-agent runtime, the same boundary as SCN-046: the workflow-as-data and the trigger are authorable now; autonomous execution + CEO drive await S6b, with a matching in-UI pending note — A-10)*
+- **Status:** proposed *(SCN-063/064/066 draft 2026-07-24 — the RUN is gated on the S6b orchestrator-agent runtime, the same boundary as SCN-046: the workflow-as-data + the agent/terminal/context config + the trigger are authorable now; autonomous execution, multi-terminal hand-off and CEO drive await S6b, with a matching in-UI pending note — A-10/A-11)*
 
 ---
 
@@ -783,6 +787,21 @@ Marked by risk dimension: **D**esirability / **V**iability / **F**easibility /
   The design deliberately splits the two so authoring ships without a dishonest
   run screen. No spike — this is a scheduled roadmap slice (SW1 executor + S6b),
   not an open feasibility question.
+- **A-11 (F/U) ⚠ — stated 2026-07-24.** The **multi-agent hand-off model** —
+  each contiguous same-agent block of stages runs in its own terminal, and
+  context crosses an agent boundary through a file-backed **run journal /
+  heartbeat** that each agent appends to (what it did, artifacts, instructions
+  for the next agent) rather than through shared memory (SCN-065/066) — is a
+  design bet, not yet validated with a real multi-agent run (that needs the S6b
+  executor). Open questions to confirm when the runtime lands: (1) is the
+  heartbeat file, at the default `handoff` context scope, enough for the next
+  agent to reliably pick up, or do real runs need `project`/`selected` more
+  often than expected; (2) does the "collapse consecutive same-agent stages into
+  one terminal/conversation" rule hold up, or do long single-agent runs need an
+  explicit context reset between stages anyway. The authoring surface makes all
+  of this **configurable and legible now** (agent per stage, context scope,
+  outputs, the terminal grouping shown in the editor); the bet is only about the
+  runtime behaviour, so nothing here blocks building the authoring slice.
 
 ## 6. Best-practices applicability
 

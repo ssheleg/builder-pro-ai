@@ -536,11 +536,16 @@ flowchart TD
 ```mermaid
 flowchart TD
   L[Screen: Workflows library] -->|+ New / open| E[Screen: Workflow editor]
-  E -->|+ stage / reorder| ST[Stage list]
-  ST -->|open a stage| SD[Stage detail: prompt + skill picker + gate auto/manual]
+  E -->|default agent| DA[Workflow default agent: claude-code/hermes/opencode/kilo]
+  E -->|+ stage / reorder| ST[Stage list - grouped into terminals by agent]
+  ST -->|open a stage| SD[Stage detail: prompt + skills + gate + agent + context scope + outputs]
   SD -->|pick skills| SK{skill still in registry?}
   SK -->|yes| SD
   SK -->|removed from registry| SM[Missing-binding marker - never a silent drop]
+  SD -->|agent = inherit or override| TG{agent changes vs previous stage?}
+  TG -->|no| T1[Same terminal - one agent, one conversation]
+  TG -->|yes| T2[New terminal boundary - context via handoff SCN-066]
+  SD -->|context scope| CS[inherit / handoff / project / selected + outputs]
   E -->|global skills| G[Global skills picker - applied to every stage]
   E -->|CEO oversight| CEO[Enable + delegated gate classes + instruction - reuses SupervisorConfig SCN-046]
   E -->|Save| V{valid? at least one stage, each stage has a prompt}
@@ -553,8 +558,8 @@ flowchart TD
   | Screen | States | Key elements |
   |--------|--------|--------------|
   | SCR-01 Workflows library | empty, success | scope filter (global/project), workflow rows, "+ New workflow" (primary), per-row open/duplicate/delete |
-  | SCR-02 Workflow editor | error, success | reorderable stage list, global-skills picker, CEO oversight section, effective-skills summary per stage (primary: Save workflow) |
-  | SCR-03 Stage detail | error, success | name, prompt/command markdown editor, skill picker (from registry), gate toggle auto\|manual, missing-binding marker |
+  | SCR-02 Workflow editor | error, success | default-agent picker, reorderable stage list grouped into terminals (agent boundary lines), global-skills picker, CEO oversight section, effective-skills summary per stage (primary: Save workflow) |
+  | SCR-03 Stage detail | error, success | name, prompt/command editor, skill picker (from registry), gate toggle auto\|manual, agent picker (inherit + known), context-scope selector (inherit/handoff/project/selected), outputs field, missing-binding / agent-unavailable markers |
 
 ### FLW-24: Run a workflow under CEO *(to-be — the run is gated on the S6b orchestrator runtime, A-10)*
 - **Traces:** ST-046 (JTBD-12, JTBD-10, JRN-12/#5-6)
@@ -566,14 +571,18 @@ flowchart TD
 ```mermaid
 flowchart TD
   TR[Project: Run workflow] -->|pick global workflow| RUN[WorkflowRun created]
-  RUN --> S[Stage runs: agent turn with effective skills + prompt in a session]
+  RUN --> S[Stage runs in its agent's terminal: effective skills + prompt]
+  S -->|as it works| HB[Agent appends to run journal / heartbeat: did / outputs / for-next / status - SCN-066]
   S --> D{stage done?}
   D -->|failed/stalled| F[Honest failed/stalled state - never fake running]
   D -->|done| GATE{gate}
-  GATE -->|auto AND in delegated scope| ADV[CEO advances -> next stage] --> LOG[Decision log entry w/ basis - SCN-050]
+  GATE -->|auto AND in delegated scope| ADV[CEO advances - cites the journal entry] --> LOG[Decision log entry w/ basis - SCN-050]
   GATE -->|manual| PARK[Parked: needs you -> operator advances]
   GATE -->|auto BUT out of scope| ESC[Escalate - needs-you badge + Home card, SCN-048] --> LOG
-  ADV --> S
+  ADV --> AB{next stage same agent?}
+  AB -->|yes| S
+  AB -->|no - agent boundary| NT[New terminal: next agent reads the journal + declared outputs, picks up]
+  NT --> S
   PARK -->|operator advances| S
   CEOFAIL[CEO backend fails] --> DEGR[Plain needs-you - degradation equals manual, SCN-047 E&R]
 ```
@@ -581,8 +590,9 @@ flowchart TD
   | Screen | States | Key elements |
   |--------|--------|--------------|
   | SCR-04 Run workflow picker | success | global-workflow list, run button |
-  | SCR-05 Run detail | loading, success, error | stage progress rail, per-stage session link, gate/escalation markers, decision log, honest failed/stalled state |
+  | SCR-05 Run detail | loading, success, error | terminal swimlanes (one per agent block, its agent + stages), per-terminal session link, gate/escalation markers, decision log, honest failed/stalled state |
   | SCR-06 Home digest | success | "since you left" workflow hand-offs + open escalations (SCN-050/055), "open run" link |
+  | SCR-07 Run journal (heartbeat) | loading, empty, success, error | per-stage entries (agent, terminal, did / outputs / for-next / status), "open as file", decision-log back-links |
 
 ---
 

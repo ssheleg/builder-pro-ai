@@ -19,6 +19,7 @@ product code exists yet (the runtime is S6b, foundation A-10).
 | SCR-04 | Run workflow picker | FLW-24 | [frame 3-19](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-19) | designed | none yet |
 | SCR-05 | Run detail | FLW-24 | [frame 3-23](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-23) | designed | none yet |
 | SCR-06 | Home digest (workflows) | FLW-24 | [frame 3-27](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-27) | designed | none yet |
+| SCR-07 | Run journal (heartbeat) | FLW-24 | [frame 17-2](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=17-2) | designed | none yet |
 
 ## Design system
 
@@ -45,30 +46,30 @@ product code exists yet (the runtime is S6b, foundation A-10).
 
 ### SCR-02: Workflow editor
 - **Used by:** FLW-23 (steps 2-6)
-- **Purpose:** author the workflow — ordered stages, global skills, CEO oversight (SCN-061/062)
-- **Elements:** breadcrumb (⚙ Workflows › name › scope), "unsaved changes" hint, "Save workflow" *(primary)*, reorderable stage list (drag handle, order badge, name, skills summary, gate chip auto|manual, chevron), "+ Add stage", global-skills picker (chips + add), effective-skills note, CEO oversight panel (enable toggle, delegated gate-class chips, inherited-caps line, S6b pending note)
+- **Purpose:** author the workflow — ordered stages grouped into terminals by agent, global skills, CEO oversight (SCN-061/062/065)
+- **Elements:** breadcrumb (⚙ Workflows › name › scope), **default-agent chip**, "unsaved changes" hint, "Save workflow" *(primary)*, stage list **grouped into terminal brackets** (Terminal N · agent · stage-count; a boundary where the agent changes), reorderable stage rows (drag handle, order badge, name, skills summary, gate chip auto|manual), "+ Add stage", global-skills picker (chips + add), effective-skills note, CEO oversight panel (enable toggle, delegated gate-class chips, inherited-caps line, S6b pending note)
 - **States:**
   | State | Trigger | Figma frame | Behavior |
   |-------|---------|-------------|----------|
   | success | editing a saved workflow | [3-11](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-11) | stages + global skills + CEO section |
   | error | invalid (stage without a prompt, empty CEO scope) | [3-11](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-11) | inline flag on the offending stage/section, Save blocked |
 - **Coverage:** none yet
-- **Scenarios:** SCN-061, SCN-062
-- **Resources:** CEO section reuses the RulesetPanel supervisor pattern (`SupervisorConfig`, SCN-046)
+- **Scenarios:** SCN-061, SCN-062, SCN-065
+- **Resources:** CEO section reuses the RulesetPanel supervisor pattern (`SupervisorConfig`, SCN-046); the terminal grouping is derived from the per-stage agent (consecutive same-agent stages = one terminal)
 - **Status:** designed
 
 ### SCR-03: Stage detail
 - **Used by:** FLW-23 (step 3)
-- **Purpose:** configure one stage — its prompt/command, bound skills, gate (SCN-061)
-- **Elements:** breadcrumb, "Done", prompt/command markdown editor (mono), stage-skills picker (chips + add), effective-skills summary (global ∪ stage, read-only), missing-binding marker (danger), gate segmented (auto | manual) + explanation
+- **Purpose:** configure one stage — its prompt/command, bound skills, gate, **agent, context scope, outputs** (SCN-061/065)
+- **Elements:** breadcrumb, "Done", prompt/command markdown editor (mono), stage-skills picker (chips + add), effective-skills summary (global ∪ stage, read-only), missing-binding marker (danger), gate segmented (auto | manual) + explanation, **Agent & context panel** — agent picker (inherit + claude-code/hermes/opencode/kilo), context-scope segmented (inherit | handoff | project | selected), outputs field (named artifacts)
 - **States:**
   | State | Trigger | Figma frame | Behavior |
   |-------|---------|-------------|----------|
   | success | stage open, all skills present | [3-15](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-15) | prompt + skills + gate editable |
   | error | a bound skill was removed from the registry | [3-15](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-15) | "missing from the registry — fix or remove before running" (depicted inline) |
 - **Coverage:** none yet
-- **Scenarios:** SCN-061
-- **Resources:** skills referenced by id from the registry (SCN-035); an agent-turn stage (v1)
+- **Scenarios:** SCN-061, SCN-065
+- **Resources:** skills referenced by id from the registry (SCN-035); an agent-turn stage (v1); agents are the ones the app already launches; context `handoff` = run journal + declared outputs
 - **Status:** designed
 
 ### SCR-04: Run workflow picker
@@ -86,8 +87,8 @@ product code exists yet (the runtime is S6b, foundation A-10).
 
 ### SCR-05: Run detail
 - **Used by:** FLW-24 (steps 2-3)
-- **Purpose:** watch a run advance — stage progress, CEO decisions, escalations (SCN-063/064)
-- **Elements:** run title + project chip, status chip (paused · awaiting S6b), stage progress rail (status dot per stage: done/running/waiting/escalated/pending, gate/status chip, per-stage "open terminal →"), decision log (CEO/you actor, action, basis, time; escalation entries in danger), S6b honesty banner
+- **Purpose:** watch a run advance — terminals, stage progress, CEO decisions, hand-offs, escalations (SCN-063/064/066)
+- **Elements:** run title + project chip, status chip (paused · awaiting S6b), **terminal swimlanes** (one per agent block: agent chip, "open terminal →", its stage rows with status dot done/running/waiting/escalated/pending), a **hand-off divider** at each agent boundary (references the run journal + outputs, SCN-066), decision log (CEO/you actor, action, basis citing the journal §, time; escalations in danger)
 - **States:**
   | State | Trigger | Figma frame | Behavior |
   |-------|---------|-------------|----------|
@@ -95,8 +96,8 @@ product code exists yet (the runtime is S6b, foundation A-10).
   | loading | run just started | [3-23](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-23) | first stage spawning (depicted via running dot) |
   | error | a stage failed/stalled | [3-23](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=3-23) | honest failed/stalled state, never a fake "running" |
 - **Coverage:** none yet
-- **Scenarios:** SCN-063, SCN-064
-- **Resources:** reuses the CEO decision-log surface (SCN-050); execution is S6b
+- **Scenarios:** SCN-063, SCN-064, SCN-066
+- **Resources:** reuses the CEO decision-log surface (SCN-050); terminals map to contiguous same-agent stage blocks; execution is S6b
 - **Status:** designed
 
 ### SCR-06: Home digest (workflows)
@@ -111,4 +112,19 @@ product code exists yet (the runtime is S6b, foundation A-10).
 - **Coverage:** none yet
 - **Scenarios:** SCN-064
 - **Resources:** reuses the Home digest + escalation surfaces (SCN-050/055)
+- **Status:** designed
+
+### SCR-07: Run journal (heartbeat)
+- **Used by:** FLW-24 (steps 1-3)
+- **Purpose:** the file-backed hand-off between agents — context crosses a terminal boundary through a human-readable journal, never hidden memory (SCN-066)
+- **Elements:** "Run journal" title + `handoff.md` chip + "file-backed · reuses Docs" chip + "open as file →", per-stage entries (stage · name, agent chip, terminal chip, time, status chip; DID / OUTPUTS (mono) / FOR THE NEXT AGENT fields), an honesty note ("no hand-off written — the previous stage left no journal entry", never proceed blind)
+- **States:**
+  | State | Trigger | Figma frame | Behavior |
+  |-------|---------|-------------|----------|
+  | success | ≥1 journal entry | [17-2](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=17-2) | entries stacked newest-relevant; next agent reads it |
+  | empty | run just started, nothing written | [17-2](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=17-2) | honest "no hand-off written yet" (depicted inline) |
+  | error | a boundary crossed with no entry | [17-2](https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg/Builder-Pro-AI-Workflows?node-id=17-2) | "no hand-off written — never proceed blind" (depicted inline) |
+- **Coverage:** none yet
+- **Scenarios:** SCN-066
+- **Resources:** the journal is a file the agents read/write — reuses the file-backed Doc machinery (SCN-054); the CEO's decision log links each entry it acted on
 - **Status:** designed
