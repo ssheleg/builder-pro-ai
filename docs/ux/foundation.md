@@ -818,3 +818,9 @@ class and should not be force-fit in future scenario or audit work.
   token-source spike + A-9 org-isolation spike (shared) before ST-038/ST-043
   build; SCN-057 awaiting operator approval. *(A-7 resolved 2026-07-22;
   ST-041/SCN-054 shipped; SCN-055 validated.)*
+
+## 7. Design tooling
+
+- **Figma:** enabled *(from 2026-07-24, for the workflow feature — SCN-060..064; the rest of the app remains text-only / to be reverse-mapped into `screens.md` later)*
+- **Figma file:** https://www.figma.com/design/q3tTcpi60BOCn0VIIiX4wg — "Builder Pro AI — Workflows (SW1)", page "Workflows — SW1" (one frame per workflow screen, mapped in `screens.md`)
+- **Design system:** none as a Figma library — the frames are built directly on the **Soft Control Room** tokens (`src/ui/tokens.css`, light mode): warm ivory/charcoal fills, terracotta `--accent`, blue `--data` voice, soft radii, Space Grotesk display. See [frontend-design-system concept] and `docs/design-system.md`.

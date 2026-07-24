@@ -552,9 +552,9 @@ flowchart TD
 - **Screens & states:**
   | Screen | States | Key elements |
   |--------|--------|--------------|
-  | Workflows library | empty, success | scope filter (global/project), workflow rows, "+ New workflow" (primary), per-row open/duplicate/delete |
-  | Workflow editor | error, success | reorderable stage list, global-skills picker, CEO oversight section, effective-skills summary per stage (primary: Save workflow) |
-  | Stage detail | error, success | name, prompt/command markdown editor, skill picker (from registry), gate toggle auto\|manual, missing-binding marker |
+  | SCR-01 Workflows library | empty, success | scope filter (global/project), workflow rows, "+ New workflow" (primary), per-row open/duplicate/delete |
+  | SCR-02 Workflow editor | error, success | reorderable stage list, global-skills picker, CEO oversight section, effective-skills summary per stage (primary: Save workflow) |
+  | SCR-03 Stage detail | error, success | name, prompt/command markdown editor, skill picker (from registry), gate toggle auto\|manual, missing-binding marker |
 
 ### FLW-24: Run a workflow under CEO *(to-be — the run is gated on the S6b orchestrator runtime, A-10)*
 - **Traces:** ST-046 (JTBD-12, JTBD-10, JRN-12/#5-6)
@@ -580,9 +580,9 @@ flowchart TD
 - **Screens & states:**
   | Screen | States | Key elements |
   |--------|--------|--------------|
-  | Run workflow picker | success | global-workflow list, run button |
-  | Run detail | loading, success, error | stage progress rail, per-stage session link, gate/escalation markers, decision log, honest failed/stalled state |
-  | Home digest | success | "since you left" workflow hand-offs + open escalations (SCN-050/055), "open run" link |
+  | SCR-04 Run workflow picker | success | global-workflow list, run button |
+  | SCR-05 Run detail | loading, success, error | stage progress rail, per-stage session link, gate/escalation markers, decision log, honest failed/stalled state |
+  | SCR-06 Home digest | success | "since you left" workflow hand-offs + open escalations (SCN-050/055), "open run" link |
 
 ---
 
