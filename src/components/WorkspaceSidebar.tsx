@@ -458,6 +458,29 @@ export function WorkspaceSidebar(props: {
           {strings.stats.nav}
         </button>
 
+        <button
+          type="button"
+          data-testid="workflows-nav-button"
+          aria-label={strings.workflows.title}
+          aria-current={view === "workflows" ? "true" : undefined}
+          onClick={() => setView("workflows")}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "var(--sp-2) var(--sp-3)",
+            fontSize: "var(--fs-md)",
+            fontWeight: 600,
+            border: "none",
+            borderBottom: "1px solid var(--hairline)",
+            cursor: "pointer",
+            color: view === "workflows" ? "var(--ink)" : "var(--muted)",
+            background: view === "workflows" ? "var(--panel-2)" : "transparent",
+          }}
+        >
+          {strings.workflows.nav}
+        </button>
+
         {/* Scroll region for the workspace/project list. `minHeight: 0` is what actually lets it
             shrink: without it a flex item's `min-height: auto` keeps it at its CONTENT height, so
             a long list pushed the footer controls off the bottom of the window instead of

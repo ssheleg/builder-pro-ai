@@ -103,6 +103,12 @@ pub const EV_ORCHD_RESEARCH_RUNS_CHANGED: &str = "orchd://research-runs-changed"
 /// append-only). Payload `{ projectId }` — the ONE project whose doc list/content changed,
 /// mirrors [`EV_ORCHD_TASKS_CHANGED`]'s shape exactly (docs are always project-scoped).
 pub const EV_ORCHD_DOCS_CHANGED: &str = "orchd://docs-changed";
+/// SW1 workflow-authoring coarse-invalidation (docs/ux/plans/2026-07-24-workflow-authoring.md,
+/// appended — order FROZEN append-only). No payload (`null`) — a `WorkflowsChanged` push carries
+/// no scope, mirroring [`EV_ORCHD_CONNECTORS_CHANGED`]/[`EV_ORCHD_POLICIES_CHANGED`]'s "nothing to
+/// name" precedent (the frontend's `refreshWorkflows` re-fetches the whole list). Fired by every
+/// successful `WorkflowUpsert`/`WorkflowDelete`.
+pub const EV_ORCHD_WORKFLOWS_CHANGED: &str = "orchd://workflows-changed";
 /// orchd connection-state trio (spec §9): unlike [`EV_DAEMON_DISCONNECTED`]/
 /// [`EV_DAEMON_RECONNECTED`] (which track "is this a reconnect after a disconnect" via
 /// [`map_conn_state`]'s `seen_disconnected` flag), orchd's mapping ([`map_orchd_conn_state`]) is
@@ -321,6 +327,12 @@ pub fn map_orchd_push(push: OrchdPush) -> BrokerAction {
             EV_ORCHD_DOCS_CHANGED,
             serde_json::json!({ "projectId": project_id }),
         ),
+        // SW1 workflow authoring (appended — order FROZEN append-only): a bare invalidation with
+        // no scope, mirrors `ConnectorsChanged`/`PoliciesChanged`'s null-payload "nothing to name"
+        // precedent above. Fired by every successful `WorkflowUpsert`/`WorkflowDelete`.
+        OrchdPush::WorkflowsChanged => {
+            BrokerAction::Emit(EV_ORCHD_WORKFLOWS_CHANGED, serde_json::Value::Null)
+        }
     }
 }
 
@@ -1050,6 +1062,21 @@ mod tests {
             BrokerAction::Emit(event, payload) => {
                 assert_eq!(event, EV_ORCHD_RESEARCH_RUNS_CHANGED);
                 assert!(payload["ideaId"].is_null());
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    // ── SW1 workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md) — mirrors the
+    // ConnectorsChanged/PoliciesChanged null-payload precedent above exactly ────────────────────
+
+    #[test]
+    fn orchd_workflows_changed_maps_to_emit_with_null_payload() {
+        let action = map_orchd_push(OrchdPush::WorkflowsChanged);
+        match action {
+            BrokerAction::Emit(event, payload) => {
+                assert_eq!(event, EV_ORCHD_WORKFLOWS_CHANGED);
+                assert!(payload.is_null());
             }
             other => panic!("expected Emit, got {other:?}"),
         }

@@ -10,14 +10,14 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpa_orchd::protocol::{
-    encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, DocMeta, DocView,
-    DomainTask, Goal, GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood, GraphNode,
-    GraphNodeKind, GraphView, Idea, McpArtifact, McpAuthKind, McpCallResult, McpConnectReport,
-    McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdErrorCode, OrchdFrame,
-    OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Policy, PolicyScope, Project,
-    ProjectStatus, ResearchRun, ResearchStatus, RuleFileState, RuleScope, RuleSetView, Skill,
-    SkillFileState, SkillScope, TaskPriority, TaskSource, ORCHD_CLIENT_MAX_VERSION,
-    ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
+    encode_orchd_frame, Account, AccountAuthKind, AuditRow, ConnectorOp, ContextScope, DocMeta,
+    DocView, DomainTask, Gate, Goal, GoalKind, GraphEdge, GraphEdgeKind, GraphNeighborhood,
+    GraphNode, GraphNodeKind, GraphView, Idea, McpArtifact, McpAuthKind, McpCallResult,
+    McpConnectReport, McpScope, McpServer, McpTool, McpTransport, OAuthChallenge, OrchdErrorCode,
+    OrchdFrame, OrchdFrameDecoder, OrchdPush, OrchdRequest, OrchdResponse, Policy, PolicyScope,
+    Project, ProjectStatus, ResearchRun, ResearchStatus, RuleFileState, RuleScope, RuleSetView,
+    Skill, SkillFileState, SkillScope, Stage, SupervisorConfig, TaskPriority, TaskSource, Workflow,
+    WorkflowScope, ORCHD_CLIENT_MAX_VERSION, ORCHD_CLIENT_MIN_VERSION, ORCHD_DAEMON_MAX_VERSION,
 };
 use bpa_protocol::{decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -295,6 +295,20 @@ fn expect_ack(res: OrchdResponse) {
     match res {
         OrchdResponse::Ack => {}
         other => panic!("expected Ack, got {other:?}"),
+    }
+}
+
+fn expect_workflow(res: OrchdResponse) -> Workflow {
+    match res {
+        OrchdResponse::Workflow(w) => w,
+        other => panic!("expected Workflow, got {other:?}"),
+    }
+}
+
+fn expect_workflows(res: OrchdResponse) -> Vec<Workflow> {
+    match res {
+        OrchdResponse::Workflows(v) => v,
+        other => panic!("expected Workflows, got {other:?}"),
     }
 }
 
@@ -1144,6 +1158,182 @@ async fn invalid_doc_name_is_validation_and_unknown_doc_is_not_found() {
         OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
         other => panic!("expected Error{{NotFound}}, got {other:?}"),
     }
+
+    c1.shutdown(boot).await;
+}
+
+/// SW1 (docs/ux/plans/2026-07-24-workflow-authoring.md) full workflow-authoring lifecycle over the
+/// wire: `WorkflowUpsert` (empty id) creates the row AND the JSON file under the app-support rules
+/// tree and broadcasts the bare `WorkflowsChanged` to the other client; `WorkflowList`/
+/// `WorkflowGet` read the full definition back; an update mutates it and pushes again; an invalid
+/// save (`WorkflowUpsert` with an unknown `defaultAgent`) answers `Error{Validation}` and
+/// broadcasts NOTHING (a failed verb never pushes, spec §6); `WorkflowDelete` removes row + file,
+/// answers `Ack` and pushes. Authoring only — nothing here runs a workflow (S6b).
+#[tokio::test]
+async fn workflow_authoring_lifecycle_round_trips_with_validation_and_pushes() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let mut c2 = Client::connect(&socket).await;
+    // c2's Pong proves its push registration happened-before c1's mutations (mirrors the docs test).
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    let project = create_project(&mut c1, "WF").await;
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::ProjectsChanged)
+    );
+
+    // Empty library first.
+    assert!(expect_workflows(
+        c1.request(OrchdRequest::WorkflowList {
+            scope: None,
+            project_id: None,
+        })
+        .await
+    )
+    .is_empty());
+
+    // "+ New workflow" — create via the one upsert verb (empty id ⇒ create). Two stages: one
+    // pinning a known agent, one inheriting the workflow default (agent: None).
+    let stages = vec![
+        Stage {
+            id: "s0".to_string(),
+            name: "plan".to_string(),
+            prompt: "Draft the plan".to_string(),
+            skill_ids: vec![],
+            agent: Some("hermes".to_string()),
+            context_scope: ContextScope::Handoff,
+            outputs: vec!["plan.md".to_string()],
+            gate: Gate::Manual,
+        },
+        Stage {
+            id: "s1".to_string(),
+            name: "build".to_string(),
+            prompt: "Build it".to_string(),
+            skill_ids: vec![],
+            agent: None,
+            context_scope: ContextScope::Inherit,
+            outputs: vec![],
+            gate: Gate::Auto,
+        },
+    ];
+    let created = expect_workflow(
+        c1.request(OrchdRequest::WorkflowUpsert {
+            id: String::new(),
+            name: "ship-feature".to_string(),
+            description: "Author, review, ship".to_string(),
+            scope: WorkflowScope::Project,
+            project_id: Some(project.id.clone()),
+            default_agent: "claude-code".to_string(),
+            stages: stages.clone(),
+            global_skill_ids: vec!["gs-1".to_string()],
+            supervisor: SupervisorConfig::default(),
+        })
+        .await,
+    );
+    assert!(!created.id.is_empty());
+    assert_eq!(created.stages, stages);
+    assert_eq!(created.file_state, SkillFileState::Present);
+    assert!(!created.hash.is_empty());
+    let expected_path = home_dir
+        .path()
+        .join("Library/Application Support/ai.builderpro.desktop/rules/workflows")
+        .join(&project.id)
+        .join(format!("{}.json", created.id));
+    assert_eq!(created.json_path, expected_path.to_string_lossy());
+    assert!(expected_path.exists(), "the JSON file must be written");
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::WorkflowsChanged)
+    );
+
+    // List + get read the full definition back.
+    let listed = expect_workflows(
+        c1.request(OrchdRequest::WorkflowList {
+            scope: Some(WorkflowScope::Project),
+            project_id: Some(project.id.clone()),
+        })
+        .await,
+    );
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, created.id);
+    let got = expect_workflow(
+        c1.request(OrchdRequest::WorkflowGet {
+            id: created.id.clone(),
+        })
+        .await,
+    );
+    assert_eq!(got, created);
+
+    // Update mutates + pushes.
+    let updated = expect_workflow(
+        c1.request(OrchdRequest::WorkflowUpsert {
+            id: created.id.clone(),
+            name: "ship-feature".to_string(),
+            description: "now with review".to_string(),
+            scope: WorkflowScope::Project,
+            project_id: Some(project.id.clone()),
+            default_agent: "opencode".to_string(),
+            stages: stages.clone(),
+            global_skill_ids: vec![],
+            supervisor: SupervisorConfig::default(),
+        })
+        .await,
+    );
+    assert_eq!(updated.id, created.id);
+    assert_eq!(updated.default_agent, "opencode");
+    assert_eq!(updated.description, "now with review");
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::WorkflowsChanged)
+    );
+
+    // An invalid save (unknown defaultAgent) answers Error{Validation} and pushes NOTHING.
+    match c1
+        .request(OrchdRequest::WorkflowUpsert {
+            id: String::new(),
+            name: "bad".to_string(),
+            description: String::new(),
+            scope: WorkflowScope::Global,
+            project_id: None,
+            default_agent: "gpt-5".to_string(),
+            stages: vec![],
+            global_skill_ids: vec![],
+            supervisor: SupervisorConfig::default(),
+        })
+        .await
+    {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::Validation),
+        other => panic!("expected Error{{Validation}}, got {other:?}"),
+    }
+    assert_eq!(c2.recv_push_timeout(Duration::from_millis(300)).await, None);
+
+    // Delete removes row + file, answers Ack and pushes.
+    expect_ack(
+        c1.request(OrchdRequest::WorkflowDelete {
+            id: created.id.clone(),
+        })
+        .await,
+    );
+    assert!(!expected_path.exists(), "the JSON file must be removed");
+    assert_eq!(
+        c2.recv_push_timeout(Duration::from_secs(2)).await,
+        Some(OrchdPush::WorkflowsChanged)
+    );
+    assert!(expect_workflows(
+        c1.request(OrchdRequest::WorkflowList {
+            scope: None,
+            project_id: None,
+        })
+        .await
+    )
+    .is_empty());
 
     c1.shutdown(boot).await;
 }

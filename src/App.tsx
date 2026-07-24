@@ -31,6 +31,7 @@ import {
   onOrchdSkillsChanged,
   onOrchdPoliciesChanged,
   onOrchdResearchRunsChanged,
+  onOrchdWorkflowsChanged,
 } from "./ipc/events";
 import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
@@ -53,6 +54,7 @@ import { ProjectPanel } from "./components/ProjectPanel";
 import { ExtPanel } from "./components/ext/ExtPanel";
 import { InboxPanel } from "./components/InboxPanel";
 import { StatsView } from "./components/StatsView";
+import { WorkflowsView } from "./components/workflows/WorkflowsView";
 import { Toast } from "./components/Toast";
 import { strings } from "./strings";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -298,6 +300,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // Trust policy-cap coarse-invalidation event (S-EXT §4/§6/§8, BL-22, T18): same
     // unconditional-refresh precedent as `ConnectorsChanged`/`SkillsChanged` above.
     track(onOrchdPoliciesChanged(() => void useAppStore.getState().refreshPolicies()));
+    // SW1 workflow-authoring coarse-invalidation event: same unconditional-refresh precedent as
+    // the Connectors/Skills/Trust events above — the `workflows` slice is whole-store, unscoped, so
+    // any workflow upsert/delete re-fetches the whole list.
+    track(onOrchdWorkflowsChanged(() => void useAppStore.getState().refreshWorkflows()));
     // S-IDEA research coarse-invalidation event (spec §5/§8, task T6): same unconditional-refresh
     // precedent as the MCP/Connectors/Skills/Trust events above — no "idea currently open" gating
     // to mirror. `ideaId` is defensively treated as possibly `null` (see
@@ -364,6 +370,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         void s.refreshSkills();
         void s.refreshPolicies();
         void s.refreshInvocations();
+        // SW1: the workflow library is whole-store, project-independent — rehydrate it on every
+        // reconnect exactly like the Extensions slices above (a `WorkflowsChanged` push during the
+        // outage is lost, so a held list can be stale until re-read).
+        void s.refreshWorkflows();
         // Research runs self-heal on reconnect for every idea currently holding runs in the store
         // (spec D8) — the mounted `ResearchPane` self-poll covers the visible pane; this covers
         // every loaded idea whether or not its pane is on screen right now.
@@ -476,6 +486,9 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
     // the `refreshProjects()` above. A lost cold-boot race self-heals via `onOrchdUp` (which also
     // refetches it) exactly like the project list does.
     void useAppStore.getState().refreshStorageStatus();
+    // SW1 workflow library: pulled once on the initial connect, mirroring `refreshProjects()`
+    // above; a lost cold-boot race self-heals via `onOrchdUp` (which also refetches it).
+    void useAppStore.getState().refreshWorkflows();
 
     return () => {
       disposed = true;
@@ -631,6 +644,10 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         ) : view === "stats" ? (
           // Stats view (SCN-052/053): usage + git output analytics; fetches lazily on first open.
           <StatsView />
+        ) : view === "workflows" ? (
+          // SW1 workflow-authoring library (SCR-01): compose + save reusable workflow-as-data;
+          // authoring/config only — the S6b executor is not built here (no runtime).
+          <WorkflowsView />
         ) : (
           <>
             <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>

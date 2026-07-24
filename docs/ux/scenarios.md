@@ -65,6 +65,13 @@
 | SCN-055 | Home v2 — attention hub | home | P-01 | ST-042 | validated | 2026-07-23 BLOCKED (not built) |
 | SCN-056 | First-run fast-path — terminal auto-spawn | onboarding | P-02 | ST-002 | implemented | 2026-07-23 PASS (re-audit; AUD-17 closed) |
 | SCN-057 | Per-project auth context for terminals | auth | P-01 | ST-043 | draft | 2026-07-23 BLOCKED (draft, gated A-9) |
+| SCN-060 | Create a workflow | workflows | P-01 | ST-045 | validated | 2026-07-24 built |
+| SCN-061 | Configure a stage — skills, prompt, gate | workflows | P-01 | ST-045 | validated | 2026-07-24 built |
+| SCN-062 | Global skills + CEO oversight for a workflow | workflows | P-01 | ST-045 | validated | 2026-07-24 built (config only) |
+| SCN-063 | Run a workflow on a project | workflows | P-01 | ST-046 | draft | — |
+| SCN-064 | CEO advances or escalates between stages | workflows | P-01 | ST-046 | draft | — |
+| SCN-065 | Assign a stage's agent and context — terminal grouping | workflows | P-01 | ST-045 | validated | 2026-07-24 built |
+| SCN-066 | Run journal — the heartbeat hand-off between agents | workflows | P-01 | ST-046 | draft | — |
 
 ## Personas
 
@@ -219,10 +226,10 @@ in different lifecycle states.
 - **Entry point:** left sidebar (always visible)
 - **Preconditions:** projects and workspaces exist
 - **Steps:**
-  1. User clicks "⌂ Home" / "⚙ Extensions" / a project header / a workspace row
+  1. User clicks "⌂ Home" / "⚙ Extensions" / "⚙ Workflows" / "✦ Stats" / a project header / a workspace row
   2. User expands "Archived (N)" and opens an archived project
-- **Expected result:** view switches accordingly; project header opens the project panel; workspace row activates the workspace and shows terminals; archived group is collapsed by default and toggles with ▸/▾
-- **UI elements:** "⌂ Home", "⚙ Extensions", "✉ Inbox" (+ orphan count badge), project group headers, workspace rows, "Archived (N)" toggle, archived project rows
+- **Expected result:** view switches accordingly; "⚙ Workflows" opens the workflow library (SCN-060); project header opens the project panel; workspace row activates the workspace and shows terminals; archived group is collapsed by default and toggles with ▸/▾
+- **UI elements:** "⌂ Home", "⚙ Extensions", "⚙ Workflows" *(draft — SCN-060)*, "✦ Stats", "✉ Inbox" (+ orphan count badge), project group headers, workspace rows, "Archived (N)" toggle, archived project rows
 - **States covered:** empty, success
 - **Errors & recovery:** zero projects and workspaces → empty-state sentence (SCN-001); nothing else can fail (navigation is local)
 - **Status:** implemented
@@ -919,7 +926,7 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** save rejects → inline + toast (policy form pattern); orchd down → **Save disabled, but the CEO controls stay editable as drafts** — unified with the SCN-036 policy fields, one drafts-stay-live rule for the whole form (AUD-2026-07-23 PRN-04); an external ruleset change landing mid-edit never silently clobbers an unsaved draft (dirty fields are kept, clean fields re-hydrate — PRN-03); empty delegation scope with CEO on → blocked alert "delegate at least one class or disable the CEO"
 - **Status:** implemented
-- **Note (honesty boundary, S6b):** this scenario ships the delegation CONFIG only. It persists the scope, instruction and custom rules and states what the CEO would read/decide; it does NOT execute anything. Autonomous execution — the CEO actually answering agent questions (SCN-047) and continuing workflows (SCN-049) — awaits the orchestrator-agent runtime (S6b). The UI carries a matching pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same register as the Skills-tab registry banner.
+- **Note (honesty boundary, S6b):** this scenario ships the delegation CONFIG only. It persists the scope, instruction and custom rules and states what the CEO would read/decide; it does NOT execute anything. Autonomous execution — the CEO actually answering agent questions (SCN-047) and continuing workflows (SCN-049) — awaits the orchestrator-agent runtime (S6b). The UI carries a matching pending note ("The CEO acts on this once the orchestrator agent runtime lands (S6b)."), the same register as the Skills-tab registry banner. **Reuse:** the same `SupervisorConfig` model and CEO section pattern are applied to workflow-stage gates in SCN-062/064 (the CEO advancing a workflow run is the same answer-within-scope-vs-escalate decision, applied to gates instead of terminal questions).
 - **Coverage:** crates/orchd-proto/src/lib.rs:225-284 (SupervisorConfig + PolicyRules.supervisor additive field), src/ipc/orchd-types.ts:209,300-305 (generated TS), crates/orchd/src/persistence.rs:2576-2585,2607-2634,2659-2683 (validate_policy supervisor guards, PolicyRulesStrict mirror, decode backfill), src/components/RulesetPanel.tsx (validatePolicy + supervisor section, project scope only; progressive disclosure while OFF — PRN-11; drafts-stay-live under orchd-down unified across the form — PRN-04; dirty-draft guard on the policy fields — PRN-03), src/strings.ts (rules.supervisor.* incl. pendingNote + disabledHint); tests — crates/orchd/src/persistence.rs:6176-6320, crates/orchd-proto/tests/roundtrip.rs:1467-1516, crates/orchd-proto/tests/ts_export.rs:159-200, src/components/RulesetPanel.test.tsx (supervisor suite incl. disclosure, unified gating, dirty-draft guard)
 
 ### SCN-047: CEO answers an agent's question autonomously
@@ -1107,3 +1114,133 @@ in different lifecycle states.
 - **Design rationale:** env injection at spawn is the only cross-platform mechanism that truly isolates orgs (auth precedence: `ANTHROPIC_API_KEY` > `apiKeyHelper` > `CLAUDE_CODE_OAUTH_TOKEN` > `/login`); `CLAUDE_CONFIG_DIR` isolates config on Linux/Windows but **not** Keychain-backed creds on macOS — hence the honesty boundary above. Feasibility of the token/cost read-back is tracked by A-8; this scenario is the org-isolation half and is gated behind the same spike (A-9). Interaction (A-8/SCN-052): a per-context `CLAUDE_CONFIG_DIR` relocates Claude Code's session JSONL, so the usage-stats scanner must also scan bound contexts' dirs — spike check 4. Injected env vars must pass sessiond's env-hygiene allowlist (pty_supervisor, spec §9.3).
 - **Status:** draft
 - **Coverage:** none yet — integration point: terminal/session spawn env in the Tauri command + orchd session create (where cwd is set today, per SCN-013 coverage)
+
+## workflows
+
+### SCN-060: Create a workflow
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-045, FLW-23 (JTBD-12, JRN-12/#2)
+- **Entry point:** top-nav "⛓ Workflows" → library → "+ New workflow" (a distinct glyph from ⚙ Extensions)
+- **Preconditions:** none (a workflow can be authored before any project exists)
+- **Steps:**
+  1. User opens the Workflows library and reads the list of saved workflows (scope filter global | project)
+  2. User clicks "+ New workflow", names it and picks a scope → the workflow editor opens
+  3. User adds stages and reorders them
+  4. User saves
+- **Expected result:** the workflow persists file-backed (like Rules/Docs), scoped global or project, and survives a restart; stages keep their order; it appears in the library and can be run on a project (SCN-063). Authoring is fully live now — it is workflow-as-DATA, independent of the S6b runtime
+- **Alt paths:** duplicate an existing workflow as a starting point → a copy opens in the editor
+- **UI elements:** "⛓ Workflows" nav item, library list, scope filter, "+ New workflow" button, name input, scope picker, workflow editor, reorderable stage list, "Save workflow" button, per-row open/duplicate/delete
+- **States covered:** loading, empty, error, success
+- **Errors & recovery:** empty name → save blocked inline; a workflow with zero stages → save blocked ("add at least one stage"); persist rejects → toast with the reason, the draft is preserved; orchd down → Save disabled, the editor stays editable as a draft (the SCN-046 policy-form rule)
+- **Status:** validated
+- **Coverage:** crates/orchd-proto/src/lib.rs (Workflow/Stage/Gate/ContextScope/WorkflowScope + WorkflowList/Get/Upsert/Delete + Push::WorkflowsChanged, tail-appended), crates/orchd/src/persistence.rs (schema v7 `workflow` table + files-as-truth JSON at rules/workflows/ + validate_workflow), crates/orchd/src/socket_server.rs (respond_workflow + dispatch), src-tauri/src/commands.rs:3002-3073 (workflow_list/get/upsert/delete) + src-tauri/src/broker.rs:111,333 (orchd://workflows-changed), src/ipc/orchd.ts + src/ipc/events.ts (onOrchdWorkflowsChanged), src/store/store.ts:262,458 (workflows slice + refreshWorkflows + upsert/delete), src/App.tsx (view "workflows" + subscription), src/components/WorkspaceSidebar.tsx (workflows-nav-button, ⛓ glyph), src/components/workflows/WorkflowsView.tsx (+.test), src/strings.ts (workflows group); tests: crates + src/store/store.workflows.test.ts + src/ipc/workflows.test.ts. Authoring built; the RUN (SCN-063) remains S6b
+
+### SCN-061: Configure a stage — skills, prompt, gate
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-045, FLW-23 (JTBD-12, JRN-12/#3)
+- **Entry point:** workflow editor → open a stage
+- **Preconditions:** a workflow with ≥1 stage exists
+- **Steps:**
+  1. User opens a stage and writes its prompt/command (markdown instruction the agent turn will follow)
+  2. User binds skills to the stage from the skills registry (SCN-035)
+  3. User sets the stage's gate to auto or manual
+- **Expected result:** the stage holds its name, prompt, bound skills, and gate; the editor shows the stage's **effective skills = global skills ∪ stage skills** (deduped), so what the stage will actually have is explicit; a stage is an **agent-turn** (skills + prompt) — approval pauses are the manual gate, not a separate step kind (v1). The stage's **agent, context scope and outputs** are configured alongside on the same panel (SCN-065)
+- **Alt paths:** unset the gate back to auto/manual freely; remove a bound skill
+- **UI elements:** stage name input, prompt/command markdown editor, skill picker (registry-backed), gate toggle (auto | manual), effective-skills summary, "missing binding" marker
+- **States covered:** error, success
+- **Errors & recovery:** a bound skill later removed from the registry → shown as a **missing binding** on the stage (never silently dropped), and running is blocked until it is fixed or removed; empty prompt → the stage is flagged and the workflow cannot be saved until every stage has a prompt
+- **Status:** validated
+- **Coverage:** src/components/workflows/StageDetail.tsx (prompt/command editor, skill picker, gate segmented, effective-skills summary, missing-binding marker) + .test, src/components/workflows/agents.ts (effectiveSkillIds = global ∪ stage) + .test, src/components/workflows/WorkflowEditor.tsx (opens stages), src/strings.ts (workflows group); daemon validation crates/orchd/src/persistence.rs (validate_workflow: every stage has name+prompt). Skills referenced by id from the existing registry (SCN-035)
+
+### SCN-062: Global skills + CEO oversight for a workflow
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-045, ST-046, FLW-23 (JTBD-12, JTBD-10, JRN-12/#4)
+- **Entry point:** workflow editor → global-skills picker + CEO oversight section
+- **Preconditions:** a workflow exists
+- **Steps:**
+  1. User picks the global skills applied to every stage
+  2. User enables CEO oversight for the workflow, delegates which gate classes the CEO may auto-advance, and writes the CEO instruction — or seeds a recommended scope (reuses SCN-046)
+  3. User saves
+- **Expected result:** global skills are union-merged into every stage's effective set; CEO oversight config persists with the workflow, stating what the CEO may auto-advance and within which caps (inherited from policy); disabled by default until explicitly enabled — mirrors the SCN-046 CEO section exactly (same component pattern, same delegation model)
+- **UI elements:** global-skills picker, CEO enable toggle, "Recommended scope" preset, delegated gate-class checkboxes, inherited-caps summary, CEO instruction textarea, scope summary, "Save workflow" (shared)
+- **States covered:** success, error
+- **Errors & recovery:** CEO enabled with an empty delegated scope → blocked alert ("delegate at least one class or disable the CEO"), the same guard as SCN-046; save rejects → inline + toast; orchd down → controls stay editable as drafts, only Save gated (unified policy-form rule)
+- **Note (honesty boundary, S6b — A-10):** this configures oversight; it does NOT run anything. The CEO actually advancing a run (SCN-064) awaits the S6b orchestrator-agent runtime, and the section carries the matching pending note — the same register and boundary as SCN-046
+- **Status:** validated
+- **Coverage:** src/components/workflows/WorkflowEditor.tsx (global-skills picker + CEO oversight section reusing the RulesetPanel supervisor pattern — enable toggle, Recommended-scope preset, delegated-class chips, empty-scope blocked guard, S6b pending note), crates/orchd/src/persistence.rs (shared `validate_supervisor` called by both validate_policy and validate_workflow — enabled CEO with empty scope rejected, byte-equal error). Config only; the CEO actually advancing a run (SCN-064) is S6b
+
+### SCN-063: Run a workflow on a project
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-046, FLW-24 (JTBD-12, JTBD-10, JRN-12/#5)
+- **Entry point:** project → "Run workflow"
+- **Preconditions:** a saved workflow exists; a project is open
+- **Steps:**
+  1. User clicks "Run workflow" on a project and picks a saved (global) workflow
+  2. A run is created; the operator watches it advance on the run detail and the Home digest
+- **Expected result:** each **contiguous same-agent block of stages runs in its own terminal** (its agent, its effective skills + prompt) in a real session the operator can open — a single-agent workflow is one terminal running every stage; the run advances per each stage's gate (SCN-064); across an agent boundary the next terminal is handed the run journal + declared outputs (SCN-066); a "running" workflow reflects **live** state — a stalled or failed stage shows honestly, never a fake "running"
+- **UI elements:** project "Run workflow" button, workflow picker, run detail (terminal swimlanes — one per agent block — with a stage progress rail, per-terminal session link, the run-journal / heartbeat panel between terminals, decision log, honest failed/stalled state), Home "open run" link
+- **States covered:** loading, success, error
+- **Errors & recovery:** run trigger rejects → toast, no run created; a stage's session fails to spawn → the run parks in an honest failed state with the reason (never fake busy); orchd/runtime down → the run cannot start and says so
+- **Note (honesty boundary, S6b — A-10):** the RUN is gated on the S6b orchestrator-agent runtime, which does not exist yet. The trigger and the run surface are designed now; until S6b, "Run workflow" carries the pending note "Workflows run once the orchestrator agent runtime lands (S6b)." and does not fake execution — exactly the SCN-046 boundary
+- **Status:** draft
+- **Coverage:** none yet — S6b runtime (SW1 executor + WorkflowRun/StageState persistence)
+
+### SCN-064: CEO advances or escalates between stages
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-046, FLW-24 (JTBD-12, JTBD-10, JRN-12/#6)
+- **Entry point:** a running workflow reaches a stage boundary (gate)
+- **Preconditions:** CEO oversight enabled on the workflow (SCN-062); a run in progress (SCN-063)
+- **Steps:**
+  1. A stage completes; the CEO evaluates the gate
+  2. auto gate + transition within delegated classes → CEO advances to the next stage and records the decision (basis + timestamp) in the decision log (SCN-050); manual gate → the run parks "needs you" for the operator to advance; auto gate but out of delegated scope → the CEO escalates (SCN-048), never advancing beyond what was delegated
+  3. The operator sees advances/hand-offs and open escalations in the Home digest (SCN-050/055)
+- **Expected result:** the pipeline advances without operator input for in-scope auto gates; every autonomous advance is auditable in the decision log and **cites the run journal** (the heartbeat the finishing agent wrote — SCN-066) as its basis; manual gates and escalations are the only things that stop for the operator; the CEO never acts beyond the delegated scope
+- **UI elements:** stage gate/escalation markers on the run detail, decision-log entries (each linking the run-journal entry it acted on), needs-you badge (app chrome), Home hand-off + escalation cards
+- **States covered:** success, error
+- **Errors & recovery:** CEO cannot ground an advance in the delegated scope → treats it as escalation, never guesses (SCN-047 rule); CEO backend failure → the run parks as ordinary "needs you" + Diagnostics — degradation equals the manual path, nothing worse
+- **Status:** draft
+- **Coverage:** none yet — S6b runtime; the CEO decision model reuses SCN-046/047/048 (answer-within-scope vs escalate), applied to workflow gates
+
+### SCN-065: Assign a stage's agent and context — see the terminal grouping
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-045, FLW-23 (JTBD-12, JRN-12/#3)
+- **Entry point:** workflow editor → stage panel (agent + context) and the editor's terminal-grouping view
+- **Preconditions:** a workflow with ≥2 stages exists
+- **Steps:**
+  1. User sets the workflow's **default agent** (from the agents the app runs — claude-code / hermes / opencode / kilo)
+  2. On a stage, user leaves the agent as "inherit" or overrides it with a different agent
+  3. User sets the stage's **context scope** (inherit / handoff / project / selected) and declares the stage's named **outputs**
+  4. User reads the editor's terminal grouping
+- **Expected result:** the editor **groups consecutive same-agent stages into one terminal** and draws a boundary line where the agent changes ("Terminal 1 · claude-code · 3 stages" → "Terminal 2 · hermes · 2 stages"); a workflow with no agent change shows a single terminal running every stage. Each stage states what its agent will be handed (its context scope) and what it will leave behind (its outputs). Context scope defaults to `inherit` inside a terminal and to `handoff` (run journal + prior outputs) at a terminal boundary — the cheap, explicit, reproducible default; the operator can widen it to `project` or `selected`
+- **Alt paths:** set every stage to inherit → the whole workflow is one terminal/agent (no hand-off needed); override an agent mid-list → a new terminal boundary appears there
+- **UI elements:** workflow default-agent picker, per-stage agent picker (inherit + known agents), context-scope selector (inherit | handoff | project | selected) + subset picker for `selected`, stage outputs field, terminal-grouping bracket/boundary in the stage list
+- **States covered:** success, error
+- **Errors & recovery:** an agent that the app cannot launch (not installed) → the stage shows an honest "agent unavailable" marker and the workflow cannot run until it is changed or installed — never a silent fallback to a different agent; `selected` scope referencing a path/output that no longer exists → flagged like a missing skill binding
+- **Note (honesty boundary, S6b — A-11):** this configures the agent/terminal/context model and shows the grouping; the actual multi-terminal run and hand-off (SCN-066) await the S6b runtime. The grouping and context choices are fully legible now — nothing about them is faked
+- **Status:** validated
+- **Coverage:** src/components/workflows/agents.ts (KNOWN_AGENTS + computeTerminalGroups: consecutive same-effective-agent stages = one terminal, an agent change = a boundary) + .test (incl. single-agent = one terminal AND the A-B-A three-terminal case), src/components/workflows/WorkflowEditor.tsx (default-agent picker + terminal-grouping brackets), src/components/workflows/StageDetail.tsx (agent picker inherit+known, context-scope segmented, outputs), crates/orchd/src/persistence.rs (validate_workflow: default_agent + stage agent ∈ known set). The terminal-collapse rule + context scope are config the S6b runtime consumes
+
+### SCN-066: Run journal — the heartbeat hand-off between agents
+- **Persona:** P-01
+- **Feature:** workflows
+- **Traces:** ST-046, FLW-24 (JTBD-12, JTBD-02, JRN-12/#5-6)
+- **Entry point:** run detail → the run-journal panel (between terminal swimlanes); also readable as a file the agents write
+- **Preconditions:** a run in progress that crosses at least one agent boundary
+- **Steps:**
+  1. A stage's agent works and **appends to the run journal as it goes** — what it did, artifacts/commits it produced, explicit "for the next agent: pick up X, the spec is at Y, run Z", and a status
+  2. The run crosses an agent boundary; the next terminal's agent is spawned and **reads the run journal first**, picking up exactly what the prior agent left (at the `handoff` scope: the journal + the declared outputs)
+  3. The operator reads the same run journal to see the hand-off in plain language; the CEO's gate decisions cite the journal entries they acted on
+- **Expected result:** context crosses terminal boundaries through a **file-backed, human-readable run journal** (heartbeat) — not through hidden shared memory; a single-agent run needs no hand-off (one terminal keeps its own context, but the journal is still written for observability); the journal is the operator's and the CEO's shared source of truth for "what happened and what's next"; it versions with the run and never silently loses an entry
+- **Alt paths:** the operator edits/annotates the journal between stages to redirect the next agent (a manual steer); a single-agent workflow → the journal is a linear progress log, not a hand-off
+- **UI elements:** run-journal panel (per-stage entries: agent, terminal, what-it-did, outputs, "for next", status), the same content as a file the agents read/write (reuses the Docs file-backing, SCN-054), "open as file" affordance, per-entry link from the decision log
+- **States covered:** loading, empty, success, error
+- **Errors & recovery:** an agent writes nothing before an agent boundary → the next agent (and the operator) see an honest "no hand-off written — the previous stage left no journal entry" rather than proceeding blind; journal storage degraded → StorageBanner rules (SCN-041); the journal never silently truncates
+- **Note (honesty boundary, S6b — A-11):** the live hand-off (agents writing, next agent reading, CEO citing) awaits the S6b runtime. The journal format, its file-backing, and its place in the run surface are designed now; the honesty rule is explicit — no agent is ever assumed to "just know" context that is not in the journal
+- **Status:** draft
+- **Coverage:** none yet — reuses the file-backed Doc machinery (SCN-054) for the journal file; live writing/reading is S6b

@@ -74,6 +74,11 @@ fn export_and_read() -> String {
     Doc::export_all_to(types_ts_dir()).expect("export Doc");
     DocMeta::export_all_to(types_ts_dir()).expect("export DocMeta");
     DocView::export_all_to(types_ts_dir()).expect("export DocView");
+    Workflow::export_all_to(types_ts_dir()).expect("export Workflow");
+    Stage::export_all_to(types_ts_dir()).expect("export Stage");
+    WorkflowScope::export_all_to(types_ts_dir()).expect("export WorkflowScope");
+    Gate::export_all_to(types_ts_dir()).expect("export Gate");
+    ContextScope::export_all_to(types_ts_dir()).expect("export ContextScope");
     fs::read_to_string(types_ts_path()).expect("read generated orchd-types.ts")
 }
 
@@ -345,6 +350,12 @@ fn no_snake_case_leakage_anywhere_in_generated_file() {
         "storage_mode",
         "quarantined_path",
         "modified_at",
+        // SW1 Workflow authoring fields.
+        "default_agent",
+        "skill_ids",
+        "context_scope",
+        "global_skill_ids",
+        "json_path",
     ] {
         assert!(
             !ts.contains(snake),
@@ -816,6 +827,107 @@ fn research_status_wire_tags_are_camelcase() {
         assert!(
             contains_normalized(&ts, &format!("\"{tag}\"")),
             "ResearchStatus must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+}
+
+// ---- SW1 Workflow authoring entity export tests
+// (docs/ux/plans/2026-07-24-workflow-authoring.md) ----
+
+#[test]
+fn workflow_entities_are_present_with_camelcase_fields_and_ts_number_timestamps() {
+    let ts = export_and_read();
+    for expected in [
+        "export type Workflow",
+        "export type Stage",
+        "export type WorkflowScope",
+        "export type Gate",
+        "export type ContextScope",
+    ] {
+        assert!(
+            contains_normalized(&ts, expected),
+            "expected {expected:?} in generated orchd-types.ts; got:\n{ts}"
+        );
+    }
+    assert!(
+        contains_normalized(&ts, "defaultAgent: string"),
+        "Workflow.default_agent must serialize as camelCase `defaultAgent`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "stages: Array<Stage>")
+            || contains_normalized(&ts, "stages: Stage[]"),
+        "Workflow.stages must be typed `Array<Stage>`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "globalSkillIds: Array<string>")
+            || contains_normalized(&ts, "globalSkillIds: string[]"),
+        "Workflow.global_skill_ids must serialize as camelCase `globalSkillIds`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "supervisor: SupervisorConfig"),
+        "Workflow.supervisor must REUSE the wire `SupervisorConfig` type; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "fileState: SkillFileState"),
+        "Workflow.file_state must REUSE the `SkillFileState` enum (SW1 contract); got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "jsonPath: string"),
+        "Workflow.json_path must serialize as camelCase `jsonPath`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "projectId: string | null"),
+        "Workflow.project_id (Option<String>) must be TS `string | null`; got:\n{ts}"
+    );
+    // Stage fields.
+    assert!(
+        contains_normalized(&ts, "skillIds: Array<string>")
+            || contains_normalized(&ts, "skillIds: string[]"),
+        "Stage.skill_ids must serialize as camelCase `skillIds`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "agent: string | null"),
+        "Stage.agent (Option<String>, None = inherit the workflow default) must be TS \
+         `string | null`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "contextScope: ContextScope"),
+        "Stage.context_scope must serialize as camelCase `contextScope`, typed `ContextScope`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "gate: Gate"),
+        "Stage.gate must be typed `Gate`; got:\n{ts}"
+    );
+    assert!(
+        contains_normalized(&ts, "createdAt: number")
+            && contains_normalized(&ts, "updatedAt: number"),
+        "Workflow.created_at/updated_at (i64) must be TS `number`, not bigint; got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("bigint"),
+        "generated orchd-types.ts must never contain `bigint`; got:\n{ts}"
+    );
+}
+
+#[test]
+fn workflow_scope_gate_context_scope_wire_tags_are_camelcase() {
+    let ts = export_and_read();
+    for tag in ["global", "project"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "WorkflowScope must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+    for tag in ["auto", "manual"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "Gate must include wire tag {tag:?}; got:\n{ts}"
+        );
+    }
+    for tag in ["inherit", "handoff", "project", "selected"] {
+        assert!(
+            contains_normalized(&ts, &format!("\"{tag}\"")),
+            "ContextScope must include wire tag {tag:?}; got:\n{ts}"
         );
     }
 }

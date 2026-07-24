@@ -218,7 +218,7 @@ async fn second_instance_flock_refusal() {
 }
 
 #[tokio::test]
-async fn fresh_boot_creates_schema_v6_and_global_ruleset() {
+async fn fresh_boot_creates_schema_v7_and_global_ruleset() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
     let home_dir = tempfile::tempdir().unwrap();
@@ -250,8 +250,8 @@ async fn fresh_boot_creates_schema_v6_and_global_ruleset() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only); SCN-054 bumped it
-    // 5->6 (additive, the `doc` table only).
-    assert_eq!(user_version, 6);
+    // 5->6 (additive, the `doc` table only); SW1 bumped it 6->7 (additive, the `workflow` table).
+    assert_eq!(user_version, 7);
 
     for table in [
         "project",
@@ -277,6 +277,8 @@ async fn fresh_boot_creates_schema_v6_and_global_ruleset() {
         "research_run",
         // SCN-054/ST-041 (schema v6, additive): per-project markdown docs.
         "doc",
+        // SW1 (schema v7, additive): file-backed workflow definitions.
+        "workflow",
     ] {
         let exists: bool = db
             .conn()

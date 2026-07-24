@@ -29,7 +29,11 @@ import type {
   RuleScope,
   RuleSetView,
   Skill,
+  Stage,
   StorageStatus,
+  SupervisorConfig,
+  Workflow,
+  WorkflowScope,
 } from "../ipc/orchd-types";
 import {
   orchdGetDoc,
@@ -51,6 +55,9 @@ import {
   trustListAudit,
   researchListRuns,
   orchdStorageStatus,
+  orchdListWorkflows,
+  orchdUpsertWorkflow,
+  orchdDeleteWorkflow,
   describeOrchdError,
   isNotFoundError,
 } from "../ipc/orchd";
@@ -104,10 +111,12 @@ export interface AppState {
    * Top-level navigation (spec §6.6/§6.2/§10, S-EXT §8): `"home"` is the attention-first Home
    * view over ALL terminals across workspaces; `"workspace"` is the existing per-workspace
    * terminal layout; `"project"` is the S3 project panel (`openProject`, T18); `"ext"` is the
-   * S-EXT Extensions panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management.
-   * Defaults to `"home"` — the owner's daily loop starts there, never mid-workspace.
+   * S-EXT Extensions panel (`ExtPanel`, T8) — MCP servers/tools/connectors/skills management;
+   * `"workflows"` is the SW1 workflow-authoring library (`WorkflowsView`) — reusable
+   * workflow-as-data authoring (config only, no runtime — S6b). Defaults to `"home"` — the owner's
+   * daily loop starts there, never mid-workspace.
    */
-  view: "home" | "workspace" | "project" | "ext" | "inbox" | "stats";
+  view: "home" | "workspace" | "project" | "ext" | "inbox" | "stats" | "workflows";
 
   /**
    * File-explorer slice (spec §6.6/§6.4). Every keyed map here uses the SAME key format:
@@ -243,6 +252,15 @@ export interface AppState {
    * tab's policy editor). Replaced wholesale by `refreshPolicies`. */
   policies: Policy[];
 
+  /**
+   * Workflow-authoring slice (SW1, docs/ux/plans/2026-07-24-workflow-authoring.md). Every reusable
+   * workflow-as-data definition (`orchdListWorkflows(null, null)` — all scopes; the library filters
+   * global/project client-side). Mirrors `skills`/`mcpServers`'s whole-store, invalidation-driven
+   * convention exactly — replaced wholesale by `refreshWorkflows`, which the `orchd://workflows-
+   * changed` push (App.tsx) fires. AUTHORING/CONFIG ONLY — no runtime consumer until the S6b
+   * executor lands (`RunWorkflowPicker.tsx`'s honest pending note). */
+  workflows: Workflow[];
+
   /** Honest orchd connectivity (spec §9/§11, mirrors sessiond's `daemonConnected` inverted):
    * `true` while the `orchd://down` event is the most recent connection-state signal seen, `false`
    * once `orchd://up` fires. Every domain surface shows the shared "Orchestrator unavailable"
@@ -311,7 +329,9 @@ export interface AppState {
   setActiveSession: (id: SessionId | null) => void;
 
   /** Switch the top-level view. See `view`'s doc above. */
-  setView: (v: "home" | "workspace" | "project" | "ext" | "inbox" | "stats") => void;
+  setView: (
+    v: "home" | "workspace" | "project" | "ext" | "inbox" | "stats" | "workflows",
+  ) => void;
   /** Set (`open=true`) or clear (`open=false`) one directory's expanded flag. */
   setExpanded: (root: string, rel: string, open: boolean) => void;
   /** Insert or replace one directory's cached listing. */
@@ -432,6 +452,30 @@ export interface AppState {
   /** Re-fetch `policies` wholesale (`trustListPolicies()` has no filter). Mirrors
    * `refreshMcpServers` exactly. */
   refreshPolicies: () => Promise<void>;
+
+  /** Re-fetch `workflows` wholesale (`orchdListWorkflows(null, null)` — all scopes; SW1). Mirrors
+   * `refreshSkills` exactly: try/catch → `reportError` on failure, replace on success. */
+  refreshWorkflows: () => Promise<void>;
+  /** Create (`id: ""`) or save (a non-empty `id`) a workflow via `orchdUpsertWorkflow` (SW1). On
+   * success upserts the returned definition into `workflows` by id for immediate feedback (the
+   * `orchd://workflows-changed` push then re-fetches the whole list) and RESOLVES with it; a
+   * daemon rejection propagates untouched so the editor keeps the owner's draft on screen and
+   * surfaces the honest mapped toast itself. */
+  upsertWorkflow: (params: {
+    id: string;
+    name: string;
+    description: string;
+    scope: WorkflowScope;
+    projectId: string | null;
+    defaultAgent: string;
+    stages: Stage[];
+    globalSkillIds: string[];
+    supervisor: SupervisorConfig;
+  }) => Promise<Workflow>;
+  /** Delete a workflow via `orchdDeleteWorkflow` (SW1): daemon round-trip first, then drop it from
+   * `workflows` on success. REJECTS with the raw error when the daemon refuses (down, unknown id),
+   * leaving the slice untouched — the library surfaces the honest toast. */
+  deleteWorkflow: (id: string) => Promise<void>;
   /** Re-fetch `storageStatus` (`orchdStorageStatus()` — spec D3, BL-94). Called on connect and on
    * every `orchd://up`. Mirrors `refreshMcpServers` exactly: try/catch -> toast on failure,
    * replace on success. */
@@ -724,6 +768,7 @@ export const useAppStore = create<AppState>((set, get) => {
     invocations: [],
     auditRows: [],
     policies: [],
+    workflows: [],
     orchdDown: false,
     orchdIncompatible: false,
     orchdUpgradeDialogOpen: false,
@@ -1140,6 +1185,49 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (e) {
         get().reportError("refreshPolicies", e);
       }
+    },
+
+    // ── Workflow-authoring slice (SW1) ───────────────────────────────────────────────────────
+
+    refreshWorkflows: async () => {
+      try {
+        const workflows = await orchdListWorkflows(null, null);
+        set({ workflows });
+      } catch (e) {
+        get().reportError("refreshWorkflows", e);
+      }
+    },
+
+    upsertWorkflow: async (params) => {
+      // Daemon first: the write is authoritative (fail-closed validation runs there). On success
+      // upsert the returned row by id so the library reflects it immediately even before the
+      // `orchd://workflows-changed` push re-fetches wholesale; a rejection propagates untouched so
+      // the editor keeps the draft and toasts the honest message itself (mirrors `removeWorkspace`'s
+      // daemon-first, propagate-on-reject discipline).
+      const saved = await orchdUpsertWorkflow(
+        params.id,
+        params.name,
+        params.description,
+        params.scope,
+        params.projectId,
+        params.defaultAgent,
+        params.stages,
+        params.globalSkillIds,
+        params.supervisor,
+      );
+      set((s) => {
+        const rest = s.workflows.filter((w) => w.id !== saved.id);
+        return { workflows: [...rest, saved] };
+      });
+      return saved;
+    },
+
+    deleteWorkflow: async (id) => {
+      // Daemon first, state second (mirrors `removeWorkspace`): the row is dropped ONLY after the
+      // daemon commits the delete; a rejection leaves `workflows` exactly as it was so the row stays
+      // put and the library surfaces the honest toast.
+      await orchdDeleteWorkflow(id);
+      set((s) => ({ workflows: s.workflows.filter((w) => w.id !== id) }));
     },
 
     // ── storage-degradation status (spec D3, BL-94) ──────────────────────────────────────────

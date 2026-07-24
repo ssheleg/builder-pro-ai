@@ -803,4 +803,179 @@ export const strings = {
       `Database was corrupted and has been reset. The damaged copy was saved to ${path}.`,
     inMemory: "Storage unavailable — running in memory. Changes will NOT survive a restart.",
   },
+
+  // ── Workflows (SW1, docs/ux/plans/2026-07-24-workflow-authoring.md; "Workflows" nav, SCR-01..04)
+  // AUTHORING/CONFIG ONLY: `run.pendingNote` is the honesty boundary — saving/triggering never
+  // starts a run; the S6b executor that consumes these definitions does not exist yet. ──────────
+  workflows: {
+    nav: "⛓  Workflows",
+    title: "Workflows",
+
+    // ── library (SCR-01) ──
+    library: {
+      scopeAria: "Workflow scope filter",
+      scopeAll: "All",
+      scopeGlobal: "Global",
+      scopeProject: "Project",
+      newWorkflow: "+ New workflow",
+      loading: "Loading workflows…",
+      emptyTitle: "No workflows yet",
+      emptyHint: "Compose one to reuse across projects.",
+      stagesCount: (n: number) => `${n} ${n === 1 ? "stage" : "stages"}`,
+      skillsCount: (n: number) => `${n} ${n === 1 ? "skill" : "skills"}`,
+      scopeBadgeGlobal: "global",
+      scopeBadgeProject: "project",
+      run: "Run →",
+      open: "Open",
+      duplicate: "Duplicate",
+      delete: "Delete",
+      deleteConfirm: (name: string) => `Delete workflow "${name}"? This cannot be undone.`,
+      duplicateSuffix: (name: string) => `${name} (copy)`,
+      untitled: "Untitled workflow",
+      noDescription: "No description.",
+    },
+
+    // ── editor (SCR-02) ──
+    editor: {
+      backToLibrary: "← Workflows",
+      newTitle: "New workflow",
+      nameLabel: "Name",
+      nameAria: "Workflow name",
+      namePlaceholder: "workflow name",
+      descriptionLabel: "Description",
+      descriptionAria: "Workflow description",
+      descriptionPlaceholder: "what this workflow does (optional)",
+      scopeLabel: "Scope",
+      defaultAgentLabel: "Default agent",
+      defaultAgentAria: "Default agent for stages that inherit",
+      globalSkillsLabel: "Global skills",
+      globalSkillsHint: "Loaded into every stage, on top of each stage's own skills.",
+      noSkillsAvailable: "No skills registered yet.",
+      stagesLabel: "Stages",
+      addStage: "+ Add stage",
+      noStages: "No stages yet — add the first stage.",
+      save: "Save workflow",
+      saving: "Saving…",
+      unsavedHint: "Unsaved changes.",
+      /** Terminal-bracket header (SCR-02): consecutive same-effective-agent stages group into one
+       * terminal; a header names the terminal, its agent and its stage count. */
+      terminalHeader: (n: number, agent: string, count: number) =>
+        `Terminal ${n} · ${agent} · ${count} ${count === 1 ? "stage" : "stages"}`,
+      stageInherits: (agent: string) => `inherits ${agent}`,
+      editStage: "Edit",
+      // validation (client twin of the daemon's fail-closed guard)
+      errNameRequired: "name the workflow before saving",
+      errProjectRequired: "pick a project for a project-scoped workflow",
+      errStageIncomplete: (name: string) => `stage "${name}" needs a name and a prompt`,
+      errNoStages: "add at least one stage before saving",
+      errCeoNoClasses: "delegate at least one class or disable the CEO",
+      stageUnnamedFallback: "Untitled stage",
+    },
+
+    // ── stage detail (SCR-03) ──
+    stage: {
+      nameLabel: "Stage name",
+      nameAria: "Stage name",
+      namePlaceholder: "stage name",
+      promptLabel: "Prompt / command",
+      promptAria: "Stage prompt or command",
+      promptPlaceholder: "what this stage's agent should do…",
+      skillsLabel: "Stage skills",
+      noSkillsAvailable: "No skills registered yet.",
+      effectiveSkillsLabel: "Effective skills",
+      effectiveSkillsHint: "global plus this stage, deduped",
+      noEffectiveSkills: "none",
+      gateLabel: "Gate",
+      gateAria: "Stage gate",
+      outputsLabel: "Outputs",
+      outputsAria: "New output",
+      outputsPlaceholder: "output name",
+      addOutput: "+ add",
+      removeOutput: (v: string) => `Remove ${v}`,
+      /** A bound skill id that is not in the registry (missing binding) — honest, blocks a clean
+       * run. */
+      missingBinding: (id: string) => `missing skill: ${id}`,
+      /** A pinned agent that is not one of the known/launchable agents. */
+      agentUnavailable: (agent: string) => `unknown agent: ${agent}`,
+      done: "Done",
+      remove: "Remove stage",
+    },
+
+    // ── agent & context panel (SCR-03) ──
+    agentPanel: {
+      sectionLabel: "Agent & context",
+      agentLabel: "Agent",
+      agentAria: "Stage agent",
+      inherit: "Inherit default",
+      inheritedLabel: (agent: string) => `inherits ${agent}`,
+      contextLabel: "Context scope",
+      contextAria: "Context scope",
+      selectedNote: "Starts from an owner-picked subset (chosen per run).",
+    },
+
+    /** Known launchable agents — display labels for the four ids the app launches (contract). An
+     * agent id not in this map is shown verbatim (an unavailable/legacy pin), never hidden. */
+    agents: {
+      "claude-code": "Claude Code",
+      hermes: "Hermes",
+      opencode: "OpenCode",
+      kilo: "Kilo",
+    } as Record<string, string>,
+
+    contextScopes: {
+      inherit: "Inherit",
+      handoff: "Handoff",
+      project: "Project",
+      selected: "Selected",
+    },
+
+    gates: {
+      auto: "Auto",
+      manual: "Manual",
+    },
+
+    // ── CEO oversight (reuses the RulesetPanel supervisor pattern, SCN-046 register) — PLUMBING
+    // ONLY: `pendingNote` is the honesty boundary, same register as the Skills tab's banner. ──
+    ceo: {
+      sectionLabel: "CEO oversight",
+      pendingNote: "The CEO acts on this once the orchestrator agent runtime lands (S6b).",
+      enableLabel: "Enable the CEO",
+      enableAria: "Enable the CEO oversight",
+      disabledHint: "Enable to configure delegation.",
+      delegatedLabel: "Delegated confirmation classes",
+      noClasses: "No classes delegated — add one or use the recommended scope.",
+      recommendedScope: "Recommended scope",
+      instructionLabel: "CEO instruction",
+      instructionAria: "CEO instruction (markdown the CEO must follow)",
+      instructionPlaceholder: "What the CEO must always follow (markdown)…",
+      customRulesLabel: "Custom rules",
+      customRuleAria: "New custom CEO rule",
+      customRulePlaceholder: "rule",
+      classAria: "New delegated confirmation class",
+      classPlaceholder: "class",
+      addEntry: "+ add",
+      deleteEntry: (v: string) => `Delete ${v}`,
+      /** Blocked alert: enabled CEO with an empty delegation scope (client twin of the daemon's
+       * validate guard). */
+      blockedNoClasses: "delegate at least one class or disable the CEO",
+    },
+
+    // ── run picker (SCR-04) — the trigger stub. It NEVER spawns a run in this slice. ──
+    run: {
+      openPicker: "Run workflow",
+      title: (project: string) => `Run workflow on ${project}`,
+      /** Neutral target label when no project is open (the run slice is a stub; this only titles the
+       * modal). */
+      fallbackProject: "your project",
+      runButton: "Run workflow",
+      cancel: "Cancel",
+      noGlobalWorkflows: "No global workflows to run yet.",
+      rowMeta: (stages: number, ceo: boolean) =>
+        `${stages} ${stages === 1 ? "stage" : "stages"} · CEO ${ceo ? "on" : "off"}`,
+      pickAria: "Workflow to run",
+      /** The honesty boundary (S6b): this build does NOT run anything — it shows this note only. */
+      pendingNote:
+        "Workflows run once the orchestrator agent runtime lands (S6b). Authoring, saving and this trigger are live now — the run does not fake execution.",
+    },
+  },
 } as const;

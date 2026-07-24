@@ -41,10 +41,14 @@ import type {
   RuleSetView,
   Skill,
   SkillScope,
+  Stage,
   StorageStatus,
+  SupervisorConfig,
   TaskPriority,
   TaskSource,
   TaskStatus,
+  Workflow,
+  WorkflowScope,
 } from "./orchd-types";
 
 /**
@@ -795,6 +799,64 @@ export function skillList(projectId: string | null): Promise<Skill[]> {
 
 export function skillDelete(id: string): Promise<void> {
   return invoke<void>("skill_delete", { id });
+}
+
+// ── SW1 Workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md, task 5) ─────────────
+//
+// One thin wrapper per `workflow_*` `#[tauri::command]` (`src-tauri/src/commands.rs`, task 4), same
+// naming/arg-shape-verbatim convention as every wrapper above. AUTHORING/CONFIG ONLY — the S6b
+// executor that consumes these workflows does not exist yet, so saving one never spawns a run (see
+// `RunWorkflowPicker.tsx`'s honest pending note).
+
+/** Lists workflows (`scope: null` ⇒ all scopes; `scope:"project"` with `projectId` ⇒ that
+ * project's workflows plus the global ones, resolved daemon-side). Plain read — never triggers a
+ * push. */
+export function orchdListWorkflows(
+  scope: WorkflowScope | null,
+  projectId: string | null,
+): Promise<Workflow[]> {
+  return invoke<Workflow[]>("workflow_list", { scope, projectId });
+}
+
+/** One workflow by id; the JSON file is read fresh (files-as-truth). Rejects `NotFound` on an
+ * unknown id. Plain read — never triggers a push. */
+export function orchdGetWorkflow(id: string): Promise<Workflow> {
+  return invoke<Workflow>("workflow_get", { id });
+}
+
+/** THE one write call — create (`id: ""`) or save in place (a non-empty `id`), the exact
+ * create-or-save shape `orchdUpsertDoc` uses. The daemon validates fail-closed BEFORE any side
+ * effect (name-rule, scope⇒projectId, known agents, no empty skill/output entries, the enabled-CEO
+ * ⇒ ≥1 delegated-class `supervisor` guard) and rejects `Validation` on a bad payload; on success it
+ * pushes `WorkflowsChanged`. */
+export function orchdUpsertWorkflow(
+  id: string,
+  name: string,
+  description: string,
+  scope: WorkflowScope,
+  projectId: string | null,
+  defaultAgent: string,
+  stages: Stage[],
+  globalSkillIds: string[],
+  supervisor: SupervisorConfig,
+): Promise<Workflow> {
+  return invoke<Workflow>("workflow_upsert", {
+    id,
+    name,
+    description,
+    scope,
+    projectId,
+    defaultAgent,
+    stages,
+    globalSkillIds,
+    supervisor,
+  });
+}
+
+/** Removes the row AND the JSON file (a missing file is tolerated). Rejects `NotFound` on an
+ * unknown id; on success the daemon pushes `WorkflowsChanged`. */
+export function orchdDeleteWorkflow(id: string): Promise<void> {
+  return invoke<void>("workflow_delete", { id });
 }
 
 // ── Trust: policy caps + audit log (S-EXT §4/§5/§6, BL-22, T18's trust_* commands) ─────────────

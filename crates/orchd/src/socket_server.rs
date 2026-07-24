@@ -667,6 +667,27 @@ fn respond_ruleset(
     }
 }
 
+/// A mutating workflow verb's shared reply/push shape (SW1: `WorkflowsChanged`, a bare invalidation
+/// with no payload) — used by `WorkflowUpsert` (`WorkflowDelete` replies `Ack` and pushes inline).
+/// The `persistence::Db::upsert_workflow` result is ALREADY the full assembled wire `Workflow`
+/// (identity + body + a fresh `fileState`, read back from the JSON file) — files-as-truth is done
+/// in the persistence layer, so there is no separate `build_workflow_view` step here the way `Doc`
+/// needs one. `WorkflowList`/`WorkflowGet` are READs and do NOT use this helper — no push on a
+/// read, per spec §6's "mutating request" scoping. Mirrors [`respond_doc`]'s failure handling: a
+/// failed verb maps its error and broadcasts NOTHING.
+fn respond_workflow(
+    result: Result<bpa_orchd_proto::Workflow, OrchdPersistError>,
+    broadcaster: &Broadcaster,
+) -> OrchdResponse {
+    match result {
+        Ok(workflow) => {
+            broadcaster.broadcast(OrchdFrame::Push(OrchdPush::WorkflowsChanged));
+            OrchdResponse::Workflow(workflow)
+        }
+        Err(e) => map_err(e),
+    }
+}
+
 /// Post-commit ruleset FILE write for a freshly created project (spec §7/§10, task-10 brief):
 /// `Db::create_project` already committed the `ruleset` DB ROW (default `md_path`, `md_hash: ""`)
 /// inside its OWN transaction before this is ever called. This writes the FILE at that path with
@@ -2176,5 +2197,63 @@ async fn dispatch_inner(
         // Storage-degradation mode (spec D3, BL-94): fixed at boot, returned verbatim — no DB
         // access, so the frontend can read it even in the in-memory-fallback / recovered modes.
         OrchdRequest::GetStorageStatus => OrchdResponse::StorageStatus(deps.storage_status.clone()),
+
+        // ---- SW1 workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md). Authoring/
+        // config only — NO runtime/executor (S6b). Reads don't push; mutations push the bare
+        // `WorkflowsChanged` invalidation. ----
+        OrchdRequest::WorkflowList { scope, project_id } => {
+            let db = deps.db.lock().await;
+            match db.list_workflows(scope, project_id.as_deref()) {
+                Ok(rows) => OrchdResponse::Workflows(rows),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::WorkflowGet { id } => {
+            let db = deps.db.lock().await;
+            match db.get_workflow(&id) {
+                Ok(workflow) => OrchdResponse::Workflow(workflow),
+                Err(e) => map_err(e),
+            }
+        }
+        OrchdRequest::WorkflowUpsert {
+            id,
+            name,
+            description,
+            scope,
+            project_id,
+            default_agent,
+            stages,
+            global_skill_ids,
+            supervisor,
+        } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.upsert_workflow(
+                    &id,
+                    &name,
+                    &description,
+                    scope,
+                    project_id.as_deref(),
+                    &default_agent,
+                    stages,
+                    global_skill_ids,
+                    supervisor,
+                )
+            };
+            respond_workflow(result, broadcaster)
+        }
+        OrchdRequest::WorkflowDelete { id } => {
+            let result = {
+                let db = deps.db.lock().await;
+                db.delete_workflow(&id)
+            };
+            match result {
+                Ok(()) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::WorkflowsChanged));
+                    OrchdResponse::Ack
+                }
+                Err(e) => map_err(e),
+            }
+        }
     }
 }

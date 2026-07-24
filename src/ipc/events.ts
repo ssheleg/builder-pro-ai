@@ -360,3 +360,14 @@ export interface DocsChangedPayload {
 export function onOrchdDocsChanged(cb: (p: DocsChangedPayload) => void): Promise<UnlistenFn> {
   return listen<DocsChangedPayload>("orchd://docs-changed", (e) => cb(e.payload));
 }
+
+// ── SW1 workflow-authoring coarse-invalidation event (docs/ux/plans/2026-07-24-workflow-
+// authoring.md, `EV_ORCHD_WORKFLOWS_CHANGED`) ──────────────────────────────────────────────────
+
+/** Subscribe to `orchd://workflows-changed`. Carries no payload — mirrors
+ * `onOrchdConnectorsChanged`/`onOrchdPoliciesChanged` above (a workflow change is unscoped, so a
+ * full `refreshWorkflows` is the only meaningful reaction). Fired by every successful
+ * `workflowUpsert`/`workflowDelete`. */
+export function onOrchdWorkflowsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen<null>("orchd://workflows-changed", () => cb());
+}

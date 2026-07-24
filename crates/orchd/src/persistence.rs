@@ -41,8 +41,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bpa_orchd_proto::{
     AuditRow, Doc, DomainTask, FitVerdict, Goal, GoalKind, GoalStatus, GraphEntityType, Idea,
     IdeaLifecycle, Insight, InsightStatus, McpArtifact, McpInvocation, Policy, PolicyRules,
-    PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, SupervisorConfig, TaskPriority,
-    TaskSource, TaskStatus,
+    PolicyScope, Project, ProjectStatus, RuleScope, RuleSet, SkillFileState, Stage,
+    SupervisorConfig, TaskPriority, TaskSource, TaskStatus, Workflow, WorkflowScope,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{info, warn};
@@ -52,8 +52,10 @@ use uuid::Uuid;
 /// bumps this 1→2 for the additive knowledge-graph tables; S-EXT spec §4 bumps this 2→3 for the
 /// additive MCP/connectors/skills/trust tables; S-IDEA spec §4 D7 bumps this 3→4 for the
 /// additive `research_run` table; SCN-051/ST-037 bumps this 4→5 for the additive
-/// `task.priority` column; SCN-054/ST-041 bumps this 5→6 for the additive `doc` table).
-pub const SCHEMA_VERSION: i64 = 6;
+/// `task.priority` column; SCN-054/ST-041 bumps this 5→6 for the additive `doc` table; SW1
+/// (docs/ux/plans/2026-07-24-workflow-authoring.md) bumps this 6→7 for the additive `workflow`
+/// table).
+pub const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -278,6 +280,10 @@ impl Db {
             bpa_daemon_core::migrate::Migration {
                 upto: 6,
                 apply: migrate_v6,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 7,
+                apply: migrate_v7,
             },
         ];
         bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
@@ -677,6 +683,37 @@ pub(crate) fn migrate_v6(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
            UNIQUE(project_id, name)
          );
          -- user_version → 6",
+    )
+}
+
+/// v6 -> v7: SW1 workflow authoring (docs/ux/plans/2026-07-24-workflow-authoring.md). ONE additive
+/// table, `workflow` — the `skill`/`doc` files-as-truth column set (`json_path`/`hash`, the JSON
+/// file on disk is the source of truth for the FULL definition; the DB row is the index) plus the
+/// scope columns. `file_state` is NOT a column: it is computed FRESH at read time by re-hashing the
+/// JSON file against the stored `hash` ([`Db::get_workflow`]), exactly like the `skill` table's
+/// (which also has no `file_state` column). `ON DELETE CASCADE` mirrors the `skill` table's
+/// project-child discipline: a project-scoped workflow lives and dies with its project; a
+/// global-scoped one (`project_id IS NULL`) is unaffected by project deletion. The `scope`/
+/// `project_id` CHECK is the exact `skill` invariant. Purely additive, forward-only per D1; a
+/// v6→v7 upgrade of a live orchd.db creates this table and seeds nothing — see
+/// `v6_fixture_migrates_to_v7_and_creates_an_empty_workflow_table` below for the proof against a
+/// REAL v6 fixture.
+pub(crate) fn migrate_v7(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE workflow (
+           id         TEXT PRIMARY KEY,                  -- uuid v4
+           scope      TEXT NOT NULL CHECK (scope IN ('global','project')),
+           project_id TEXT,                              -- FK -> project(id); NULL for a global workflow
+           name       TEXT NOT NULL CHECK (name <> ''),  -- owner-chosen; validated by validate_workflow
+           json_path  TEXT NOT NULL,                     -- absolute path; the JSON file is the source of truth
+           hash       TEXT NOT NULL DEFAULT '',          -- sha256 of the last JSON orchd wrote
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL,
+           FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE,
+           CHECK ( (scope='project') = (project_id IS NOT NULL) )
+         );
+         CREATE INDEX workflow_by_project ON workflow(project_id);
+         -- user_version → 7",
     )
 }
 
@@ -2611,33 +2648,42 @@ fn validate_policy(policy: &PolicyRules) -> Result<String, OrchdPersistError> {
             "policy.path_allowlist entries must be non-empty".to_string(),
         ));
     }
-    // SCN-046 / A-7 CEO supervisor: the same non-empty-entry discipline as the two lists above, plus
-    // the core SCN-046 invariant — an ENABLED CEO with no delegated classes is a contradiction ("a
-    // supervisor authorized to decide nothing"). The client blocks this with the "delegate at least
-    // one class or disable the CEO" alert; this is the authoritative guard so the invariant also
-    // holds against a racing/hand-crafted request, exactly like the negative-cap guard above.
-    if strict
-        .supervisor
-        .delegated_classes
-        .iter()
-        .any(|s| s.is_empty())
-    {
+    // SCN-046 / A-7 CEO supervisor guard (factored out so SW1's `validate_workflow` reuses the
+    // EXACT same checks and error shapes — the SupervisorConfig invariant must hold identically
+    // whether the config rides inside a ruleset policy or a workflow definition).
+    validate_supervisor(&strict.supervisor)?;
+    Ok(json)
+}
+
+/// The SCN-046 / A-7 CEO-supervisor guard, shared verbatim by [`validate_policy`] (where the
+/// config rides inside a ruleset `PolicyRules`) and SW1's [`validate_workflow`] (where it rides
+/// inside a `Workflow`). Three fail-closed invariants, all `Validation` with the same messages the
+/// ruleset policy has always returned so a workflow's CEO config is rejected identically:
+/// - every `delegatedClasses` entry non-empty (the same non-empty-entry discipline as the policy's
+///   own lists);
+/// - every `customRules` entry non-empty;
+/// - an ENABLED CEO must delegate at least one confirmation class — an enabled supervisor with an
+///   empty scope is a contradiction ("a supervisor authorized to decide nothing"). The client
+///   blocks this with the "delegate at least one class or disable the CEO" alert; this is the
+///   authoritative guard so the invariant holds against a racing/hand-crafted request too.
+fn validate_supervisor(supervisor: &SupervisorConfig) -> Result<(), OrchdPersistError> {
+    if supervisor.delegated_classes.iter().any(|s| s.is_empty()) {
         return Err(OrchdPersistError::Validation(
             "policy.supervisor.delegatedClasses entries must be non-empty".to_string(),
         ));
     }
-    if strict.supervisor.custom_rules.iter().any(|s| s.is_empty()) {
+    if supervisor.custom_rules.iter().any(|s| s.is_empty()) {
         return Err(OrchdPersistError::Validation(
             "policy.supervisor.customRules entries must be non-empty".to_string(),
         ));
     }
-    if strict.supervisor.enabled && strict.supervisor.delegated_classes.is_empty() {
+    if supervisor.enabled && supervisor.delegated_classes.is_empty() {
         return Err(OrchdPersistError::Validation(
             "policy.supervisor: an enabled CEO must delegate at least one confirmation class"
                 .to_string(),
         ));
     }
-    Ok(json)
+    Ok(())
 }
 
 /// Raw `ruleset` row (text-encoded `scope`, JSON-encoded `policy`) before decoding into the wire
@@ -3119,6 +3165,454 @@ impl Db {
 }
 
 // ================================================================================
+// ---- SW1 workflow authoring persistence (docs/ux/plans/2026-07-24-workflow-authoring.md).
+// Files-as-truth (mirrors `skill`/`doc`): the FULL `Workflow` definition is serialized to a JSON
+// file under the app-support rules tree (`rules/workflows/<global|project-id>/<id>.json`), the DB
+// `workflow` row is the index, and `file_state` is computed FRESH at read time by re-hashing the
+// file against the stored `hash`. AUTHORING/CONFIG ONLY — nothing here runs a workflow (S6b). ----
+
+/// The known agents the app launches (SW1 contract). A workflow's `default_agent`, and every
+/// stage's own `agent` when `Some`, must be one of these — the SAME set the executor (S6b) will
+/// spawn terminals for. `pub(crate)` so the socket dispatch layer and tests can reference the one
+/// authoritative list rather than duplicating the literals.
+pub(crate) const KNOWN_AGENTS: &[&str] = &["claude-code", "hermes", "opencode", "kilo"];
+
+/// Longest accepted workflow name — a human-facing label (NOT a filename: the on-disk file is
+/// `<id>.json`, so the name is never a path component and carries no traversal risk, unlike a
+/// doc's name). Generous for a typed title, bounded so a pathological value can't bloat a row.
+const WORKFLOW_NAME_MAX_LEN: usize = 200;
+
+/// SW1 workflow validation — the ONE fail-closed guard every `WorkflowUpsert` passes through
+/// BEFORE any row/file side effect (mirrors [`validate_policy`]'s "validate, then store" order).
+/// Every rejection is `Validation` with a human-readable reason (the honest error surface the UI
+/// shows inline + toast). The invariants (SW1 contract):
+/// - `name` non-empty and at most [`WORKFLOW_NAME_MAX_LEN`] chars;
+/// - `scope=project` ⇒ a non-empty `projectId` is present;
+/// - `defaultAgent` non-empty AND one of [`KNOWN_AGENTS`];
+/// - every stage has a non-empty name AND a non-empty prompt;
+/// - every stage `agent`, when `Some`, is one of [`KNOWN_AGENTS`];
+/// - no empty stage-skill-id, global-skill-id, or output entry (the same non-empty-entry
+///   discipline [`validate_policy`] applies to its own lists);
+/// - the `supervisor` passes the shared [`validate_supervisor`] guard (enabled CEO with an empty
+///   delegation scope rejected — the SAME error the ruleset policy guard returns).
+#[allow(clippy::too_many_arguments)]
+fn validate_workflow(
+    name: &str,
+    scope: &WorkflowScope,
+    project_id: Option<&str>,
+    default_agent: &str,
+    stages: &[Stage],
+    global_skill_ids: &[String],
+    supervisor: &SupervisorConfig,
+) -> Result<(), OrchdPersistError> {
+    if name.is_empty() {
+        return Err(OrchdPersistError::Validation(
+            "workflow name must not be empty".to_string(),
+        ));
+    }
+    if name.len() > WORKFLOW_NAME_MAX_LEN {
+        return Err(OrchdPersistError::Validation(format!(
+            "workflow name must be at most {WORKFLOW_NAME_MAX_LEN} characters"
+        )));
+    }
+    if matches!(scope, WorkflowScope::Project) && project_id.map(|p| p.is_empty()).unwrap_or(true) {
+        return Err(OrchdPersistError::Validation(
+            "a project-scoped workflow requires a projectId".to_string(),
+        ));
+    }
+    if default_agent.is_empty() || !KNOWN_AGENTS.contains(&default_agent) {
+        return Err(OrchdPersistError::Validation(format!(
+            "workflow defaultAgent must be one of the known agents {KNOWN_AGENTS:?}"
+        )));
+    }
+    for stage in stages {
+        if stage.name.is_empty() {
+            return Err(OrchdPersistError::Validation(
+                "every stage must have a non-empty name".to_string(),
+            ));
+        }
+        if stage.prompt.is_empty() {
+            return Err(OrchdPersistError::Validation(
+                "every stage must have a non-empty prompt".to_string(),
+            ));
+        }
+        if let Some(agent) = &stage.agent {
+            if !KNOWN_AGENTS.contains(&agent.as_str()) {
+                return Err(OrchdPersistError::Validation(format!(
+                    "stage agent must be one of the known agents {KNOWN_AGENTS:?} (or unset to \
+                     inherit the workflow default)"
+                )));
+            }
+        }
+        if stage.skill_ids.iter().any(|s| s.is_empty()) {
+            return Err(OrchdPersistError::Validation(
+                "stage skill-id entries must be non-empty".to_string(),
+            ));
+        }
+        if stage.outputs.iter().any(|s| s.is_empty()) {
+            return Err(OrchdPersistError::Validation(
+                "stage output entries must be non-empty".to_string(),
+            ));
+        }
+    }
+    if global_skill_ids.iter().any(|s| s.is_empty()) {
+        return Err(OrchdPersistError::Validation(
+            "workflow global-skill-id entries must be non-empty".to_string(),
+        ));
+    }
+    // REUSE the ruleset policy's CEO-supervisor guard verbatim (same error shape).
+    validate_supervisor(supervisor)?;
+    Ok(())
+}
+
+/// A workflow's on-disk JSON path (SW1: `{app-support}/rules/workflows/<segment>/<id>.json`, next
+/// to the same `rules/` tree the ruleset/doc files live under). `<segment>` is the literal
+/// `"global"` for a global workflow or the owning `project_id` for a project one. Both path
+/// components are traversal-safe by construction, NOT by trusting a JS-supplied string: `id` is a
+/// server-generated uuid (create) or an existing row's uuid (update — a JS-supplied id that names
+/// no row is rejected as `NotFound` before this is ever called), and a project `<segment>` is only
+/// reached AFTER [`ensure_project_active`] has confirmed it names a real project (whose id is
+/// itself a server uuid) — so no `../` from a JS name can ever reach the filesystem (SW1: "path
+/// built through the same validated choke-point Docs use").
+fn workflow_json_path(scope: &WorkflowScope, project_id: Option<&str>, id: &str) -> String {
+    let segment = match scope {
+        WorkflowScope::Global => "global".to_string(),
+        WorkflowScope::Project => project_id.unwrap_or("project").to_string(),
+    };
+    bpa_daemon_core::dirs::app_support_dir()
+        .join("rules")
+        .join("workflows")
+        .join(segment)
+        .join(format!("{id}.json"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn encode_workflow_scope(s: &WorkflowScope) -> &'static str {
+    match s {
+        WorkflowScope::Global => "global",
+        WorkflowScope::Project => "project",
+    }
+}
+
+fn decode_workflow_scope(s: &str) -> Result<WorkflowScope, OrchdPersistError> {
+    match s {
+        "global" => Ok(WorkflowScope::Global),
+        "project" => Ok(WorkflowScope::Project),
+        other => Err(OrchdPersistError::Io(format!(
+            "corrupt workflow.scope value: {other}"
+        ))),
+    }
+}
+
+/// Raw `workflow` row (the index half) before it is paired with the JSON file's body into the wire
+/// [`Workflow`] by [`build_workflow`]. Mirrors [`RuleSetRow`]'s "decode the DB row, then assemble
+/// the wire type" split.
+struct WorkflowRow {
+    id: String,
+    scope: String,
+    project_id: Option<String>,
+    name: String,
+    json_path: String,
+    hash: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+const WORKFLOW_COLUMNS: &str =
+    "id, scope, project_id, name, json_path, hash, created_at, updated_at";
+
+fn workflow_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
+    Ok(WorkflowRow {
+        id: r.get(0)?,
+        scope: r.get(1)?,
+        project_id: r.get(2)?,
+        name: r.get(3)?,
+        json_path: r.get(4)?,
+        hash: r.get(5)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
+    })
+}
+
+fn load_workflow_row_by_id(conn: &Connection, id: &str) -> Result<WorkflowRow, OrchdPersistError> {
+    conn.query_row(
+        &format!("SELECT {WORKFLOW_COLUMNS} FROM workflow WHERE id = ?1"),
+        rusqlite::params![id],
+        workflow_row_from,
+    )
+    .optional()?
+    .ok_or(OrchdPersistError::NotFound)
+}
+
+/// Assemble the wire [`Workflow`] from its index row + a FRESH read of the JSON file (files-as-
+/// truth, the exact `build_ruleset_view`/`build_doc_view` shape): identity and timestamps are
+/// authoritative from the DB row; the definition BODY (`description`/`defaultAgent`/`stages`/
+/// `globalSkillIds`/`supervisor`) comes from the file; `fileState` is computed by comparing the
+/// file's current sha256 to the row's stored `hash` (`Present` on a match, `Modified` on a
+/// mismatch — a hand-edit outside orchd, `Missing` when the file is gone OR its JSON is corrupt,
+/// which degrades honestly to an empty body rather than surfacing raw content). The row's `id`/
+/// `scope`/`projectId` always win over whatever the (possibly hand-edited) file claims, so an
+/// external edit can never silently re-home or re-identify a workflow.
+fn build_workflow(row: WorkflowRow) -> Result<Workflow, OrchdPersistError> {
+    let scope = decode_workflow_scope(&row.scope)?;
+    let (body, file_state) = match std::fs::read_to_string(&row.json_path) {
+        Ok(content) => {
+            let state = if crate::ruleset_files::sha256_hex(&content) == row.hash {
+                SkillFileState::Present
+            } else {
+                SkillFileState::Modified
+            };
+            match serde_json::from_str::<Workflow>(&content) {
+                Ok(wf) => (Some(wf), state),
+                // A corrupt/unparseable JSON file is as good as gone for the definition body —
+                // report Missing (honest degradation, mirrors `ruleset_files::read_state`'s
+                // fold-to-Missing stance) rather than surfacing a half-decoded body.
+                Err(_) => (None, SkillFileState::Missing),
+            }
+        }
+        Err(_) => (None, SkillFileState::Missing),
+    };
+    Ok(match body {
+        Some(wf) => Workflow {
+            id: row.id,
+            name: row.name,
+            description: wf.description,
+            scope,
+            project_id: row.project_id,
+            default_agent: wf.default_agent,
+            stages: wf.stages,
+            global_skill_ids: wf.global_skill_ids,
+            supervisor: wf.supervisor,
+            file_state,
+            json_path: row.json_path,
+            hash: row.hash,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        },
+        None => Workflow {
+            id: row.id,
+            name: row.name,
+            description: String::new(),
+            scope,
+            project_id: row.project_id,
+            default_agent: String::new(),
+            stages: Vec::new(),
+            global_skill_ids: Vec::new(),
+            supervisor: SupervisorConfig::default(),
+            file_state,
+            json_path: row.json_path,
+            hash: row.hash,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        },
+    })
+}
+
+impl Db {
+    /// `WorkflowList` (SW1 SCR-01 library). Filters by scope/project, name-ordered for a stable
+    /// list; reads are lenient (an unknown `project_id` never errors — mirrors [`Db::list_docs`]).
+    /// Semantics (mirrors `list_skills`/`list_mcp_servers`'s "global ∪ this project" scoping):
+    /// - `(scope=None, project_id=None)` ⇒ ALL workflows;
+    /// - `(scope=None, project_id=Some(p))` ⇒ the global workflows ∪ project `p`'s (the library
+    ///   view for one project);
+    /// - `(scope=Some(Global), _)` ⇒ the global workflows only;
+    /// - `(scope=Some(Project), Some(p))` ⇒ project `p`'s workflows only;
+    /// - `(scope=Some(Project), None)` ⇒ every project-scoped workflow.
+    ///
+    /// Each row is paired with a fresh JSON-file read ([`build_workflow`]) so the returned
+    /// definitions carry their live `fileState`.
+    pub fn list_workflows(
+        &self,
+        scope: Option<WorkflowScope>,
+        project_id: Option<&str>,
+    ) -> Result<Vec<Workflow>, OrchdPersistError> {
+        // Build the WHERE clause + params from the (scope, project_id) filter above.
+        let (where_sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
+            match (&scope, project_id) {
+                (None, None) => (String::new(), vec![]),
+                (None, Some(p)) => (
+                    "WHERE scope = 'global' OR project_id = ?1".to_string(),
+                    vec![Box::new(p.to_string())],
+                ),
+                (Some(WorkflowScope::Global), _) => ("WHERE scope = 'global'".to_string(), vec![]),
+                (Some(WorkflowScope::Project), Some(p)) => (
+                    "WHERE scope = 'project' AND project_id = ?1".to_string(),
+                    vec![Box::new(p.to_string())],
+                ),
+                (Some(WorkflowScope::Project), None) => {
+                    ("WHERE scope = 'project'".to_string(), vec![])
+                }
+            };
+        let sql = format!("SELECT {WORKFLOW_COLUMNS} FROM workflow {where_sql} ORDER BY name");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), workflow_row_from)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(build_workflow(row?)?);
+        }
+        Ok(out)
+    }
+
+    /// `WorkflowGet` (SW1). The DB-row half is paired with a FRESH JSON-file read
+    /// ([`build_workflow`]) — the definition body and live `fileState` come from disk each time
+    /// (files-as-truth, mirrors [`Db::get_doc`] + `build_doc_view`). Unknown `id` ⇒ `NotFound`.
+    pub fn get_workflow(&self, id: &str) -> Result<Workflow, OrchdPersistError> {
+        let row = load_workflow_row_by_id(&self.conn, id)?;
+        build_workflow(row)
+    }
+
+    /// `WorkflowUpsert` (SW1): THE one write path — an empty `id` creates (a fresh uuid is
+    /// stamped), a non-empty `id` updates in place (the exact `UpsertDoc` create-or-save shape).
+    /// Order, all inside one transaction:
+    /// 1. [`validate_workflow`] runs BEFORE any side effect — an invalid definition never leaves a
+    ///    half-applied write (mirrors the upsert-doc name-validation order).
+    /// 2. For a project-scoped workflow, [`ensure_project_active`] fires (unknown `project_id` ⇒
+    ///    `NotFound`, archived ⇒ `Invariant`) — this is ALSO the traversal choke-point: the path's
+    ///    project segment is only ever a confirmed-real project's uuid, never a raw JS string.
+    ///    A global workflow's `project_id` is normalized to `NULL` (the CHECK requires it).
+    /// 3. The full definition is serialized to JSON and written atomically
+    ///    ([`crate::ruleset_files::write_atomic`] — parent dirs created, tmp+rename), its sha256
+    ///    stored as `hash`. On an update whose scope/project (and thus path) changed, the OLD file
+    ///    is removed so no orphan is left behind.
+    ///
+    /// `updated_at` always bumps; `created_at` is preserved across an update. Returns the freshly
+    /// assembled wire [`Workflow`] (re-read via [`build_workflow`], so it carries `fileState:
+    /// present` and the stored `hash`) — identical to what a subsequent `WorkflowGet` returns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_workflow(
+        &self,
+        id: &str,
+        name: &str,
+        description: &str,
+        scope: WorkflowScope,
+        project_id: Option<&str>,
+        default_agent: &str,
+        stages: Vec<Stage>,
+        global_skill_ids: Vec<String>,
+        supervisor: SupervisorConfig,
+    ) -> Result<Workflow, OrchdPersistError> {
+        validate_workflow(
+            name,
+            &scope,
+            project_id,
+            default_agent,
+            &stages,
+            &global_skill_ids,
+            &supervisor,
+        )?;
+
+        // A global workflow carries no project (the CHECK requires project_id NULL); normalize a
+        // stray project_id away rather than erroring.
+        let effective_project_id: Option<String> = match scope {
+            WorkflowScope::Global => None,
+            WorkflowScope::Project => project_id.map(|s| s.to_string()),
+        };
+
+        let tx = self.conn.unchecked_transaction()?;
+        if matches!(scope, WorkflowScope::Project) {
+            // Safe to unwrap: validate_workflow guaranteed Some+non-empty for project scope.
+            ensure_project_active(&tx, effective_project_id.as_deref().unwrap())?;
+        }
+
+        let (wf_id, created_at, old_path) = if id.is_empty() {
+            (Uuid::new_v4().to_string(), now_ms(), None)
+        } else {
+            let existing = load_workflow_row_by_id(&tx, id)?;
+            (
+                id.to_string(),
+                existing.created_at,
+                Some(existing.json_path),
+            )
+        };
+        let updated_at = now_ms();
+        let json_path = workflow_json_path(&scope, effective_project_id.as_deref(), &wf_id);
+
+        // Serialize the FULL definition. `hash`/`file_state`/`json_path` in the on-disk value are
+        // canonical placeholders (the row + a fresh read are authoritative for them), so the file
+        // content is deterministic and the DB `hash` is a stable digest of it.
+        let to_write = Workflow {
+            id: wf_id.clone(),
+            name: name.to_string(),
+            description: description.to_string(),
+            scope: scope.clone(),
+            project_id: effective_project_id.clone(),
+            default_agent: default_agent.to_string(),
+            stages,
+            global_skill_ids,
+            supervisor,
+            file_state: SkillFileState::Present,
+            json_path: json_path.clone(),
+            hash: String::new(),
+            created_at,
+            updated_at,
+        };
+        let json = serde_json::to_string_pretty(&to_write)
+            .map_err(|e| OrchdPersistError::Io(format!("failed to serialize workflow: {e}")))?;
+        let hash = crate::ruleset_files::write_atomic(Path::new(&json_path), &json)
+            .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+
+        // If an update moved the file (scope/project changed), remove the stale one.
+        if let Some(old) = old_path {
+            if old != json_path {
+                crate::ruleset_files::remove_if_exists(Path::new(&old))
+                    .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO workflow (id, scope, project_id, name, json_path, hash, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+               scope = excluded.scope,
+               project_id = excluded.project_id,
+               name = excluded.name,
+               json_path = excluded.json_path,
+               hash = excluded.hash,
+               updated_at = excluded.updated_at",
+            rusqlite::params![
+                wf_id,
+                encode_workflow_scope(&scope),
+                effective_project_id,
+                name,
+                json_path,
+                hash,
+                created_at,
+                updated_at,
+            ],
+        )?;
+
+        let row = load_workflow_row_by_id(&tx, &wf_id)?;
+        let workflow = build_workflow(row)?;
+        tx.commit()?;
+        Ok(workflow)
+    }
+
+    /// `WorkflowDelete` (SW1, after the SCR-01 "delete workflow?" confirm): removes the JSON FILE
+    /// first ([`crate::ruleset_files::remove_if_exists`] — an already-lost file is fine, deleting a
+    /// "file lost" workflow must still work), then the row, in one transaction. A non-missing file
+    /// removal failure aborts BEFORE the row delete — never an orphaned on-disk file the UI no
+    /// longer lists (mirrors [`Db::delete_doc`]). A project-scoped workflow on an archived project
+    /// is blocked (`Invariant`, same guard as every project-child mutator); a global workflow has
+    /// no project to guard. Unknown `id` ⇒ `NotFound`.
+    pub fn delete_workflow(&self, id: &str) -> Result<(), OrchdPersistError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let row = load_workflow_row_by_id(&tx, id)?;
+        if let Some(project_id) = &row.project_id {
+            ensure_project_active(&tx, project_id)?;
+        }
+
+        crate::ruleset_files::remove_if_exists(Path::new(&row.json_path))
+            .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+
+        tx.execute("DELETE FROM workflow WHERE id = ?1", rusqlite::params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+// ================================================================================
 // ---- raw-insert helpers for import (T9, spec §8, D7): field-verbatim inserts used ONLY by
 // `export::import_bundle`'s single transaction. Every value here comes from an already-parsed,
 // already-typed bundle row and is written to the DB EXACTLY as given — ids, `created_at`,
@@ -3392,6 +3886,8 @@ mod tests {
         "research_run",
         // SCN-054/ST-041 (schema v6, additive): per-project markdown docs.
         "doc",
+        // SW1 (schema v7, additive): file-backed workflow definitions.
+        "workflow",
     ];
 
     fn table_exists(conn: &Connection, name: &str) -> bool {
@@ -3409,21 +3905,21 @@ mod tests {
     }
 
     #[test]
-    fn open_in_memory_creates_schema_v6_with_every_table() {
+    fn open_in_memory_creates_schema_v7_with_every_table() {
         let db = Db::open_in_memory().unwrap();
-        // SCN-054 bumped SCHEMA_VERSION 5->6 (additive, the `doc` table only).
-        assert_eq!(user_version(db.conn()), 6);
+        // SW1 bumped SCHEMA_VERSION 6->7 (additive, the `workflow` table only).
+        assert_eq!(user_version(db.conn()), 7);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
     }
 
     #[test]
-    fn open_on_disk_creates_schema_v6_with_every_table() {
+    fn open_on_disk_creates_schema_v7_with_every_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orchd.db");
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(db.conn()), 6);
+        assert_eq!(user_version(db.conn()), 7);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
@@ -3450,7 +3946,7 @@ mod tests {
         std::fs::write(&path, b"not a sqlite database").unwrap();
 
         let db = Db::open(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 6);
+        assert_eq!(user_version(db.conn()), 7);
 
         let found = std::fs::read_dir(dir.path()).unwrap().any(|e| {
             e.unwrap()
@@ -3469,7 +3965,7 @@ mod tests {
 
         let (db, outcome) =
             Db::open_with_outcome(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 6);
+        assert_eq!(user_version(db.conn()), 7);
         match outcome {
             DbOpenOutcome::RecoveredFromCorruption { quarantined_to } => {
                 assert!(
@@ -3662,6 +4158,104 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM doc", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remaining, 0, "doc rows must cascade with their project");
+    }
+
+    /// Applies steps v1..v6 alone (a REAL pre-workflow on-disk shape) with a live project row, THEN
+    /// applies [`migrate_v7`] — proving the additive `workflow` table appears empty (SW1 seeds
+    /// nothing), its scope/project CHECK holds, and its ON DELETE CASCADE ties project-scoped
+    /// workflow rows to their project (mirrors `v5_fixture_migrates_to_v6_...`'s fixture approach).
+    #[test]
+    fn v6_fixture_migrates_to_v7_and_creates_an_empty_workflow_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let v6_steps: &[bpa_daemon_core::migrate::Migration] = &[
+            bpa_daemon_core::migrate::Migration {
+                upto: 1,
+                apply: migrate_v1,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 2,
+                apply: migrate_v2,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 3,
+                apply: migrate_v3,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 4,
+                apply: migrate_v4,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 5,
+                apply: migrate_v5,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 6,
+                apply: migrate_v6,
+            },
+        ];
+        bpa_daemon_core::migrate::run_migrations(&conn, 0, 6, v6_steps).unwrap();
+        let has_workflow_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'workflow'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has_workflow_table, 0,
+            "the v6 fixture must NOT have `workflow` yet"
+        );
+
+        let now = 1_700_000_000_000i64;
+        conn.execute(
+            "INSERT INTO project (id, name, description, status, created_at, updated_at)
+             VALUES ('p1', 'Acme', '', 'active', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        let v7_steps: &[bpa_daemon_core::migrate::Migration] =
+            &[bpa_daemon_core::migrate::Migration {
+                upto: 7,
+                apply: migrate_v7,
+            }];
+        bpa_daemon_core::migrate::run_migrations(&conn, 6, 7, v7_steps).unwrap();
+
+        assert_eq!(user_version(&conn), 7);
+        let workflow_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workflow", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(workflow_count, 0, "v6→v7 must seed nothing");
+
+        // The scope/project CHECK rejects a global workflow that carries a project_id…
+        let err = conn
+            .execute(
+                "INSERT INTO workflow (id, scope, project_id, name, json_path, hash, created_at, updated_at)
+                 VALUES ('w-bad', 'global', 'p1', 'oops', '/x/w.json', '', ?1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap_err();
+        assert!(is_constraint_violation(&err), "got {err:?}");
+
+        // …a project-scoped workflow row is accepted…
+        conn.execute(
+            "INSERT INTO workflow (id, scope, project_id, name, json_path, hash, created_at, updated_at)
+             VALUES ('w1', 'project', 'p1', 'ship', '/x/w1.json', '', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        // …and it dies with its project (ON DELETE CASCADE).
+        conn.execute("DELETE FROM project WHERE id = 'p1'", [])
+            .unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workflow", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "project-scoped workflow rows must cascade with their project"
+        );
     }
 
     #[test]
@@ -6844,6 +7438,771 @@ mod doc_tests {
         for ok in ["notes", "api-spec_v2.notes", "a", "0", "readme.md"] {
             assert!(validate_doc_name(ok).is_ok(), "{ok:?} must be accepted");
         }
+    }
+}
+
+/// SW1 workflow storage tests (docs/ux/plans/2026-07-24-workflow-authoring.md). Mirrors
+/// `doc_tests` scenario-for-scenario (workflows are file-backed like docs): create+get round-trip
+/// of the FULL definition, update, reorder, delete row+file, external-change → `fileState`, list
+/// filters, plus the fail-closed validation matrix the SW1 contract locks. HERMETICITY: a
+/// workflow's file path resolves under the REAL `app_support_dir()` (`$HOME`-derived), so every
+/// test overrides `$HOME` to its own tempdir under [`HOME_LOCK`] — never the developer's real
+/// app-support tree (mirrors `tests/boot_integration.rs`'s `HOME_LOCK`/`HomeGuard`).
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    use bpa_orchd_proto::{ContextScope, Gate};
+
+    // `$HOME` is process-global mutable state; `workflow_json_path` reads it fresh per write, and
+    // `cargo test` runs same-binary tests concurrently — so every test that writes a workflow file
+    // isolates `$HOME` under its own tempdir and serializes with the others via this lock.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(dir: &Path) -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prior = std::env::var_os("HOME");
+            // Symlink `Library/Keychains` from the REAL `$HOME` into this test's isolated `dir`
+            // (mirrors `tests/dispatch_integration.rs`'s `HomeGuard`). These workflow tests never
+            // touch the Keychain — but OTHER same-binary unit tests (e.g. `connectors::adapter`)
+            // resolve the macOS Keychain via a `$HOME`-derived path through `bpa_secrets`, and
+            // `cargo test` runs them CONCURRENTLY with this test's `$HOME` override. Without this
+            // symlink, a concurrent Keychain access during our window resolves to a nonexistent
+            // keychain under the bare tempdir and fails/hangs. The symlink points the repointed
+            // `$HOME` at the SAME keychain those tests could already reach directly (no new
+            // access granted); only `Library/Keychains` is shared — the rest of `$HOME`, including
+            // the `Library/Application Support` subtree our workflow files land under, stays a
+            // fresh isolated tempdir.
+            if let Some(real_home) = &prior {
+                let keychains_link = dir.join("Library/Keychains");
+                if let Some(parent) = keychains_link.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::os::unix::fs::symlink(
+                    Path::new(real_home).join("Library/Keychains"),
+                    &keychains_link,
+                );
+            }
+            std::env::set_var("HOME", dir);
+            HomeGuard { _lock: lock, prior }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A stage with a valid non-empty name+prompt; `agent`/`gate`/`context_scope` vary per test.
+    fn stage(id: &str, name: &str, agent: Option<&str>) -> Stage {
+        Stage {
+            id: id.into(),
+            name: name.into(),
+            prompt: format!("Do the {name} work"),
+            skill_ids: vec![],
+            agent: agent.map(|a| a.to_string()),
+            context_scope: ContextScope::Inherit,
+            outputs: vec![],
+            gate: Gate::Auto,
+        }
+    }
+
+    fn enabled_supervisor() -> SupervisorConfig {
+        SupervisorConfig {
+            enabled: true,
+            delegated_classes: ids(&["safe-shell"]),
+            instruction: "Keep diffs small.".into(),
+            custom_rules: ids(&["never push to main"]),
+        }
+    }
+
+    // ---- upsert create + get: round-trips the FULL definition ----
+
+    #[test]
+    fn upsert_create_and_get_round_trip_the_full_definition() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("Acme", "", &ids(&["w1"])).unwrap();
+
+        // Two stages: one pinning a specific agent, one inheriting the workflow default (agent:
+        // None) — proves the Option<String> agent binding survives, plus outputs + a context scope.
+        let mut s0 = stage("s0", "plan", Some("hermes"));
+        s0.outputs = ids(&["plan.md"]);
+        s0.context_scope = ContextScope::Handoff;
+        s0.gate = Gate::Manual;
+        let s1 = stage("s1", "build", None);
+
+        let created = db
+            .upsert_workflow(
+                "",
+                "ship-feature",
+                "Author, review, ship",
+                WorkflowScope::Project,
+                Some(&project.id),
+                "claude-code",
+                vec![s0.clone(), s1.clone()],
+                ids(&["global-skill-1"]),
+                enabled_supervisor(),
+            )
+            .unwrap();
+
+        assert!(!created.id.is_empty(), "a fresh uuid must be stamped");
+        assert_eq!(created.scope, WorkflowScope::Project);
+        assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(created.default_agent, "claude-code");
+        assert_eq!(created.stages, vec![s0, s1]);
+        assert_eq!(created.global_skill_ids, ids(&["global-skill-1"]));
+        assert_eq!(created.supervisor, enabled_supervisor());
+        assert_eq!(created.file_state, SkillFileState::Present);
+        assert!(!created.hash.is_empty(), "hash must be set");
+
+        // File on disk, at the scoped path.
+        let expected_path = home
+            .path()
+            .join("Library/Application Support/ai.builderpro.desktop/rules/workflows")
+            .join(&project.id)
+            .join(format!("{}.json", created.id));
+        assert_eq!(created.json_path, expected_path.to_string_lossy());
+        assert!(expected_path.exists(), "the JSON file must be written");
+
+        // get() returns the identical full definition (persisted, not just returned).
+        let got = db.get_workflow(&created.id).unwrap();
+        assert_eq!(got, created);
+    }
+
+    // ---- update mutates ----
+
+    #[test]
+    fn upsert_update_mutates_the_same_row_and_file() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let created = db
+            .upsert_workflow(
+                "",
+                "v1-name",
+                "v1 desc",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+
+        let updated = db
+            .upsert_workflow(
+                &created.id,
+                "v2-name",
+                "v2 desc",
+                WorkflowScope::Global,
+                None,
+                "hermes",
+                vec![stage("s0", "plan", None), stage("s1", "review", None)],
+                ids(&["gs-1"]),
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+
+        assert_eq!(updated.id, created.id, "update must reuse the same row");
+        assert_eq!(updated.name, "v2-name");
+        assert_eq!(updated.description, "v2 desc");
+        assert_eq!(updated.default_agent, "hermes");
+        assert_eq!(updated.stages.len(), 2);
+        assert_eq!(updated.global_skill_ids, ids(&["gs-1"]));
+        assert_eq!(
+            updated.created_at, created.created_at,
+            "created_at is preserved across an update"
+        );
+        assert!(updated.updated_at >= created.updated_at);
+        // Exactly one row.
+        assert_eq!(db.list_workflows(None, None).unwrap().len(), 1);
+        // The file reflects the new content.
+        assert_eq!(db.get_workflow(&created.id).unwrap(), updated);
+    }
+
+    // ---- reorder (swap two stages) persists order ----
+
+    #[test]
+    fn upsert_reorder_swaps_stage_order_and_persists_it() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let a = stage("a", "alpha", None);
+        let b = stage("b", "beta", None);
+        let created = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![a.clone(), b.clone()],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            created
+                .stages
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        // Swap the two stages (order is the Vec index — a reorder is a reordered Vec).
+        let reordered = db
+            .upsert_workflow(
+                &created.id,
+                "wf",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![b, a],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            reordered
+                .stages
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["b".to_string(), "a".to_string()],
+            "the swapped order must persist"
+        );
+        // And it survives a fresh read from disk.
+        assert_eq!(
+            db.get_workflow(&created.id)
+                .unwrap()
+                .stages
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["b".to_string(), "a".to_string()]
+        );
+    }
+
+    // ---- delete removes row AND file ----
+
+    #[test]
+    fn delete_removes_the_row_and_the_file() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let created = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+        let path = created.json_path.clone();
+        assert!(Path::new(&path).exists());
+
+        db.delete_workflow(&created.id).unwrap();
+
+        assert!(!Path::new(&path).exists(), "the file must be removed");
+        assert!(matches!(
+            db.get_workflow(&created.id).unwrap_err(),
+            OrchdPersistError::NotFound
+        ));
+        assert!(db.list_workflows(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_with_an_already_lost_file_still_deletes_the_row() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let created = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+        std::fs::remove_file(&created.json_path).unwrap();
+
+        // Deleting a "file lost" workflow must still remove the row.
+        db.delete_workflow(&created.id).unwrap();
+        assert!(db.list_workflows(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_unknown_id_is_not_found() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        assert!(matches!(
+            db.delete_workflow("nope").unwrap_err(),
+            OrchdPersistError::NotFound
+        ));
+    }
+
+    // ---- validation matrix (each its own test; fail-closed BEFORE any write) ----
+
+    /// A convenience upsert that is valid EXCEPT for whatever the caller mutates via the closure —
+    /// keeps each validation test to a single deviation from a known-good baseline.
+    fn upsert_global(
+        db: &Db,
+        default_agent: &str,
+        stages: Vec<Stage>,
+        global_skill_ids: Vec<String>,
+        supervisor: SupervisorConfig,
+    ) -> Result<Workflow, OrchdPersistError> {
+        db.upsert_workflow(
+            "",
+            "wf",
+            "",
+            WorkflowScope::Global,
+            None,
+            default_agent,
+            stages,
+            global_skill_ids,
+            supervisor,
+        )
+    }
+
+    #[test]
+    fn stage_without_a_prompt_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let mut s = stage("s0", "plan", None);
+        s.prompt = String::new();
+
+        let err = upsert_global(
+            &db,
+            "claude-code",
+            vec![s],
+            vec![],
+            SupervisorConfig::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+        // Fail-closed: nothing written.
+        assert!(db.list_workflows(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unknown_default_agent_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = upsert_global(
+            &db,
+            "gpt-5",
+            vec![stage("s0", "plan", None)],
+            vec![],
+            SupervisorConfig::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_stage_agent_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = upsert_global(
+            &db,
+            "claude-code",
+            vec![stage("s0", "plan", Some("gpt-5"))],
+            vec![],
+            SupervisorConfig::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn enabled_ceo_with_empty_scope_is_rejected_with_the_same_error_as_the_policy_guard() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        // An enabled CEO delegating nothing.
+        let bad = SupervisorConfig {
+            enabled: true,
+            delegated_classes: vec![],
+            instruction: String::new(),
+            custom_rules: vec![],
+        };
+        // The ruleset policy guard's error for the IDENTICAL violation.
+        let policy_err = validate_policy(&PolicyRules {
+            spend_cap_usd: None,
+            approval_classes: vec![],
+            path_allowlist: vec![],
+            supervisor: bad.clone(),
+        })
+        .unwrap_err();
+
+        let wf_err = upsert_global(
+            &db,
+            "claude-code",
+            vec![stage("s0", "plan", None)],
+            vec![],
+            bad,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(wf_err, OrchdPersistError::Validation(_)),
+            "got {wf_err:?}"
+        );
+        assert_eq!(
+            wf_err.to_string(),
+            policy_err.to_string(),
+            "the workflow CEO guard must reuse the ruleset policy guard's error verbatim"
+        );
+    }
+
+    #[test]
+    fn project_scope_without_a_project_id_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Project,
+                None,
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn empty_output_entry_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let mut s = stage("s0", "plan", None);
+        s.outputs = vec![String::new()];
+
+        let err = upsert_global(
+            &db,
+            "claude-code",
+            vec![s],
+            vec![],
+            SupervisorConfig::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn empty_name_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = db
+            .upsert_workflow(
+                "",
+                "",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn project_scope_with_unknown_project_is_not_found() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Project,
+                Some("no-such-project"),
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, OrchdPersistError::NotFound), "got {err:?}");
+        // The traversal choke-point held: no file was written for the bogus project segment.
+        assert!(!home
+            .path()
+            .join(
+                "Library/Application Support/ai.builderpro.desktop/rules/workflows/no-such-project"
+            )
+            .exists());
+    }
+
+    #[test]
+    fn archived_project_blocks_upsert() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("Acme", "", &ids(&["w1"])).unwrap();
+        db.archive_project(&project.id).unwrap();
+
+        let err = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Project,
+                Some(&project.id),
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, OrchdPersistError::Invariant(m) if m == "project archived"),
+            "got {err:?}"
+        );
+    }
+
+    // ---- list filters by scope/project ----
+
+    #[test]
+    fn list_filters_by_scope_and_project() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let a = db.create_project("A", "", &ids(&["wa"])).unwrap();
+        let b = db.create_project("B", "", &ids(&["wb"])).unwrap();
+
+        let global = db
+            .upsert_workflow(
+                "",
+                "global-wf",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+        let wf_a = db
+            .upsert_workflow(
+                "",
+                "a-wf",
+                "",
+                WorkflowScope::Project,
+                Some(&a.id),
+                "claude-code",
+                vec![],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+        let wf_b = db
+            .upsert_workflow(
+                "",
+                "b-wf",
+                "",
+                WorkflowScope::Project,
+                Some(&b.id),
+                "claude-code",
+                vec![],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+
+        let all_ids = |v: Vec<Workflow>| {
+            v.into_iter()
+                .map(|w| w.id)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        // (None, None) → all three.
+        assert_eq!(
+            all_ids(db.list_workflows(None, None).unwrap()),
+            [global.id.clone(), wf_a.id.clone(), wf_b.id.clone()]
+                .into_iter()
+                .collect()
+        );
+        // (Global, _) → only the global one.
+        assert_eq!(
+            all_ids(
+                db.list_workflows(Some(WorkflowScope::Global), None)
+                    .unwrap()
+            ),
+            [global.id.clone()].into_iter().collect()
+        );
+        // (Project, Some(a)) → only project A's.
+        assert_eq!(
+            all_ids(
+                db.list_workflows(Some(WorkflowScope::Project), Some(&a.id))
+                    .unwrap()
+            ),
+            [wf_a.id.clone()].into_iter().collect()
+        );
+        // (None, Some(a)) → global ∪ project A's (the library view for A).
+        assert_eq!(
+            all_ids(db.list_workflows(None, Some(&a.id)).unwrap()),
+            [global.id.clone(), wf_a.id.clone()].into_iter().collect()
+        );
+        // (Project, None) → every project-scoped workflow.
+        assert_eq!(
+            all_ids(
+                db.list_workflows(Some(WorkflowScope::Project), None)
+                    .unwrap()
+            ),
+            [wf_a.id, wf_b.id].into_iter().collect()
+        );
+    }
+
+    // ---- external-change: editing the JSON on disk flips file_state ----
+
+    #[test]
+    fn external_edit_of_the_json_flips_file_state_to_modified() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let created = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(created.file_state, SkillFileState::Present);
+
+        // An agent (or the owner in an editor) rewrites the JSON directly on disk — still valid
+        // JSON, but a different byte sequence, so its sha256 no longer matches the stored hash.
+        let mut edited: Workflow =
+            serde_json::from_str(&std::fs::read_to_string(&created.json_path).unwrap()).unwrap();
+        edited.stages[0].prompt = "hand-edited prompt".into();
+        std::fs::write(
+            &created.json_path,
+            serde_json::to_string_pretty(&edited).unwrap(),
+        )
+        .unwrap();
+
+        let got = db.get_workflow(&created.id).unwrap();
+        assert_eq!(
+            got.file_state,
+            SkillFileState::Modified,
+            "an external edit must flip fileState to Modified"
+        );
+        // The edited body is what a read now returns (files-as-truth).
+        assert_eq!(got.stages[0].prompt, "hand-edited prompt");
+    }
+
+    #[test]
+    fn lost_file_reports_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+        let created = db
+            .upsert_workflow(
+                "",
+                "wf",
+                "",
+                WorkflowScope::Global,
+                None,
+                "claude-code",
+                vec![stage("s0", "plan", None)],
+                vec![],
+                SupervisorConfig::default(),
+            )
+            .unwrap();
+        std::fs::remove_file(&created.json_path).unwrap();
+
+        let got = db.get_workflow(&created.id).unwrap();
+        assert_eq!(got.file_state, SkillFileState::Missing);
+        // The row identity survives even with the body gone (the UI shows "file lost").
+        assert_eq!(got.id, created.id);
+        assert_eq!(got.name, "wf");
+        assert!(got.stages.is_empty());
     }
 }
 

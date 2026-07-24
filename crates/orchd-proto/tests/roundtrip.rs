@@ -360,6 +360,46 @@ fn sample_research_run() -> ResearchRun {
     }
 }
 
+fn sample_stage() -> Stage {
+    Stage {
+        id: "stage-1".into(),
+        name: "Plan".into(),
+        prompt: "Draft the plan".into(),
+        skill_ids: vec!["skill-1".into()],
+        // `Some` so the round-trip proves the Option<String> agent binding, distinct from the
+        // workflow-level default.
+        agent: Some("hermes".into()),
+        context_scope: ContextScope::Handoff,
+        outputs: vec!["plan.md".into()],
+        gate: Gate::Manual,
+    }
+}
+
+fn sample_workflow() -> Workflow {
+    Workflow {
+        id: "wf-1".into(),
+        name: "ship-feature".into(),
+        description: "Author, review, ship".into(),
+        scope: WorkflowScope::Project,
+        project_id: Some("proj-1".into()),
+        default_agent: "claude-code".into(),
+        stages: vec![sample_stage()],
+        global_skill_ids: vec!["skill-2".into()],
+        // Reuses the wire SupervisorConfig verbatim (SW1 contract).
+        supervisor: SupervisorConfig {
+            enabled: true,
+            delegated_classes: vec!["safe-shell".into()],
+            instruction: "Keep diffs small.".into(),
+            custom_rules: vec!["never push to main".into()],
+        },
+        file_state: SkillFileState::Present,
+        json_path: "/Users/demo/rules/workflows/proj-1/wf-1.json".into(),
+        hash: "deadbeef".into(),
+        created_at: 1_720_000_000,
+        updated_at: 1_720_000_100,
+    }
+}
+
 fn all_requests() -> Vec<OrchdRequest> {
     vec![
         OrchdRequest::Ping,
@@ -722,6 +762,33 @@ fn all_requests() -> Vec<OrchdRequest> {
             id: "task-1".into(),
             priority: TaskPriority::Normal,
         },
+        // SW1 Workflow authoring (tail-appended).
+        OrchdRequest::WorkflowList {
+            scope: Some(WorkflowScope::Project),
+            project_id: Some("proj-1".into()),
+        },
+        OrchdRequest::WorkflowList {
+            scope: None,
+            project_id: None,
+        },
+        OrchdRequest::WorkflowGet { id: "wf-1".into() },
+        OrchdRequest::WorkflowUpsert {
+            id: String::new(),
+            name: "ship-feature".into(),
+            description: "Author, review, ship".into(),
+            scope: WorkflowScope::Project,
+            project_id: Some("proj-1".into()),
+            default_agent: "claude-code".into(),
+            stages: vec![sample_stage()],
+            global_skill_ids: vec!["skill-2".into()],
+            supervisor: SupervisorConfig {
+                enabled: true,
+                delegated_classes: vec!["safe-shell".into()],
+                instruction: "Keep diffs small.".into(),
+                custom_rules: vec!["never push to main".into()],
+            },
+        },
+        OrchdRequest::WorkflowDelete { id: "wf-1".into() },
     ]
 }
 
@@ -808,6 +875,9 @@ fn all_responses() -> Vec<OrchdResponse> {
         }),
         OrchdResponse::ConnectorProviders(vec!["prowl".into(), "github".into()]),
         OrchdResponse::ConnectorProviders(vec![]),
+        // SW1 Workflow authoring (tail-appended).
+        OrchdResponse::Workflow(sample_workflow()),
+        OrchdResponse::Workflows(vec![sample_workflow()]),
     ]
 }
 
@@ -853,6 +923,8 @@ fn all_pushes() -> Vec<OrchdPush> {
             idea_id: Some("idea-1".into()),
         },
         OrchdPush::ResearchRunsChanged { idea_id: None },
+        // SW1 Workflow authoring (tail-appended): bare invalidation, no payload.
+        OrchdPush::WorkflowsChanged,
     ]
 }
 
@@ -1514,4 +1586,79 @@ fn supervisor_config_default_is_disabled_empty() {
     assert!(d.delegated_classes.is_empty());
     assert!(d.custom_rules.is_empty());
     assert_eq!(d.instruction, "");
+}
+
+// ---- SW1 Workflow authoring entity/verb tests ----
+
+#[test]
+fn workflow_scope_wire_tags_are_lowercase() {
+    assert_serde_tag(&WorkflowScope::Global, "global");
+    assert_serde_tag(&WorkflowScope::Project, "project");
+}
+
+#[test]
+fn gate_wire_tags_are_lowercase() {
+    assert_serde_tag(&Gate::Auto, "auto");
+    assert_serde_tag(&Gate::Manual, "manual");
+}
+
+#[test]
+fn context_scope_wire_tags_are_camelcase() {
+    for (value, tag) in [
+        (ContextScope::Inherit, "inherit"),
+        (ContextScope::Handoff, "handoff"),
+        (ContextScope::Project, "project"),
+        (ContextScope::Selected, "selected"),
+    ] {
+        assert_serde_tag(&value, tag);
+    }
+}
+
+#[test]
+fn workflow_entity_serializes_with_camelcase_keys() {
+    let json = serde_json::to_string(&sample_workflow()).expect("serialize Workflow");
+    for key in [
+        "\"projectId\"",
+        "\"defaultAgent\"",
+        "\"globalSkillIds\"",
+        "\"fileState\"",
+        "\"jsonPath\"",
+        "\"createdAt\"",
+        "\"updatedAt\"",
+    ] {
+        assert!(
+            json.contains(key),
+            "Workflow must serialize {key} as camelCase; got:\n{json}"
+        );
+    }
+    // Stage's own camelCase keys (nested in `stages`).
+    assert!(
+        json.contains("\"skillIds\"") && json.contains("\"contextScope\""),
+        "Stage.skill_ids/context_scope must serialize as camelCase; got:\n{json}"
+    );
+    assert!(
+        !json.contains("project_id")
+            && !json.contains("default_agent")
+            && !json.contains("global_skill_ids")
+            && !json.contains("file_state")
+            && !json.contains("json_path")
+            && !json.contains("skill_ids")
+            && !json.contains("context_scope"),
+        "generated JSON must not contain snake_case field names; got:\n{json}"
+    );
+}
+
+#[test]
+fn workflow_response_json_roundtrips_the_full_definition() {
+    // Mirrors `skill_list_response_json_roundtrips`: a plain-`serde_json` round-trip in addition to
+    // the CBOR-wire round-trip `every_response_variant_roundtrips` already exercises. Proves the
+    // FULL definition (stages incl. agent/contextScope/outputs, globals, supervisor) survives.
+    let original = OrchdResponse::Workflow(sample_workflow());
+    let json = serde_json::to_string(&original).expect("serialize OrchdResponse::Workflow");
+    let decoded: OrchdResponse =
+        serde_json::from_str(&json).expect("deserialize OrchdResponse::Workflow");
+    assert_eq!(
+        decoded, original,
+        "OrchdResponse::Workflow must JSON round-trip byte-for-byte equal"
+    );
 }
