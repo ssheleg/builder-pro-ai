@@ -279,7 +279,7 @@ in different lifecycle states.
 - **Preconditions:** project exists
 - **Steps:**
   1. User opens the project; Overview tab shows Goals/Ideas/Tasks/Insights counters and the workspaces panel
-  2. User switches among 7 tabs (Overview/Goals/Ideas/Tasks/Insights/Rules/Graph)
+  2. User switches among 8 tabs (Overview/Goals/Ideas/Tasks/Insights/Rules/Graph/Docs)
   3. User detaches a workspace ("Unlink") or attaches one via "+ add workspace…" select
 - **Expected result:** counters populate after eager refresh; unlink/attach update the list after refreshProjects
 - **UI elements:** header (name + description), tab bar, counter tiles, workspaces panel, "Unlink" buttons, "+ add workspace…" select, "workspace unavailable" badge
@@ -906,7 +906,7 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** OS denies the assertion → honest banner/toast "keep-awake unavailable: {reason}" + Diagnostics record — never a silent fake "awake"; app quit/crash → assertion released by OS (no orphan lock)
 - **Status:** implemented
-- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-387 (SleepAsserter, reconcile, IOKit FFI, commands), src-tauri/src/lib.rs:604,727-729 (new_power_slot manage + handler registration), src/ipc/power.ts:13-48, src/store/store.ts:443-457 (keepAwake slice types),617 (applyPowerStatus mirror),1064-1090 (init + setKeepAwakeEnabled + syncKeepAwake), src/App.tsx:470-476 (live-count sync effect), src/components/WorkspaceSidebar.tsx:479 (pill mount),563-636 (KeepAwakePill), src/strings.ts:697-711 (keepAwake group: keepAwakeOn/keepAwakeFailed)
+- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-387 (SleepAsserter, reconcile, IOKit FFI, commands), src-tauri/src/lib.rs:604,727-729 (new_power_slot manage + handler registration), src/ipc/power.ts:13-48, src/store/store.ts:443-457 (keepAwake slice types),617 (applyPowerStatus mirror),1064-1090 (init + setKeepAwakeEnabled + syncKeepAwake), src/App.tsx:470-476 (live-count sync effect), src/components/WorkspaceSidebar.tsx:479 (pill mount),563-636 (KeepAwakePill), src/strings.ts:786-800 (keepAwake group: keepAwakeOn/keepAwakeFailed)
 
 ## supervisor
 
