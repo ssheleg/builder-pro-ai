@@ -39,10 +39,8 @@ fn capabilities_grant_minimal_required_permissions() {
     let ids = perm_ids(&caps);
     for required in [
         "core:default",
-        "store:default",
         "dialog:default",
         "dialog:allow-open",
-        "fs:default",
         "shell:default",
     ] {
         assert!(
@@ -53,18 +51,19 @@ fn capabilities_grant_minimal_required_permissions() {
 }
 
 #[test]
-fn capabilities_grant_scoped_fs_access_under_appdata() {
+fn capabilities_do_not_grant_removed_store_or_fs_plugins() {
+    // 2026-07-24 audit (FE-9/FE-5): the store/fs plugins were dead code — nothing in the
+    // webview called them — and their ACL surface (store:default, fs:default + a broad
+    // $APPDATA/** scope) was pure risk. The plugins were dropped from Cargo.toml/lib.rs, so
+    // their permissions must NOT come back here either.
     let caps = load_caps();
-    let perms = caps["permissions"].as_array().expect("permissions array");
-    let scope = perms
-        .iter()
-        .find(|p| matches!(p, Value::Object(o) if o.get("identifier").and_then(Value::as_str) == Some("fs:scope")))
-        .expect("must grant a scoped fs:scope permission (not unbounded fs access)");
-    let allow = scope["allow"].as_array().expect("fs:scope.allow array");
-    assert!(
-        allow.iter().any(|a| a["path"] == "$APPDATA/**"),
-        "fs:scope must allow $APPDATA/**; got {allow:?}"
-    );
+    let ids = perm_ids(&caps);
+    for forbidden in ["store:default", "fs:default", "fs:scope"] {
+        assert!(
+            !ids.iter().any(|i| i == forbidden),
+            "capabilities must NOT grant {forbidden} (FE-9/FE-5: store/fs plugins removed)"
+        );
+    }
 }
 
 #[test]

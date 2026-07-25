@@ -101,6 +101,62 @@ describe("findFileLinks — KNOWN true/false table", () => {
   });
 });
 
+/**
+ * LNK-1 trimmed-prefix wrong-target edges (flipped probes): a root-resolving match (`rel === ""`)
+ * that is only a TRIMMED PREFIX of the raw token must NOT linkify -- the regex stopped at a
+ * character outside its match class (a space inside a spaced directory name, or a non-ASCII
+ * segment), so the link would target the root DIRECTORY instead of the file the owner meant.
+ * Genuine full-token root matches still linkify (asserted below). Cyrillic inputs are built via
+ * `String.fromCodePoint` so this file stays ASCII-only for the scripts/check-english.sh gate
+ * (spec D2/O-2).
+ */
+describe("findFileLinks — LNK-1 trimmed-prefix wrong-target guard", () => {
+  const roots = ["/Users/x/My"];
+  // The cyrillic "file.ts" name, built from codepoints so this source file stays ASCII-only.
+  const CYRILLIC_FILE = String.fromCodePoint(0x0444, 0x0430, 0x0439, 0x043b) + ".ts";
+  it("token with a space under a spaced root (`/Users/x/My Dir/f.ts`) -> NO link (was: one wrong-target root link with rel === '')", () => {
+    // The regex stops at the space and matches only the `/Users/x/My` prefix; that prefix
+    // resolves to the root with rel === "" while the token plainly continues (`Dir/f.ts`), so
+    // the LNK-1 guard kills it. The trailing `Dir/f.ts` word resolves outside every root anyway.
+    const links = findFileLinks("open /Users/x/My Dir/f.ts now", "/", roots);
+    expect(links).toHaveLength(0);
+  });
+
+  it("cyrillic segment in an ABSOLUTE path -> NO link (was: only the ASCII root prefix underlined, targeting rel === '')", () => {
+    // `\w` skips cyrillic, so the regex matches only `/Users/x/My` and the token continues at
+    // `/` + the cyrillic name -- a trimmed root-prefix, killed by the same guard.
+    const links = findFileLinks(`cat /Users/x/My/${CYRILLIC_FILE}`, "/", roots);
+    expect(links).toHaveLength(0);
+  });
+
+  it("bare cyrillic relative token -> NO link (unchanged: \\w never matches cyrillic)", () => {
+    expect(findFileLinks(`cat ${CYRILLIC_FILE}`, "/Users/x/My", roots)).toHaveLength(0);
+  });
+
+  it("quoted relative token \"src/a.ts\" -> still exactly one link with rel 'src/a.ts' (quotes sit outside the char class, the guard does not apply)", () => {
+    const links = findFileLinks(`see "src/a.ts" here`, "/Users/x/My", roots);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ root: "/Users/x/My", rel: "src/a.ts" });
+  });
+
+  it("positive control: a full-token absolute path to a real shape -> still linkifies with the file's rel", () => {
+    const links = findFileLinks("cat /Users/x/My/file.ts", "/", roots);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ root: "/Users/x/My", rel: "file.ts" });
+  });
+
+  it("genuine full-token root match (`cd /Users/x/My`) -> STILL linkifies with rel === ''", () => {
+    // The token IS the root, not a trimmed prefix of a longer one: `isTrimmedPrefix` sees no
+    // continuation past the match, so the guard passes and the fixed code genuinely emits the
+    // root link with rel === "" (clicking it targets the root directory -- the intended target).
+    const line = "cd /Users/x/My";
+    const links = findFileLinks(line, "/", roots);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ root: "/Users/x/My", rel: "" });
+    expect(line.slice(links[0].startCol - 1, links[0].endCol - 1)).toBe("/Users/x/My");
+  });
+});
+
 describe("matchWorkspaceRoot — shared containment helper (also used by the OSC-8 file:// handler)", () => {
   it("returns the matching root (verbatim) and the slash-relative rel", () => {
     expect(matchWorkspaceRoot("/repo/x/y.ts", ["/repo"])).toEqual({

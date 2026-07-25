@@ -221,6 +221,14 @@ const createInputStyle: CSSProperties = {
   padding: "3px 6px",
 };
 
+/** UX-1 first-fetch placeholder — the same dim muted register as GoalTree's `loadingTextStyle`
+ * (and DocsPanel's `docs-loading` row before it), so still-loading groups never read as six
+ * genuinely empty ones. */
+const loadingTextStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
+};
+
 interface TaskRowProps {
   task: DomainTask;
   canMoveUp: boolean;
@@ -369,6 +377,7 @@ export function TasksList(props: { projectId: string }): JSX.Element {
   const { projectId } = props;
 
   const tasksByProject = useAppStore((s) => s.tasksByProject);
+  const tasksFetched = useAppStore((s) => s.tasksFetched);
   const refreshTasks = useAppStore((s) => s.refreshTasks);
   const showToast = useAppStore((s) => s.showToast);
   const orchdDown = useAppStore((s) => s.orchdDown);
@@ -582,45 +591,57 @@ export function TasksList(props: { projectId: string }): JSX.Element {
         </Button>
       </div>
 
-      {STATUS_VALUES.map((status) => {
-        const group = groups.get(status) ?? [];
-        return (
-          <div key={status} data-testid={`task-status-group-${status}`} style={sectionStyle}>
-            <div style={sectionHeaderStyle}>
-              {STATUS_LABEL[status]} ({group.length})
-            </div>
-            {group.length === 0 ? (
-              <div
-                data-testid={`task-empty-group-${status}`}
-                style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", padding: "0 var(--sp-2)" }}
-              >
-                {strings.tasks.empty}
+      {tasks.length === 0 && tasksFetched[projectId] !== true ? (
+        // UX-1: an empty cache means "no tasks" only once the FIRST fetch for this project has
+        // settled (`tasksFetched[projectId]` flips on success AND failure and never resets) —
+        // before that it just means "not loaded yet", so render ONE common loading row instead of
+        // flashing six false empty groups at a user who HAS tasks (the GoalTree/DocsPanel
+        // loading-vs-empty split). After a FAILED first fetch the empty groups are the honest
+        // copy, which is exactly what the never-reset flag yields.
+        <div data-testid="tasks-loading" style={loadingTextStyle}>
+          {strings.tasks.loading}
+        </div>
+      ) : (
+        STATUS_VALUES.map((status) => {
+          const group = groups.get(status) ?? [];
+          return (
+            <div key={status} data-testid={`task-status-group-${status}`} style={sectionStyle}>
+              <div style={sectionHeaderStyle}>
+                {STATUS_LABEL[status]} ({group.length})
               </div>
-            ) : (
-              group.map((task) => {
-                // SCN-051: ▲/▼ neighbors + first/last disabling live within the task's
-                // same-priority segment — the priority boundary is not crossable by rank.
-                const segment = prioritySegment(group, task);
-                const segIdx = segment.findIndex((t) => t.id === task.id);
-                return (
-                  <TaskRow
-                    key={task.id}
-                    task={task}
-                    canMoveUp={segIdx > 0}
-                    canMoveDown={segIdx < segment.length - 1}
-                    disabled={orchdDown}
-                    onStatusChange={(id, s) => void handleStatusChange(id, s)}
-                    onPriorityChange={(id, p) => void handlePriorityChange(id, p)}
-                    onMoveUp={(t) => void handleMoveUp(segment, t)}
-                    onMoveDown={(t) => void handleMoveDown(segment, t)}
-                    onDelete={(t) => void handleDelete(t)}
-                  />
-                );
-              })
-            )}
-          </div>
-        );
-      })}
+              {group.length === 0 ? (
+                <div
+                  data-testid={`task-empty-group-${status}`}
+                  style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", padding: "0 var(--sp-2)" }}
+                >
+                  {strings.tasks.empty}
+                </div>
+              ) : (
+                group.map((task) => {
+                  // SCN-051: ▲/▼ neighbors + first/last disabling live within the task's
+                  // same-priority segment — the priority boundary is not crossable by rank.
+                  const segment = prioritySegment(group, task);
+                  const segIdx = segment.findIndex((t) => t.id === task.id);
+                  return (
+                    <TaskRow
+                      key={task.id}
+                      task={task}
+                      canMoveUp={segIdx > 0}
+                      canMoveDown={segIdx < segment.length - 1}
+                      disabled={orchdDown}
+                      onStatusChange={(id, s) => void handleStatusChange(id, s)}
+                      onPriorityChange={(id, p) => void handlePriorityChange(id, p)}
+                      onMoveUp={(t) => void handleMoveUp(segment, t)}
+                      onMoveDown={(t) => void handleMoveDown(segment, t)}
+                      onDelete={(t) => void handleDelete(t)}
+                    />
+                  );
+                })
+              )}
+            </div>
+          );
+        })
+      )}
     </div>
   );
 }

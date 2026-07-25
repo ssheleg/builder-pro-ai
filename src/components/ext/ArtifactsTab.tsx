@@ -48,6 +48,14 @@ const preStyle: CSSProperties = {
   overflowY: "auto",
 };
 
+/** UX-1 first-fetch placeholder — the same dim muted register as GoalTree's `loadingTextStyle`
+ * (and DocsPanel's `docs-loading` row before it), so a still-loading tab never reads as a
+ * genuinely empty one. */
+const loadingTextStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
+};
+
 function formatTimestamp(ms: number): string {
   return new Date(ms).toLocaleString();
 }
@@ -135,6 +143,7 @@ export function ArtifactViewer(props: {
  */
 export function ArtifactsTab(): JSX.Element {
   const artifacts = useAppStore((s) => s.mcpArtifacts);
+  const mcpArtifactsFetched = useAppStore((s) => s.mcpArtifactsFetched);
   const mcpServers = useAppStore((s) => s.mcpServers);
   const refreshMcpArtifacts = useAppStore((s) => s.refreshMcpArtifacts);
 
@@ -149,7 +158,19 @@ export function ArtifactsTab(): JSX.Element {
   return (
     <div data-testid="artifacts-tab">
       {artifacts.length === 0 ? (
-        <EmptyState data-testid="artifacts-empty" title={strings.ext.artifacts.empty} />
+        // UX-1: an empty cache means "no artifacts" only once the FIRST fetch has settled
+        // (`mcpArtifactsFetched` flips on success AND failure and never resets) — before that it
+        // just means "not loaded yet", so render the loading placeholder instead of flashing the
+        // false empty state at a user who HAS artifacts (the GoalTree/DocsPanel loading-vs-empty
+        // split). After a FAILED first fetch the empty state is the honest copy, which is exactly
+        // what the never-reset flag yields.
+        mcpArtifactsFetched !== true ? (
+          <div data-testid="artifacts-loading" style={loadingTextStyle}>
+            {strings.ext.artifacts.loading}
+          </div>
+        ) : (
+          <EmptyState data-testid="artifacts-empty" title={strings.ext.artifacts.empty} />
+        )
       ) : (
         <div role="list">
           {artifacts.map((artifact) => {

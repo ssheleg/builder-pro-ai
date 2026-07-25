@@ -3,6 +3,7 @@ import { useAppStore } from "../store/store";
 import { createSession, killSession } from "../ipc/commands";
 import type { CreateSessionOpts, WorkspaceId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { StatusDot } from "./StatusDot";
 import { strings } from "../strings";
 
@@ -63,6 +64,12 @@ export function TerminalTabs(props: {
   const setActiveSession = useAppStore((s) => s.setActiveSession);
   const removeSession = useAppStore((s) => s.removeSession);
   const showToast = useAppStore((s) => s.showToast);
+
+  // FE-4 (spec D6): a rapid double-click on «+ New terminal» must not spawn two sessions — the
+  // `createSession` round-trip is wrapped in the shared double-submit guard, and the button renders
+  // `disabled` while a create is in flight (the second click is dropped by the ref lock even before
+  // the re-render lands).
+  const { submitting, guard } = useSubmitGuard();
 
   // Scoped to the active workspace (see the component doc); no workspace selected ⇒ no tabs, which
   // is the honest reading of "there is no workspace whose terminals these would be".
@@ -172,7 +179,7 @@ export function TerminalTabs(props: {
                 flexShrink: 0,
               }}
             >
-              <StatusDot lifecycle={s.lifecycle} waitingForInput={s.waitingForInput} />
+              <StatusDot lifecycle={s.lifecycle} waitingForInput={s.waitingForInput} isActive={s.isActive} />
               <span style={{ whiteSpace: "nowrap" }}>{s.title}</span>
               <button
                 type="button"
@@ -199,13 +206,13 @@ export function TerminalTabs(props: {
       <button
         type="button"
         aria-label={strings.terminal.tabs.newTerminalAria}
-        disabled={!activeWorkspaceId}
-        onClick={() => void onNewTerminal()}
+        disabled={!activeWorkspaceId || submitting}
+        onClick={() => void guard(onNewTerminal)()}
         style={{
           border: "none",
           background: "transparent",
-          color: activeWorkspaceId ? "var(--ink)" : "var(--muted)",
-          cursor: activeWorkspaceId ? "pointer" : "not-allowed",
+          color: activeWorkspaceId && !submitting ? "var(--ink)" : "var(--muted)",
+          cursor: activeWorkspaceId && !submitting ? "pointer" : "not-allowed",
           padding: "var(--sp-2) var(--sp-3)",
           fontSize: "var(--fs-lg)",
           // Always reachable: the primary action of this strip must never be squeezed to nothing

@@ -44,6 +44,14 @@ const listStyle: CSSProperties = {
   gap: "var(--sp-2)",
 };
 
+/** UX-1 first-fetch placeholder — the same dim muted register as GoalTree's `loadingTextStyle`
+ * (and DocsPanel's `docs-loading` row before it), so a still-loading list never reads as a
+ * genuinely empty one. */
+const loadingTextStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
+};
+
 const rowStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -303,6 +311,7 @@ export function InsightsList(props: { projectId: string | null }): JSX.Element {
   const { projectId } = props;
 
   const insights = useAppStore((s) => s.insights);
+  const insightsFetched = useAppStore((s) => s.insightsFetched);
   const showToast = useAppStore((s) => s.showToast);
   const orchdDown = useAppStore((s) => s.orchdDown);
 
@@ -339,10 +348,22 @@ export function InsightsList(props: { projectId: string | null }): JSX.Element {
   return (
     <div data-testid="insights-list" style={listStyle}>
       {rows.length === 0 ? (
-        <EmptyState
-          data-testid="insights-list-empty"
-          title={isOrphanView ? strings.insights.emptyOrphan : strings.insights.emptyProject}
-        />
+        // UX-1: an empty cache means "no insights" only once the FIRST fetch has settled
+        // (`insightsFetched` flips on success AND failure and never resets) — before that it just
+        // means "not loaded yet", so render the loading placeholder instead of flashing the false
+        // empty state at a user who HAS insights (the GoalTree/DocsPanel loading-vs-empty split).
+        // After a FAILED first fetch the empty state is the honest copy, which is exactly what
+        // the never-reset flag yields.
+        insightsFetched !== true ? (
+          <div data-testid="insights-list-loading" style={loadingTextStyle}>
+            {strings.insights.loading}
+          </div>
+        ) : (
+          <EmptyState
+            data-testid="insights-list-empty"
+            title={isOrphanView ? strings.insights.emptyOrphan : strings.insights.emptyProject}
+          />
+        )
       ) : (
         rows.map((insight) => (
           <InsightRow

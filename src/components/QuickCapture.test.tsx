@@ -184,6 +184,24 @@ describe("QuickCapture", () => {
     expect(orchdCreateIdeaMock).toHaveBeenCalledWith("p2", "My idea", "");
   });
 
+  it("the project attach select offers ONLY active projects — archived ones are absent (UX-2)", () => {
+    useAppStore.setState(
+      {
+        projects: [
+          makeProject({ id: "p1", name: "ActiveProj", status: "active" }),
+          makeProject({ id: "p2", name: "ArchivedProj", status: "archived" }),
+        ],
+      },
+      false,
+    );
+    render(<QuickCapture />);
+    pressCmdK();
+
+    const select = screen.getByTestId("quick-capture-project-select");
+    expect(select.querySelector('option[value="p1"]')).toBeTruthy();
+    expect(select.querySelector('option[value="p2"]')).toBeNull();
+  });
+
   it("Enter in the title field submits (same as the Save button)", async () => {
     render(<QuickCapture />);
     pressCmdK();

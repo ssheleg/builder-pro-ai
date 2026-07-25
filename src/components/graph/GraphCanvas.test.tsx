@@ -66,6 +66,20 @@ vi.mock("@xyflow/react", async (importOriginal) => {
         >
           stub-move-b
         </button>
+        {/* GRAPH-1: a position change for the GHOST id — real xyflow never dispatches one (the
+            ghost maps to `draggable: false`), so this simulates a ghost that slipped through and
+            exercises flushMoves' defensive ghost filter. */}
+        <button
+          type="button"
+          data-testid="stub-move-ghost"
+          onClick={() =>
+            props.onNodesChange?.([
+              { type: "position", id: "ext1", position: { x: 55, y: 66 }, dragging: false },
+            ])
+          }
+        >
+          stub-move-ghost
+        </button>
         <button
           type="button"
           data-testid="stub-select-n1"
@@ -86,6 +100,22 @@ vi.mock("@xyflow/react", async (importOriginal) => {
           }
         >
           stub-select-both
+        </button>
+        {/* GRAPH-1: selects a local node AND the ghost — real xyflow never dispatches the ghost's
+            select change (`selectable: false`), and `applyNodeChanges` itself doesn't honor that
+            flag, so this puts a genuinely-selected ghost into local state and exercises
+            handleDeleteSelected's defensive filter (not a vacuous pass). */}
+        <button
+          type="button"
+          data-testid="stub-select-n1-and-ghost"
+          onClick={() =>
+            props.onNodesChange?.([
+              { type: "select", id: "n1", selected: true },
+              { type: "select", id: "ext1", selected: true },
+            ])
+          }
+        >
+          stub-select-n1-and-ghost
         </button>
         <button
           type="button"

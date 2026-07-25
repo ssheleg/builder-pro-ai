@@ -175,7 +175,7 @@ export function QuickCapture(): JSX.Element | null {
     if (trimmed === "" || orchdDown) return; // honest guard — never a doomed send (spec §11)
     try {
       await orchdCreateIdea(projectId === "" ? null : projectId, trimmed, body);
-      showToast(SAVED_TOAST);
+      showToast(SAVED_TOAST, "success");
       close();
     } catch (e) {
       showToast(describeOrchdError(e));
@@ -189,6 +189,11 @@ export function QuickCapture(): JSX.Element | null {
   if (!open) return null;
 
   const blocked = orchdDown || title.trim() === "" || submitting;
+
+  // Only ACTIVE projects are offered as idea-attach targets (UX-2): an archived project is
+  // read-only history, so attaching a fresh idea to it would be a dead end. Mirrors
+  // WorkspaceSidebar's `activeProjects` filter (spec D7).
+  const activeProjects = projects.filter((p) => p.status === "active");
 
   return (
     <div style={overlayStyle} data-testid="quick-capture-overlay">
@@ -239,7 +244,7 @@ export function QuickCapture(): JSX.Element | null {
           style={selectStyle}
         >
           <option value="">{strings.capture.noProject}</option>
-          {projects.map((p) => (
+          {activeProjects.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
             </option>

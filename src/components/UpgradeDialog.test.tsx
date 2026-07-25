@@ -128,6 +128,18 @@ describe("UpgradeDialog", () => {
     expect(upgradeDaemonMock).toHaveBeenCalledWith();
   });
 
+  it('a rapid double-click on "Update" fires the kickstart only once (submit guard, FE-4)', () => {
+    useAppStore.setState({ daemonIncompatible: true, upgradeDialogOpen: true }, false);
+    render(<UpgradeDialog />);
+    const btn = screen.getByRole("button", { name: strings.common.update });
+
+    // The default never-settling mock keeps the guard's ref lock engaged across both clicks.
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+
+    expect(upgradeDaemonMock).toHaveBeenCalledTimes(1);
+  });
+
   it('"Cancel" closes the dialog but does NOT clear daemonIncompatible (honesty invariant)', () => {
     useAppStore.setState({ daemonIncompatible: true, upgradeDialogOpen: true }, false);
     render(<UpgradeDialog />);

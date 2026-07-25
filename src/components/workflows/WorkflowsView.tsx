@@ -95,6 +95,11 @@ const metaRowStyle: CSSProperties = {
  * "+ New workflow" primary. Opening/duplicating/creating swaps this list for the `WorkflowEditor`;
  * "Run →" opens the `RunWorkflowPicker` — the honest S6b trigger stub that fabricates no execution.
  *
+ * WIP-4: "Run →" renders on GLOBAL rows only (the picker lists global workflows — reusable on the
+ * active project; a project-scoped workflow is bound to its own project and could not even be
+ * shown there), and it opens the picker with THAT row's workflow preselected via
+ * `initialWorkflowId`, not the first workflow in the list.
+ *
  * Invalidation-driven (mirrors every other domain surface): refreshes `store.workflows` on mount;
  * the `orchd://workflows-changed` push (App.tsx) keeps it live thereafter. Delete confirms via
  * `window.confirm` and surfaces a rejection as a toast (`describeOrchdError`), never a silent
@@ -114,6 +119,9 @@ export function WorkflowsView(): JSX.Element {
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
   const [editing, setEditing] = useState<WorkflowDraft | null>(null);
   const [runOpen, setRunOpen] = useState(false);
+  // WIP-4: the workflow the row's "Run →" was clicked on — the picker opens preselecting it,
+  // not the first workflow in the list.
+  const [runTargetId, setRunTargetId] = useState<string | null>(null);
 
   useEffect(() => {
     void refreshWorkflows();
@@ -243,16 +251,25 @@ export function WorkflowsView(): JSX.Element {
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: "var(--sp-2)", flexShrink: 0, flexWrap: "wrap" }}>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    data-testid={`workflow-run-${w.id}`}
-                    disabled={orchdDown}
-                    onClick={() => setRunOpen(true)}
-                  >
-                    {strings.workflows.library.run}
-                  </Button>
+                  {/* WIP-4: "Run →" is offered on GLOBAL rows only. The picker lists global
+                      workflows (reusable on the active project it titles) — a project-scoped
+                      workflow is bound to its own project, so a Run action here would open a
+                      picker that cannot even show it. Open/Duplicate/Delete stay on every row. */}
+                  {w.scope === "global" && (
+                    <Button
+                      type="button"
+                      variant="primary"
+                      size="sm"
+                      data-testid={`workflow-run-${w.id}`}
+                      disabled={orchdDown}
+                      onClick={() => {
+                        setRunTargetId(w.id);
+                        setRunOpen(true);
+                      }}
+                    >
+                      {strings.workflows.library.run}
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     variant="ghost"
@@ -293,6 +310,7 @@ export function WorkflowsView(): JSX.Element {
         open={runOpen}
         onClose={() => setRunOpen(false)}
         projectName={runProjectName}
+        initialWorkflowId={runTargetId}
       />
     </div>
   );

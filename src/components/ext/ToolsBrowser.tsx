@@ -3,6 +3,7 @@ import { useAppStore } from "../../store/store";
 import { mcpSetToolEnabled, mcpCallTool, describeOrchdError, isConsentError } from "../../ipc/orchd";
 import type { McpTool } from "../../ipc/orchd-types";
 import { Badge, Button, TextArea, EmptyState } from "../../ui/primitives";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { strings } from "../../strings";
 
 const toolRowStyle: CSSProperties = {
@@ -111,6 +112,14 @@ export function ToolsBrowser(): JSX.Element {
   const [toggleError, setToggleError] = useState<Record<string, string | null>>({});
   const [result, setResult] = useState<Record<string, ToolCallResult | undefined>>({});
 
+  // FE-4 (spec D6): a rapid double-click on a row's "invoke" must not fire two MCP tool calls
+  // (duplicate spend / duplicate side effects on the server side) — the `mcpCallTool` round-trip
+  // is wrapped in the shared double-submit guard, and the invoke button renders `disabled` while
+  // a call is in flight. ONE instance covers every row: a hook-per-row is impossible (rows come
+  // from a `.map`, hooks can't be called in a loop), and serializing invokes — dropping a second
+  // invoke while one is in flight — is the safe reading of the guard here.
+  const { submitting: callSubmitting, guard: callGuard } = useSubmitGuard();
+
   const serverIds = servers.map((s) => s.id).join(",");
 
   useEffect(() => {
@@ -159,6 +168,8 @@ export function ToolsBrowser(): JSX.Element {
       showToast(message);
     }
   }
+
+  const submitCall = callGuard(handleCall);
 
   const rows = servers.flatMap((server) =>
     (toolsByServer[server.id] ?? []).map((tool) => ({ server, tool })),
@@ -242,8 +253,8 @@ export function ToolsBrowser(): JSX.Element {
                   variant="ghost"
                   size="sm"
                   data-testid={`tool-call-${tool.id}`}
-                  disabled={callDisabled}
-                  onClick={() => void handleCall(tool)}
+                  disabled={callDisabled || callSubmitting}
+                  onClick={() => void submitCall(tool)}
                 >
                   {strings.ext.invoke}
                 </Button>

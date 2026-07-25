@@ -8,6 +8,10 @@ function Boom(): never {
   throw new Error("kaboom in render");
 }
 
+function SecretBoom(): never {
+  throw new Error("clone failed with ghp_abcdefghijklmnopqrstuvwxyz under /Users/alice/repo");
+}
+
 describe("ErrorBoundary", () => {
   beforeEach(() => {
     useAppStore.setState({ diagEvents: [] });
@@ -53,5 +57,25 @@ describe("ErrorBoundary", () => {
     );
     fireEvent.click(screen.getByTestId("error-boundary-reload"));
     expect(onReload).toHaveBeenCalledTimes(1);
+  });
+
+  it("Copy details writes the SCRUBBED error text to the clipboard (REL-3)", () => {
+    render(
+      <ErrorBoundary>
+        <SecretBoom />
+      </ErrorBoundary>,
+    );
+    // Same clipboard stub as DiagnosticsPanel.test.tsx; installed after render so the crash
+    // capture runs with the real globals.
+    const writeText = vi.fn();
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    fireEvent.click(screen.getByTestId("error-boundary-copy"));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const copied: string = writeText.mock.calls[0][0];
+    expect(copied).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");
+    expect(copied).not.toContain("/Users/alice");
+    expect(copied).toContain("«redacted-key»");
+    expect(copied).toContain("/Users/«user»");
+    vi.unstubAllGlobals();
   });
 });

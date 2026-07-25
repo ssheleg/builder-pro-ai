@@ -10,6 +10,7 @@ import {
 import type { DocMeta } from "../ipc/orchd-types";
 import { parseMarkdown, renderInline, type MdBlock } from "./markdown";
 import { Button, SegmentedPill } from "../ui/primitives";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { strings } from "../strings";
 
 /**
@@ -276,6 +277,15 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [mode, setMode] = useState<"edit" | "preview">("edit");
 
+  // FE-4 (spec D6): double-submit guards for every doc mutation, split into the TWO independent
+  // control groups that are on screen at once. The editor mutations (Save/Delete/Accept/Recreate)
+  // all target the SAME selected doc — a second click while one is in flight can only be a
+  // double-fire, so one shared lock serializes them. "+ doc" lives in the list column and stays
+  // clickable while an editor mutation runs (creating doc B while doc A saves is legitimate), so
+  // it gets its own guard rather than being dropped by the editor's lock.
+  const createGuard = useSubmitGuard();
+  const docGuard = useSubmitGuard();
+
   // Dirty-draft guard baseline (PRN-03): the last content hydrated from the store, tagged with the
   // selected doc name. On a same-doc re-hydrate (an `orchd://docs-changed` push or reconnect
   // rehydrate landing mid-edit) the editor keeps a draft the user has edited away from this
@@ -413,6 +423,16 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
     }
   }
 
+  // Guarded variants of the mutating handlers (FE-4). The guard is `finally`-only — every
+  // handler's own try/catch → toast path above is untouched, and a rejection still releases the
+  // lock so a retry isn't blocked. `handleReveal` is a read (Finder open off a daemon read), not
+  // a mutation, so it stays unguarded.
+  const submitCreate = createGuard.guard(handleCreate);
+  const submitSave = docGuard.guard(handleSave);
+  const submitAcknowledge = docGuard.guard(handleAcknowledge);
+  const submitRecreate = docGuard.guard(handleRecreate);
+  const submitDelete = docGuard.guard(handleDelete);
+
   const now = Date.now();
 
   function renderList(): JSX.Element {
@@ -511,8 +531,8 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
             variant="danger"
             size="sm"
             data-testid="docs-delete"
-            disabled={orchdDown}
-            onClick={() => void handleDelete()}
+            disabled={orchdDown || docGuard.submitting}
+            onClick={() => void submitDelete()}
             style={{ flexShrink: 0, whiteSpace: "nowrap", marginLeft: "auto" }}
           >
             {strings.common.delete}
@@ -527,8 +547,8 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
               variant="ghost"
               size="sm"
               data-testid="docs-acknowledge"
-              disabled={orchdDown}
-              onClick={() => void handleAcknowledge()}
+              disabled={orchdDown || docGuard.submitting}
+              onClick={() => void submitAcknowledge()}
               style={{ flexShrink: 0, whiteSpace: "nowrap" }}
             >
               {strings.common.accept}
@@ -544,8 +564,8 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
               variant="ghost"
               size="sm"
               data-testid="docs-recreate"
-              disabled={orchdDown}
-              onClick={() => void handleRecreate()}
+              disabled={orchdDown || docGuard.submitting}
+              onClick={() => void submitRecreate()}
               style={{ flexShrink: 0, whiteSpace: "nowrap" }}
             >
               {strings.docs.recreate}
@@ -580,8 +600,8 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
               variant="primary"
               size="sm"
               data-testid="docs-save"
-              disabled={orchdDown}
-              onClick={() => void handleSave()}
+              disabled={orchdDown || docGuard.submitting}
+              onClick={() => void submitSave()}
               style={{ alignSelf: "flex-start" }}
             >
               {strings.common.save}
@@ -608,7 +628,7 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
             onKeyDown={(e) => {
               if (e.key === "Enter" && trimmedDraft !== "" && !orchdDown) {
                 e.preventDefault();
-                void handleCreate();
+                void submitCreate();
               }
             }}
             style={nameInputStyle}
@@ -618,9 +638,10 @@ export function DocsPanel(props: { projectId: string }): JSX.Element {
             variant="ghost"
             size="sm"
             data-testid="docs-add"
-            // SCN-054: empty name → "+ doc" blocked; orchd down → mutation disabled.
-            disabled={trimmedDraft === "" || orchdDown}
-            onClick={() => void handleCreate()}
+            // SCN-054: empty name → "+ doc" blocked; orchd down → mutation disabled; FE-4: a
+            // create already in flight → the second click is dropped by the guard anyway.
+            disabled={trimmedDraft === "" || orchdDown || createGuard.submitting}
+            onClick={() => void submitCreate()}
             style={{ flexShrink: 0, whiteSpace: "nowrap" }}
           >
             {strings.docs.addDoc}

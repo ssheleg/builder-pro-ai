@@ -61,6 +61,16 @@ const selectStyle: CSSProperties = {
   flexShrink: 0,
 };
 
+/** SEC-4 inert-cap honesty note under the limits editor — the muted-line register the rules
+ * panel's spend-cap hint uses: the cap is stored but does not block calls until MCP servers
+ * report per-call costs. */
+const limitsInertHintStyle: CSSProperties = {
+  fontSize: "var(--fs-xs)",
+  color: "var(--muted)",
+  marginTop: "var(--sp-2)",
+  lineHeight: 1.5,
+};
+
 const SCOPE_LABEL: Record<PolicyScope, string> = {
   global: strings.common.scope.global,
   project: strings.common.scope.project,
@@ -90,6 +100,10 @@ function sourceLabel(inv: McpInvocation, serverNames: Record<string, string>): s
  * The policy editor's `trustSetPolicy` control is `disabled={orchdDown}` (spec §8 honest
  * degradation, mirrors every other mutating control in this panel) — the invocation/audit tables
  * are read-only and unaffected by `orchdDown`.
+ *
+ * SEC-4: the spend-cap editor implies an enforcement the daemon does not yet have — the cap is
+ * INERT until MCP servers report per-call costs — so the editor carries the inert-hint line
+ * rather than letting a stored cap read as a blocking one.
  */
 export function InvocationLog(): JSX.Element {
   const invocations = useAppStore((s) => s.invocations);
@@ -194,6 +208,12 @@ export function InvocationLog(): JSX.Element {
           >
             {strings.ext.log.setLimit}
           </Button>
+        </div>
+
+        {/* SEC-4: the spend cap implies an enforcement it does not yet have — the hint sits with
+            the editor so "set limit" never reads as "calls are now blocked". */}
+        <div data-testid="policy-spend-cap-inert-hint" style={limitsInertHintStyle}>
+          {strings.ext.log.spendCapInertHint}
         </div>
 
         {policies.length === 0 ? (

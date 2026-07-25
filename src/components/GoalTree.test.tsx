@@ -58,7 +58,10 @@ beforeEach(() => {
   orchdDeleteGoalMock.mockReset().mockResolvedValue(undefined);
   orchdListGoalsMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
-  useAppStore.setState({ goalsByProject: {}, toast: null, toastQueue: [], orchdDown: false }, false);
+  useAppStore.setState(
+    { goalsByProject: {}, goalsFetched: {}, toast: null, toastQueue: [], orchdDown: false },
+    false,
+  );
 });
 
 describe("GoalTree", () => {
@@ -231,6 +234,39 @@ describe("GoalTree", () => {
     // goalsByProject has no entry at all for this project (never fetched).
     render(<GoalTree projectId={projectId} />);
     await waitFor(() => expect(orchdListGoalsMock).toHaveBeenCalledWith(projectId));
+  });
+
+  it("UX-1: while the first fetch is in flight the loading placeholder shows — the false empty state never does", async () => {
+    // orchdListGoals stays pending: the FIRST fetch for this project has not settled, so
+    // `goalsFetched[projectId]` is unset and the cache is still empty — exactly the window in
+    // which the pre-fix component flashed strings.goals.empty at a user who HAS goals.
+    let resolveList!: (goals: Goal[]) => void;
+    orchdListGoalsMock.mockReset().mockImplementation(
+      () => new Promise<Goal[]>((res) => (resolveList = res)),
+    );
+
+    render(<GoalTree projectId={projectId} />);
+
+    expect(orchdListGoalsMock).toHaveBeenCalledTimes(1); // the fetch IS in flight meanwhile
+    expect(screen.queryByText(strings.goals.empty)).toBeNull(); // no false empty flash
+    expect(screen.getByTestId("goal-tree-loading").textContent).toBe(strings.goals.loading);
+
+    // Once the fetch settles with a real goal, the goal shows and neither loading nor empty
+    // copy remains.
+    await act(async () => {
+      resolveList([root]);
+    });
+    expect(screen.queryByTestId("goal-tree-loading")).toBeNull();
+    expect(screen.queryByText(strings.goals.empty)).toBeNull();
+    expect(screen.queryByDisplayValue("Strategic goal")).toBeTruthy();
+  });
+
+  it("UX-1: after a SETTLED first fetch with an empty result, the honest empty state shows (no loading row)", async () => {
+    orchdListGoalsMock.mockResolvedValue([]);
+    render(<GoalTree projectId={projectId} />);
+
+    await waitFor(() => expect(screen.queryByTestId("goal-tree-empty")).toBeTruthy());
+    expect(screen.queryByTestId("goal-tree-loading")).toBeNull();
   });
 
   it("while orchdDown: every mutating control is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {

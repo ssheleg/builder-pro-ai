@@ -439,13 +439,23 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     if (moves.length === 0) return;
     // Fresh read (not the render-time `orchdDown` closure): a drag can start before orchd goes
     // down and only settle/flush after — the flush itself must honor the CURRENT state.
-    if (useAppStore.getState().orchdDown) return;
+    const state = useAppStore.getState();
+    if (state.orchdDown) return;
+    // GRAPH-1 defense-in-depth: a ghost is already `draggable: false` (`graphMapping.ts`), so
+    // xyflow never emits a position change for one — but if a ghost id ever slipped into the
+    // buffer anyway, NEVER send a move for an id this project doesn't own (fresh store read, same
+    // discipline as `orchdDown` above). Server-side scoping of the mutation verbs is the deferred
+    // half of GRAPH-1, tracked as a backlog item.
+    const ghostIds = new Set(
+      (state.graphByProject[projectId]?.externalNodes ?? []).map((n) => n.id),
+    );
     for (const move of moves) {
+      if (ghostIds.has(move.id)) continue;
       orchdGraphMoveNode(move.id, move.posX, move.posY).catch((e: unknown) =>
         showToast(describeOrchdError(e)),
       );
     }
-  }, [showToast]);
+  }, [projectId, showToast]);
 
   const onNodesChange = useCallback(
     (changes: NodeChange<GraphFlowNode>[]): void => {
@@ -572,7 +582,12 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
   const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : undefined;
 
   async function handleDeleteSelected(): Promise<void> {
-    const selectedNodeIds = nodes.filter((n) => n.selected).map((n) => n.id);
+    // GRAPH-1 defense-in-depth: a ghost is already `selectable: false`/`deletable: false`
+    // (`graphMapping.ts`), but filter `isExternal` out here too so Delete can NEVER target a
+    // foreign project's node id even if one slipped into the selection (a ghost-only selection
+    // therefore falls through to the empty-selection no-op below). Server-side scoping of the
+    // mutation verbs is the deferred half of GRAPH-1, tracked as a backlog item.
+    const selectedNodeIds = nodes.filter((n) => n.selected && !n.data.isExternal).map((n) => n.id);
     const selectedEdgeIds = edges.filter((e) => e.selected).map((e) => e.id);
     if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
     if (!window.confirm(DELETE_CONFIRM_TEXT)) return;

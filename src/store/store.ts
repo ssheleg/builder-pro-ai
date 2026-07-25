@@ -142,6 +142,16 @@ export interface AppState {
   /** `true` while the live watch is paused after an `fs://watch-error` (spec §5/§7): the UI shows
    * a "live updates paused — refresh" affordance. Cleared on reactivation. */
   watchPaused: boolean;
+  /**
+   * Per-directory invalidation epochs (FS-8), keyed by the SAME `` `${root}\t${rel}` `` format as
+   * `treeCache`. `invalidateDirs` BUMPS the epoch of every affected key (in addition to dropping
+   * the cached listing); `FileTree` captures the epoch before starting a `listDir` and applies the
+   * response ONLY when it still matches — a listing that was invalidated mid-flight is dropped and
+   * re-fetched instead of landing as a stale cache entry (previously the invalidation was LOST
+   * whenever the fetch was already in flight: there was no cache entry to drop yet and the
+   * `fetchingRef` guard suppressed the refetch).
+   */
+  treeEpochs: Record<string, number>;
 
   /**
    * The CURRENTLY-VISIBLE toast message — the head of `toastQueue`, or `null` when the queue is
@@ -159,6 +169,16 @@ export interface AppState {
    * and can be advanced early via `dismissToast` (the manual close button).
    */
   toastQueue: string[];
+  /**
+   * The visible toast's TONE (FE-6): `"error"` (default — the honest-failure accent,
+   * `var(--danger)`) or `"success"` (a positive confirmation, `var(--ok)`). Kept in lockstep with
+   * `toast` exactly like `toastQueue` is, and rendered by `<Toast/>` as the left-edge accent.
+   */
+  toastTone: ToastTone;
+  /** Parallel FIFO of the queued toasts' tones — index-for-index aligned with `toastQueue`
+   * (`toastTone` is `toastToneQueue[0]`). Kept as a separate queue so the message queue's
+   * `string[]` shape (and every existing reader/test of it) is untouched. */
+  toastToneQueue: ToastTone[];
 
   /**
    * App-domain slice (spec §10, S3 T13): projects/goals/ideas/insights/tasks/rulesets live in
@@ -251,6 +271,28 @@ export interface AppState {
   /** Every configured spend/rate policy (S-EXT §4/§6/§8, BL-22, T18: the Extensions/Log
    * tab's policy editor). Replaced wholesale by `refreshPolicies`. */
   policies: Policy[];
+
+  /**
+   * First-fetch-completed flags (UX-1): every list slice above initializes EMPTY, so "the fetch
+   * has not completed yet" and "the fetch completed and the list is genuinely empty" were
+   * indistinguishable — a list with real rows flashed its EmptyState copy until the first
+   * `refresh*` landed. The matching flag flips `true` when the FIRST fetch for that slice SETTLES
+   * — success OR failure (a failed fetch surfaces via toast/diag; leaving the flag down would pin
+   * the surface on an eternal loading row, which is the worse lie). Keyed slices mirror their data
+   * map (`Record<key, true>` — presence = fetched, same convention as `expanded`). Flags never
+   * reset to `false` once set: they mean "the first fetch completed", not "the data is fresh" —
+   * later invalidation re-fetches replace the data wholesale and a transient re-fetch must NOT
+   * re-empty the list into a loading flash. Consumers render a loading row until the flag is set
+   * (the `DocsPanel` docs-loading/docs-empty split pattern).
+   */
+  projectsFetched: boolean;
+  goalsFetched: Record<string, true>;
+  ideasFetched: boolean;
+  insightsFetched: boolean;
+  tasksFetched: Record<string, true>;
+  researchRunsFetched: Record<string, true>;
+  mcpServersFetched: boolean;
+  mcpArtifactsFetched: boolean;
 
   /**
    * Workflow-authoring slice (SW1, docs/ux/plans/2026-07-24-workflow-authoring.md). Every reusable
@@ -365,8 +407,10 @@ export interface AppState {
    * if a fresh toast became visible, start its `TOAST_AUTO_DISMISS_MS` auto-advance timer. See
    * `toastQueue`'s doc above. `<Toast/>` (`src/components/Toast.tsx`) is a pure reader of `toast`
    * — it never owns this timer itself, so the auto-advance fires even across a remount.
+   * `tone` defaults to `"error"` (this atom exists to surface failures); pass `"success"` for a
+   * positive confirmation (saved/created/copied) so it renders with the `var(--ok)` accent (FE-6).
    */
-  showToast: (message: string) => void;
+  showToast: (message: string, tone?: ToastTone) => void;
   /** Advance the queue by one (drop the visible head, show the next) — the manual close button's
    * action AND the auto-advance path. Reschedules the timer for the newly-visible toast, or
    * cancels it when the queue empties, so a stale timer can never clear a later toast. */
@@ -444,7 +488,9 @@ export interface AppState {
    * exactly: try/catch -> `showToast(describeOrchdError(e))` on failure, replace on success. */
   refreshSkills: () => Promise<void>;
   /** Re-fetch `invocations` wholesale (`mcpListInvocations(null, null, null)` — no filter).
-   * Mirrors `refreshMcpArtifacts` exactly. */
+   * Mirrors `refreshMcpArtifacts` exactly, PLUS a trailing 300ms debounce (FE-1): `App.tsx` fires
+   * this on every `orchd://mcp-invocation-logged` push, so bursts collapse into one trailing
+   * fetch. The returned promise resolves when that fetch completes. */
   refreshInvocations: () => Promise<void>;
   /** Re-fetch `auditRows` wholesale (`trustListAudit(null)` — no cap). Mirrors
    * `refreshInvocations` exactly. */
@@ -549,10 +595,14 @@ export interface AppState {
   cancelStats: () => void;
 }
 
-/** Key format shared by `expanded`/`treeCache` — see their docs on `AppState` above. */
+/** Key format shared by `expanded`/`treeCache`/`treeEpochs` — see their docs on `AppState` above. */
 function fsKey(root: string, rel: string): string {
   return `${root}\t${rel}`;
 }
+
+/** The toast accent (FE-6): `"error"` is the default honest-failure surface (`var(--danger)`);
+ * `"success"` marks a positive confirmation (`var(--ok)`). */
+export type ToastTone = "error" | "success";
 
 /**
  * The global ruleset scope's key is the literal `` `global` `` (spec §10: `rulesets`' key
@@ -671,6 +721,10 @@ function describePowerFailure(e: unknown): string {
 /** How long the visible toast stays up before auto-advancing to the next (Toast atom, spec §7). */
 const TOAST_AUTO_DISMISS_MS = 4000;
 
+/** Trailing-debounce window for `refreshInvocations` (FE-1): `App.tsx` re-fires it on every
+ * `orchd://mcp-invocation-logged` push, so bursts collapse into one trailing fetch. */
+const INVOCATIONS_DEBOUNCE_MS = 300;
+
 /** FIFO toast-queue cap (BL-97, spec D8): a runaway producer drops the OLDEST rather than growing
  * unboundedly, so the queue never holds more than this many pending notices. */
 const TOAST_QUEUE_CAP = 5;
@@ -733,6 +787,68 @@ export const useAppStore = create<AppState>((set, get) => {
     else lastPowerError = null;
   };
 
+  // ── refresh* race guard (FE-1; closure state like `toastTimer` — write-only plumbing) ────────
+  //
+  // Every `refresh*` action below runs through `guardedRefresh(key, attempt)` — the `stats` slice's
+  // epoch guard generalized. Per key: at most ONE fetch is in flight; a call arriving mid-flight
+  // only marks the guard `dirty` (and bumps the epoch) instead of stacking a parallel invoke; when
+  // the in-flight attempt settles, a dirty guard re-runs the attempt ONCE (trailing edge) so the
+  // final state always comes from a fetch started after the last invalidation. An attempt applies
+  // its response ONLY while its captured epoch is still current (`isCurrent()`) — a response that
+  // was superseded mid-flight is dropped, so an out-of-order/slower stale reply can never clobber
+  // fresher data. Keyed slices pass their natural key (`goals:${projectId}`, `doc:${key}`, …), so
+  // two DIFFERENT projects/ideas/servers never block each other.
+  const refreshGuards = new Map<string, { epoch: number; inFlight: boolean; dirty: boolean }>();
+
+  // `refreshInvocations`' trailing-debounce bookkeeping (FE-1; closure state like `toastTimer`):
+  // the pending trailing-edge timer plus the resolve callbacks of every caller collapsed into it.
+  let invocationsTimer: ReturnType<typeof setTimeout> | undefined;
+  let invocationsWaiters: Array<() => void> = [];
+
+  const guardedRefresh = async (
+    key: string,
+    attempt: (isCurrent: () => boolean) => Promise<void>,
+  ): Promise<void> => {
+    let g = refreshGuards.get(key);
+    if (!g) {
+      g = { epoch: 0, inFlight: false, dirty: false };
+      refreshGuards.set(key, g);
+    }
+    g.epoch += 1;
+    if (g.inFlight) {
+      // A fetch is already running — it predates this call's invalidation, so its (possibly
+      // stale) response will be dropped by the epoch check; mark dirty and let ITS settle path
+      // re-run the attempt instead of firing a parallel invoke.
+      g.dirty = true;
+      return;
+    }
+    g.inFlight = true;
+    try {
+      do {
+        g.dirty = false;
+        const attemptEpoch = g.epoch;
+        // `attempt` never rejects by contract (it surfaces failures via `reportError` itself).
+        await attempt(() => g.epoch === attemptEpoch);
+      } while (g.dirty);
+    } finally {
+      g.inFlight = false;
+    }
+  };
+
+  // UX-1 first-fetch flags (see the flags' doc on `AppState`): set on the FIRST settled fetch —
+  // success or failure — and never reset. These helpers keep the `refresh*` bodies one-liners.
+  const markFetched = (
+    field: "projectsFetched" | "ideasFetched" | "insightsFetched" | "mcpServersFetched" | "mcpArtifactsFetched",
+  ): void => {
+    if (!get()[field]) set({ [field]: true } as Partial<AppState>);
+  };
+  const markKeyedFetched = (
+    field: "goalsFetched" | "tasksFetched" | "researchRunsFetched",
+    key: string,
+  ): void => {
+    if (!get()[field][key]) set((s) => ({ [field]: { ...s[field], [key]: true } }) as Partial<AppState>);
+  };
+
   return {
     sessions: {},
     workspaces: {},
@@ -749,6 +865,7 @@ export const useAppStore = create<AppState>((set, get) => {
     showIgnored: false,
     filesRailOpen: false,
     watchPaused: false,
+    treeEpochs: {},
     activeProjectId: null,
     projects: [],
     goalsByProject: {},
@@ -768,6 +885,14 @@ export const useAppStore = create<AppState>((set, get) => {
     invocations: [],
     auditRows: [],
     policies: [],
+    projectsFetched: false,
+    goalsFetched: {},
+    ideasFetched: false,
+    insightsFetched: false,
+    tasksFetched: {},
+    researchRunsFetched: {},
+    mcpServersFetched: false,
+    mcpArtifactsFetched: false,
     workflows: [],
     orchdDown: false,
     orchdIncompatible: false,
@@ -775,6 +900,8 @@ export const useAppStore = create<AppState>((set, get) => {
     storageStatus: null,
     toast: null,
     toastQueue: [],
+    toastTone: "error",
+    toastToneQueue: [],
     diagEvents: [],
 
     upsertSession: (meta) =>
@@ -920,7 +1047,26 @@ export const useAppStore = create<AppState>((set, get) => {
           if (!drop(key)) out[key] = s.treeCache[key];
         }
 
-        return { treeCache: out };
+        // FS-8: bump the invalidation epoch of every affected key, so a `listDir` response that
+        // was already IN FLIGHT when this invalidation landed is recognized as stale and dropped
+        // (then re-fetched) instead of silently becoming the cached truth. The bump set covers
+        // keys that may have an in-flight fetch: every cached/expanded/epoch-tracked key under the
+        // root for the "*" overflow sentinel, or exactly the named dirs otherwise.
+        const treeEpochs = { ...s.treeEpochs };
+        if (dropAll) {
+          const candidates = new Set([
+            ...Object.keys(treeEpochs),
+            ...Object.keys(s.treeCache),
+            ...Object.keys(s.expanded),
+          ]);
+          for (const key of candidates) {
+            if (key.startsWith(prefix)) treeEpochs[key] = (treeEpochs[key] ?? 0) + 1;
+          }
+        } else {
+          for (const key of dropKeys!) treeEpochs[key] = (treeEpochs[key] ?? 0) + 1;
+        }
+
+        return { treeCache: out, treeEpochs };
       }),
 
     setSelectedFile: (sel) => set({ selectedFile: sel }),
@@ -931,13 +1077,20 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setWatchPaused: (b) => set({ watchPaused: b }),
 
-    showToast: (message) => {
+    showToast: (message, tone = "error") => {
       const prevHead = get().toast;
       set((s) => {
         const queue = [...s.toastQueue, message];
+        const tones = [...s.toastToneQueue, tone];
         // Cap at TOAST_QUEUE_CAP, dropping the OLDEST first (BL-97, spec D8).
         while (queue.length > TOAST_QUEUE_CAP) queue.shift();
-        return { toastQueue: queue, toast: queue[0] ?? null };
+        while (tones.length > TOAST_QUEUE_CAP) tones.shift();
+        return {
+          toastQueue: queue,
+          toastToneQueue: tones,
+          toast: queue[0] ?? null,
+          toastTone: tones[0] ?? "error",
+        };
       });
       // (Re)start the timer only when the VISIBLE toast actually changed — either the queue was
       // empty (a first toast appeared) or drop-oldest bumped the head. A steady head keeps its
@@ -948,7 +1101,13 @@ export const useAppStore = create<AppState>((set, get) => {
     dismissToast: () => {
       set((s) => {
         const queue = s.toastQueue.slice(1);
-        return { toastQueue: queue, toast: queue[0] ?? null };
+        const tones = s.toastToneQueue.slice(1);
+        return {
+          toastQueue: queue,
+          toastToneQueue: tones,
+          toast: queue[0] ?? null,
+          toastTone: tones[0] ?? "error",
+        };
       });
       // Re-arm for the newly-visible toast, or cancel outright when the queue drained — so a stale
       // timer can never clear a toast shown after this one (the honest-close invariant).
@@ -962,7 +1121,14 @@ export const useAppStore = create<AppState>((set, get) => {
       // key would otherwise reach the toast, the console, and — the real leak — the copyable
       // support bundle (toSupportBundle assumes every stored event is already scrubbed, as
       // recordRenderCrash's message is).
-      const message = scrubSecrets(describeOrchdError(e));
+      //
+      // FE-2: a STRING error is already a finished human message (e.g. a per-source failure reason
+      // like "scan worker died: …" handed over by `refreshStats`) — pass it through verbatim.
+      // Running it through `describeOrchdError` would mislabel every such failure "unknown
+      // orchestrator error", hiding the actual cause from the one surface meant to show it.
+      const message = scrubSecrets(
+        typeof e === "string" && e ? e : describeOrchdError(e),
+      );
       const { kind, detail } = classifyError(e);
       const event: DiagEvent = {
         id: ++diagSeq,
@@ -996,113 +1162,158 @@ export const useAppStore = create<AppState>((set, get) => {
 
     // ── app-domain slice (spec §10, S3 T13) ─────────────────────────────────────────────────
     //
-    // Every `refresh*` below follows the same shape: fetch via `./orchd.ts`, replace the
-    // matching slice on success, or surface the mapped honest message as a toast on failure
-    // (spec §7 "every async failure is a toast... never console-only") — never a silent no-op,
-    // never a thrown/unhandled rejection.
+    // Every `refresh*` below follows the same shape: `guardedRefresh` (FE-1 race guard — see its
+    // comment above) around fetch via `./orchd.ts`, replace the matching slice on success, or
+    // surface the mapped honest message as a toast on failure (spec §7 "every async failure is a
+    // toast... never console-only") — never a silent no-op, never a thrown/unhandled rejection.
+    // The UX-1 first-fetch flag flips on the first SETTLED attempt (success or failure), so a
+    // list surface can tell initial-loading apart from genuinely-empty.
 
     refreshProjects: async () => {
-      try {
-        const projects = await orchdListProjects();
-        set({ projects });
-      } catch (e) {
-        get().reportError("refreshProjects", e);
-      }
+      await guardedRefresh("projects", async (isCurrent) => {
+        try {
+          const projects = await orchdListProjects();
+          if (!isCurrent()) return; // superseded mid-flight — the trailing re-run applies fresher data
+          set({ projects });
+          markFetched("projectsFetched");
+        } catch (e) {
+          if (isCurrent()) markFetched("projectsFetched");
+          get().reportError("refreshProjects", e);
+        }
+      });
     },
 
     refreshGoals: async (projectId) => {
-      try {
-        const goals = await orchdListGoals(projectId);
-        set((s) => ({ goalsByProject: { ...s.goalsByProject, [projectId]: goals } }));
-      } catch (e) {
-        get().reportError("refreshGoals", e);
-      }
+      await guardedRefresh(`goals:${projectId}`, async (isCurrent) => {
+        try {
+          const goals = await orchdListGoals(projectId);
+          if (!isCurrent()) return;
+          set((s) => ({ goalsByProject: { ...s.goalsByProject, [projectId]: goals } }));
+          markKeyedFetched("goalsFetched", projectId);
+        } catch (e) {
+          if (isCurrent()) markKeyedFetched("goalsFetched", projectId);
+          get().reportError("refreshGoals", e);
+        }
+      });
     },
 
     refreshIdeas: async () => {
-      try {
-        const ideas = await orchdListIdeas(null);
-        set({ ideas });
-      } catch (e) {
-        get().reportError("refreshIdeas", e);
-      }
+      await guardedRefresh("ideas", async (isCurrent) => {
+        try {
+          const ideas = await orchdListIdeas(null);
+          if (!isCurrent()) return;
+          set({ ideas });
+          markFetched("ideasFetched");
+        } catch (e) {
+          if (isCurrent()) markFetched("ideasFetched");
+          get().reportError("refreshIdeas", e);
+        }
+      });
     },
 
     refreshInsights: async () => {
-      try {
-        const insights = await orchdListInsights(null);
-        set({ insights });
-      } catch (e) {
-        get().reportError("refreshInsights", e);
-      }
+      await guardedRefresh("insights", async (isCurrent) => {
+        try {
+          const insights = await orchdListInsights(null);
+          if (!isCurrent()) return;
+          set({ insights });
+          markFetched("insightsFetched");
+        } catch (e) {
+          if (isCurrent()) markFetched("insightsFetched");
+          get().reportError("refreshInsights", e);
+        }
+      });
     },
 
     refreshTasks: async (projectId) => {
-      try {
-        const tasks = await orchdListTasks(projectId);
-        set((s) => ({ tasksByProject: { ...s.tasksByProject, [projectId]: tasks } }));
-      } catch (e) {
-        get().reportError("refreshTasks", e);
-      }
+      await guardedRefresh(`tasks:${projectId}`, async (isCurrent) => {
+        try {
+          const tasks = await orchdListTasks(projectId);
+          if (!isCurrent()) return;
+          set((s) => ({ tasksByProject: { ...s.tasksByProject, [projectId]: tasks } }));
+          markKeyedFetched("tasksFetched", projectId);
+        } catch (e) {
+          if (isCurrent()) markKeyedFetched("tasksFetched", projectId);
+          get().reportError("refreshTasks", e);
+        }
+      });
     },
 
     refreshResearchRuns: async (ideaId) => {
-      try {
-        const runs = await researchListRuns(ideaId);
-        set((s) => ({ researchRunsByIdea: { ...s.researchRunsByIdea, [ideaId]: runs } }));
-      } catch (e) {
-        get().reportError("refreshResearchRuns", e);
-      }
+      await guardedRefresh(`researchRuns:${ideaId}`, async (isCurrent) => {
+        try {
+          const runs = await researchListRuns(ideaId);
+          if (!isCurrent()) return;
+          set((s) => ({ researchRunsByIdea: { ...s.researchRunsByIdea, [ideaId]: runs } }));
+          markKeyedFetched("researchRunsFetched", ideaId);
+        } catch (e) {
+          if (isCurrent()) markKeyedFetched("researchRunsFetched", ideaId);
+          get().reportError("refreshResearchRuns", e);
+        }
+      });
     },
 
     refreshGraph: async (projectId) => {
-      try {
-        const graph = await orchdGraphListProject(projectId);
-        set((s) => ({ graphByProject: { ...s.graphByProject, [projectId]: graph } }));
-      } catch (e) {
-        get().reportError("refreshGraph", e);
-      }
+      await guardedRefresh(`graph:${projectId}`, async (isCurrent) => {
+        try {
+          const graph = await orchdGraphListProject(projectId);
+          if (!isCurrent()) return;
+          set((s) => ({ graphByProject: { ...s.graphByProject, [projectId]: graph } }));
+        } catch (e) {
+          get().reportError("refreshGraph", e);
+        }
+      });
     },
 
     refreshRuleset: async (key) => {
       const { scope, projectId } = parseRulesetKey(key);
-      try {
-        const view = await orchdGetRuleset(scope, projectId);
-        set((s) => ({ rulesets: { ...s.rulesets, [key]: view } }));
-      } catch (e) {
-        get().reportError("refreshRuleset", e);
-      }
+      await guardedRefresh(`ruleset:${key}`, async (isCurrent) => {
+        try {
+          const view = await orchdGetRuleset(scope, projectId);
+          if (!isCurrent()) return;
+          set((s) => ({ rulesets: { ...s.rulesets, [key]: view } }));
+        } catch (e) {
+          get().reportError("refreshRuleset", e);
+        }
+      });
     },
 
     // ── SCN-054 project docs ─────────────────────────────────────────────────────────────────
 
     refreshDocs: async (projectId) => {
-      try {
-        const docs = await orchdListDocs(projectId);
-        set((s) => ({ docsByProject: { ...s.docsByProject, [projectId]: docs } }));
-      } catch (e) {
-        get().reportError("refreshDocs", e);
-      }
+      await guardedRefresh(`docs:${projectId}`, async (isCurrent) => {
+        try {
+          const docs = await orchdListDocs(projectId);
+          if (!isCurrent()) return;
+          set((s) => ({ docsByProject: { ...s.docsByProject, [projectId]: docs } }));
+        } catch (e) {
+          get().reportError("refreshDocs", e);
+        }
+      });
     },
 
     refreshDoc: async (projectId, name) => {
       const key = docViewKey(projectId, name);
-      try {
-        const view = await orchdGetDoc(projectId, name);
-        set((s) => ({ docViews: { ...s.docViews, [key]: view } }));
-      } catch (e) {
-        if (isNotFoundError(e)) {
-          // The doc was deleted (by this client's own confirmed delete, or another client's,
-          // racing this refresh) — dropping the stale view IS the correct outcome, not an error
-          // (see `refreshDoc`'s interface doc above).
-          set((s) => {
-            const { [key]: _dropped, ...rest } = s.docViews;
-            return { docViews: rest };
-          });
-          return;
+      await guardedRefresh(`doc:${key}`, async (isCurrent) => {
+        try {
+          const view = await orchdGetDoc(projectId, name);
+          if (!isCurrent()) return;
+          set((s) => ({ docViews: { ...s.docViews, [key]: view } }));
+        } catch (e) {
+          if (isNotFoundError(e)) {
+            // The doc was deleted (by this client's own confirmed delete, or another client's,
+            // racing this refresh) — dropping the stale view IS the correct outcome, not an error
+            // (see `refreshDoc`'s interface doc above).
+            if (!isCurrent()) return;
+            set((s) => {
+              const { [key]: _dropped, ...rest } = s.docViews;
+              return { docViews: rest };
+            });
+            return;
+          }
+          get().reportError("refreshDoc", e);
         }
-        get().reportError("refreshDoc", e);
-      }
+      });
     },
 
     openProject: (id) => set({ view: "project", activeProjectId: id }),
@@ -1110,92 +1321,140 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── MCP slice (S-EXT §8, T8) ─────────────────────────────────────────────────────────────
 
     refreshMcpServers: async () => {
-      try {
-        const mcpServers = await mcpListServers(null);
-        set({ mcpServers });
-      } catch (e) {
-        get().reportError("refreshMcpServers", e);
-      }
+      await guardedRefresh("mcpServers", async (isCurrent) => {
+        try {
+          const mcpServers = await mcpListServers(null);
+          if (!isCurrent()) return;
+          set({ mcpServers });
+          markFetched("mcpServersFetched");
+        } catch (e) {
+          if (isCurrent()) markFetched("mcpServersFetched");
+          get().reportError("refreshMcpServers", e);
+        }
+      });
     },
 
     refreshMcpTools: async (serverId) => {
-      try {
-        const tools = await mcpListTools(serverId);
-        set((s) => ({ mcpToolsByServer: { ...s.mcpToolsByServer, [serverId]: tools } }));
-      } catch (e) {
-        get().reportError("refreshMcpTools", e);
-      }
+      await guardedRefresh(`mcpTools:${serverId}`, async (isCurrent) => {
+        try {
+          const tools = await mcpListTools(serverId);
+          if (!isCurrent()) return;
+          set((s) => ({ mcpToolsByServer: { ...s.mcpToolsByServer, [serverId]: tools } }));
+        } catch (e) {
+          get().reportError("refreshMcpTools", e);
+        }
+      });
     },
 
     refreshMcpArtifacts: async () => {
-      try {
-        const mcpArtifacts = await mcpListArtifacts(null, null, null);
-        set({ mcpArtifacts });
-      } catch (e) {
-        get().reportError("refreshMcpArtifacts", e);
-      }
+      await guardedRefresh("mcpArtifacts", async (isCurrent) => {
+        try {
+          const mcpArtifacts = await mcpListArtifacts(null, null, null);
+          if (!isCurrent()) return;
+          set({ mcpArtifacts });
+          markFetched("mcpArtifactsFetched");
+        } catch (e) {
+          if (isCurrent()) markFetched("mcpArtifactsFetched");
+          get().reportError("refreshMcpArtifacts", e);
+        }
+      });
     },
 
     // ── Connectors slice (S-EXT §8, T13b) ────────────────────────────────────────────────────
 
     refreshAccounts: async () => {
-      try {
-        const accounts = await connectorListAccounts();
-        set({ accounts });
-      } catch (e) {
-        get().reportError("refreshAccounts", e);
-      }
+      await guardedRefresh("accounts", async (isCurrent) => {
+        try {
+          const accounts = await connectorListAccounts();
+          if (!isCurrent()) return;
+          set({ accounts });
+        } catch (e) {
+          get().reportError("refreshAccounts", e);
+        }
+      });
     },
 
     // ── Skills slice (S-EXT §8, D11, Q14, T17) ───────────────────────────────────────────────
 
     refreshSkills: async () => {
-      try {
-        const skills = await skillList(null);
-        set({ skills });
-      } catch (e) {
-        get().reportError("refreshSkills", e);
-      }
+      await guardedRefresh("skills", async (isCurrent) => {
+        try {
+          const skills = await skillList(null);
+          if (!isCurrent()) return;
+          set({ skills });
+        } catch (e) {
+          get().reportError("refreshSkills", e);
+        }
+      });
     },
 
     // ── Trust slice (S-EXT §4/§6/§8, BL-22, T18) ─────────────────────────────────────────────
 
-    refreshInvocations: async () => {
-      try {
-        const invocations = await mcpListInvocations(null, null, null);
-        set({ invocations });
-      } catch (e) {
-        get().reportError("refreshInvocations", e);
-      }
+    refreshInvocations: () => {
+      // Trailing 300ms debounce ON TOP of the usual race guard (FE-1): `App.tsx` fires this on
+      // EVERY `orchd://mcp-invocation-logged` push, i.e. potentially per MCP call — a busy server
+      // would otherwise keep one `mcp_list_invocations` round-trip in flight at all times. Calls
+      // inside the window are collapsed into a single trailing fetch; the returned promise
+      // resolves once that fetch (and any guard-mandated re-run) completes, so direct awaiters
+      // (mount/refresh paths) observe the same completion semantics as any other `refresh*`.
+      return new Promise<void>((resolve) => {
+        invocationsWaiters.push(resolve);
+        if (invocationsTimer !== undefined) clearTimeout(invocationsTimer);
+        invocationsTimer = setTimeout(() => {
+          invocationsTimer = undefined;
+          const waiters = invocationsWaiters;
+          invocationsWaiters = [];
+          void guardedRefresh("invocations", async (isCurrent) => {
+            try {
+              const invocations = await mcpListInvocations(null, null, null);
+              if (!isCurrent()) return;
+              set({ invocations });
+            } catch (e) {
+              get().reportError("refreshInvocations", e);
+            }
+          }).then(() => {
+            for (const done of waiters) done();
+          });
+        }, INVOCATIONS_DEBOUNCE_MS);
+      });
     },
 
     refreshAuditRows: async () => {
-      try {
-        const auditRows = await trustListAudit(null);
-        set({ auditRows });
-      } catch (e) {
-        get().reportError("refreshAuditRows", e);
-      }
+      await guardedRefresh("auditRows", async (isCurrent) => {
+        try {
+          const auditRows = await trustListAudit(null);
+          if (!isCurrent()) return;
+          set({ auditRows });
+        } catch (e) {
+          get().reportError("refreshAuditRows", e);
+        }
+      });
     },
 
     refreshPolicies: async () => {
-      try {
-        const policies = await trustListPolicies();
-        set({ policies });
-      } catch (e) {
-        get().reportError("refreshPolicies", e);
-      }
+      await guardedRefresh("policies", async (isCurrent) => {
+        try {
+          const policies = await trustListPolicies();
+          if (!isCurrent()) return;
+          set({ policies });
+        } catch (e) {
+          get().reportError("refreshPolicies", e);
+        }
+      });
     },
 
     // ── Workflow-authoring slice (SW1) ───────────────────────────────────────────────────────
 
     refreshWorkflows: async () => {
-      try {
-        const workflows = await orchdListWorkflows(null, null);
-        set({ workflows });
-      } catch (e) {
-        get().reportError("refreshWorkflows", e);
-      }
+      await guardedRefresh("workflows", async (isCurrent) => {
+        try {
+          const workflows = await orchdListWorkflows(null, null);
+          if (!isCurrent()) return;
+          set({ workflows });
+        } catch (e) {
+          get().reportError("refreshWorkflows", e);
+        }
+      });
     },
 
     upsertWorkflow: async (params) => {
@@ -1233,12 +1492,15 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── storage-degradation status (spec D3, BL-94) ──────────────────────────────────────────
 
     refreshStorageStatus: async () => {
-      try {
-        const storageStatus = await orchdStorageStatus();
-        set({ storageStatus });
-      } catch (e) {
-        get().reportError("refreshStorageStatus", e);
-      }
+      await guardedRefresh("storageStatus", async (isCurrent) => {
+        try {
+          const storageStatus = await orchdStorageStatus();
+          if (!isCurrent()) return;
+          set({ storageStatus });
+        } catch (e) {
+          get().reportError("refreshStorageStatus", e);
+        }
+      });
     },
 
     setOrchdDown: (v) => set({ orchdDown: v }),

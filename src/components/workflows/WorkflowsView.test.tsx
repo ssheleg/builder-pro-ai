@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 
 vi.mock("../../ipc/orchd", () => ({
   orchdListWorkflows: vi.fn().mockResolvedValue([]),
@@ -143,6 +143,55 @@ describe("WorkflowsView (SCR-01)", () => {
     fireEvent.click(screen.getByTestId("workflow-open-a"));
     expect(screen.getByTestId("workflow-editor")).toBeTruthy();
     expect((screen.getByTestId("workflow-name") as HTMLInputElement).value).toBe("Alpha");
+  });
+
+  it('WIP-4: a global row\'s "Run →" opens the picker with THAT workflow preselected, not the first', () => {
+    useAppStore.setState(
+      {
+        workflows: [
+          wf({ id: "a", name: "Alpha", scope: "global" }),
+          wf({ id: "b", name: "Beta", scope: "global" }),
+        ],
+      },
+      false,
+    );
+    render(<WorkflowsView />);
+
+    fireEvent.click(screen.getByTestId("workflow-run-b"));
+
+    // The clicked row's workflow wins over the positional first-in-list default.
+    const radioA = within(screen.getByTestId("run-workflow-option-a")).getByRole(
+      "radio",
+    ) as HTMLInputElement;
+    const radioB = within(screen.getByTestId("run-workflow-option-b")).getByRole(
+      "radio",
+    ) as HTMLInputElement;
+    expect(radioB.checked).toBe(true);
+    expect(radioA.checked).toBe(false);
+    // The honesty boundary rides along: the run is still a stub — the pending note, no execution.
+    expect(screen.getByTestId("run-workflow-pending").textContent).toBe(
+      strings.workflows.run.pendingNote,
+    );
+  });
+
+  it('WIP-4: a project-scoped row gets NO "Run →" (the picker lists global workflows only); other actions stay', () => {
+    useAppStore.setState(
+      {
+        workflows: [
+          wf({ id: "g", name: "Global one", scope: "global" }),
+          wf({ id: "p", name: "Project one", scope: "project", projectId: "p1" }),
+        ],
+      },
+      false,
+    );
+    render(<WorkflowsView />);
+
+    expect(screen.getByTestId("workflow-run-g")).toBeTruthy();
+    expect(screen.queryByTestId("workflow-run-p")).toBeNull();
+    // Open/Duplicate/Delete are unaffected — only the Run action is scope-gated.
+    expect(screen.getByTestId("workflow-open-p")).toBeTruthy();
+    expect(screen.getByTestId("workflow-duplicate-p")).toBeTruthy();
+    expect(screen.getByTestId("workflow-delete-p")).toBeTruthy();
   });
 
   it('"+ New workflow" opens a blank editor', () => {

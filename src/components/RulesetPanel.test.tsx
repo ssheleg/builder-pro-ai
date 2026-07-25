@@ -186,6 +186,21 @@ describe("RulesetPanel", () => {
     expect(orchdUpsertRulesetMock).not.toHaveBeenCalled();
   });
 
+  it("SEC-4: the inert spend-cap hint renders with the spend-cap control (stored cap ≠ enforced cap)", () => {
+    const view = makeView({ fileState: "ok" });
+    useAppStore.setState({ rulesets: { global: view } }, false);
+    orchdGetRulesetMock.mockResolvedValue(view);
+
+    render(<RulesetPanel scope="global" projectId={null} />);
+
+    const hint = screen.getByTestId("ruleset-spend-cap-inert-hint");
+    expect(hint.textContent).toBe(strings.rules.spendCapInertHint);
+    // Proximity: the hint follows the spend-cap input in the same policy editor, so the
+    // disclaimer is read with the control whose enforcement it de-implies.
+    const spendCap = screen.getByTestId("ruleset-spend-cap");
+    expect(spendCap.compareDocumentPosition(hint) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("policy save: empty spend cap saves null (unlimited), and a valid non-negative cap round-trips", async () => {
     const view = makeView({ fileState: "ok", spendCapUsd: 10 });
     useAppStore.setState({ rulesets: { global: view } }, false);

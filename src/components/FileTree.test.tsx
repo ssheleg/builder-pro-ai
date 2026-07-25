@@ -39,6 +39,7 @@ function resetStore(): void {
     {
       expanded: {},
       treeCache: {},
+      treeEpochs: {},
       selectedFile: null,
       showIgnored: false,
       filesRailOpen: false,
@@ -532,5 +533,70 @@ describe("FileTree", () => {
       fireEvent.click(screen.getByRole("button", { name: /add root/i }));
     });
     expect(useAppStore.getState().toast).toMatch(/already a root/);
+  });
+});
+
+// FS-8 (flipped probe /tmp/bpa-probes/fe/sus8-lost-invalidation.probe.test.tsx): an invalidation
+// landing while a dir's listDir is IN FLIGHT bumps the dir's treeEpochs key; the stale in-flight
+// response is then DROPPED and the dir re-fetched, instead of becoming the cached truth.
+describe("FS-8 lost invalidation during in-flight listDir", () => {
+  const KEY = "/proj\t"; // fsKey("/proj", "")
+  const staleListing: FsEntry[] = [
+    { name: "old.txt", relPath: "old.txt", isDir: false, size: 3, isIgnored: false },
+  ];
+  const freshListing: FsEntry[] = [
+    { name: "new.txt", relPath: "new.txt", isDir: false, size: 3, isIgnored: false },
+  ];
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  it("mid-fetch invalidation drops the stale response and schedules a correcting refetch", async () => {
+    const d1 = deferred<FsEntry[]>();
+    const d2 = deferred<FsEntry[]>();
+    listDirMock.mockReturnValueOnce(d1.promise).mockReturnValueOnce(d2.promise);
+    useAppStore.setState({ expanded: { [KEY]: true }, treeCache: {}, treeEpochs: {} }, false);
+
+    render(<FileTree workspace={ws} />);
+    await act(async () => {}); // let the fetch effect run — fetch #1 now in flight
+    expect(listDirMock).toHaveBeenCalledTimes(1);
+
+    // fs://changed arrives WHILE fetch #1 is in flight (a file landed after listDir started).
+    act(() => {
+      useAppStore.getState().invalidateDirs("/proj", ["*"]);
+    });
+    await act(async () => {});
+    expect(listDirMock).toHaveBeenCalledTimes(1); // fetchingRef guard: still no parallel refetch
+
+    // fetch #1 resolves with a listing captured BEFORE the fs change (stale) — it is dropped...
+    await act(async () => {
+      d1.resolve(staleListing);
+    });
+    expect(useAppStore.getState().treeCache[KEY]).toBeUndefined();
+    // ...and a correcting refetch was scheduled automatically (never the stale payload again).
+    expect(listDirMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      d2.resolve(freshListing);
+    });
+    expect(useAppStore.getState().treeCache[KEY]).toEqual(freshListing);
+  });
+
+  it("control: a response is applied normally when no invalidation raced it", async () => {
+    const d1 = deferred<FsEntry[]>();
+    listDirMock.mockReturnValueOnce(d1.promise);
+    useAppStore.setState({ expanded: { [KEY]: true }, treeCache: {}, treeEpochs: {} }, false);
+
+    render(<FileTree workspace={ws} />);
+    await act(async () => {
+      d1.resolve(staleListing);
+    });
+    expect(useAppStore.getState().treeCache[KEY]).toEqual(staleListing);
+    expect(listDirMock).toHaveBeenCalledTimes(1); // no phantom refetch
   });
 });

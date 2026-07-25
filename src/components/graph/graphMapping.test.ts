@@ -52,6 +52,25 @@ describe("graphMapping", () => {
       expect(ext?.data.isExternal).toBe(true);
     });
 
+    it("locks a ghost (external) node read-only — draggable/selectable/deletable all false — while a local node keeps xyflow's defaults (GRAPH-1)", () => {
+      const view: GraphView = {
+        nodes: [node({ id: "local1" })],
+        edges: [],
+        externalNodes: [node({ id: "ext1" })],
+      };
+      const flowNodes = toFlowNodes(view);
+      const local = flowNodes.find((n) => n.id === "local1");
+      const ext = flowNodes.find((n) => n.id === "ext1");
+      expect(ext?.draggable).toBe(false);
+      expect(ext?.selectable).toBe(false);
+      expect(ext?.deletable).toBe(false);
+      // A local node leaves the flags UNSET (not `true`) so xyflow's own defaults — and any
+      // future `<ReactFlow nodesDraggable=…>`-level props — keep applying to it.
+      expect(local?.draggable).toBeUndefined();
+      expect(local?.selectable).toBeUndefined();
+      expect(local?.deletable).toBeUndefined();
+    });
+
     it("passes isOrphan through unchanged", () => {
       const view: GraphView = {
         ...emptyView,

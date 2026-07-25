@@ -60,6 +60,7 @@ vi.mock("../ipc/commands", () => ({
 
 import { IdeasList } from "./IdeasList";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { Idea, Project, ResearchRun } from "../ipc/orchd-types";
 
 const projectId = "proj-1";
@@ -130,7 +131,9 @@ beforeEach(() => {
   pickFolderMock.mockReset();
   createWorkspaceMock.mockReset();
   useAppStore.setState(
-    { ideas: [], projects: [], toast: null, toastQueue: [], orchdDown: false, researchRunsByIdea: {}, mcpServers: [] },
+    // `ideasFetched: true` (UX-1): these tests exercise the post-first-fetch render paths — with
+    // the flag unset an empty inbox now shows the loading placeholder instead of the empty state.
+    { ideas: [], ideasFetched: true, projects: [], toast: null, toastQueue: [], orchdDown: false, researchRunsByIdea: {}, mcpServers: [] },
     false,
   );
 });
@@ -263,6 +266,21 @@ describe("IdeasList", () => {
     await waitFor(() => expect(orchdListIdeasMock).toHaveBeenCalledWith(null));
   });
 
+  it("UX-2: the attach select offers only ACTIVE projects — an archived project is never an attach target", () => {
+    const orphan = makeIdea({ id: "orphan1", projectId: null });
+    const active = makeProject({ id: "p-active", name: "Active Proj", status: "active" });
+    const archived = makeProject({ id: "p-arch", name: "Archived Proj", status: "archived" });
+    useAppStore.setState({ ideas: [orphan], projects: [active, archived] }, false);
+
+    render(<IdeasList projectId={null} />);
+
+    const select = screen.getByTestId("idea-attach-select-orphan1") as HTMLSelectElement;
+    const values = Array.from(select.querySelectorAll("option")).map((o) => o.value);
+    expect(values).toContain("p-active");
+    expect(values).not.toContain("p-arch");
+    expect(screen.queryByText("Archived Proj")).toBeNull();
+  });
+
   it("a non-orphan row never renders the attach-to-project affordance", () => {
     const idea = makeIdea({ id: "i1" });
     useAppStore.setState({ ideas: [idea] }, false);
@@ -332,6 +350,26 @@ describe("IdeasList", () => {
 
   it("renders an empty state when there are no matching ideas", () => {
     render(<IdeasList projectId={projectId} />);
+    expect(screen.getByTestId("ideas-list-empty")).toBeTruthy();
+  });
+
+  it("UX-1: until the first fetch settles, the loading placeholder shows — never the false empty state", async () => {
+    // `ideasFetched` unset (the beforeEach flips it true for the post-fetch paths; here we want
+    // the pre-settle window) + an empty cache — exactly the window in which the pre-fix
+    // component flashed the false empty state at a user who HAS ideas.
+    useAppStore.setState({ ideas: [], ideasFetched: false }, false);
+
+    render(<IdeasList projectId={projectId} />);
+
+    expect(screen.getByTestId("ideas-list-loading").textContent).toBe(strings.ideas.loading);
+    expect(screen.queryByTestId("ideas-list-empty")).toBeNull(); // no false empty flash
+    expect(screen.queryByText(strings.ideas.emptyProject)).toBeNull();
+
+    // Flag set + still-empty data → the honest empty state shows, the loading row is gone.
+    await act(async () => {
+      useAppStore.setState({ ideasFetched: true }, false);
+    });
+    expect(screen.queryByTestId("ideas-list-loading")).toBeNull();
     expect(screen.getByTestId("ideas-list-empty")).toBeTruthy();
   });
 

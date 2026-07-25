@@ -201,7 +201,7 @@ export function ResearchRunDialog(props: { idea: Idea; onClose: () => void }): J
     try {
       await researchStartRun(idea.id, serverId, toolName, raw);
       await refreshResearchRuns(idea.id);
-      showToast(strings.research.runStarted);
+      showToast(strings.research.runStarted, "success");
       onClose();
     } catch (e) {
       const message = describeOrchdError(e);

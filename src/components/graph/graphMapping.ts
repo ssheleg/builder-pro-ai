@@ -21,6 +21,13 @@ export interface FlowNode {
   id: string;
   type: string;
   position: { x: number; y: number };
+  /** GRAPH-1 read-only lock: set ONLY on a ghost (`isExternal`) node, left `undefined` on a local
+   * one so xyflow's own defaults (and any future `<ReactFlow nodesDraggable=…>`-level props) keep
+   * applying there. All three are optional fields on xyflow v12's `Node` (`NodeBase` in
+   * `@xyflow/system`), so this stays shape-compatible with the real type. */
+  draggable?: boolean;
+  selectable?: boolean;
+  deletable?: boolean;
   data: {
     label: string;
     kind: string;
@@ -91,6 +98,11 @@ export function toFlowNodes(view: GraphView): FlowNode[] {
     id: node.id,
     type: node.kind,
     position: { x: node.posX, y: node.posY },
+    // GRAPH-1 (UI-side fix): a ghost node belongs to a FOREIGN project, so it is read-only on
+    // this canvas — never draggable (a drag would emit a move for an id this project doesn't
+    // own), never selectable (Delete acts on the selection), never deletable. Scoping the graph
+    // mutation verbs server-side is the deferred half of GRAPH-1, tracked as a backlog item.
+    ...(isExternal ? { draggable: false, selectable: false, deletable: false } : {}),
     data: {
       label: node.label,
       kind: node.kind,

@@ -265,7 +265,7 @@ export function CreateProjectDialog(props: { onClose: () => void }): JSX.Element
     setCreateError(null); // clear any stale failure before a fresh attempt (UpgradeDialog parity)
     try {
       await orchdCreateProject(name.trim(), description, selectedIds);
-      showToast(strings.project.projectCreated);
+      showToast(strings.project.projectCreated, "success");
       onClose();
     } catch (e) {
       const message = describeOrchdError(e);

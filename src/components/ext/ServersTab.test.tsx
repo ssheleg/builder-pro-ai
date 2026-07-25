@@ -24,6 +24,7 @@ vi.mock("../../ipc/orchd", () => ({
 
 import { ServersTab } from "./ServersTab";
 import { useAppStore } from "../../store/store";
+import { strings } from "../../strings";
 import type { McpServer } from "../../ipc/orchd-types";
 
 function makeServer(over: Partial<McpServer> = {}): McpServer {
@@ -64,6 +65,10 @@ beforeEach(() => {
   useAppStore.setState(
     {
       mcpServers: [],
+      // `mcpServersFetched: true` (UX-1): these tests exercise the post-first-fetch render
+      // paths — with the flag unset an empty list now shows the loading placeholder instead of
+      // the empty state.
+      mcpServersFetched: true,
       mcpToolsByServer: {},
       mcpArtifacts: [],
       orchdDown: false,
@@ -83,6 +88,25 @@ describe("ServersTab", () => {
 
   it("renders an empty-state message when there are no servers", () => {
     render(<ServersTab />);
+    expect(screen.getByTestId("servers-empty")).toBeTruthy();
+  });
+
+  it("UX-1: until the first fetch settles, the loading placeholder shows — never the false empty state", async () => {
+    // `mcpServersFetched` unset (the beforeEach flips it true for the post-fetch paths; here we
+    // want the pre-settle window) + an empty cache — exactly the window in which the pre-fix
+    // component flashed the false empty state at a user who HAS servers.
+    useAppStore.setState({ mcpServers: [], mcpServersFetched: false }, false);
+
+    render(<ServersTab />);
+
+    expect(screen.getByTestId("servers-loading").textContent).toBe(strings.ext.servers.loading);
+    expect(screen.queryByTestId("servers-empty")).toBeNull(); // no false empty flash
+
+    // Flag set + still-empty data → the honest empty state shows, the loading row is gone.
+    await act(async () => {
+      useAppStore.setState({ mcpServersFetched: true }, false);
+    });
+    expect(screen.queryByTestId("servers-loading")).toBeNull();
     expect(screen.getByTestId("servers-empty")).toBeTruthy();
   });
 
