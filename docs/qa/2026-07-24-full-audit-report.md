@@ -508,3 +508,16 @@ they can be lifted into the repo as failing-then-passing regression tests alongs
 > Note: `/tmp/bpa-probes/**` is scratch space (survives until reboot). Ask before migrating any of
 > it into the repo as regression tests — each confirmed finding above names its probe for exactly
 > that purpose.
+
+---
+
+## Remediation outcome (2026-07-24, branch `audit-remediation-2026-07-24`)
+
+Every actionable finding in this report was remediated on the branch; the rest is filed in
+`docs/backlog.md` (BL-109..BL-156). Validation: `scripts/final-suite.sh` (11 stages — now with the
+blocking `docs/ux/lint.py`) → **ALL GATES PASSED**; 1260 Rust tests / 1270 vitest (71 files), both
+daemons ≥80% coverage, all e2e phases green. Plan and per-wave detail:
+`docs/superpowers/plans/2026-07-24-audit-remediation.md`; groupings: `CHANGELOG.md` [Unreleased].
+BL-143 (server-side graph ownership) landed as a follow-up: scoped graph mutations are typed
+`NotFound`, wire unchanged. Concurrent main-tree work independently fixed REL-1 and BL-107/BL-108 —
+either side can be taken at merge.

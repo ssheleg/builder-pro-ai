@@ -98,3 +98,13 @@ HEAD; reconciliation on merge is the owner's pass. Overlapping files are flagged
 No merge to `nightbuild`/`main`, no push, no release build, no changes in the main working tree.
 Server-side graph ownership wire change, generic-client extraction (ARCH-2), monolith splits
 (ARCH-4), BL-34 re-design — backlog rows, not code, in this sweep.
+
+---
+
+## Outcome (2026-07-24)
+
+Done: waves A (11/11), B (18/18), C (17/17), D (docs/gates), plus BL-108 (ported drain fix),
+BL-102 (hermetic tests), BL-143 (server-side graph ownership, wire-compatible). `final-suite.sh`
+→ ALL GATES PASSED at 11 stages (1260 Rust / 1270 TS, coverage both ≥80%, e2e ×2). Deferred: all
+rows filed as BL-109..BL-156 in `docs/backlog.md`. Not in scope (as planned): merge/push/release,
+GUI smoke, clean-VM runbook.
