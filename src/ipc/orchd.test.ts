@@ -426,6 +426,16 @@ describe("ipc/orchd", () => {
     });
   });
 
+  it("orchdGraphUpdateNode passes an optional projectId through (GRAPH-1 ownership scope)", async () => {
+    await orchdGraphUpdateNode("n1", "New label", null, "p1");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_update_node", {
+      id: "n1",
+      label: "New label",
+      body: null,
+      projectId: "p1",
+    });
+  });
+
   it("orchdGraphMoveNode sends id/posX/posY", async () => {
     await orchdGraphMoveNode("n1", 5, 9);
     expect(invokeMock).toHaveBeenCalledWith("orchd_graph_move_node", {
@@ -435,9 +445,27 @@ describe("ipc/orchd", () => {
     });
   });
 
+  it("orchdGraphMoveNode passes an optional projectId through (GRAPH-1 ownership scope)", async () => {
+    await orchdGraphMoveNode("n1", 5, 9, "p1");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_move_node", {
+      id: "n1",
+      posX: 5,
+      posY: 9,
+      projectId: "p1",
+    });
+  });
+
   it("orchdGraphDeleteNode sends id", async () => {
     await orchdGraphDeleteNode("n1");
     expect(invokeMock).toHaveBeenCalledWith("orchd_graph_delete_node", { id: "n1" });
+  });
+
+  it("orchdGraphDeleteNode passes an optional projectId through (GRAPH-1 ownership scope)", async () => {
+    await orchdGraphDeleteNode("n1", "p1");
+    expect(invokeMock).toHaveBeenCalledWith("orchd_graph_delete_node", {
+      id: "n1",
+      projectId: "p1",
+    });
   });
 
   it("orchdGraphAddEdge sends sourceNodeId/targetNodeId/kind/label", async () => {

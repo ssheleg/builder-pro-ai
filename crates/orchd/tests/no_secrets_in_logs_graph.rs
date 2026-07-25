@@ -120,7 +120,7 @@ fn planted_graph_node_secrets_never_appear_in_logs() {
     // that already carries it in body) — a real UPDATE statement, a different SQL path than the
     // INSERT above, also carrying live secret content.
     let updated = db
-        .update_node(&node.id, Some(secret_body), None)
+        .update_node(&node.id, Some(secret_body), None, None)
         .expect("update_node changing label to the other secret");
     assert_eq!(
         updated.label, secret_body,
@@ -168,7 +168,7 @@ fn planted_graph_node_secrets_never_appear_in_logs() {
 
     // delete_node cascades the incident edge created above (FK `ON DELETE CASCADE`, D4) —
     // exercises the DELETE path over the secret-carrying row.
-    db.delete_node(&node.id)
+    db.delete_node(&node.id, None)
         .expect("delete the secret-carrying node");
 
     bpa_daemon_core::logging::flush();

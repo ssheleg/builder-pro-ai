@@ -1886,6 +1886,7 @@ async fn graph_delete_node_cross_project_broadcasts_graph_changed_for_foreign_pr
     expect_ack(
         c1.request(OrchdRequest::GraphDeleteNode {
             id: node_a.id.clone(),
+            project_id: None,
         })
         .await,
     );
@@ -1938,6 +1939,7 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
             id: node_a.id.clone(),
             label: Some("Renamed A".to_string()),
             body: None,
+            project_id: None,
         })
         .await,
     );
@@ -1972,6 +1974,7 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
             id: node_a.id.clone(),
             pos_x: 10.0,
             pos_y: 20.0,
+            project_id: None,
         })
         .await,
     );
@@ -1996,6 +1999,105 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
             .await
             .is_none(),
         "a cross-project GraphMoveNode must broadcast exactly two GraphChanged pushes"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_move_node_scoped_to_foreign_project_is_not_found_and_broadcasts_nothing() {
+    // GRAPH-1 (BL-143): the additive `project_id` ownership check on the node-mutation verbs —
+    // a move scoped to a project that does NOT own the node fails with the SAME typed `NotFound`
+    // as an unknown id (no cross-project existence leak) and pushes nothing, while the SAME verb
+    // scoped to the OWNING project succeeds and keeps the cross-project `GraphChanged` fan-out.
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Node B").await;
+    add_edge(&mut c1, &node_a.id, &node_b.id).await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // Scoped to project B (which does NOT own node A) ⇒ NotFound, and no push fires.
+    let res = c1
+        .request(OrchdRequest::GraphMoveNode {
+            id: node_a.id.clone(),
+            pos_x: 1.0,
+            pos_y: 1.0,
+            project_id: Some(project_b.id.clone()),
+        })
+        .await;
+    match res {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
+        other => panic!("expected NotFound Error, got {other:?}"),
+    }
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a foreign-project-scoped GraphMoveNode must broadcast nothing"
+    );
+
+    // The rejected move must not have landed — the node still sits at its original position.
+    let view = expect_graph_view(
+        c1.request(OrchdRequest::GraphListProject {
+            project_id: project_a.id.clone(),
+        })
+        .await,
+    );
+    let reread = view
+        .nodes
+        .iter()
+        .find(|n| n.id == node_a.id)
+        .expect("node A still listed in its own project");
+    assert_eq!(
+        (reread.pos_x, reread.pos_y),
+        (node_a.pos_x, node_a.pos_y),
+        "a foreign-project-scoped move must not modify the node"
+    );
+
+    // Scoped to the OWNING project ⇒ Ok, and the reachable foreign project (B, via the
+    // cross-project edge) still gets its `GraphChanged` — the check narrows ownership, never
+    // the fan-out.
+    let moved = expect_graph_node(
+        c1.request(OrchdRequest::GraphMoveNode {
+            id: node_a.id.clone(),
+            pos_x: 10.0,
+            pos_y: 20.0,
+            project_id: Some(project_a.id.clone()),
+        })
+        .await,
+    );
+    assert_eq!(moved.pos_x, 10.0);
+    assert_eq!(moved.pos_y, 20.0);
+
+    let seen = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the node's own project in {seen:?}"
+    );
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the FOREIGN reachable project in {seen:?}"
+    );
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a project-scoped GraphMoveNode must broadcast exactly two GraphChanged pushes"
     );
 
     c1.shutdown(boot).await;

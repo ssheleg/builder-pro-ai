@@ -1581,23 +1581,40 @@ async fn dispatch_inner(
                 Err(e) => map_err(e),
             }
         }
-        OrchdRequest::GraphUpdateNode { id, label, body } => {
+        OrchdRequest::GraphUpdateNode {
+            id,
+            label,
+            body,
+            project_id,
+        } => {
             let db = deps.db.lock().await;
-            let result = db.update_node(&id, label.as_deref(), body.as_deref());
+            let result = db.update_node(
+                &id,
+                label.as_deref(),
+                body.as_deref(),
+                project_id.as_deref(),
+            );
             respond_graph_node_reachable(&db, result, broadcaster)
         }
-        OrchdRequest::GraphMoveNode { id, pos_x, pos_y } => {
+        OrchdRequest::GraphMoveNode {
+            id,
+            pos_x,
+            pos_y,
+            project_id,
+        } => {
             let db = deps.db.lock().await;
-            let result = db.move_node(&id, pos_x, pos_y);
+            let result = db.move_node(&id, pos_x, pos_y, project_id.as_deref());
             respond_graph_node_reachable(&db, result, broadcaster)
         }
         // `node_project_ids_reachable` is resolved BEFORE `delete_node`: the cascade removes the
         // node's incident cross-project edges, so the foreign endpoints would be unreachable from
         // it afterward (mirrors `goal_project_id`/`task_project_id`'s pre-delete lookup pattern).
-        OrchdRequest::GraphDeleteNode { id } => {
+        // GRAPH-1 (BL-143): a mismatched `project_id` fails inside `delete_node` with `NotFound`
+        // AFTER this lookup — no broadcast fires on the error path, same as an unknown id.
+        OrchdRequest::GraphDeleteNode { id, project_id } => {
             let db = deps.db.lock().await;
             match db.node_project_ids_reachable(&id) {
-                Ok(project_ids) => match db.delete_node(&id) {
+                Ok(project_ids) => match db.delete_node(&id, project_id.as_deref()) {
                     Ok(()) => {
                         broadcast_graph_changed(broadcaster, project_ids);
                         OrchdResponse::Ack

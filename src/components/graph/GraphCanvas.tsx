@@ -444,14 +444,14 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     // GRAPH-1 defense-in-depth: a ghost is already `draggable: false` (`graphMapping.ts`), so
     // xyflow never emits a position change for one — but if a ghost id ever slipped into the
     // buffer anyway, NEVER send a move for an id this project doesn't own (fresh store read, same
-    // discipline as `orchdDown` above). Server-side scoping of the mutation verbs is the deferred
-    // half of GRAPH-1, tracked as a backlog item.
+    // discipline as `orchdDown` above). The canvas's own `projectId` rides along as the verb's
+    // ownership scope: the daemon answers `NotFound` for a node outside it (BL-143).
     const ghostIds = new Set(
       (state.graphByProject[projectId]?.externalNodes ?? []).map((n) => n.id),
     );
     for (const move of moves) {
       if (ghostIds.has(move.id)) continue;
-      orchdGraphMoveNode(move.id, move.posX, move.posY).catch((e: unknown) =>
+      orchdGraphMoveNode(move.id, move.posX, move.posY, projectId).catch((e: unknown) =>
         showToast(describeOrchdError(e)),
       );
     }
@@ -545,7 +545,7 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     if (trimmed === "") return; // required — a blank rename is a silent no-op, never a wire call
     if (useAppStore.getState().orchdDown) return;
     try {
-      await orchdGraphUpdateNode(id, trimmed, null);
+      await orchdGraphUpdateNode(id, trimmed, null, projectId);
       setRenamingNodeId(null);
       setRenameValue("");
       await refreshGraph(projectId);
@@ -585,14 +585,15 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
     // GRAPH-1 defense-in-depth: a ghost is already `selectable: false`/`deletable: false`
     // (`graphMapping.ts`), but filter `isExternal` out here too so Delete can NEVER target a
     // foreign project's node id even if one slipped into the selection (a ghost-only selection
-    // therefore falls through to the empty-selection no-op below). Server-side scoping of the
-    // mutation verbs is the deferred half of GRAPH-1, tracked as a backlog item.
+    // therefore falls through to the empty-selection no-op below). The canvas's own `projectId`
+    // rides along as the verb's ownership scope (BL-143) — the daemon answers `NotFound` for a
+    // node outside it.
     const selectedNodeIds = nodes.filter((n) => n.selected && !n.data.isExternal).map((n) => n.id);
     const selectedEdgeIds = edges.filter((e) => e.selected).map((e) => e.id);
     if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
     if (!window.confirm(DELETE_CONFIRM_TEXT)) return;
     try {
-      for (const id of selectedNodeIds) await orchdGraphDeleteNode(id);
+      for (const id of selectedNodeIds) await orchdGraphDeleteNode(id, projectId);
       for (const id of selectedEdgeIds) await orchdGraphDeleteEdge(id);
     } catch (e) {
       showToast(describeOrchdError(e));

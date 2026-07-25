@@ -2247,11 +2247,17 @@ pub async fn orchd_graph_update_node(
     id: String,
     label: Option<String>,
     body: Option<String>,
+    project_id: Option<String>,
 ) -> Result<GraphNode, CommandError> {
     expect_graph_node(
         state
             .orchd()?
-            .request(OrchdRequest::GraphUpdateNode { id, label, body })
+            .request(OrchdRequest::GraphUpdateNode {
+                id,
+                label,
+                body,
+                project_id,
+            })
             .await?,
     )
 }
@@ -2262,11 +2268,17 @@ pub async fn orchd_graph_move_node(
     id: String,
     pos_x: f64,
     pos_y: f64,
+    project_id: Option<String>,
 ) -> Result<GraphNode, CommandError> {
     expect_graph_node(
         state
             .orchd()?
-            .request(OrchdRequest::GraphMoveNode { id, pos_x, pos_y })
+            .request(OrchdRequest::GraphMoveNode {
+                id,
+                pos_x,
+                pos_y,
+                project_id,
+            })
             .await?,
     )
 }
@@ -2275,11 +2287,12 @@ pub async fn orchd_graph_move_node(
 pub async fn orchd_graph_delete_node(
     state: State<'_, AppState>,
     id: String,
+    project_id: Option<String>,
 ) -> Result<(), CommandError> {
     expect_orchd_ack(
         state
             .orchd()?
-            .request(OrchdRequest::GraphDeleteNode { id })
+            .request(OrchdRequest::GraphDeleteNode { id, project_id })
             .await?,
     )
 }

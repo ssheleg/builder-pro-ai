@@ -316,7 +316,7 @@ describe("GraphCanvas", () => {
       await vi.advanceTimersByTimeAsync(400);
 
       expect(orchdGraphMoveNodeMock).toHaveBeenCalledTimes(1);
-      expect(orchdGraphMoveNodeMock).toHaveBeenCalledWith("n1", 33, 44);
+      expect(orchdGraphMoveNodeMock).toHaveBeenCalledWith("n1", 33, 44, "p1");
     } finally {
       vi.useRealTimers();
     }
@@ -462,7 +462,7 @@ describe("GraphCanvas", () => {
 
   // ── inline rename (double-click a LOCAL node) ────────────────────────────────────────────────
 
-  it("double-clicking a LOCAL node opens a rename input pre-filled with its label, and committing fires orchdGraphUpdateNode(id, newLabel, null)", async () => {
+  it("double-clicking a LOCAL node opens a rename input pre-filled with its label, and committing fires orchdGraphUpdateNode(id, newLabel, null, projectId)", async () => {
     const refreshGraphMock = vi.fn().mockResolvedValue(undefined);
     useAppStore.setState({ refreshGraph: refreshGraphMock }, false);
     render(<GraphCanvas projectId="p1" />);
@@ -479,7 +479,7 @@ describe("GraphCanvas", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
-      expect(orchdGraphUpdateNodeMock).toHaveBeenCalledWith("n1", "Renamed node", null);
+      expect(orchdGraphUpdateNodeMock).toHaveBeenCalledWith("n1", "Renamed node", null, "p1");
       expect(refreshGraphMock).toHaveBeenCalledWith("p1");
     });
     // The bar closes after a successful commit.
@@ -493,7 +493,7 @@ describe("GraphCanvas", () => {
     fireEvent.change(screen.getByTestId("graph-rename-input"), { target: { value: "Via save" } });
     fireEvent.click(screen.getByTestId("graph-rename-save"));
     await waitFor(() =>
-      expect(orchdGraphUpdateNodeMock).toHaveBeenCalledWith("n1", "Via save", null),
+      expect(orchdGraphUpdateNodeMock).toHaveBeenCalledWith("n1", "Via save", null, "p1"),
     );
 
     // Re-open, then Cancel: no additional wire call, bar closes.
@@ -593,7 +593,7 @@ describe("GraphCanvas", () => {
     confirmSpy.mockReturnValue(true);
     fireEvent.click(screen.getByTestId("graph-delete-selected-button"));
     await waitFor(() => {
-      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n1");
+      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n1", "p1");
       expect(refreshGraphMock).toHaveBeenCalledWith("p1");
     });
 
@@ -625,8 +625,8 @@ describe("GraphCanvas", () => {
     fireEvent.click(screen.getByTestId("graph-delete-selected-button"));
 
     await waitFor(() => {
-      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n1"); // 1st delete happened
-      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n2"); // 2nd attempted (rejected)
+      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n1", "p1"); // 1st delete happened
+      expect(orchdGraphDeleteNodeMock).toHaveBeenCalledWith("n2", "p1"); // 2nd attempted (rejected)
       expect(useAppStore.getState().toast).toBe("orchestrator: error"); // failure toasted
       expect(refreshGraphMock).toHaveBeenCalledWith("p1"); // canvas reconciled to server truth
     });
