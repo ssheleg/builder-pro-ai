@@ -10,7 +10,10 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use bpa_orchd_proto::{DomainTask, Goal, Idea, Insight, Project, RuleScope, RuleSet};
+use bpa_orchd_proto::{
+    Doc, DomainTask, Goal, GoalKind, GraphEdge, GraphEntityType, GraphNode, Idea, Insight,
+    InsightStatus, Project, RuleScope, RuleSet,
+};
 use bpa_protocol::MAX_FRAME_LEN;
 
 use crate::persistence::{self, Db, OrchdPersistError};
@@ -37,6 +40,23 @@ pub struct ImportCounts {
     pub rulesets: u32,
 }
 
+/// The outcome of a SUCCESSFUL [`import_bundle`] (DOM-4 of the 2026-07-24 audit remediation).
+/// Distinct from a bare [`ImportCounts`] because a post-commit ruleset/doc FILE write can still
+/// fail after the DB transaction committed: the rows ARE durable (an honest "imported" state,
+/// not an error to retry — a retry would now hit `Conflict`), so the failure must travel
+/// ALONGSIDE the counts, not instead of them. The dispatch layer turns a `Some` here into an
+/// `Error{Io}` reply whose message says exactly that ("imported, file writes failed: …") while
+/// STILL emitting every touched family's push — the data genuinely landed, and other clients
+/// must not drift.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportOutcome {
+    pub counts: ImportCounts,
+    /// `Some(<path>: <error>)` when a post-commit file write failed (the FIRST failure, for the
+    /// error message; every queued write is still attempted so one bad path can't starve the
+    /// rest). `None` on a fully clean import.
+    pub deferred_file_error: Option<String>,
+}
+
 /// `{ "rule": RuleSet, "mdContent": "…" } | null` (spec §8). `mdContent: null` means the file was
 /// missing (or unreadable) when read live; an EMPTY file exports as `""`. No separate
 /// `mdMissing` flag — `null` IS the missing signal.
@@ -47,11 +67,27 @@ struct RuleSetBundle {
     md_content: Option<String>,
 }
 
+/// `{ "doc": Doc, "mdContent": "…" }` (DOM-1 of the 2026-07-24 audit remediation): one project
+/// doc with its live-read markdown — the EXACT [`RuleSetBundle`] shape (docs reuse the rules
+/// files-as-truth model wholesale), so export/import treat them identically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocBundle {
+    doc: Doc,
+    md_content: Option<String>,
+}
+
 /// The `project`/`goals`/`ideas`/`insights`/`tasks`/`ruleset` fields shared verbatim by BOTH
 /// locked bundle shapes (spec §8): [`export_project`]'s top-level object (`bundleFormat`/
 /// `exportedAt` flattened in alongside this, see [`ProjectExportEnvelope`]) AND each element of
 /// [`export_all`]'s `projects[]` array, which — per spec — is exactly this shape with NOTHING
 /// flattened in ("per-project bundle objects, without `bundleFormat`/`exportedAt`").
+///
+/// DOM-1 of the 2026-07-24 audit remediation: the bundle ADDITIONALLY carries the project's
+/// `docs` (rows + live-read content, like the ruleset) and its whole knowledge graph
+/// (`graphNodes`/`graphEdges`) — additively within `bundleFormat:1`: the keys are `#[serde(
+/// default)]`, so a bundle written BEFORE this family existed still imports exactly as it used
+/// to (empty vecs; import then re-seeds the graph entityRefs per DOM-2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectBundle {
@@ -61,6 +97,12 @@ struct ProjectBundle {
     insights: Vec<Insight>,
     tasks: Vec<DomainTask>,
     ruleset: Option<RuleSetBundle>,
+    #[serde(default)]
+    docs: Vec<DocBundle>,
+    #[serde(default)]
+    graph_nodes: Vec<GraphNode>,
+    #[serde(default)]
+    graph_edges: Vec<GraphEdge>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,7 +174,10 @@ fn build_ruleset_bundle(
 
 /// Assembles one project's full bundle: the project row, its goals (tree order, via
 /// `Db::list_goals`), its ideas/insights (orphans excluded — `Some(project_id)` scopes both
-/// lists to just this project), its tasks, and its ruleset (with live-read `mdContent`).
+/// lists to just this project), its tasks, its ruleset (with live-read `mdContent`), its docs
+/// (rows + live-read content, DOM-1), and its whole knowledge graph (nodes + incident edges,
+/// DOM-1 — via [`crate::graph::export_project_graph`]'s RAW rows, so the stored labels round-trip
+/// verbatim and no read-time resolution leaks into the snapshot).
 fn build_project_bundle(db: &Db, project_id: &str) -> Result<ProjectBundle, OrchdPersistError> {
     let project = db.get_project(project_id)?;
     let goals = db.list_goals(project_id)?;
@@ -140,6 +185,15 @@ fn build_project_bundle(db: &Db, project_id: &str) -> Result<ProjectBundle, Orch
     let insights = db.list_insights(Some(project_id))?;
     let tasks = db.list_tasks(Some(project_id))?;
     let ruleset = build_ruleset_bundle(db, RuleScope::Project, Some(project_id))?;
+    let docs = db
+        .list_docs(project_id)?
+        .into_iter()
+        .map(|doc| {
+            let md_content = read_live_md_content(&doc.md_path, &doc.md_hash);
+            DocBundle { doc, md_content }
+        })
+        .collect();
+    let (graph_nodes, graph_edges) = crate::graph::export_project_graph(db, project_id)?;
     Ok(ProjectBundle {
         project,
         goals,
@@ -147,6 +201,9 @@ fn build_project_bundle(db: &Db, project_id: &str) -> Result<ProjectBundle, Orch
         insights,
         tasks,
         ruleset,
+        docs,
+        graph_nodes,
+        graph_edges,
     })
 }
 
@@ -355,11 +412,186 @@ fn import_ruleset(
     persistence::insert_ruleset_raw(tx, &rule)
 }
 
-/// Raw-inserts one project bundle's rows (project → its goals/ideas/insights/tasks → its
-/// ruleset) and bumps `counts`. Insertion order here is for readability only — FK enforcement is
-/// deferred for the WHOLE import transaction by [`import_project_bundles`], so a bundle array
-/// that isn't parent-before-child (e.g. a reranked subtask sorting ahead of its parent in
-/// `tasks[]`) still imports correctly.
+/// A doc `name` interpolated into the default import path must be a single plain path segment —
+/// the SAME traversal guard [`validate_project_id_segment`] applies to a project id (import
+/// bundles are untrusted input; `persistence::validate_doc_name` is the live-verb validator and
+/// stays private to it).
+fn validate_doc_name_segment(name: &str) -> Result<(), OrchdPersistError> {
+    let bad = name.is_empty()
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(std::path::MAIN_SEPARATOR);
+    if bad {
+        return Err(OrchdPersistError::Validation(format!(
+            "doc name is not a plain path segment: {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolves the FINAL on-disk path a doc's `mdContent` will be written to during import (DOM-1),
+/// with the SAME fail-closed rules [`resolve_ruleset_write_path`] applies to a ruleset: the
+/// bundle's own `md_path` is honored verbatim ONLY if it is `..`-free, absolute, and lexically
+/// contained under `app_support`; otherwise the doc is repointed to the default app-support doc
+/// path (`{app_support}/rules/docs/<project_id>/<name>.md` — the layout
+/// `persistence::project_doc_md_path` stamps for the live `UpsertDoc` verb) with BOTH path
+/// segments validated first.
+fn resolve_doc_write_path(app_support: &Path, doc: &Doc) -> Result<PathBuf, OrchdPersistError> {
+    let bundle_path = Path::new(&doc.md_path);
+    if bundle_path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(OrchdPersistError::Validation(
+            "doc md_path escapes app-support (contains '..')".to_string(),
+        ));
+    }
+    if bundle_path.is_absolute() && bundle_path.starts_with(app_support) {
+        Ok(bundle_path.to_path_buf())
+    } else {
+        validate_project_id_segment(&doc.project_id)?;
+        validate_doc_name_segment(&doc.name)?;
+        Ok(app_support
+            .join("rules")
+            .join("docs")
+            .join(&doc.project_id)
+            .join(format!("{}.md", doc.name)))
+    }
+}
+
+/// Validates a doc's write path, inserts its raw row inside the already-open import transaction,
+/// and — when there is `mdContent` — QUEUES the file write into `pending` for execution after
+/// commit (DOM-1; the EXACT [`import_ruleset`] shape, BL-90 deferred-write discipline included).
+fn import_doc(
+    tx: &rusqlite::Transaction,
+    app_support: &Path,
+    bundle: &DocBundle,
+    pending: &mut Vec<PendingRulesetWrite>,
+) -> Result<(), OrchdPersistError> {
+    let mut doc = bundle.doc.clone();
+    let effective_path = resolve_doc_write_path(app_support, &doc)?;
+
+    if let Some(content) = &bundle.md_content {
+        let parent = effective_path.parent().ok_or_else(|| {
+            OrchdPersistError::Validation("doc md_path has no parent directory".to_string())
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| OrchdPersistError::Io(format!("failed to create docs dir: {e}")))?;
+        bpa_paths::validate_path_within(app_support, parent).map_err(|e| {
+            OrchdPersistError::Validation(format!("doc md_path escapes app-support: {e}"))
+        })?;
+        pending.push(PendingRulesetWrite {
+            path: effective_path.clone(),
+            content: content.clone(),
+        });
+    }
+    doc.md_path = effective_path.to_string_lossy().into_owned();
+    persistence::insert_doc_raw(tx, &doc)
+}
+
+/// Validates one project bundle's INTERNAL consistency BEFORE any of its rows is inserted
+/// (DOM-8 of the 2026-07-24 audit remediation). Import bundles are untrusted input; every
+/// rejection is a typed `Validation` and — running pre-insert — leaves the store untouched:
+/// - an `additional` goal with `parent_id: None` (a "rogue root" breaking spec D5's
+///   exactly-one-strategic-root invariant — and deletable, unlike the strategic root);
+/// - a cycle in the goals' parent chains (a cyclic pair becomes invisible to `list_goals`, whose
+///   tree walk anchors at `parent_id IS NULL` — the rows land but can never be listed);
+/// - a non-finite task `rank` or graph node position (the DOM-3 class: JSON cannot represent
+///   NaN/±Infinity, so one stored instance poisons the NEXT export→import round-trip).
+fn validate_project_bundle(bundle: &ProjectBundle) -> Result<(), OrchdPersistError> {
+    let parent_of: std::collections::HashMap<&str, Option<&str>> = bundle
+        .goals
+        .iter()
+        .map(|g| (g.id.as_str(), g.parent_id.as_deref()))
+        .collect();
+    for goal in &bundle.goals {
+        if matches!(goal.kind, GoalKind::Additional) && goal.parent_id.is_none() {
+            return Err(OrchdPersistError::Validation(format!(
+                "goal {} is 'additional' but has no parent (rogue root)",
+                goal.id
+            )));
+        }
+        // Walk the parent chain up through the bundle's own goal set; a dangling parent (one not
+        // present in the bundle) simply ends the walk — the deferred FK check at commit rejects
+        // it. Revisiting a node is a cycle.
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = Some(goal.id.as_str());
+        while let Some(id) = cursor {
+            if !seen.insert(id) {
+                return Err(OrchdPersistError::Validation(format!(
+                    "goal parent chain contains a cycle at {id}"
+                )));
+            }
+            cursor = parent_of.get(id).copied().flatten();
+        }
+    }
+    for task in &bundle.tasks {
+        if !task.rank.is_finite() {
+            return Err(OrchdPersistError::Validation(format!(
+                "task {} rank must be finite (NaN and ±Infinity are not storable)",
+                task.id
+            )));
+        }
+    }
+    for node in &bundle.graph_nodes {
+        if !node.pos_x.is_finite() || !node.pos_y.is_finite() {
+            return Err(OrchdPersistError::Validation(format!(
+                "graph node {} position must be finite (NaN and ±Infinity are not storable)",
+                node.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Re-seeds the entityRef graph nodes a bundle predating the DOM-1 graph-family keys lacks
+/// (DOM-2 of the 2026-07-24 audit remediation): the project's strategic goal AND every
+/// `accepted` insight with a project — the same two seed sources `create_project`
+/// (`seed_strategic_entity_ref`) and `set_insight_status`'s accept path (`add_entity_ref_node`)
+/// maintain live. [`crate::graph::seed_entity_ref_if_missing`] makes each seed conditional, so a
+/// CURRENT bundle (whose verbatim-restored graph already contains these nodes) is a no-op here —
+/// never a spurious `Conflict` on the one-entityRef-per-entity index. Orphan insights (no
+/// project) are skipped, exactly like the live accept path skips them (the graph is
+/// project-scoped).
+fn reseed_entity_refs(
+    tx: &rusqlite::Transaction,
+    bundle: &ProjectBundle,
+) -> Result<(), OrchdPersistError> {
+    for goal in &bundle.goals {
+        if matches!(goal.kind, GoalKind::Strategic) {
+            crate::graph::seed_entity_ref_if_missing(
+                tx,
+                &goal.project_id,
+                &GraphEntityType::Goal,
+                &goal.id,
+                &goal.title,
+            )?;
+        }
+    }
+    for insight in &bundle.insights {
+        if matches!(insight.status, InsightStatus::Accepted) {
+            if let Some(project_id) = insight.project_id.as_deref() {
+                crate::graph::seed_entity_ref_if_missing(
+                    tx,
+                    project_id,
+                    &GraphEntityType::Insight,
+                    &insight.id,
+                    &insight.title,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Raw-inserts one project bundle's rows (project → its goals/ideas/insights/tasks → its docs →
+/// its graph → its ruleset) and bumps `counts`, then re-seeds the graph entityRefs (DOM-2).
+/// Insertion order here is for readability only — FK enforcement is deferred for the WHOLE
+/// import transaction by [`import_project_bundles`], so a bundle array that isn't
+/// parent-before-child (e.g. a reranked subtask sorting ahead of its parent in `tasks[]`, or a
+/// graph edge sorting ahead of its endpoint node) still imports correctly. The bundle is
+/// validated ([`validate_project_bundle`], DOM-8) BEFORE anything is written.
 fn import_one_project(
     tx: &rusqlite::Transaction,
     app_support: &Path,
@@ -367,6 +599,7 @@ fn import_one_project(
     counts: &mut ImportCounts,
     pending: &mut Vec<PendingRulesetWrite>,
 ) -> Result<(), OrchdPersistError> {
+    validate_project_bundle(bundle)?;
     persistence::insert_project_raw(tx, &bundle.project)?;
     counts.projects += 1;
     for goal in &bundle.goals {
@@ -385,10 +618,20 @@ fn import_one_project(
         persistence::insert_task_raw(tx, task)?;
         counts.tasks += 1;
     }
+    for doc in &bundle.docs {
+        import_doc(tx, app_support, doc, pending)?;
+    }
+    for node in &bundle.graph_nodes {
+        crate::graph::insert_graph_node_raw(tx, node)?;
+    }
+    for edge in &bundle.graph_edges {
+        crate::graph::insert_graph_edge_raw(tx, edge)?;
+    }
     if let Some(ruleset) = &bundle.ruleset {
         import_ruleset(tx, app_support, ruleset, pending)?;
         counts.rulesets += 1;
     }
+    reseed_entity_refs(tx, bundle)?;
     Ok(())
 }
 
@@ -405,7 +648,7 @@ fn import_project_bundles(
     global_ruleset: Option<&RuleSetBundle>,
     orphan_ideas: &[Idea],
     orphan_insights: &[Insight],
-) -> Result<ImportCounts, OrchdPersistError> {
+) -> Result<ImportOutcome, OrchdPersistError> {
     let tx = db.conn().unchecked_transaction()?;
     // See `import_one_project`'s doc: bundle arrays are not guaranteed FK-dependency order.
     // Deferring FK enforcement to COMMIT (SQLite semantics; auto-resets to OFF at COMMIT/
@@ -415,9 +658,9 @@ fn import_project_bundles(
     // topologically re-sort every family first.
     tx.pragma_update(None, "defer_foreign_keys", "ON")?;
 
-    // Ruleset markdown writes are COLLECTED here (path fully validated) and executed only after a
-    // successful commit (BL-90) — a file write cannot roll back with the transaction, so writing
-    // inside the tx left an orphan `.md` whenever a later bundle hit a `Conflict`.
+    // Ruleset/doc markdown writes are COLLECTED here (path fully validated) and executed only
+    // after a successful commit (BL-90) — a file write cannot roll back with the transaction, so
+    // writing inside the tx left an orphan `.md` whenever a later bundle hit a `Conflict`.
     let mut counts = ImportCounts::default();
     let mut pending_writes: Vec<PendingRulesetWrite> = Vec::new();
     for bundle in project_bundles {
@@ -438,28 +681,45 @@ fn import_project_bundles(
 
     tx.commit()?;
 
-    // Commit succeeded and is durable — NOW write the ruleset files. If a write fails here the row
-    // is already committed (the file is best-effort recreatable via the ruleset editor), so surface
-    // it but the import has otherwise landed.
+    // Commit succeeded and is durable — NOW write the queued files. A write failing HERE can no
+    // longer roll the rows back: surface it as `deferred_file_error` (DOM-4 — the caller reports
+    // "imported, file writes failed" and STILL emits the family pushes) rather than as an
+    // outright import failure (which wrongly read as "nothing landed" and made a retry hit
+    // `Conflict`). Every queued write is attempted, so one bad path can't starve the rest.
+    let mut deferred_file_error = None;
     for write in &pending_writes {
-        ruleset_files::write_atomic(&write.path, &write.content)
-            .map_err(|e| OrchdPersistError::Io(e.to_string()))?;
+        if let Err(e) = ruleset_files::write_atomic(&write.path, &write.content) {
+            tracing::error!(
+                path = %write.path.display(),
+                error = %e,
+                "import: post-commit file write failed; the rows are committed, the file is \
+                 recreatable via the ruleset/docs editor"
+            );
+            if deferred_file_error.is_none() {
+                deferred_file_error = Some(format!("{}: {e}", write.path.display()));
+            }
+        }
     }
-    Ok(counts)
+    Ok(ImportOutcome {
+        counts,
+        deferred_file_error,
+    })
 }
 
 /// `ImportBundle` (spec §8, D7): parses `json`, validates `bundleFormat == 1` (else
 /// `Validation`), discriminates the two locked shapes on the presence of a `project` (per-
 /// project) vs `projects` (whole-store) top-level key, then raw-inserts every row inside ONE
 /// transaction. Every row field is written EXACTLY as parsed (ids, timestamps, `rank`/`ord`/
-/// `md_hash`) — this function never re-stamps anything. Ruleset markdown is written ONLY under
-/// `app_support`; a foreign `md_path` is repointed to the scope's default app-support path
-/// instead (spec §8).
+/// `md_hash`) — this function never re-stamps anything. Ruleset/doc markdown is written ONLY
+/// under `app_support`; a foreign `md_path` is repointed to the scope's default app-support path
+/// instead (spec §8). Returns an [`ImportOutcome`] — NOT a bare count — because a post-commit
+/// file write can still fail after the rows committed (DOM-4: that partial state must stay
+/// distinguishable from a rolled-back failure).
 pub fn import_bundle(
     db: &Db,
     app_support: &Path,
     json: &str,
-) -> Result<ImportCounts, OrchdPersistError> {
+) -> Result<ImportOutcome, OrchdPersistError> {
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| OrchdPersistError::Validation(format!("invalid import JSON: {e}")))?;
 
@@ -513,7 +773,7 @@ mod tests {
 
     /// Every table this module's raw inserts can touch, plus `project_workspace` — used by the
     /// collision test to prove a rolled-back import left EVERY table untouched, not just the one
-    /// that collided.
+    /// that collided. `doc`/`graph_node`/`graph_edge` included since DOM-1 made them importable.
     const TABLES: &[&str] = &[
         "project",
         "project_workspace",
@@ -522,6 +782,9 @@ mod tests {
         "insight",
         "task",
         "ruleset",
+        "doc",
+        "graph_node",
+        "graph_edge",
     ];
 
     fn table_counts(db: &Db) -> Vec<i64> {
@@ -646,7 +909,9 @@ mod tests {
         let exported = export_all(&db, 1_700_000_000_000).unwrap();
 
         let fresh = Db::open_in_memory().unwrap();
-        let counts = import_bundle(&fresh, root.path(), &exported).unwrap();
+        let counts = import_bundle(&fresh, root.path(), &exported)
+            .unwrap()
+            .counts;
         assert_eq!(counts.projects, 1);
         assert_eq!(counts.goals, 3);
         assert_eq!(counts.ideas, 1);
@@ -895,7 +1160,9 @@ mod tests {
 
         let target = Db::open_in_memory().unwrap();
         let app_support = tempfile::tempdir().unwrap();
-        let counts = import_bundle(&target, app_support.path(), &json).unwrap();
+        let counts = import_bundle(&target, app_support.path(), &json)
+            .unwrap()
+            .counts;
 
         assert_eq!(counts.projects, 1);
         assert_eq!(counts.goals, 3);
@@ -1026,7 +1293,9 @@ mod tests {
         // Import into a TRULY empty store (no seeded global row): the global row inserts verbatim
         // (this is the spec §8 "import into an empty store" round-trip DoD path).
         let fresh = Db::open_in_memory().unwrap();
-        let counts = import_bundle(&fresh, app_support.path(), &exported).unwrap();
+        let counts = import_bundle(&fresh, app_support.path(), &exported)
+            .unwrap()
+            .counts;
         assert_eq!(counts.rulesets, 1);
 
         let imported = fresh.get_ruleset(RuleScope::Global, None).unwrap();
@@ -1059,7 +1328,9 @@ mod tests {
             seed_global_ruleset(&target, target_support.path(), "# target seed\n");
 
         // Must SUCCEED (not Conflict): projects + tasks + the reconciled global row all land.
-        let counts = import_bundle(&target, target_support.path(), &exported).unwrap();
+        let counts = import_bundle(&target, target_support.path(), &exported)
+            .unwrap()
+            .counts;
         assert_eq!(counts.projects, 1);
         assert_eq!(counts.tasks, 2);
         assert!(counts.rulesets >= 1);
@@ -1191,5 +1462,270 @@ mod tests {
             escape_target.display()
         );
         assert_eq!(table_counts(&target).iter().sum::<i64>(), 0);
+    }
+
+    // ---- DOM-1/DOM-2 (2026-07-24 audit remediation): docs + graph ride the bundle ----
+
+    #[test]
+    fn export_import_round_trip_includes_docs_and_graph_verbatim() {
+        let db = Db::open_in_memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&db, root.path(), "w1");
+
+        // A file-backed doc (its md_path derives from the project's ruleset path, which the
+        // fixture already seats under `root` — so it round-trips under app_support verbatim) and
+        // two graph nodes with an edge (in addition to create_project's seeded strategic
+        // entityRef).
+        db.upsert_doc(&fixture.project_id, "notes", "# Notes\nbody\n")
+            .unwrap();
+        let n1 = db
+            .add_node(
+                &fixture.project_id,
+                bpa_orchd_proto::GraphNodeKind::Concept,
+                "Alpha",
+                "",
+                1.0,
+                2.0,
+            )
+            .unwrap();
+        let n2 = db
+            .add_node(
+                &fixture.project_id,
+                bpa_orchd_proto::GraphNodeKind::Fact,
+                "Beta",
+                "",
+                3.0,
+                4.0,
+            )
+            .unwrap();
+        db.add_edge(&n1.id, &n2.id, bpa_orchd_proto::GraphEdgeKind::Relates, "")
+            .unwrap();
+
+        let exported = export_all(&db, 1_700_000_000_000).unwrap();
+
+        let fresh = Db::open_in_memory().unwrap();
+        let outcome = import_bundle(&fresh, root.path(), &exported).unwrap();
+        assert_eq!(outcome.deferred_file_error, None);
+
+        // DOM-1: the graph is restored with the SAME node/edge ids (verbatim), and the project's
+        // graph view is non-empty after the import (DOM-2's invariant holds via the restore).
+        let view = fresh.list_project_graph(&fixture.project_id).unwrap();
+        let node_ids: std::collections::HashSet<&str> =
+            view.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(node_ids.contains(n1.id.as_str()));
+        assert!(node_ids.contains(n2.id.as_str()));
+        assert_eq!(view.edges.len(), 1);
+        assert_eq!(view.edges[0].source_node_id, n1.id);
+
+        // DOM-1: the doc row AND its file are restored.
+        let doc = fresh.get_doc(&fixture.project_id, "notes").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&doc.md_path).unwrap(),
+            "# Notes\nbody\n"
+        );
+
+        // The full DoD: export → wipe → import → export is deep-equal, docs and graph included.
+        let re_exported = export_all(&fresh, 1_800_000_000_000).unwrap();
+        let mut original: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let mut roundtripped: serde_json::Value = serde_json::from_str(&re_exported).unwrap();
+        original.as_object_mut().unwrap().remove("exportedAt");
+        roundtripped.as_object_mut().unwrap().remove("exportedAt");
+        assert_eq!(
+            original, roundtripped,
+            "import into an empty store then re-export must equal the original, docs+graph included"
+        );
+    }
+
+    #[test]
+    fn import_of_a_bundle_without_graph_keys_reseeds_the_entity_refs() {
+        // DOM-2: a bundle written BEFORE the graph family existed (or one that lost it) must not
+        // leave the project's graph empty — import re-seeds the strategic-goal entityRef and the
+        // accepted-insight entityRefs, the same two sources the live verbs maintain.
+        let staging = Db::open_in_memory().unwrap();
+        let staging_root = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&staging, staging_root.path(), "w1");
+        let insight = staging
+            .list_insights(Some(&fixture.project_id))
+            .unwrap()
+            .remove(0);
+        staging
+            .set_insight_status(&insight.id, InsightStatus::Accepted, None)
+            .unwrap();
+        let strategic = staging
+            .list_goals(&fixture.project_id)
+            .unwrap()
+            .into_iter()
+            .find(|g| g.kind == GoalKind::Strategic)
+            .unwrap();
+
+        let exported = export_all(&staging, 1).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        for p in value["projects"].as_array_mut().unwrap() {
+            let obj = p.as_object_mut().unwrap();
+            obj.remove("graphNodes");
+            obj.remove("graphEdges");
+            obj.remove("docs");
+        }
+        let stripped = serde_json::to_string(&value).unwrap();
+
+        let target = Db::open_in_memory().unwrap();
+        import_bundle(&target, staging_root.path(), &stripped).unwrap();
+
+        let view = target.list_project_graph(&fixture.project_id).unwrap();
+        assert!(
+            view.nodes
+                .iter()
+                .any(|n| n.kind == bpa_orchd_proto::GraphNodeKind::EntityRef
+                    && n.entity_id.as_deref() == Some(strategic.id.as_str())),
+            "the strategic-goal entityRef must be re-seeded: {:?}",
+            view.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+        );
+        assert!(
+            view.nodes
+                .iter()
+                .any(|n| n.kind == bpa_orchd_proto::GraphNodeKind::EntityRef
+                    && n.entity_id.as_deref() == Some(insight.id.as_str())),
+            "the accepted-insight entityRef must be re-seeded"
+        );
+    }
+
+    // ---- DOM-4 (2026-07-24 audit remediation): a post-commit file write failure is a partial
+    // success — rows committed, error reported, NOT a rollback ----
+
+    #[test]
+    fn import_with_a_failing_post_commit_file_write_reports_deferred_error_but_keeps_rows() {
+        let staging = Db::open_in_memory().unwrap();
+        let staging_root = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&staging, staging_root.path(), "w1");
+        let exported = export_project(&staging, &fixture.project_id, 1).unwrap();
+
+        // Force the ruleset's post-commit write to fail: the bundle's md_path is under
+        // `staging_root` (so it is honored verbatim when the SAME root is the import's
+        // app_support), and a DIRECTORY pre-created at that exact path makes the atomic
+        // tmp+rename write fail.
+        let target = Db::open_in_memory().unwrap();
+        let ruleset_md = staging_root
+            .path()
+            .join("rules")
+            .join(format!("project-{}.md", fixture.project_id));
+        std::fs::remove_file(&ruleset_md).unwrap();
+        std::fs::create_dir_all(&ruleset_md).unwrap();
+
+        let outcome = import_bundle(&target, staging_root.path(), &exported).unwrap();
+
+        let err = outcome
+            .deferred_file_error
+            .expect("a failed post-commit write must surface as deferred_file_error");
+        assert!(err.contains("project-"), "{err}");
+        // The rows DID land — this is the "imported, file writes failed" partial state, not a
+        // rollback (DOM-4).
+        assert_eq!(outcome.counts.projects, 1);
+        assert!(target.get_project(&fixture.project_id).is_ok());
+    }
+
+    // ---- DOM-8 (2026-07-24 audit remediation): bundle internal-consistency validation ----
+
+    #[test]
+    fn import_rejects_a_rogue_root_additional_goal_and_rolls_back() {
+        let target = Db::open_in_memory().unwrap();
+        let app_support = tempfile::tempdir().unwrap();
+        let project_id = "11111111-1111-1111-1111-111111111111";
+        let json = serde_json::json!({
+            "bundleFormat": 1, "exportedAt": 0,
+            "project": {
+                "id": project_id, "name": "P", "description": "",
+                "status": "active", "workspaceIds": [],
+                "createdAt": 0, "updatedAt": 0
+            },
+            "goals": [
+                {
+                    "id": "g-root", "projectId": project_id, "parentId": null,
+                    "kind": "strategic", "title": "S", "body": "", "ord": 0,
+                    "status": "active", "metricRefs": [], "createdAt": 0, "updatedAt": 0
+                },
+                {
+                    "id": "g-rogue", "projectId": project_id, "parentId": null,
+                    "kind": "additional", "title": "Rogue", "body": "", "ord": 1,
+                    "status": "active", "metricRefs": [], "createdAt": 0, "updatedAt": 0
+                }
+            ],
+            "ideas": [], "insights": [], "tasks": [], "ruleset": null
+        })
+        .to_string();
+
+        let err = import_bundle(&target, app_support.path(), &json).unwrap_err();
+        match err {
+            OrchdPersistError::Validation(msg) => {
+                assert!(msg.contains("rogue root"), "got {msg:?}")
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+        assert_eq!(
+            table_counts(&target).iter().sum::<i64>(),
+            0,
+            "a rejected bundle must leave the store untouched"
+        );
+    }
+
+    #[test]
+    fn import_rejects_a_goal_parent_cycle_and_rolls_back() {
+        let target = Db::open_in_memory().unwrap();
+        let app_support = tempfile::tempdir().unwrap();
+        let project_id = "11111111-1111-1111-1111-111111111111";
+        let json = serde_json::json!({
+            "bundleFormat": 1, "exportedAt": 0,
+            "project": {
+                "id": project_id, "name": "P", "description": "",
+                "status": "active", "workspaceIds": [],
+                "createdAt": 0, "updatedAt": 0
+            },
+            "goals": [
+                {
+                    "id": "g-a", "projectId": project_id, "parentId": "g-b",
+                    "kind": "strategic", "title": "A", "body": "", "ord": 0,
+                    "status": "active", "metricRefs": [], "createdAt": 0, "updatedAt": 0
+                },
+                {
+                    "id": "g-b", "projectId": project_id, "parentId": "g-a",
+                    "kind": "additional", "title": "B", "body": "", "ord": 1,
+                    "status": "active", "metricRefs": [], "createdAt": 0, "updatedAt": 0
+                }
+            ],
+            "ideas": [], "insights": [], "tasks": [], "ruleset": null
+        })
+        .to_string();
+
+        let err = import_bundle(&target, app_support.path(), &json).unwrap_err();
+        match err {
+            OrchdPersistError::Validation(msg) => {
+                assert!(msg.contains("cycle"), "got {msg:?}")
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+        assert_eq!(table_counts(&target).iter().sum::<i64>(), 0);
+    }
+
+    #[test]
+    fn validate_project_bundle_rejects_a_non_finite_task_rank() {
+        // Direct unit coverage of the DOM-3b check (a NaN literally cannot appear in JSON — it
+        // would fail deserialization as Validation anyway — so this pins the VALIDATOR itself).
+        let db = Db::open_in_memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&db, root.path(), "w1");
+        let mut bundle = build_project_bundle(&db, &fixture.project_id).unwrap();
+        bundle.tasks[0].rank = f64::NAN;
+
+        let err = validate_project_bundle(&bundle).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "a NaN task rank must be rejected as Validation, got {err:?}"
+        );
+
+        bundle.tasks[0].rank = f64::INFINITY;
+        let err = validate_project_bundle(&bundle).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Validation(_)));
+        bundle.tasks[0].rank = f64::NEG_INFINITY;
+        let err = validate_project_bundle(&bundle).unwrap_err();
+        assert!(matches!(err, OrchdPersistError::Validation(_)));
     }
 }

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::persistence::{now_ms, Db, OrchdPersistError};
+use crate::persistence::{ensure_optional_project_active, now_ms, Db, OrchdPersistError};
 
 use super::{
     McpAuthKind, McpScope, McpServerPatch, McpServerRow, McpToolRow, McpTransport, NewMcpServer,
@@ -242,9 +242,17 @@ impl Db {
     /// caller that got either wrong gets a typed `Validation` error, never a raw SQLite
     /// `ConstraintViolation`. `id`/`created_at`/`updated_at` are assigned here (uuid v4 /
     /// `now_ms()`); `protocol_version` starts `NULL` (spec §4: "null until first connect").
+    /// DOM-6 of the 2026-07-24 audit remediation: a project-scoped server must reference an
+    /// EXISTING, ACTIVE project — unknown `project_id` ⇒ typed `NotFound` (never a raw FK
+    /// `Sql`), archived ⇒ `Invariant` (spec §5.2's archived doctrine).
     pub fn add_mcp_server(&self, new: NewMcpServer) -> Result<McpServerRow, OrchdPersistError> {
         validate_new_server(&new)?;
         let tx = self.conn().unchecked_transaction()?;
+        // DOM-6 of the 2026-07-24 audit remediation: a project-scoped server must reference an
+        // EXISTING, ACTIVE project — an unknown `project_id` previously leaked as a raw FK
+        // `OrchdPersistError::Sql`, and an archived one was silently accepted (spec §5.2's
+        // archived doctrine applies to every mutating verb touching a project's children).
+        ensure_optional_project_active(&tx, new.project_id.as_deref())?;
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
         let args_json = encode_args(&new.args)?;
@@ -314,21 +322,34 @@ impl Db {
     /// with `Validation` when the server's `transport` is `stdio` — that combination is exactly
     /// the one way this patch shape could otherwise violate the spec §4
     /// `(transport='http') = (url IS NOT NULL)` CHECK (see [`super::McpServerPatch`]'s doc
-    /// comment). Unknown `id` ⇒ `NotFound`.
+    /// comment). Unknown `id` ⇒ `NotFound`; a server belonging to an ARCHIVED project ⇒
+    /// `Invariant` (DOM-6 of the 2026-07-24 audit remediation — the archived doctrine applies to
+    /// every mutation of a project's child rows).
+    ///
+    /// SEC-1 of the 2026-07-24 audit remediation: patching any SECURITY-RELEVANT field
+    /// (`url`/`command`/`args`/`env` — the exact inputs the consent fingerprint commits to)
+    /// deletes the server's consent grants in the SAME transaction. This is defense-in-depth:
+    /// `mcp::invoke::call_tool` already re-evaluates the fingerprint against the CURRENT row on
+    /// every call (the reliable gate that makes a stale grant useless), and the deletion here
+    /// additionally keeps existence-style consent checks (`has_consent`, a UI "consent granted"
+    /// badge) honest the moment the mutation lands. The tool cache (`mcp_tool`) deliberately
+    /// SURVIVES the mutation — per SEC-6 it preserves per-tool `enabled` across refreshes, and
+    /// the per-call consent gate (not the cache) is what protects the bearer.
     pub fn update_mcp_server(
         &self,
         id: &str,
         patch: McpServerPatch,
     ) -> Result<McpServerRow, OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
-        let current_transport: String = tx
+        let (current_transport, current_project_id): (String, Option<String>) = tx
             .query_row(
-                "SELECT transport FROM mcp_server WHERE id = ?1",
+                "SELECT transport, project_id FROM mcp_server WHERE id = ?1",
                 rusqlite::params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, current_project_id.as_deref())?;
         if patch.url.is_some() && current_transport == "stdio" {
             return Err(OrchdPersistError::Validation(
                 "mcp_server: cannot set url on a stdio-transport server".to_string(),
@@ -380,25 +401,45 @@ impl Db {
                 ],
             )?;
         }
+
+        // SEC-1: a consent grant commits to the fingerprint of the server's CURRENT
+        // url/command/args/env — patch any of those and every grant issued against the OLD
+        // fingerprint dies with the mutation (see this method's doc comment for why the tool
+        // cache is deliberately NOT cleared here).
+        let security_field_touched = patch.url.is_some()
+            || patch.command.is_some()
+            || patch.args.is_some()
+            || patch.env.is_some();
+        if security_field_touched {
+            crate::persistence::delete_consents_for_server_tx(&tx, id)?;
+        }
+
         let row = load_server(&tx, id)?;
         tx.commit()?;
         Ok(row)
     }
 
-    /// `set_mcp_server_enabled` (task-2 brief). Unknown `id` ⇒ `NotFound`.
+    /// `set_mcp_server_enabled` (task-2 brief). Unknown `id` ⇒ `NotFound`; a server belonging to
+    /// an ARCHIVED project ⇒ `Invariant` (DOM-6 of the 2026-07-24 audit remediation).
     pub fn set_mcp_server_enabled(
         &self,
         id: &str,
         enabled: bool,
     ) -> Result<McpServerRow, OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
-        let changed = tx.execute(
+        let project_id: Option<Option<String>> = tx
+            .query_row(
+                "SELECT project_id FROM mcp_server WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let project_id = project_id.ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+        tx.execute(
             "UPDATE mcp_server SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
             rusqlite::params![id, enabled as i64, now_ms()],
         )?;
-        if changed == 0 {
-            return Err(OrchdPersistError::NotFound);
-        }
         let row = load_server(&tx, id)?;
         tx.commit()?;
         Ok(row)
@@ -429,41 +470,70 @@ impl Db {
     /// `delete_mcp_server` (task-2 brief): `mcp_tool.server_id REFERENCES mcp_server(id) ON
     /// DELETE CASCADE` (spec §4) removes the server's cached tools automatically — `foreign_keys`
     /// is `ON` for every `Db` connection (`persistence::Db::open`/`open_in_memory`). Unknown `id`
-    /// ⇒ `NotFound`.
+    /// ⇒ `NotFound`; a server belonging to an ARCHIVED project ⇒ `Invariant` (DOM-6 of the
+    /// 2026-07-24 audit remediation).
     pub fn delete_mcp_server(&self, id: &str) -> Result<(), OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
-        let changed = tx.execute(
+        let project_id: Option<Option<String>> = tx
+            .query_row(
+                "SELECT project_id FROM mcp_server WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let project_id = project_id.ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, project_id.as_deref())?;
+        tx.execute(
             "DELETE FROM mcp_server WHERE id = ?1",
             rusqlite::params![id],
         )?;
-        if changed == 0 {
-            return Err(OrchdPersistError::NotFound);
-        }
         tx.commit()?;
         Ok(())
     }
 
     /// `upsert_mcp_tools` (task-2 brief): REPLACES the server's entire cached tool list —
-    /// deletes every existing `mcp_tool` row for `server_id`, then inserts `tools` fresh, each
-    /// `enabled=1` (spec §4: "default on-fetch" — see [`super::NewMcpTool`]'s doc comment).
+    /// deletes every existing `mcp_tool` row for `server_id`, then inserts `tools` fresh.
     /// Unknown `server_id` ⇒ `NotFound` (checked up front so an empty `tools` list against an
-    /// unknown server doesn't silently no-op).
+    /// unknown server doesn't silently no-op); a server belonging to an ARCHIVED project ⇒
+    /// `Invariant` (DOM-6 of the 2026-07-24 audit remediation).
+    ///
+    /// Per-tool `enabled` is PRESERVED across the replacement for every tool that exists in
+    /// BOTH the old and the new list, matched by `name` (SEC-6 of the 2026-07-24 audit
+    /// remediation): the tool cache is a CACHE of the server's advertised list — an owner's
+    /// "disable this dangerous tool" allowlist decision is NOT server-advertised state, and a
+    /// routine reconnect/`tools/list_changed` refresh silently re-enabling it (the old
+    /// insert-everything-`enabled=1` behavior) quietly reopened an attack surface the owner
+    /// explicitly closed. A tool that appears ONLY in the new list inserts `enabled=1` (spec §4
+    /// `mcp_tool.enabled` comment: "default on-fetch" — the spec's default applies to genuinely
+    /// NEW tools); a tool that vanished from the list is deleted with the rest of the old set.
     pub fn upsert_mcp_tools(
         &self,
         server_id: &str,
         tools: Vec<NewMcpTool>,
     ) -> Result<(), OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
-        let server_exists: Option<i64> = tx
+        let server_project: Option<Option<String>> = tx
             .query_row(
-                "SELECT 1 FROM mcp_server WHERE id = ?1",
+                "SELECT project_id FROM mcp_server WHERE id = ?1",
                 rusqlite::params![server_id],
                 |r| r.get(0),
             )
             .optional()?;
-        if server_exists.is_none() {
-            return Err(OrchdPersistError::NotFound);
-        }
+        let server_project = server_project.ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, server_project.as_deref())?;
+
+        // SEC-6: snapshot the current per-tool allowlist state BEFORE wiping the cache, keyed by
+        // tool name — the (server_id, name) pair is the stable identity of "the same tool"
+        // across a refresh.
+        let prior_enabled: std::collections::HashMap<String, bool> = {
+            let mut stmt = tx.prepare("SELECT name, enabled FROM mcp_tool WHERE server_id = ?1")?;
+            let rows = stmt
+                .query_map(rusqlite::params![server_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+                })?
+                .collect::<Result<_, _>>()?;
+            rows
+        };
         tx.execute(
             "DELETE FROM mcp_tool WHERE server_id = ?1",
             rusqlite::params![server_id],
@@ -471,10 +541,11 @@ impl Db {
         let now = now_ms();
         for tool in &tools {
             let id = Uuid::new_v4().to_string();
+            let enabled = prior_enabled.get(&tool.name).copied().unwrap_or(true);
             tx.execute(
                 "INSERT INTO mcp_tool
                    (id, server_id, name, title, description, input_schema_json, enabled, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     id,
                     server_id,
@@ -482,6 +553,7 @@ impl Db {
                     tool.title,
                     tool.description,
                     tool.input_schema_json,
+                    enabled as i64,
                     now,
                 ],
             )?;
@@ -915,8 +987,9 @@ mod tests {
         assert_eq!(first.len(), 2);
         let fetch_tool_id = first.iter().find(|t| t.name == "fetch").unwrap().id.clone();
 
-        // disable one, then upsert a DIFFERENT tool set — the disabled state must not survive
-        // (spec §4: "default on-fetch"), and the removed tool ("fetch") must be gone.
+        // disable one, then upsert a DIFFERENT tool set — the disabled tool ("fetch") is not in
+        // the new set, so its disabled state is gone with its row, and the surviving tool
+        // ("search", never disabled) keeps its enabled=1 across the refresh (SEC-6).
         db.set_mcp_tool_enabled(&fetch_tool_id, false).unwrap();
         db.upsert_mcp_tools(
             &row.id,
@@ -985,5 +1058,215 @@ mod tests {
     fn get_mcp_tool_unknown_id_is_none() {
         let db = new_db();
         assert!(db.get_mcp_tool("missing").unwrap().is_none());
+    }
+
+    // ---- SEC-6 (2026-07-24 audit remediation): a cache REFRESH preserves the owner's per-tool
+    // allowlist state (matched by server+name); only genuinely NEW tools default to enabled=1 ----
+
+    #[test]
+    fn upsert_mcp_tools_preserves_a_disabled_state_across_a_refresh() {
+        let db = new_db();
+        let row = db
+            .add_mcp_server(http_server("Prowl", McpScope::Global, None))
+            .unwrap();
+        db.upsert_mcp_tools(
+            &row.id,
+            vec![NewMcpTool {
+                name: "dangerous".to_string(),
+                title: None,
+                description: None,
+                input_schema_json: "{}".to_string(),
+            }],
+        )
+        .unwrap();
+        let tool = db.list_mcp_tools(&row.id).unwrap().remove(0);
+        db.set_mcp_tool_enabled(&tool.id, false).unwrap();
+
+        // The server re-advertises the SAME tool (a reconnect refresh) plus a genuinely new one.
+        db.upsert_mcp_tools(
+            &row.id,
+            vec![
+                NewMcpTool {
+                    name: "dangerous".to_string(),
+                    title: Some("Dangerous v2".to_string()),
+                    description: None,
+                    input_schema_json: "{\"type\":\"object\"}".to_string(),
+                },
+                NewMcpTool {
+                    name: "brand-new".to_string(),
+                    title: None,
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let tools = db.list_mcp_tools(&row.id).unwrap();
+        let dangerous = tools.iter().find(|t| t.name == "dangerous").unwrap();
+        assert!(
+            !dangerous.enabled,
+            "an owner's disable must survive a cache refresh (SEC-6)"
+        );
+        assert_eq!(dangerous.title.as_deref(), Some("Dangerous v2"));
+        let brand_new = tools.iter().find(|t| t.name == "brand-new").unwrap();
+        assert!(
+            brand_new.enabled,
+            "a genuinely new tool defaults to enabled=1 (spec §4)"
+        );
+    }
+
+    // ---- SEC-1 (2026-07-24 audit remediation): patching a security-relevant field
+    // (url/command/args/env) deletes the server's consent grants in the same transaction ----
+
+    #[test]
+    fn update_mcp_server_deletes_consent_grants_on_a_security_field_change() {
+        let db = new_db();
+        let row = db
+            .add_mcp_server(http_server("Prowl", McpScope::Global, None))
+            .unwrap();
+        db.grant_consent(&row.id, "connect", row.url.as_deref().unwrap())
+            .unwrap();
+        assert!(db.has_consent(&row.id, "connect").unwrap());
+
+        // A non-security patch (name only) keeps the grant.
+        db.update_mcp_server(
+            &row.id,
+            McpServerPatch {
+                name: Some("Prowl Renamed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            db.has_consent(&row.id, "connect").unwrap(),
+            "a non-security patch must not touch consent grants"
+        );
+
+        // A url patch deletes it.
+        db.update_mcp_server(
+            &row.id,
+            McpServerPatch {
+                url: Some("https://new.example.com/mcp".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !db.has_consent(&row.id, "connect").unwrap(),
+            "a url patch must delete the server's consent grants (SEC-1)"
+        );
+    }
+
+    #[test]
+    fn update_mcp_server_deletes_consent_grants_on_an_env_change_for_stdio() {
+        let db = new_db();
+        let row = db.add_mcp_server(stdio_server("Local")).unwrap();
+        let fingerprint = crate::trust::stdio_exec_fingerprint(
+            row.command.as_deref().unwrap(),
+            &row.args,
+            &row.env,
+        );
+        db.grant_consent(&row.id, "stdio_exec", &fingerprint)
+            .unwrap();
+
+        db.update_mcp_server(
+            &row.id,
+            McpServerPatch {
+                env: Some(BTreeMap::from([(
+                    "NODE_OPTIONS".to_string(),
+                    "--require x".to_string(),
+                )])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !db.has_consent(&row.id, "stdio_exec").unwrap(),
+            "an env patch must delete the server's consent grants (SEC-1/SEC-2)"
+        );
+    }
+
+    // ---- DOM-6 (2026-07-24 audit remediation): archived-project guard + typed existence
+    // precheck on the MCP registry mutators ----
+
+    fn archived_project(db: &Db) -> String {
+        let project_id = new_project(db);
+        db.archive_project(&project_id).unwrap();
+        project_id
+    }
+
+    #[test]
+    fn add_mcp_server_on_an_archived_project_is_invariant() {
+        let db = new_db();
+        let project_id = archived_project(&db);
+        let err = db
+            .add_mcp_server(http_server("Prowl", McpScope::Project, Some(project_id)))
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_mcp_server_with_a_bogus_project_id_is_typed_not_found() {
+        let db = new_db();
+        let err = db
+            .add_mcp_server(http_server(
+                "Prowl",
+                McpScope::Project,
+                Some("no-such-project".to_string()),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::NotFound),
+            "a bogus project_id must be the typed NotFound, never a raw FK Sql error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn update_set_enabled_and_delete_on_an_archived_projects_server_are_invariant() {
+        let db = new_db();
+        // Seed the server on a LIVE project first (adding onto an archived one is itself
+        // blocked, covered by the test above), then archive the project out from under it.
+        let live = new_project(&db);
+        let row = db
+            .add_mcp_server(http_server("Prowl", McpScope::Project, Some(live.clone())))
+            .unwrap();
+        db.archive_project(&live).unwrap();
+
+        let err = db
+            .update_mcp_server(
+                &row.id,
+                McpServerPatch {
+                    name: Some("x".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "update: {err:?}"
+        );
+
+        let err = db.set_mcp_server_enabled(&row.id, false).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "set_enabled: {err:?}"
+        );
+
+        let err = db.delete_mcp_server(&row.id).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "delete: {err:?}"
+        );
+
+        let err = db.upsert_mcp_tools(&row.id, vec![]).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "upsert_mcp_tools: {err:?}"
+        );
     }
 }

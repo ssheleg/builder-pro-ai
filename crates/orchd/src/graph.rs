@@ -928,6 +928,166 @@ pub(crate) fn seed_strategic_entity_ref(
     Ok(())
 }
 
+// ================================================================================
+// ---- export/import support (DOM-1/DOM-2 of the 2026-07-24 audit remediation): the bundle
+// carries a project's WHOLE graph (nodes + incident edges) verbatim, and import re-seeds the
+// entityRef nodes a bundle predating the graph-family keys lacks. ----
+// ================================================================================
+
+/// Reads a project's WHOLE graph for the export bundle (DOM-1): every `graph_node` row of the
+/// project (RAW — the STORED `label`, never the read-time-resolved one `list_project_graph`
+/// returns, and `is_orphan: false`, which is a read-time signal with no column to round-trip)
+/// plus every `graph_edge` incident to any of those nodes (the SAME incident-edge rule
+/// `list_project_graph` uses, so cross-project edges are part of the snapshot too — in a
+/// whole-store export both endpoints land inside the one import transaction; importing a
+/// single-project bundle whose edges point outside it fails honestly on the deferred FK at
+/// commit). Deterministic `created_at, id` order on both lists so an export→import→export
+/// round-trip is byte-stable. Unknown `project_id` ⇒ `NotFound` (mirrors `list_project_graph`).
+pub(crate) fn export_project_graph(
+    db: &Db,
+    project_id: &str,
+) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), OrchdPersistError> {
+    let conn = db.conn();
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM project WHERE id = ?1",
+            rusqlite::params![project_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(OrchdPersistError::NotFound);
+    }
+
+    let mut node_stmt = conn.prepare(
+        "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+                created_at, updated_at
+         FROM graph_node WHERE project_id = ?1 ORDER BY created_at, id",
+    )?;
+    let nodes: Vec<GraphNode> = node_stmt
+        .query_map(rusqlite::params![project_id], GraphNodeRow::from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(GraphNodeRow::into_node)
+        .collect::<Result<_, _>>()?;
+
+    let mut edge_stmt = conn.prepare(
+        "SELECT id, source_node_id, target_node_id, kind, label, created_at
+         FROM graph_edge
+         WHERE source_node_id IN (SELECT id FROM graph_node WHERE project_id = ?1)
+            OR target_node_id IN (SELECT id FROM graph_node WHERE project_id = ?1)
+         ORDER BY created_at, id",
+    )?;
+    let edges: Vec<GraphEdge> = edge_stmt
+        .query_map(rusqlite::params![project_id], GraphEdgeRow::from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(GraphEdgeRow::into_edge)
+        .collect::<Result<_, _>>()?;
+
+    Ok((nodes, edges))
+}
+
+/// Raw-inserts one `graph_node` row VERBATIM (D7 field-verbatim preservation, DOM-1): ids,
+/// `entity_type`/`entity_id`, stored label, positions, and timestamps are written exactly as the
+/// bundle carries them — nothing is re-stamped. Any PK/UNIQUE hit (including the
+/// `graph_node_one_per_entity` partial unique index) ⇒ `Conflict`, rolling back the whole import.
+pub(crate) fn insert_graph_node_raw(
+    tx: &rusqlite::Transaction,
+    n: &GraphNode,
+) -> Result<(), OrchdPersistError> {
+    tx.execute(
+        "INSERT INTO graph_node
+           (id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+            created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            n.id,
+            n.project_id,
+            encode_node_kind(&n.kind),
+            n.entity_type.as_ref().map(encode_entity_type),
+            n.entity_id,
+            n.label,
+            n.body,
+            n.pos_x,
+            n.pos_y,
+            n.created_at,
+            n.updated_at
+        ],
+    )
+    .map_err(|e| crate::persistence::conflict_or_sql(e, "graph_node", &n.id))?;
+    Ok(())
+}
+
+/// Raw-inserts one `graph_edge` row VERBATIM (DOM-1). Any PK/UNIQUE hit (including the
+/// `graph_edge_uniq` index on `(source_node_id, target_node_id, kind)`) ⇒ `Conflict`, rolling
+/// back the whole import.
+pub(crate) fn insert_graph_edge_raw(
+    tx: &rusqlite::Transaction,
+    e: &GraphEdge,
+) -> Result<(), OrchdPersistError> {
+    tx.execute(
+        "INSERT INTO graph_edge (id, source_node_id, target_node_id, kind, label, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            e.id,
+            e.source_node_id,
+            e.target_node_id,
+            encode_edge_kind(&e.kind),
+            e.label,
+            e.created_at
+        ],
+    )
+    .map_err(|err| crate::persistence::conflict_or_sql(err, "graph_edge", &e.id))?;
+    Ok(())
+}
+
+/// Seeds an `entity_ref` graph node for `(entity_type, entity_id)` INSIDE the caller's already-
+/// open transaction — but ONLY if none exists yet (DOM-2 of the 2026-07-24 audit remediation):
+/// importing a bundle predates the graph-family keys (or one that lost them) would otherwise
+/// leave the project's graph without its strategic-goal / accepted-insight entityRefs, breaking
+/// S4 D6's "a project's graph is never empty" invariant (`insert_project_raw` bypasses
+/// `create_project`'s seeding). For a CURRENT bundle the verbatim-restored nodes already exist,
+/// so this is a no-op — it must never collide with the `graph_node_one_per_entity` index.
+/// Returns `true` when a node was actually inserted.
+pub(crate) fn seed_entity_ref_if_missing(
+    tx: &rusqlite::Transaction,
+    project_id: &str,
+    entity_type: &GraphEntityType,
+    entity_id: &str,
+    label: &str,
+) -> rusqlite::Result<bool> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM graph_node
+             WHERE kind = 'entity_ref' AND entity_type = ?1 AND entity_id = ?2",
+            rusqlite::params![encode_entity_type(entity_type), entity_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        return Ok(false);
+    }
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO graph_node
+           (id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+            created_at, updated_at)
+         VALUES (?1, ?2, 'entity_ref', ?3, ?4, ?5, '', 0, 0, ?6, ?6)",
+        rusqlite::params![
+            Uuid::new_v4().to_string(),
+            project_id,
+            encode_entity_type(entity_type),
+            entity_id,
+            label,
+            now
+        ],
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

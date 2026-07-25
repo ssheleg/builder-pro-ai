@@ -779,6 +779,22 @@ pub(crate) fn is_constraint_violation(e: &rusqlite::Error) -> bool {
     }
 }
 
+/// FOREIGN-KEY-specific constraint-violation test (DOM-11 of the 2026-07-24 audit remediation):
+/// an FK failure means the caller referenced a row that doesn't exist, which is semantically
+/// `NotFound`/`Validation`-class input — NOT an I/O failure. `socket_server::map_err` uses this
+/// to map an `Sql`-wrapped FK violation to the typed `NotFound` wire code instead of leaking it
+/// as a raw `Error{Io}: FOREIGN KEY constraint failed`. The EXTENDED code is the discriminator
+/// (`SQLITE_CONSTRAINT_FOREIGNKEY` = 787): the primary `ErrorCode` is the same generic
+/// `ConstraintViolation` a UNIQUE/CHECK/NOT NULL hit produces, so matching on `code` alone would
+/// misclassify those.
+pub(crate) fn is_foreign_key_violation(e: &rusqlite::Error) -> bool {
+    if let rusqlite::Error::SqliteFailure(err, _) = e {
+        err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+    } else {
+        false
+    }
+}
+
 /// Maps a `project_workspace` insert failure to `Conflict` (spec §5.2: "a workspace can be
 /// linked to at most one project") when it's a constraint violation, otherwise passes the raw
 /// SQL error through unchanged.
@@ -1044,7 +1060,13 @@ pub(crate) fn ensure_project_active(
 /// ALWAYS mutable — there is no project to be archived; a `Some(pid)` defers to
 /// [`ensure_project_active`] as-is (so an unknown `pid` still surfaces `NotFound`, and an
 /// archived `pid` still surfaces `Invariant`).
-fn ensure_optional_project_active(
+///
+/// `pub(crate)` (was private): the 2026-07-24 audit remediation (DOM-6) reuses this SAME guard
+/// for every project-nullable row outside this file — `mcp_server` (`mcp::registry`),
+/// `skill` (`skills::registry`), `consent_grant`/`policy` (this file's trust section), and
+/// `research_run`'s idea lookup (`research`) — so all of them apply the archived doctrine
+/// identically instead of growing per-module copies.
+pub(crate) fn ensure_optional_project_active(
     conn: &Connection,
     project_id: Option<&str>,
 ) -> Result<(), OrchdPersistError> {
@@ -2506,7 +2528,19 @@ impl Db {
     /// `SetTaskRank` (spec §4.2/§5.2): takes an explicit `f64` verbatim — fractional
     /// insert-between midpoint math is the CLIENT's move, this verb just persists whatever it is
     /// given. Guard uses the task's OWN `project_id`. Unknown `id` ⇒ `NotFound`.
+    ///
+    /// NON-FINITE ranks are rejected as `Validation` (DOM-3 of the 2026-07-24 audit
+    /// remediation): a stored `±Infinity` serializes as `"rank":null` in the next `ExportAll`
+    /// (JSON has no Infinity), which the daemon then cannot re-import — one Infinity rank made
+    /// the whole store un-backupable — and a `NaN` died as a raw `NOT NULL constraint failed`
+    /// `Error{Io}`. Both are client input errors, so both are refused up front, before any
+    /// transaction opens (the same validate-first discipline as [`validate_new_server`] et al.).
     pub fn set_task_rank(&self, id: &str, rank: f64) -> Result<DomainTask, OrchdPersistError> {
+        if !rank.is_finite() {
+            return Err(OrchdPersistError::Validation(
+                "task rank must be finite (NaN and ±Infinity are not storable)".to_string(),
+            ));
+        }
         let tx = self.conn.unchecked_transaction()?;
         let project_id: String = tx
             .query_row(
@@ -3189,7 +3223,11 @@ const WORKFLOW_NAME_MAX_LEN: usize = 200;
 /// - `name` non-empty and at most [`WORKFLOW_NAME_MAX_LEN`] chars;
 /// - `scope=project` ⇒ a non-empty `projectId` is present;
 /// - `defaultAgent` non-empty AND one of [`KNOWN_AGENTS`];
-/// - every stage has a non-empty name AND a non-empty prompt;
+/// - AT LEAST ONE stage (WIP-2 of the 2026-07-24 audit remediation, SCN-060: the client already
+///   blocks a zero-stage save — the daemon, the authoritative guard, now mirrors it);
+/// - every stage has a non-empty `id` (WIP-5 — the S6b run-journal addresses stages by id) AND a
+///   non-empty name AND a non-empty prompt;
+/// - stage `id`s are UNIQUE within the workflow (WIP-5);
 /// - every stage `agent`, when `Some`, is one of [`KNOWN_AGENTS`];
 /// - no empty stage-skill-id, global-skill-id, or output entry (the same non-empty-entry
 ///   discipline [`validate_policy`] applies to its own lists);
@@ -3225,7 +3263,24 @@ fn validate_workflow(
             "workflow defaultAgent must be one of the known agents {KNOWN_AGENTS:?}"
         )));
     }
+    if stages.is_empty() {
+        return Err(OrchdPersistError::Validation(
+            "a workflow must have at least one stage".to_string(),
+        ));
+    }
+    let mut seen_stage_ids = std::collections::HashSet::new();
     for stage in stages {
+        if stage.id.is_empty() {
+            return Err(OrchdPersistError::Validation(
+                "every stage must have a non-empty id".to_string(),
+            ));
+        }
+        if !seen_stage_ids.insert(stage.id.as_str()) {
+            return Err(OrchdPersistError::Validation(format!(
+                "stage ids must be unique within a workflow (duplicate: {:?})",
+                stage.id
+            )));
+        }
         if stage.name.is_empty() {
             return Err(OrchdPersistError::Validation(
                 "every stage must have a non-empty name".to_string(),
@@ -3630,7 +3685,9 @@ impl Db {
 /// Maps a raw-insert failure to `Conflict("<entity> <id> already exists")` (spec §8: "any id
 /// already present in the store ⇒ `Conflict`") when it's a PK/UNIQUE collision, otherwise passes
 /// the raw SQL error through unchanged. Shared by every `insert_*_raw` helper below.
-fn conflict_or_sql(e: rusqlite::Error, entity: &str, id: &str) -> OrchdPersistError {
+/// `pub(crate)`: `graph.rs`'s `insert_graph_node_raw`/`insert_graph_edge_raw` (DOM-1 of the
+/// 2026-07-24 audit remediation) reuse the same mapping.
+pub(crate) fn conflict_or_sql(e: rusqlite::Error, entity: &str, id: &str) -> OrchdPersistError {
     if is_constraint_violation(&e) {
         OrchdPersistError::Conflict(format!("{entity} {id} already exists"))
     } else {
@@ -3854,6 +3911,30 @@ pub(crate) fn insert_ruleset_raw(
             .map_err(|e| conflict_or_sql(e, "ruleset", &r.id))?;
         }
     }
+    Ok(())
+}
+
+/// Raw-inserts one `doc` row VERBATIM (DOM-1 of the 2026-07-24 audit remediation): ids,
+/// `md_path`/`md_hash`, and timestamps are written exactly as the bundle carries them — nothing
+/// is re-stamped (the caller, `export::import_doc`, has already resolved `md_path` to its FINAL
+/// app-support-contained location, exactly like [`insert_ruleset_raw`]'s caller does). Any
+/// PK/UNIQUE hit (including the `doc (project_id, name)` uniqueness) ⇒ `Conflict`, rolling back
+/// the whole import.
+pub(crate) fn insert_doc_raw(tx: &rusqlite::Transaction, d: &Doc) -> Result<(), OrchdPersistError> {
+    tx.execute(
+        "INSERT INTO doc (id, project_id, name, md_path, md_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            d.id,
+            d.project_id,
+            d.name,
+            d.md_path,
+            d.md_hash,
+            d.created_at,
+            d.updated_at
+        ],
+    )
+    .map_err(|e| conflict_or_sql(e, "doc", &d.id))?;
     Ok(())
 }
 
@@ -6250,6 +6331,45 @@ mod domain_tests {
         assert!(matches!(err, OrchdPersistError::Invariant(_)));
     }
 
+    // ---- DOM-3 (2026-07-24 audit remediation): non-finite ranks are typed Validation, never
+    // stored (a stored ±Infinity serialized as null on the next export and made the whole store
+    // un-reimportable; a NaN died as a raw NOT NULL Sql error) ----
+
+    #[test]
+    fn set_task_rank_rejects_non_finite_values_as_validation() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = db.set_task_rank(&task.id, bad).unwrap_err();
+            assert!(
+                matches!(err, OrchdPersistError::Validation(_)),
+                "rank {bad:?} must be rejected as Validation, got {err:?}"
+            );
+        }
+        // Nothing was written — the original rank survives.
+        assert_eq!(
+            db.list_tasks(None).unwrap()[0].rank,
+            task.rank,
+            "a rejected rank must not be persisted"
+        );
+        // A finite rank still works.
+        db.set_task_rank(&task.id, 2.5).unwrap();
+    }
+
     // ---- delete_task ----
 
     #[test]
@@ -7446,61 +7566,14 @@ mod doc_tests {
 /// of the FULL definition, update, reorder, delete row+file, external-change → `fileState`, list
 /// filters, plus the fail-closed validation matrix the SW1 contract locks. HERMETICITY: a
 /// workflow's file path resolves under the REAL `app_support_dir()` (`$HOME`-derived), so every
-/// test overrides `$HOME` to its own tempdir under [`HOME_LOCK`] — never the developer's real
-/// app-support tree (mirrors `tests/boot_integration.rs`'s `HOME_LOCK`/`HomeGuard`).
+/// test overrides `$HOME` to its own tempdir under the crate-wide [`crate::test_support::
+/// HomeGuard`] — never the developer's real app-support tree (mirrors
+/// `tests/boot_integration.rs`'s isolation, but serialized on the ONE lib-binary lock).
 #[cfg(test)]
 mod workflow_tests {
     use super::*;
+    use crate::test_support::HomeGuard;
     use bpa_orchd_proto::{ContextScope, Gate};
-
-    // `$HOME` is process-global mutable state; `workflow_json_path` reads it fresh per write, and
-    // `cargo test` runs same-binary tests concurrently — so every test that writes a workflow file
-    // isolates `$HOME` under its own tempdir and serializes with the others via this lock.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct HomeGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prior: Option<std::ffi::OsString>,
-    }
-
-    impl HomeGuard {
-        fn set(dir: &Path) -> Self {
-            let lock = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            let prior = std::env::var_os("HOME");
-            // Symlink `Library/Keychains` from the REAL `$HOME` into this test's isolated `dir`
-            // (mirrors `tests/dispatch_integration.rs`'s `HomeGuard`). These workflow tests never
-            // touch the Keychain — but OTHER same-binary unit tests (e.g. `connectors::adapter`)
-            // resolve the macOS Keychain via a `$HOME`-derived path through `bpa_secrets`, and
-            // `cargo test` runs them CONCURRENTLY with this test's `$HOME` override. Without this
-            // symlink, a concurrent Keychain access during our window resolves to a nonexistent
-            // keychain under the bare tempdir and fails/hangs. The symlink points the repointed
-            // `$HOME` at the SAME keychain those tests could already reach directly (no new
-            // access granted); only `Library/Keychains` is shared — the rest of `$HOME`, including
-            // the `Library/Application Support` subtree our workflow files land under, stays a
-            // fresh isolated tempdir.
-            if let Some(real_home) = &prior {
-                let keychains_link = dir.join("Library/Keychains");
-                if let Some(parent) = keychains_link.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::os::unix::fs::symlink(
-                    Path::new(real_home).join("Library/Keychains"),
-                    &keychains_link,
-                );
-            }
-            std::env::set_var("HOME", dir);
-            HomeGuard { _lock: lock, prior }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match self.prior.take() {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -7982,6 +8055,81 @@ mod workflow_tests {
         );
     }
 
+    // ---- WIP-2 (2026-07-24 audit remediation): zero stages is rejected daemon-side, mirroring
+    // the client (SCN-060 — the server is the authoritative guard) ----
+
+    #[test]
+    fn zero_stages_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = upsert_global(
+            &db,
+            "claude-code",
+            vec![],
+            vec![],
+            SupervisorConfig::default(),
+        )
+        .unwrap_err();
+
+        match err {
+            OrchdPersistError::Validation(msg) => {
+                assert_eq!(msg, "a workflow must have at least one stage")
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+        // Fail-closed: nothing written.
+        assert!(db.list_workflows(None, None).unwrap().is_empty());
+    }
+
+    // ---- WIP-5 (2026-07-24 audit remediation): stage.id non-empty + unique (the S6b
+    // run-journal addresses stages by id) ----
+
+    #[test]
+    fn empty_stage_id_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = upsert_global(
+            &db,
+            "claude-code",
+            vec![stage("", "plan", None)],
+            vec![],
+            SupervisorConfig::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+        assert!(db.list_workflows(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicate_stage_ids_are_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let db = Db::open_in_memory().unwrap();
+
+        let err = upsert_global(
+            &db,
+            "claude-code",
+            vec![stage("s0", "plan", None), stage("s0", "build", None)],
+            vec![],
+            SupervisorConfig::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Validation(_)),
+            "got {err:?}"
+        );
+        assert!(db.list_workflows(None, None).unwrap().is_empty());
+    }
+
     #[test]
     fn project_scope_with_unknown_project_is_not_found() {
         let home = tempfile::tempdir().unwrap();
@@ -8058,7 +8206,7 @@ mod workflow_tests {
                 WorkflowScope::Global,
                 None,
                 "claude-code",
-                vec![],
+                vec![stage("s0", "plan", None)],
                 vec![],
                 SupervisorConfig::default(),
             )
@@ -8071,7 +8219,7 @@ mod workflow_tests {
                 WorkflowScope::Project,
                 Some(&a.id),
                 "claude-code",
-                vec![],
+                vec![stage("s0", "plan", None)],
                 vec![],
                 SupervisorConfig::default(),
             )
@@ -8084,7 +8232,7 @@ mod workflow_tests {
                 WorkflowScope::Project,
                 Some(&b.id),
                 "claude-code",
-                vec![],
+                vec![stage("s0", "plan", None)],
                 vec![],
                 SupervisorConfig::default(),
             )
@@ -8699,17 +8847,32 @@ impl Db {
 
     /// `grant_consent` (spec §6/D10, task-5 brief): upserts — `UNIQUE(server_id, kind)` means a
     /// re-grant (e.g. after a fingerprint change) replaces the prior grant's `fingerprint`/
-    /// `granted_at` rather than erroring. `server_id` must reference an existing `mcp_server` row
-    /// (`FOREIGN KEY ... `, `foreign_keys=ON` on every `Db` connection) — an unknown `server_id`
-    /// surfaces as the FK's own `OrchdPersistError::Sql`, matching every other FK'd insert in
-    /// this file (no bespoke existence pre-check here either).
+    /// `granted_at` rather than erroring.
+    ///
+    /// DOM-6 of the 2026-07-24 audit remediation: the target server is resolved FIRST, inside
+    /// the same transaction — an unknown `server_id` surfaces as the typed `NotFound` (an FK
+    /// failure would otherwise leak as a raw `OrchdPersistError::Sql`), and a server belonging to
+    /// an ARCHIVED project is `Invariant("project archived")` (granting consent is a mutation of
+    /// that project's child row, so the spec §5.2 archived doctrine applies to it exactly like
+    /// every other mutating verb).
     pub fn grant_consent(
         &self,
         server_id: &str,
         kind: &str,
         fingerprint: &str,
     ) -> Result<(), OrchdPersistError> {
-        self.conn().execute(
+        let tx = self.conn().unchecked_transaction()?;
+        let server_project: Option<Option<String>> = tx
+            .query_row(
+                "SELECT project_id FROM mcp_server WHERE id = ?1",
+                rusqlite::params![server_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let server_project = server_project.ok_or(OrchdPersistError::NotFound)?;
+        ensure_optional_project_active(&tx, server_project.as_deref())?;
+
+        tx.execute(
             "INSERT INTO consent_grant (id, kind, server_id, fingerprint, granted_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(server_id, kind) DO UPDATE SET
@@ -8723,6 +8886,7 @@ impl Db {
                 now_ms(),
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -8803,6 +8967,32 @@ impl Db {
         }
 
         let tx = self.conn().unchecked_transaction()?;
+
+        // DOM-6 of the 2026-07-24 audit remediation: `policy.ref_id` is NOT an FK column, so a
+        // dangling reference previously landed silently (and a project-scoped policy on an
+        // ARCHIVED project was accepted). Resolve the referenced row up front, inside this tx:
+        // `Project` ⇒ the project must exist and be active (`ensure_project_active` — unknown ⇒
+        // `NotFound`, archived ⇒ `Invariant`, the spec §5.2 archived doctrine); `Server` ⇒ the
+        // server must exist (`NotFound`) and, when it belongs to a project, that project must be
+        // active (`ensure_optional_project_active` — a global server has no project to guard).
+        match new.scope {
+            PolicyScope::Project => {
+                ensure_project_active(&tx, new.ref_id.as_deref().unwrap_or_default())?;
+            }
+            PolicyScope::Server => {
+                let server_project: Option<Option<String>> = tx
+                    .query_row(
+                        "SELECT project_id FROM mcp_server WHERE id = ?1",
+                        rusqlite::params![new.ref_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let server_project = server_project.ok_or(OrchdPersistError::NotFound)?;
+                ensure_optional_project_active(&tx, server_project.as_deref())?;
+            }
+            PolicyScope::Global => {}
+        }
+
         let now = now_ms();
         let scope_text = encode_policy_scope(&new.scope);
         let existing_id: Option<String> = tx
@@ -8948,6 +9138,24 @@ impl Db {
         };
         Ok(sum)
     }
+}
+
+/// Deletes EVERY consent grant (any `kind`) for `server_id`, inside the caller's already-open
+/// transaction (SEC-1 of the 2026-07-24 audit remediation): `mcp::registry::update_mcp_server`
+/// calls this when a security-relevant field (`url`/`command`/`args`/`env`) is patched, so a
+/// grant issued against the OLD fingerprint is destroyed at mutation time — defense-in-depth
+/// alongside `mcp::invoke::call_tool`'s per-call fingerprint re-evaluation (which alone would
+/// already deny the stale grant; the deletion additionally keeps `has_consent`-style existence
+/// checks and any future non-fingerprint path honest). Returns the number of grants removed.
+pub(crate) fn delete_consents_for_server_tx(
+    tx: &rusqlite::Transaction,
+    server_id: &str,
+) -> Result<usize, OrchdPersistError> {
+    let removed = tx.execute(
+        "DELETE FROM consent_grant WHERE server_id = ?1",
+        rusqlite::params![server_id],
+    )?;
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -9284,6 +9492,123 @@ mod trust_persistence_tests {
         );
     }
 
+    // ---- DOM-6 (2026-07-24 audit remediation): archived/existence guards on the trust rows
+    // (`consent_grant.server_id` is an FK that used to leak as raw Sql; `policy.ref_id` isn't
+    // even an FK, so a dangling ref landed silently) ----
+
+    fn add_project_server(db: &Db, project_id: &str) -> String {
+        db.add_mcp_server(NewMcpServer {
+            name: "Prowl".to_string(),
+            transport: McpTransport::Http,
+            url: Some("https://example.com/mcp".to_string()),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            scope: McpScope::Project,
+            project_id: Some(project_id.to_string()),
+            auth_kind: McpAuthKind::None,
+            secret_ref: None,
+            account_id: None,
+            enabled: true,
+            timeout_ms: 30_000,
+            max_retries: 2,
+        })
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn grant_consent_with_a_bogus_server_id_is_typed_not_found() {
+        let db = new_db();
+        let err = db
+            .grant_consent("no-such-server", "connect", "https://example.com/mcp")
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::NotFound),
+            "a bogus server_id must be the typed NotFound, never a raw FK Sql error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn grant_consent_on_an_archived_projects_server_is_invariant() {
+        let db = new_db();
+        let project = db.create_project("P", "", &["w1".to_string()]).unwrap();
+        let server_id = add_project_server(&db, &project.id);
+        db.archive_project(&project.id).unwrap();
+
+        let err = db
+            .grant_consent(&server_id, "connect", "https://example.com/mcp")
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn upsert_policy_with_a_bogus_project_ref_is_typed_not_found() {
+        let db = new_db();
+        let err = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Project,
+                ref_id: Some("no-such-project".to_string()),
+                spend_cap_usd: None,
+                rate_per_min: Some(1),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::NotFound),
+            "policy.ref_id is not an FK — a dangling project ref must be pre-checked as NotFound: {err:?}"
+        );
+    }
+
+    #[test]
+    fn upsert_policy_on_an_archived_project_is_invariant() {
+        let db = new_db();
+        let project = db.create_project("P", "", &["w1".to_string()]).unwrap();
+        db.archive_project(&project.id).unwrap();
+
+        let err = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Project,
+                ref_id: Some(project.id.clone()),
+                spend_cap_usd: None,
+                rate_per_min: Some(1),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn upsert_policy_with_a_bogus_server_ref_is_typed_not_found() {
+        let db = new_db();
+        let err = db
+            .upsert_policy(NewPolicy {
+                scope: PolicyScope::Server,
+                ref_id: Some("no-such-server".to_string()),
+                spend_cap_usd: None,
+                rate_per_min: Some(1),
+            })
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound), "got {err:?}");
+    }
+
+    #[test]
+    fn upsert_policy_on_a_global_server_is_allowed() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        db.upsert_policy(NewPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server_id),
+            spend_cap_usd: Some(5.0),
+            rate_per_min: None,
+        })
+        .unwrap();
+    }
+
     // ---- insert_audit ----
 
     #[test]
@@ -9382,10 +9707,13 @@ mod trust_persistence_tests {
     fn upsert_policy_project_and_server_scopes_are_independent_rows() {
         let db = new_db();
         let server_id = add_server(&db);
+        // A REAL project row is required for the project-scope row (DOM-6: `policy.ref_id` is
+        // now existence-checked — a dangling project ref is `NotFound`).
+        let project_row = db.create_project("P", "", &["w1".to_string()]).unwrap();
         let project = db
             .upsert_policy(NewPolicy {
                 scope: PolicyScope::Project,
-                ref_id: Some("proj-1".to_string()),
+                ref_id: Some(project_row.id.clone()),
                 spend_cap_usd: Some(5.0),
                 rate_per_min: None,
             })

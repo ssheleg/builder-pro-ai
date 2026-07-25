@@ -219,6 +219,11 @@ impl Db {
             .unwrap_or_default();
 
         let tx = self.conn().unchecked_transaction()?;
+        // DOM-6 of the 2026-07-24 audit remediation: a project-scoped skill must reference an
+        // EXISTING, ACTIVE project — an unknown `project_id` previously leaked as a raw FK
+        // `OrchdPersistError::Sql`, and an archived one was silently accepted (spec §5.2's
+        // archived doctrine applies to every mutating verb touching a project's children).
+        crate::persistence::ensure_optional_project_active(&tx, new.project_id.as_deref())?;
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
         let md_path_string = canonical_path.to_string_lossy().to_string();
@@ -275,13 +280,20 @@ impl Db {
     /// `delete_skill` (task-17 brief): removes the DB row only — this registry never touches the
     /// SKILL.md file itself on disk (files-as-truth: the file's lifecycle is the owner's, not
     /// orchd's, mirroring RuleSet's own "never deletes the markdown file" discipline). Unknown
-    /// `id` ⇒ `NotFound`.
+    /// `id` ⇒ `NotFound`; a skill belonging to an ARCHIVED project ⇒ `Invariant` (DOM-6 of the
+    /// 2026-07-24 audit remediation).
     pub fn delete_skill(&self, id: &str) -> Result<(), OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
-        let changed = tx.execute("DELETE FROM skill WHERE id = ?1", rusqlite::params![id])?;
-        if changed == 0 {
-            return Err(OrchdPersistError::NotFound);
-        }
+        let project_id: Option<Option<String>> = tx
+            .query_row(
+                "SELECT project_id FROM skill WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let project_id = project_id.ok_or(OrchdPersistError::NotFound)?;
+        crate::persistence::ensure_optional_project_active(&tx, project_id.as_deref())?;
+        tx.execute("DELETE FROM skill WHERE id = ?1", rusqlite::params![id])?;
         tx.commit()?;
         Ok(())
     }
@@ -577,5 +589,58 @@ mod tests {
         let db = new_db();
         let err = db.delete_skill("missing").unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound), "{err:?}");
+    }
+
+    // ---- DOM-6 (2026-07-24 audit remediation): archived-project guard + typed existence
+    // precheck on the skill registry mutators ----
+
+    #[test]
+    fn add_skill_on_an_archived_project_is_invariant() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        db.archive_project(&project_id).unwrap();
+        let (_guard, path) = write_skill_md(WITH_FRONTMATTER);
+        let mut new = new_skill(&path);
+        new.scope = SkillScope::Project;
+        new.project_id = Some(project_id);
+
+        let err = db.add_skill(new).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_skill_with_a_bogus_project_id_is_typed_not_found() {
+        let db = new_db();
+        let (_guard, path) = write_skill_md(WITH_FRONTMATTER);
+        let mut new = new_skill(&path);
+        new.scope = SkillScope::Project;
+        new.project_id = Some("no-such-project".to_string());
+
+        let err = db.add_skill(new).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::NotFound),
+            "a bogus project_id must be the typed NotFound, never a raw FK Sql error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn delete_skill_on_an_archived_projects_skill_is_invariant() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let (_guard, path) = write_skill_md(WITH_FRONTMATTER);
+        let mut new = new_skill(&path);
+        new.scope = SkillScope::Project;
+        new.project_id = Some(project_id.clone());
+        let row = db.add_skill(new).unwrap();
+        db.archive_project(&project_id).unwrap();
+
+        let err = db.delete_skill(&row.id).unwrap_err();
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "got {err:?}"
+        );
     }
 }
