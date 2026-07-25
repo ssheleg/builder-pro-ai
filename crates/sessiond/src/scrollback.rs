@@ -12,11 +12,13 @@ use std::collections::VecDeque;
 const CARRY_CAP: usize = 256;
 
 /// Once a partial sequence is identified as a recognized strippable OSC (title 0/1/2,
-/// OSC-7 cwd, OSC-133 semantic marks — spec §11), it must never fail open: leaking it would
-/// let a replayed snapshot re-trigger the title/cwd side effect on a reattached terminal.
-/// Instead we keep consuming and dropping bytes until the terminator, bounded only by this
-/// larger safety cap (matches `osc_parser`'s cap) to protect against adversarial/unterminated
-/// input growing the carry unboundedly.
+/// OSC-7 cwd, OSC-133 semantic marks — spec §11), it must never fail open WHILE STILL
+/// PLAUSIBLY TERMINATED: leaking it would let a replayed snapshot re-trigger the title/cwd
+/// side effect on a reattached terminal. Instead we keep consuming bytes until the terminator,
+/// bounded by this larger safety cap (matches `osc_parser`'s cap). Past the cap the sequence is
+/// no longer "plausibly terminated" — it is an unterminated fragment, almost certainly user
+/// output that merely STARTED with `ESC ] <ident> ;` (SES-5, audit 2026-07-24): the buffered
+/// bytes are then flushed DEFUSED (see [`flush_defused`]) rather than silently dropped.
 const RECOGNIZED_OSC_CAP: usize = 8192;
 
 pub struct ScrollbackRing {
@@ -63,16 +65,6 @@ const BEL: u8 = 0x07;
 struct Sanitizer {
     /// Bytes of an in-progress escape sequence not yet classified.
     carry: Vec<u8>,
-    /// Set once a recognized strippable OSC's carry has exceeded `RECOGNIZED_OSC_CAP` without
-    /// finding its terminator. While true, we have abandoned tracking the sequence's exact
-    /// bytes (the carry itself is cleared to bound memory) but we must NOT fail open like the
-    /// unrecognized-sequence path does — that would leak the tail of a recognized OSC
-    /// (including its terminator) into `out`/`snapshot()` (spec §11). Instead every
-    /// subsequent byte, in this call and any later `push()` calls, is dropped — never pushed
-    /// to `carry` or `out` — until the terminator (BEL or ESC `\`) is found, at which point we
-    /// drop it too and return to ground state. This mirrors the `overflowed` flag pattern in
-    /// the sibling `osc_parser.rs`.
-    discarding_until_terminator: bool,
 }
 
 #[derive(PartialEq)]
@@ -87,35 +79,12 @@ enum Verdict {
 
 impl Sanitizer {
     fn new() -> Self {
-        Sanitizer {
-            carry: Vec::new(),
-            discarding_until_terminator: false,
-        }
+        Sanitizer { carry: Vec::new() }
     }
 
     fn filter(&mut self, chunk: &[u8]) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(chunk.len());
         for &b in chunk {
-            if self.discarding_until_terminator {
-                // Abandoned an over-long recognized OSC: drop every byte (never push to
-                // `carry` or `out`) while scanning only for its terminator. BEL is a single
-                // terminator byte; ST is the two-byte `ESC \` — since we're not accumulating
-                // into `carry` here, we detect ST by looking for `\` immediately after we've
-                // already seen an ESC in this discarded stream. We track that with a tiny
-                // one-byte lookback via `carry` reused as a 0/1-length scratch buffer.
-                if b == BEL {
-                    self.discarding_until_terminator = false;
-                } else if b == b'\\' && self.carry.last() == Some(&ESC) {
-                    self.discarding_until_terminator = false;
-                    self.carry.clear();
-                } else if b == ESC {
-                    self.carry.clear();
-                    self.carry.push(ESC);
-                } else {
-                    self.carry.clear();
-                }
-                continue;
-            }
             if self.carry.is_empty() {
                 if b == ESC {
                     self.carry.push(b);
@@ -130,18 +99,19 @@ impl Sanitizer {
                 Verdict::Incomplete => {
                     if is_recognized_strippable_osc_prefix(&self.carry) {
                         // A recognized side-effecting OSC (title/OSC-7/OSC-133): it must
-                        // NEVER fail open, since leaking it would let a replayed snapshot
-                        // re-trigger the side effect (spec §11). Keep dropping bytes until
-                        // the terminator, bounded only by the larger safety cap.
+                        // NEVER fail open while still plausibly terminated, since leaking it
+                        // would let a replayed snapshot re-trigger the side effect (spec §11).
+                        // Keep holding bytes until the terminator, bounded by the larger cap.
                         if self.carry.len() > RECOGNIZED_OSC_CAP {
-                            // Adversarial/unterminated input: give up tracking the exact
-                            // bytes (bound memory by clearing the carry), but do NOT return
-                            // to ground state — enter discard-until-terminator mode so every
-                            // remaining byte of this same in-flight OSC (including its
-                            // eventual terminator), in this call or later push() calls, is
-                            // dropped rather than leaked into `out`.
-                            self.carry.clear();
-                            self.discarding_until_terminator = true;
+                            // SES-5 (audit 2026-07-24): past the cap this is no longer a real
+                            // OSC — it is an UNTERMINATED fragment, almost certainly user output
+                            // that merely started with `ESC ] <ident> ;` (the pre-fix code
+                            // silently dropped EVERYTHING from here until a terminator that
+                            // might never come, swallowing genuine output whole). Flush the
+                            // buffered bytes DEFUSED (leading ESC replaced by U+FFFD — without
+                            // it the sequence can never re-trigger on replay) and return to
+                            // ground state, so the rest of the user's output flows verbatim.
+                            flush_defused(&mut out, &mut self.carry);
                         }
                     } else if self.carry.len() > CARRY_CAP {
                         // Not a recognized strippable sequence: give up, fail open, flush
@@ -159,6 +129,21 @@ impl Sanitizer {
         }
         out
     }
+}
+
+/// Emit an abandoned over-long recognized-OSC carry as visible, inert text (SES-5): the leading
+/// ESC — the one byte that makes the sequence a control sequence at all — is replaced by U+FFFD,
+/// so the payload prints harmlessly and a replayed snapshot can never re-trigger the side
+/// effect, while genuine user output is not silently swallowed. Returns the state machine to
+/// ground (empty carry), so a LATE terminator arriving afterwards is just inert input (a lone
+/// BEL byte, or a lone `ESC \` kept verbatim by the ordinary classify path).
+fn flush_defused(out: &mut Vec<u8>, carry: &mut Vec<u8>) {
+    debug_assert_eq!(carry.first(), Some(&ESC));
+    out.extend_from_slice("�".as_bytes());
+    if carry.len() > 1 {
+        out.extend_from_slice(&carry[1..]);
+    }
+    carry.clear();
 }
 
 /// True once `seq` is unambiguously the start of a recognized strippable OSC — i.e. it has
@@ -427,86 +412,80 @@ mod tests {
     }
 
     #[test]
-    fn recognized_osc_exceeding_cap_across_multiple_pushes_never_leaks_payload_or_terminator() {
-        // Regression guard for the "clear() on cap overflow" bug: a recognized strippable
-        // OSC (title, ident "0") whose payload exceeds RECOGNIZED_OSC_CAP (8 KiB), fed across
-        // MANY push() calls, must be fully discarded — including its eventual terminator —
-        // even though the terminator arrives long after the cap was exceeded. If the carry is
-        // merely `clear()`-ed at the cap, the per-byte dispatch treats the (now-empty) carry
-        // as ground state and starts flushing the rest of the in-flight OSC (payload +
-        // terminator) straight into `out`, leaking it into the snapshot. That must not happen.
+    fn overlong_unterminated_recognized_osc_is_flushed_defused_not_swallowed() {
+        // SES-5 (audit 2026-07-24, probe p6): a recognized-prefix OSC (`ESC ] 0 ;`) that never
+        // terminates and grows past RECOGNIZED_OSC_CAP is user output, not a real OSC — the
+        // pre-fix discard-until-terminator mode swallowed ALL of it (plus everything after,
+        // until a terminator that might never come). Now the buffered bytes are flushed with
+        // the leading ESC defused to U+FFFD: the payload survives as inert text, a replayed
+        // snapshot can never re-trigger the side effect (no ESC byte), and the machine returns
+        // to ground state so subsequent output flows verbatim.
         let mut r = ScrollbackRing::new(1 << 20);
-        r.push(b"\x1b]0;"); // recognized title OSC prefix
-                            // 85 * 100 = 8500 bytes, comfortably past the 8192-byte RECOGNIZED_OSC_CAP, fed in
-                            // many separate push() calls to exercise the carry-across-push path.
+        r.push(b"pre\x1b]0;");
+        // 85 * 100 = 8500 payload bytes, comfortably past the 8192-byte cap, fed in many
+        // separate push() calls to exercise the carry-across-push boundary at the overflow.
         for _ in 0..85 {
             r.push(&[b'A'; 100]);
         }
-        r.push(&[BEL]); // the (still in-flight, now-late) terminator
-        r.push(b"prompt$ "); // trailing normal text after the OSC finally terminates
+        r.push(b"post");
         let snap = r.snapshot();
 
-        assert!(
-            !contains(&snap, b"AAAAAAAAAA"),
-            "over-long recognized OSC payload leaked into snapshot"
-        );
-        assert!(
-            !snap.contains(&BEL),
-            "OSC terminator (BEL) leaked into snapshot"
+        let mut expected = b"pre".to_vec();
+        expected.extend_from_slice("�]0;".as_bytes());
+        expected.extend(std::iter::repeat_n(b'A', 8500));
+        expected.extend_from_slice(b"post");
+        assert_eq!(
+            snap,
+            expected,
+            "over-long recognized OSC must be flushed DEFUSED (ESC -> U+FFFD), payload and trailing text intact"
         );
         assert!(
             !contains(&snap, b"\x1b]0;"),
-            "title OSC prefix leaked into snapshot"
+            "a live OSC prefix (with the ESC byte) must never survive the defused flush"
         );
+
+        // Ground state after the defused flush: a NORMAL, terminated recognized OSC arriving
+        // afterwards is still fully stripped (side-effect protection unchanged).
+        r.push(b"\x1b]2;secret title\x07visible");
+        let snap2 = r.snapshot();
         assert!(
-            contains(&snap, b"prompt$ "),
-            "trailing prompt text after the OSC was lost"
+            !contains(&snap2, b"secret title"),
+            "a well-formed terminated title OSC must still be stripped after an overflow"
         );
+        assert!(contains(&snap2, b"visible"));
     }
 
     #[test]
-    fn recognized_osc_st_terminator_split_across_two_pushes_in_discard_mode_never_leaks() {
-        // Regression guard, committed (a prior reviewer's probe covered this shape but it was
-        // never checked in — see Task 25). Distinct from
-        // `recognized_osc_exceeding_cap_across_multiple_pushes_never_leaks_payload_or_terminator`
-        // above: that test uses a BEL (single-byte) terminator arriving whole in one `push()`.
-        // This test specifically targets the ST terminator (`ESC` `\`, TWO bytes) being split
-        // across the `discarding_until_terminator` state boundary itself — `ESC` lands in one
-        // `push()` call and the closing `\` lands in the NEXT `push()` call. The
-        // `discarding_until_terminator` one-byte lookback (`self.carry` reused as a 0/1-length
-        // scratch buffer, see `Sanitizer::filter`) must survive across the call boundary so the
-        // second call's leading `\` is still recognized as completing the ST terminator rather
-        // than being treated as a fresh, unrelated byte (which would either leak it or fail to
-        // exit discard mode, corrupting everything after).
+    fn overlong_recognized_osc_late_terminator_bytes_are_inert_after_defuse() {
+        // Companion to the test above (SES-5): once the over-long fragment has been flushed
+        // defused, the state machine is back at ground — a LATE terminator is ordinary input.
+        // A lone BEL passes through as an inert byte (it cannot re-arm anything); a well-formed
+        // terminated recognized OSC afterwards is still stripped exactly as before.
         let mut r = ScrollbackRing::new(1 << 20);
-        // Enter discard-until-terminator mode: a title OSC (ident "0") whose payload exceeds
-        // RECOGNIZED_OSC_CAP (8192 bytes) within a single push().
-        r.push(b"pre\x1b]0;");
-        r.push(&[b'X'; RECOGNIZED_OSC_CAP + 100]); // carry.clear() + discarding_until_terminator=true
-                                                   // Now split the two-byte ST terminator itself across two separate push() calls: ESC in
-                                                   // this call, with NOTHING after it (so this push() ends mid-terminator).
-        r.push(&[ESC]);
-        // The closing '\' arrives in the NEXT push() call, followed by trailing normal text.
-        r.push(b"\\post");
+        r.push(b"\x1b]133;C");
+        r.push(&[b'X'; RECOGNIZED_OSC_CAP + 100]); // overflow -> defused flush, ground state
+        r.push(&[BEL]); // the late terminator: inert, kept as a plain byte
+        r.push(b"\x1b]0;t\x1b\\"); // a NORMAL terminated title OSC: still fully stripped
+        r.push(b"after");
         let snap = r.snapshot();
 
         assert!(
+            !contains(&snap, b"\x1b]133;"),
+            "live OSC-133 prefix must be defused, got: {snap:?}"
+        );
+        assert!(
+            contains(&snap, &[b'X'; 100]),
+            "the over-long payload must survive as inert text"
+        );
+        assert!(
+            snap.contains(&BEL),
+            "a lone late BEL is inert user output and is kept honestly"
+        );
+        assert!(
             !contains(&snap, b"\x1b]0;"),
-            "title OSC prefix leaked into snapshot: {snap:?}"
+            "a normal terminated title OSC must still be stripped"
         );
-        assert!(
-            !snap.windows(20).any(|w| w.iter().all(|&b| b == b'X')),
-            "over-long recognized OSC payload leaked into snapshot: {snap:?}"
-        );
-        assert!(
-            !contains(&snap, &[ESC, b'\\']),
-            "ST terminator (split across two push() calls) leaked into snapshot: {snap:?}"
-        );
-        assert_eq!(
-            snap,
-            b"prepost".to_vec(),
-            "only the text before and after the discarded OSC must survive, got: {snap:?}"
-        );
+        assert!(contains(&snap, b"after"), "trailing text must flow");
     }
 
     #[test]

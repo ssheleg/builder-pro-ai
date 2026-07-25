@@ -107,6 +107,10 @@ fn open_db_degrading(app_support: &Path) -> Db {
 /// sends can already succeed via [`crate::pty_supervisor::Supervisor::rehydrate_inactive`] and the
 /// existing `AttachSession → Push::Replay` path (attach.rs), no new wire request needed.
 ///
+/// Lifecycle honesty (SES-3, audit 2026-07-24): `Db::list_sessions` already reconciles a persisted
+/// `running` to `Exited { code: None }` on the read path (see `persistence.rs::query_sessions`), so
+/// the entries installed here never claim a dead PTY is still running.
+///
 /// Best-effort at both levels: a failure to list persisted sessions at all is logged and this
 /// function simply rehydrates nothing (the daemon still boots — spec §11, persistence is
 /// best-effort, never a boot-blocking dependency); a failure to rehydrate ONE session (or to load

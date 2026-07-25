@@ -525,8 +525,25 @@ impl Db {
         self.query_sessions()
     }
 
+    /// Test-only RAW read of a session's persisted lifecycle tag, bypassing `query_sessions`'s
+    /// SES-3 `running -> Exited{None}` read-path reconciliation — `socket_server.rs`'s
+    /// flush-freshness test asserts on the WRITE side (the flush must persist the current
+    /// `running` tag), which the reconciling read path would otherwise mask.
+    #[cfg(test)]
+    pub(crate) fn raw_lifecycle_tag(&self, session_id: &str) -> String {
+        self.conn
+            .query_row(
+                "SELECT lifecycle FROM session WHERE id = ?1",
+                rusqlite::params![session_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     /// Rehydrate on restart (spec §11): every session is is_active=false,
-    /// waiting_for_input=false because its PTY is gone.
+    /// waiting_for_input=false because its PTY is gone — and a persisted `running`
+    /// lifecycle comes back as `Exited { code: None }` for the same reason (SES-3,
+    /// see [`Self::query_sessions`]).
     pub fn rehydrate(&self) -> Result<Vec<SessionMeta>, PersistError> {
         self.query_sessions()
     }
@@ -535,6 +552,17 @@ impl Db {
     /// `is_active`/`waiting_for_input` state (those are runtime-only, in-memory
     /// concepts — S1 never persists `true` for either), so both accessors always
     /// return `false` for them; the two names exist for call-site clarity.
+    ///
+    /// Lifecycle reconciliation (SES-3, audit 2026-07-24, probe p3): a persisted `running`
+    /// row only means "a flush tick fired while a command ran" — the PTY it described is
+    /// necessarily gone by the time this row is read back (a daemon restart, or a reaped
+    /// session), so handing it out as `Running` is a lie: a dead session claiming to run
+    /// (the UI would show a spinner forever). It is mapped to `Exited { code: None }`
+    /// ("unknown/aborted", the protocol's own semantics for `code: None`). `AtPrompt` is
+    /// NOT remapped: an idle shell restored PTY-less is honestly "at prompt" — that is the
+    /// 0.10.0 "restored" semantics. Genuinely LIVE sessions are unaffected: `ListSessions`
+    /// overlays the supervisor's in-memory meta over these rows, so this mapping only ever
+    /// surfaces for sessions no living PTY backs.
     fn query_sessions(&self) -> Result<Vec<SessionMeta>, PersistError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, workspace_id, title, shell, cwd, cols, rows,
@@ -570,6 +598,14 @@ impl Db {
         for row in rows {
             let (mut meta, tag, exit_code, exit_signal) = row?;
             meta.lifecycle = decode_lifecycle(&tag, exit_code, exit_signal)?;
+            // SES-3 (see the fn doc): a persisted `running` is a dead session's lie once read
+            // back — reconcile to `Exited { code: None }` (unknown/aborted).
+            if matches!(meta.lifecycle, SessionLifecycle::Running) {
+                meta.lifecycle = SessionLifecycle::Exited {
+                    code: None,
+                    signal: None,
+                };
+            }
             out.push(meta);
         }
         Ok(out)
@@ -671,6 +707,18 @@ impl Db {
     /// [`remove_workspace_root`](Self::remove_workspace_root) already returns for an unknown id
     /// (`PersistError::Sql("workspace {id} not found")`, wire code `"DbSql"`), deliberately mirrored
     /// rather than given a new variant so clients need no new error handling for the new verb.
+    /// Whether a `workspace` row with this id exists — plain boolean, no not-found error
+    /// shaping (SES-1/SES-4, audit 2026-07-24: `CreateSession`'s up-front gate owns the typed
+    /// `NoSuchWorkspace` error; this is just the lookup).
+    pub fn workspace_exists(&self, workspace_id: &WorkspaceId) -> Result<bool, PersistError> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM workspace WHERE id = ?1",
+            rusqlite::params![workspace_id],
+            |r| r.get(0),
+        )?;
+        Ok(exists > 0)
+    }
+
     pub fn workspace_session_ids(
         &self,
         workspace_id: &WorkspaceId,
@@ -931,14 +979,22 @@ mod tests {
         // rehydrated sessions are never active and never waiting
         assert!(!s.is_active);
         assert!(!s.waiting_for_input);
-        assert_eq!(s.lifecycle, SessionLifecycle::Running);
+        // SES-3: a persisted `running` is a dead PTY's lie once read back — it rehydrates as
+        // `Exited { code: None }` (unknown/aborted), never as `Running`.
+        assert_eq!(
+            s.lifecycle,
+            SessionLifecycle::Exited {
+                code: None,
+                signal: None
+            }
+        );
 
         let sb = db.load_scrollback(&"s1".to_string()).unwrap();
         assert_eq!(sb, b"hello world");
     }
 
     #[test]
-    fn every_lifecycle_variant_round_trips() {
+    fn every_lifecycle_variant_round_trips_except_running_maps_to_exited() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("bpa.db")).unwrap();
         db.upsert_workspace(&ws("w1")).unwrap();
@@ -982,7 +1038,56 @@ mod tests {
         let got = db.rehydrate().unwrap();
         for (id, lc) in &variants {
             let m = got.iter().find(|m| &m.id == id).expect("session present");
-            assert_eq!(&m.lifecycle, lc, "lifecycle mismatch for {id}");
+            // SES-3: `Running` is the ONE variant that does NOT round-trip verbatim — a
+            // persisted `running` describes a PTY that is gone by read time, so it comes back
+            // as `Exited { code: None }` (see `query_sessions`). Everything else round-trips.
+            let expected = if matches!(lc, SessionLifecycle::Running) {
+                SessionLifecycle::Exited {
+                    code: None,
+                    signal: None,
+                }
+            } else {
+                lc.clone()
+            };
+            assert_eq!(m.lifecycle, expected, "lifecycle mismatch for {id}");
+        }
+    }
+
+    /// Focused SES-3 regression (audit 2026-07-24, probe p3): a daemon killed -9 mid-command
+    /// leaves a `running` lifecycle row; after restart the restored session must report
+    /// `Exited { code: None }`, not a spinner-forever `Running` — while a live `atPrompt`
+    /// keeps the honest "restored idle shell" semantics (NOT remapped).
+    #[test]
+    fn persisted_running_rehydrates_as_exited_unknown_but_at_prompt_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.upsert_workspace(&ws("w1")).unwrap();
+            db.upsert_session(&meta("mid-cmd", "w1", SessionLifecycle::Running))
+                .unwrap();
+            db.upsert_session(&meta("idle", "w1", SessionLifecycle::AtPrompt))
+                .unwrap();
+        }
+        // Reopen = the restart boundary the probe exercises.
+        let db = Db::open(&path).unwrap();
+        for accessor in [Db::list_sessions, Db::rehydrate] {
+            let sessions = accessor(&db).unwrap();
+            let mid_cmd = sessions.iter().find(|m| m.id == "mid-cmd").unwrap();
+            assert_eq!(
+                mid_cmd.lifecycle,
+                SessionLifecycle::Exited {
+                    code: None,
+                    signal: None
+                },
+                "a persisted running must never come back claiming to run"
+            );
+            let idle = sessions.iter().find(|m| m.id == "idle").unwrap();
+            assert_eq!(
+                idle.lifecycle,
+                SessionLifecycle::AtPrompt,
+                "atPrompt keeps the 0.10.0 restored semantics"
+            );
         }
     }
 
@@ -1208,12 +1313,21 @@ mod tests {
         let events = db.list_command_events(&"s1".to_string(), 10).unwrap();
         assert_eq!(events.len(), 1);
 
-        // The pre-existing v1 session row survived the migration untouched.
+        // The pre-existing v1 session row survived the migration — its `running` lifecycle
+        // reads back as `Exited { code: None }` (SES-3: a persisted `running` is a dead PTY's
+        // lie once read back; the migration must not disturb the ROW, the read-path
+        // reconciliation is what maps it).
         let sessions = db.rehydrate().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "s1");
         assert_eq!(sessions[0].workspace_id, "w1");
-        assert_eq!(sessions[0].lifecycle, SessionLifecycle::Running);
+        assert_eq!(
+            sessions[0].lifecycle,
+            SessionLifecycle::Exited {
+                code: None,
+                signal: None
+            }
+        );
 
         // S2 §3.2: the v1 workspace also picked up an ord=0 workspace_root backfill row on
         // its way through v2 -> v3.

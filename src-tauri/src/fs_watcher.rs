@@ -196,28 +196,60 @@ fn rel_to_wire_string(rel: &Path) -> String {
 }
 
 /// Pure batch filter (spec §5): map raw `notify` event paths to deduped, capped, per-root
-/// `FsEvent::Changed` payloads. For each path: find its owning root (dropped if none matches,
-/// spec: "a path that belongs to none of the roots is dropped"); drop `.git`-internal paths
-/// unconditionally; drop gitignored paths unless `show_ignored`; dedup within each root's set;
-/// cap at [`WATCH_PATH_CAP`] (overflow collapses to `["*"]`). One `FsEvent::Changed` per root that
-/// had at least one surviving path in this batch — a batch spanning multiple roots' subtrees
-/// (all roots share one `Debouncer`/thread) yields one event per affected root, never a merged one.
+/// `FsEvent::Changed` payloads. For each path: find its owning root by LONGEST-prefix match
+/// (dropped if none matches, spec: "a path that belongs to none of the roots is dropped"); drop
+/// `.git`-internal paths unconditionally; drop gitignored paths unless `show_ignored`; dedup
+/// within each root's set; cap at [`WATCH_PATH_CAP`] (overflow collapses to `["*"]`). One
+/// `FsEvent::Changed` per root that had at least one surviving path in this batch — a batch
+/// spanning multiple roots' subtrees (all roots share one `Debouncer`/thread) yields one event
+/// per affected root, never a merged one.
+///
+/// FS-1/FS-2 (audit 2026-07-24, SUS-1/SUS-2): an event on a watched ROOT ITSELF (an FSEvents
+/// overflow/rescan reports the subtree root; a mid-watch delete/rename of the root reports its
+/// own path) used to be dropped by the empty-rel guard, leaving the frontend silently stale.
+/// Now: a root that still EXISTS yields the `["*"]` full-refresh sentinel (a wholesale change
+/// no point-refresh can express); a root that VANISHED yields an honest [`FsEvent::WatchError`]
+/// for that root (the frontend shows its "live updates paused" affordance and re-arms on next
+/// activation).
+///
+/// FS-6 (audit 2026-07-24, SUS-6): with NESTED roots (`outer`, `outer/sub`), routing used to be
+/// first-match-in-Vec order, so an event under `outer/sub` could be attributed to the OUTER
+/// root (and the inner root's tree node never refreshed). Longest-prefix wins, order-free.
 pub(crate) fn build_changed_events(
     raw_paths: &[PathBuf],
     roots: &[RootMatcher],
     show_ignored: bool,
 ) -> Vec<FsEvent> {
     let mut buckets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut vanished_roots: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     for path in raw_paths {
         let Some((matcher, rel)) = roots
             .iter()
-            .find_map(|m| path.strip_prefix(&m.root_path).ok().map(|rel| (m, rel)))
+            .filter_map(|m| path.strip_prefix(&m.root_path).ok().map(|rel| (m, rel)))
+            .max_by_key(|(m, _)| m.root_path.as_os_str().len())
         else {
             continue; // belongs to none of the watched roots
         };
 
         if is_git_internal(rel) {
+            continue;
+        }
+
+        let rel_str = rel_to_wire_string(rel);
+        if rel_str.is_empty() {
+            // The event is on the root itself (FS-1/FS-2): sentinel or honest WatchError —
+            // never silently swallowed.
+            if path.exists() {
+                buckets
+                    .entry(matcher.root.clone())
+                    .or_default()
+                    .insert("*".to_string());
+            } else {
+                vanished_roots
+                    .entry(matcher.root.clone())
+                    .or_insert_with(|| path.clone());
+            }
             continue;
         }
 
@@ -234,27 +266,35 @@ pub(crate) fn build_changed_events(
             continue;
         }
 
-        let rel_str = rel_to_wire_string(rel);
-        if rel_str.is_empty() {
-            continue; // the root directory itself — nothing for the frontend to point-refresh
-        }
         buckets
             .entry(matcher.root.clone())
             .or_default()
             .insert(rel_str);
     }
 
-    buckets
+    let mut out: Vec<FsEvent> = buckets
         .into_iter()
         .map(|(root, set)| {
-            let rel_paths = if set.len() > WATCH_PATH_CAP {
+            // The full-refresh sentinel dominates: once anything wholesale happened to a root
+            // (a root-self event, or the path cap overflowing), point-refreshes for individual
+            // paths under it are redundant.
+            let rel_paths = if set.len() > WATCH_PATH_CAP || set.contains("*") {
                 vec!["*".to_string()]
             } else {
                 set.into_iter().collect()
             };
             FsEvent::Changed { root, rel_paths }
         })
-        .collect()
+        .collect();
+    out.extend(
+        vanished_roots
+            .into_iter()
+            .map(|(root, path)| FsEvent::WatchError {
+                root,
+                reason: format!("watched root no longer exists: {}", path.display()),
+            }),
+    );
+    out
 }
 
 /// Pure mapping from a debounced batch's `Err(errors)` arm (spec §5: watcher error -> honest
@@ -638,16 +678,50 @@ mod tests {
     }
 
     #[test]
-    fn the_root_directory_itself_produces_no_entry() {
+    fn the_root_directory_itself_yields_the_full_refresh_sentinel() {
+        // FS-1/FS-2: an event on the root ITSELF (overflow/rescan, wholesale change) must not be
+        // swallowed — a root that still exists collapses to the ["*"] sentinel.
         let (_tmp, root) = plain_root();
         let matchers = vec![matcher_for("root-key", &root)];
         let raw = vec![root.clone()];
 
         let events = build_changed_events(&raw, &matchers, false);
-        assert!(
-            events.is_empty(),
-            "the root path itself must not be a rel-path entry, got {events:?}"
+        assert_eq!(
+            events,
+            vec![FsEvent::Changed {
+                root: "root-key".to_string(),
+                rel_paths: vec!["*".to_string()],
+            }]
         );
+    }
+
+    #[test]
+    fn the_root_directory_itself_when_vanished_yields_a_watch_error() {
+        // FS-1: same shape, but the root no longer exists on disk — the honest signal is a
+        // WatchError (paused affordance), not a refresh of a dead subtree. Pure-level pin; the
+        // real-notify end-to-end proof is
+        // `watched_root_deletion_mid_session_emits_a_watch_error` below.
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("never-existed");
+        let matchers = vec![RootMatcher {
+            root: "root-key".to_string(),
+            root_path: gone.clone(),
+            gitignore: ignore::gitignore::Gitignore::empty(),
+        }];
+        let raw = vec![gone.clone()];
+
+        let events = build_changed_events(&raw, &matchers, false);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            FsEvent::WatchError { root, reason } => {
+                assert_eq!(root, "root-key");
+                assert!(
+                    reason.contains("no longer exists"),
+                    "the reason must say the root vanished, got: {reason}"
+                );
+            }
+            other => panic!("expected WatchError for a vanished root, got {other:?}"),
+        }
     }
 
     // ── build_watch_error_events ────────────────────────────────────────────────────────────────
@@ -927,5 +1001,190 @@ mod tests {
         // The debouncer itself still starts fine (zero roots watched) and is stored — a later
         // reactivation with a valid root would still work, since start REPLACES the slot.
         assert!(slot.lock().unwrap().is_some());
+    }
+
+    // ── FS-1/FS-2 (audit 2026-07-24, SUS-1/SUS-2): deleting/renaming the watched ROOT mid-session
+    // now surfaces honestly (WatchError for a vanished root, ["*"] for a wholesale change). ──────
+
+    /// desired (was pin_sus1_watched_root_deletion_mid_session_produces_no_event): pre-fix,
+    /// deleting the watched root mid-session produced NO signal at all — notify's ROOT_CHANGED
+    /// event carries the root's own path, which the empty-rel guard dropped, and no WatchError
+    /// fired either; the tree went silently stale. Now the vanished root yields an honest
+    /// `fs://watch-error` (the frontend shows its paused affordance).
+    #[test]
+    fn watched_root_deletion_mid_session_emits_a_watch_error() {
+        let (_tmp, root) = git_root();
+        let sink = CapturingSink::default();
+        let slot = new_watch_slot();
+        let root_key = root.to_string_lossy().into_owned();
+
+        start_watch_inner(&slot, sink.clone(), vec![root_key.clone()], false);
+        std::thread::sleep(Duration::from_millis(200));
+
+        // sanity: the watch IS live — a normal write is delivered.
+        fs::write(root.join("alive.txt"), b"hi").unwrap();
+        let saw_alive = wait_for(Duration::from_secs(3), || {
+            sink.events().iter().any(|e| {
+                matches!(e, FsEvent::Changed { rel_paths, .. } if rel_paths.iter().any(|p| p == "alive.txt"))
+            })
+        });
+        assert!(
+            saw_alive,
+            "watch must be live before the probe, got {:?}",
+            sink.events()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+
+        // desired: a WatchError for the vanished root arrives (FS-1).
+        let saw_watch_error = wait_for(Duration::from_secs(5), || {
+            sink.events()
+                .iter()
+                .any(|e| matches!(e, FsEvent::WatchError { root: r, .. } if r == &root_key))
+        });
+        assert!(
+            saw_watch_error,
+            "root deletion must surface an honest WatchError, got {:?}",
+            sink.events()
+        );
+
+        stop_watch_inner(&slot);
+    }
+
+    /// desired (was pin_sus1_watched_root_rename_mid_session_produces_no_event): pre-fix, a
+    /// mid-session rename of the watched root was swallowed the same way — and subsequent writes
+    /// under the NEW path were dropped because they no longer `strip_prefix` the OLD canonical
+    /// root. Now the OLD root's disappearance yields a WatchError; writes under the new path stay
+    /// dropped (the frontend re-arms the watch with the new path on next activation — spec §5).
+    #[test]
+    fn watched_root_rename_mid_session_emits_a_watch_error_for_the_old_path() {
+        let (_tmp, root) = git_root();
+        let renamed = root.parent().unwrap().join("root-renamed");
+        let sink = CapturingSink::default();
+        let slot = new_watch_slot();
+        let root_key = root.to_string_lossy().into_owned();
+
+        start_watch_inner(&slot, sink.clone(), vec![root_key.clone()], false);
+        std::thread::sleep(Duration::from_millis(200));
+
+        // sanity: live delivery under the original path.
+        fs::write(root.join("alive.txt"), b"hi").unwrap();
+        let saw_alive = wait_for(Duration::from_secs(3), || {
+            sink.events().iter().any(|e| {
+                matches!(e, FsEvent::Changed { rel_paths, .. } if rel_paths.iter().any(|p| p == "alive.txt"))
+            })
+        });
+        assert!(
+            saw_alive,
+            "watch must be live before the probe, got {:?}",
+            sink.events()
+        );
+
+        fs::rename(&root, &renamed).unwrap();
+
+        // desired: a WatchError for the OLD (now-vanished) root path arrives (FS-1).
+        let saw_watch_error = wait_for(Duration::from_secs(5), || {
+            sink.events()
+                .iter()
+                .any(|e| matches!(e, FsEvent::WatchError { root: r, .. } if r == &root_key))
+        });
+        assert!(
+            saw_watch_error,
+            "root rename must surface an honest WatchError for the old path, got {:?}",
+            sink.events()
+        );
+
+        // Writes under the NEW path are still dropped by design (no matcher owns them) — the
+        // frontend re-arms the watch with the new root on activation.
+        let baseline = sink.events().len();
+        fs::write(renamed.join("after-rename.txt"), b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let delivered_for_new_path = sink.events()[baseline..].iter().any(|e| {
+            matches!(e, FsEvent::Changed { rel_paths, .. } if rel_paths.iter().any(|p| p.contains("after-rename")))
+        });
+        assert!(
+            !delivered_for_new_path,
+            "writes under the renamed path must not be attributed to the old root, got {:?}",
+            &sink.events()[baseline..]
+        );
+
+        stop_watch_inner(&slot);
+    }
+
+    // ── FS-2 (audit 2026-07-24, SUS-2): an FSEvents overflow/rescan becomes a full refresh ──────
+
+    /// desired (was pin_sus2_root_path_itself_yields_nothing_not_even_refresh_sentinel): an
+    /// overflowed FSEvents delivery reduces, by the time it reaches this pure filter, to the
+    /// watched root's own path. Pre-fix the empty-rel guard dropped it → ZERO events → silent
+    /// desync. Now the (still-existing) root collapses to the `["*"]` refresh-everything
+    /// sentinel — the same shape the path-cap overflow already used.
+    #[test]
+    fn root_path_itself_yields_the_full_refresh_sentinel() {
+        let (_tmp, root) = plain_root();
+        let matchers = vec![matcher_for("root-key", &root)];
+        let raw = vec![root.clone()];
+
+        let events = build_changed_events(&raw, &matchers, false);
+        assert_eq!(
+            events,
+            vec![FsEvent::Changed {
+                root: "root-key".to_string(),
+                rel_paths: vec!["*".to_string()],
+            }]
+        );
+    }
+
+    // ── FS-6 (audit 2026-07-24, SUS-6): nested roots route by LONGEST prefix, not Vec order ─────
+
+    /// desired (was pin_sus6_nested_roots_route_to_first_match_not_longest_prefix): with nested
+    /// roots `[outer, outer/sub]`, an event for a file under `outer/sub` must be attributed to
+    /// the INNER root regardless of registration order — first-match used to make routing
+    /// Vec-order luck.
+    #[test]
+    fn nested_roots_route_by_longest_prefix_regardless_of_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().join("r");
+        let inner = outer.join("sub");
+        fs::create_dir(&outer).unwrap();
+        fs::create_dir(&inner).unwrap();
+        let outer_key = outer.to_string_lossy().into_owned();
+        let inner_key = inner.to_string_lossy().into_owned();
+        let raw = vec![inner.join("f.txt")];
+
+        for matchers in [
+            vec![
+                matcher_for(&outer_key, &outer),
+                matcher_for(&inner_key, &inner),
+            ],
+            vec![
+                matcher_for(&inner_key, &inner),
+                matcher_for(&outer_key, &outer),
+            ],
+        ] {
+            let events = build_changed_events(&raw, &matchers, false);
+            assert_eq!(
+                events,
+                vec![FsEvent::Changed {
+                    root: inner_key.clone(),
+                    rel_paths: vec!["f.txt".to_string()],
+                }],
+                "longest-prefix routing must win regardless of Vec order"
+            );
+        }
+
+        // An event under the OUTER root (but outside the inner one) still routes to the outer.
+        let raw_outer = vec![outer.join("top.txt")];
+        let matchers = vec![
+            matcher_for(&outer_key, &outer),
+            matcher_for(&inner_key, &inner),
+        ];
+        let events = build_changed_events(&raw_outer, &matchers, false);
+        assert_eq!(
+            events,
+            vec![FsEvent::Changed {
+                root: outer_key.clone(),
+                rel_paths: vec!["top.txt".to_string()],
+            }]
+        );
     }
 }

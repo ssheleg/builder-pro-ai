@@ -8,7 +8,8 @@
 //! §13).
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Locked identity (spec Global Constraints). Kept as the sessiond call site's canonical value
 /// (`lib.rs::build_launchd_agent`) — the parameterization (S3 T11) is purely additive, so this
@@ -35,14 +36,59 @@ pub trait LaunchctlRunner: Send + Sync {
 /// Real runner used in production; shells out to `/bin/launchctl`.
 pub struct RealLaunchctl;
 
+/// REL-7 (audit 2026-07-24): hard bound on any single `launchctl` invocation. A hung `launchctl`
+/// (wedged service manager, blocked XPC round-trip) previously wedged the GUI's boot path
+/// forever — `Command::output()` waits unboundedly. 15 s is generous for any real
+/// bootstrap/kickstart/print while turning a hang into a bounded, typed boot failure (spec §13's
+/// actionable banner) instead of an infinite one.
+const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Poll interval for the child-exit watch inside [`run_command_with_timeout`].
+const LAUNCHCTL_POLL: Duration = Duration::from_millis(25);
+
 impl LaunchctlRunner for RealLaunchctl {
     fn run(&self, args: &[&str]) -> std::io::Result<LaunchctlOutput> {
-        let out = Command::new("/bin/launchctl").args(args).output()?;
-        Ok(LaunchctlOutput {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        run_command_with_timeout("/bin/launchctl", args, LAUNCHCTL_TIMEOUT)
+    }
+}
+
+/// Run `prog <args...>` capturing stdout/stderr, bounded by `timeout` (REL-7). On expiry the
+/// child is killed and reaped (no zombie/orphan process left behind) and the call returns
+/// `ErrorKind::TimedOut`. No new dependencies: `Child::try_wait` + a short sleep poll — the
+/// added ≤[`LAUNCHCTL_POLL`] latency per call is negligible next to launchd's own round-trip,
+/// and launchctl's output is always far below the pipe buffer, so the collect-after-exit read
+/// can never deadlock on a full pipe.
+fn run_command_with_timeout(
+    prog: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<LaunchctlOutput> {
+    let mut child = Command::new(prog)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            // Exited: pipes are at EOF, and `wait()` reuses the cached exit status.
+            let out = child.wait_with_output()?;
+            return Ok(LaunchctlOutput {
+                code: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait(); // reap: never leave a zombie behind
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{prog} {args:?} did not exit within {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(LAUNCHCTL_POLL);
     }
 }
 
@@ -102,7 +148,11 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// stderr/exit-code signals launchd already knows this label (idempotent bootstrap).
+/// stderr/exit-code signals launchd already knows this label (idempotent bootstrap). This is a
+/// SUCCESS signal, never a drift trigger: an already-bootstrapped service means the daemon is
+/// loaded (and possibly RUNNING live sessions) — the boot path must not touch it (REL-1, audit
+/// 2026-07-24). Plist drift on an already-loaded service is the upgrade flow's job
+/// (`upgrade_daemon` → [`LaunchdAgent::kickstart_force`] behind the consent dialog), not boot's.
 fn is_already_signal(out: &LaunchctlOutput) -> bool {
     let s = out.stderr.to_ascii_lowercase();
     out.code == 5 || s.contains("already")
@@ -180,38 +230,42 @@ impl<'a> LaunchdAgent<'a> {
         )
     }
 
-    /// Write the plist (spec §8.3) to `launch_agents_dir`, ensuring the dir exists.
+    /// Write the plist (spec §8.3) to `launch_agents_dir`, ensuring the dir exists. The write is
+    /// ATOMIC (REL-7, audit 2026-07-24): the plist goes to a temp sibling first and is then
+    /// `rename(2)`d over the target — atomic within one filesystem on macOS — so a crash/kill
+    /// mid-write can never leave a TRUNCATED plist behind for the next bootstrap to load
+    /// half-parsed (a corrupt LaunchAgent is strictly worse than a missing one).
     pub fn install_agent(&self) -> Result<PathBuf, LaunchdError> {
         std::fs::create_dir_all(&self.launch_agents_dir)?;
         std::fs::create_dir_all(self.logs_dir())?;
         let path = self.plist_path();
-        std::fs::write(&path, self.render_plist())?;
+        let tmp = self
+            .launch_agents_dir
+            .join(format!(".{}.tmp", self.plist_filename()));
+        std::fs::write(&tmp, self.render_plist())?;
+        std::fs::rename(&tmp, &path)?;
         tracing::info!(plist = %path.display(), "installed LaunchAgent plist");
         Ok(path)
     }
 
-    /// `launchctl bootstrap gui/<uid> <plist>`; "already bootstrapped" == success;
-    /// on plist drift bootout+re-bootstrap.
+    /// `launchctl bootstrap gui/<uid> <plist>`; "already bootstrapped" == success, FULL STOP.
+    ///
+    /// REL-1 (audit 2026-07-24): the pre-fix code treated the "already" signal as plist drift and
+    /// ran `bootout` + re-bootstrap — but `bootout` on an already-loaded service KILLS the running
+    /// daemon (and every live session it holds), so every single GUI launch destroyed the very
+    /// daemon it was about to connect to. An already-loaded service is exactly what a healthy
+    /// second launch looks like, so it is plain idempotent success here. Genuine plist drift (old
+    /// daemon binary loaded from an older install) is reconciled by the upgrade flow
+    /// (`upgrade_daemon` → [`Self::kickstart_force`]), which is consent-gated precisely because it
+    /// restarts the daemon — never by the boot path.
     pub fn bootstrap(&self) -> Result<(), LaunchdError> {
         let plist = self.plist_path();
         let plist_str = plist.to_string_lossy().into_owned();
         let domain = self.domain_target();
 
         let out = self.runner.run(&["bootstrap", &domain, &plist_str])?;
-        if out.code == 0 {
+        if out.code == 0 || is_already_signal(&out) {
             return Ok(());
-        }
-        if is_already_signal(&out) {
-            // Drift: bootout then re-bootstrap once. bootout's own exit code is
-            // best-effort (the target may already be gone) — only the retry matters.
-            tracing::warn!(stderr = %out.stderr, "service already bootstrapped; rebootstrapping");
-            let target = self.service_target();
-            let _ = self.runner.run(&["bootout", &target])?;
-            let retry = self.runner.run(&["bootstrap", &domain, &plist_str])?;
-            if retry.code == 0 || is_already_signal(&retry) {
-                return Ok(());
-            }
-            return Err(LaunchdError::Install(retry.stderr));
         }
         Err(LaunchdError::Install(out.stderr))
     }
@@ -224,6 +278,11 @@ impl<'a> LaunchdAgent<'a> {
     /// [10]/[16] of the final-review wave) and bypassing the upgrade consent dialog before the
     /// handshake even gets a chance to raise `IncompatibleDaemon`. See [`Self::kickstart_force`]
     /// for the force-restart variant used by the upgrade flow.
+    ///
+    /// The same "boot never kills" rule drives [`Self::bootstrap`]'s REL-1 semantics: its
+    /// "already bootstrapped" signal is plain idempotent success (no `bootout`), and any plist
+    /// drift on an already-loaded service is reconciled HERE — by the consent-gated upgrade flow
+    /// (`upgrade_daemon` → [`Self::kickstart_force`]) — never by the boot path.
     pub fn kickstart(&self) -> Result<(), LaunchdError> {
         let target = self.service_target();
         let out = self.runner.run(&["kickstart", &target])?;
@@ -507,19 +566,23 @@ mod tests {
 
     #[test]
     fn bootstrap_already_bootstrapped_is_success() {
-        // first bootstrap -> "already"; drift path: bootout(ok) then bootstrap(ok)
-        let mock = MockLaunchctl::new(vec![already(), ok(), ok()]);
+        // REL-1 (audit 2026-07-24): "already bootstrapped" is plain idempotent success — the
+        // pre-fix drift path ran `bootout` (which KILLS the running daemon and every live
+        // session it holds) on every GUI launch. Now: exactly ONE launchctl call, never bootout.
+        let mock = MockLaunchctl::new(vec![already()]);
         let tmp = tempfile::tempdir().unwrap();
         let a = agent(&mock, tmp.path());
         a.install_agent().unwrap();
         a.bootstrap()
             .expect("already-bootstrapped must be idempotent success");
         let calls = mock.calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "already-bootstrapped must NOT trigger bootout/re-bootstrap, got {calls:?}"
+        );
         assert_eq!(calls[0][0], "bootstrap");
         assert_eq!(calls[0][1], "gui/501");
-        assert_eq!(calls[1][0], "bootout");
-        assert_eq!(calls[1][1], "gui/501/ai.builderpro.desktop.sessiond");
-        assert_eq!(calls[2][0], "bootstrap");
     }
 
     #[test]
@@ -635,5 +698,66 @@ mod tests {
             }
             o => panic!("expected DaemonPath error, got {o:?}"),
         }
+    }
+
+    // ---- REL-7 (audit 2026-07-24): bounded launchctl + atomic plist install. ----
+
+    #[test]
+    fn run_command_with_timeout_collects_output_and_exit_code() {
+        let out = run_command_with_timeout("/bin/echo", &["hi"], Duration::from_secs(5)).unwrap();
+        assert_eq!(out.code, 0);
+        assert_eq!(out.stdout, "hi\n");
+    }
+
+    #[test]
+    fn run_command_with_timeout_propagates_a_nonzero_exit() {
+        let out = run_command_with_timeout("/usr/bin/false", &[], Duration::from_secs(5)).unwrap();
+        assert_eq!(out.code, 1);
+    }
+
+    #[test]
+    fn run_command_with_timeout_kills_a_hung_child_and_returns_timed_out() {
+        let start = Instant::now();
+        let err = run_command_with_timeout("/bin/sleep", &["30"], Duration::from_millis(150))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "got {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the call must return promptly after the timeout, not wait out the child"
+        );
+        // The killed child was reaped via `wait()` — nothing to assert directly without a pid
+        // handle, but a zombie would surface as a leaked `<defunct>` under load; the kill+wait
+        // ordering is covered by the prompt-return assertion above.
+    }
+
+    #[test]
+    fn install_agent_is_atomic_no_tmp_left_and_replaces_stale_plist() {
+        let mock = MockLaunchctl::new(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let a = agent(&mock, tmp.path());
+
+        let plist_path = a.install_agent().unwrap();
+        // Simulate a stale/corrupt install from an earlier crashed run.
+        std::fs::write(&plist_path, b"GARBAGE-TRUNCATED").unwrap();
+
+        let plist_path = a.install_agent().unwrap();
+        let contents = std::fs::read_to_string(&plist_path).unwrap();
+        assert!(
+            contents.contains("ai.builderpro.desktop.sessiond"),
+            "re-install must atomically REPLACE the stale plist, got: {contents}"
+        );
+        assert!(
+            !contents.contains("GARBAGE-TRUNCATED"),
+            "stale bytes must be fully gone after the atomic replace"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(a.launch_agents_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp-install sibling may survive install_agent, got {leftovers:?}"
+        );
     }
 }

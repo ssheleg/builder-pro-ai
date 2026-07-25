@@ -389,4 +389,38 @@ mod tests {
         let err = validate_parent_within(&root, &target).unwrap_err();
         assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
     }
+
+    // -- SUS-5 audit probes: the containment boundary has no workspace allowlist -----------------
+
+    /// pin: current behavior — `validate_path_within` is a PURE canonical-containment check
+    /// against whatever `root` the caller supplies; nothing cross-checks `root` against the
+    /// workspaces registered in the app store. With `root == "/"` ANY existing absolute path is
+    /// "within" it, so a caller passing `root: "/"` (e.g. from the frontend, whose `root` arg is
+    /// trusted blindly by every fs command) is accepted for `/etc/passwd` and anything else the
+    /// OS user can read. desired: `root` validated against a registered-workspace allowlist
+    /// before any fs operation honors it.
+    #[test]
+    fn pin_sus5_validate_path_within_with_root_slash_accepts_etc_passwd() {
+        let got = validate_path_within(Path::new("/"), Path::new("/etc/passwd"))
+            .expect("pin: no allowlist — root \"/\" trivially contains everything");
+        assert!(got.ends_with("passwd"), "got {got:?}");
+    }
+
+    /// Control for SUS-5: within a REAL workspace root the same function is still fail-closed —
+    /// a symlink inside the root resolving outside it is rejected (pin of the good behavior, so
+    /// the SUS-5 finding is scoped precisely to "no allowlist", not "containment broken").
+    #[test]
+    fn pin_sus5_control_real_root_symlink_escape_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"top").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let err = validate_path_within(&root, &link.join("secret.txt")).unwrap_err();
+        assert!(matches!(err, PathError::SymlinkEscape(_)), "got {err:?}");
+    }
 }
