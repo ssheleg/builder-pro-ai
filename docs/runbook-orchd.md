@@ -2,9 +2,12 @@
 
 Everything here uses REAL identifiers from the code (verified 2026-07-13, S3). `bpa-orchd` is the
 SECOND per-user LaunchAgent — the app-domain store (projects / goals / ideas / insights / tasks /
-rulesets). It has **no live runtime state to lose**: every domain row lives in `orchd.db`
-(SQLite), so restarting or upgrading it never loses data the way killing `bpa-sessiond` ends live
-shells. See the survival truth table in the platform overview §2 / `README.md`.
+rulesets). It has **no PTYs and no live sessions**, but it is NOT free of live runtime state: an
+in-flight **research run** is a live tokio task, so a restart interrupts it (the next boot's
+reconcile marks it `failed{interrupted}`) — see "Research runs" below. Every committed domain row
+lives in `orchd.db` (SQLite), so data at rest never goes away the way killing `bpa-sessiond` ends
+live shells. See the survival truth table in the platform overview §2
+(`docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md`).
 
 ## Locations
 
@@ -39,9 +42,11 @@ pgrep -fl bpa-orchd
 
 ## Restart
 
-> Unlike `bpa-sessiond`, restarting `bpa-orchd` does **not** end any live work — it has no PTYs,
-> no live sessions. Every project/goal/idea/insight/task/ruleset row survives (SQLite), and
-> in-flight requests just get a `Disconnected` the GUI retries against the reconnected daemon.
+> Restarting `bpa-orchd` does not kill PTYs (it has none), but it DOES end live work when a
+> **research run** is in flight: the run's MCP call dies with the process and the next boot
+> reconciles the row to `failed{interrupted}` — check for running research before a manual
+> restart. Everything committed survives (SQLite), and in-flight requests just get a
+> `Disconnected` the GUI retries against the reconnected daemon.
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/ai.builderpro.desktop.orchd
@@ -73,14 +78,15 @@ bounded-retry connect sequence used at boot — no app restart needed for a plai
 
 The one-time developer reset: drop just the SQLite store (and its `-wal`/`-shm` sidecars) while
 leaving the LaunchAgent, rules markdown, logs, and socket in place. The daemon recreates a fresh
-schema-v4 `orchd.db` at its next boot, so this is the fastest way to start from an empty domain
-store on your own machine (e.g. after a dev run left stale rows).
+`orchd.db` at the current schema version at its next boot, so this is the fastest way to start
+from an empty domain store on your own machine (e.g. after a dev run left stale rows).
 
 ```bash
 launchctl bootout gui/$(id -u)/ai.builderpro.desktop.orchd 2>/dev/null
 rm -f ~/Library/Application\ Support/ai.builderpro.desktop/orchd.db*
 # Relaunch the app (or `launchctl kickstart -k gui/$(id -u)/ai.builderpro.desktop.orchd`) —
-# boot recreates orchd.db with schema v4 and re-seeds the global ruleset row idempotently.
+# boot recreates orchd.db with the current schema and re-seeds the global ruleset row
+# idempotently.
 ```
 
 The `orchd.db*` glob covers `orchd.db`, `orchd.db-wal`, and `orchd.db-shm`. This touches ONLY
@@ -113,8 +119,9 @@ rm ~/Library/LaunchAgents/ai.builderpro.desktop.orchd.plist
 ## DB quarantine (corruption recovery)
 
 On open, a corrupt/not-a-database image is **quarantined, not fatal**: the daemon renames it to
-`orchd.db.corrupt-<unix-ts>` in place and recreates a fresh schema-v4 database
-(`crates/orchd/src/persistence.rs`, mirrors `bpa-sessiond`'s identical quarantine behavior). To
+`orchd.db.corrupt-<unix-ts>` in place and recreates a fresh database at the current schema
+version (`crates/orchd/src/persistence.rs`, mirrors `bpa-sessiond`'s identical quarantine
+behavior). To
 attempt manual recovery, inspect the quarantined file with `sqlite3`; there is no automatic
 re-import — use `ExportAll`/`ImportBundle` (a project or whole-store JSON export/import, see the
 S3 spec §8) as the supported recovery path once the daemon is back up on a fresh DB.

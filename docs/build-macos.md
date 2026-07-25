@@ -174,10 +174,10 @@ What each step does:
 2. **`scripts/sign-verify.sh [path-to-.app]`** (defaults to the path
    `tauri build --target universal-apple-darwin` produces)
    - `codesign --verify --deep --strict --verbose=2 <app>` — the whole bundle,
-     including the embedded sidecar, must have a complete, valid signature.
-   - Locates the embedded `bpa-sessiond` inside `<app>/Contents/` and verifies its
-     signature individually (a clearer failure message than relying solely on
-     `--deep` if something about the sidecar's signing specifically is broken).
+     including the embedded sidecars, must have a complete, valid signature.
+   - Locates each embedded sidecar (`bpa-sessiond` and `bpa-orchd`) inside `<app>/Contents/`
+     and verifies each signature individually (a clearer failure message than relying solely on
+     `--deep` if something about a sidecar's signing specifically is broken).
    - `spctl --assess --type execute --verbose=4 <app>` — the actual Gatekeeper
      policy check. This is the one that distinguishes a merely-signed build from a
      notarized one: `codesign --verify` can pass on an ad-hoc/dev-signed build,
@@ -225,8 +225,8 @@ This script:
    bootstrap in `src-tauri/src/launchd.rs` (writes
    `~/Library/LaunchAgents/ai.builderpro.desktop.sessiond.plist`,
    `launchctl bootstrap gui/$UID <plist>`).
-3. Polls for up to 30s for `bpa-sessiond` to appear as a running process (proves
-   launchd actually started the daemon, not just that the plist was written).
+3. Polls for up to 30s for BOTH `bpa-sessiond` and `bpa-orchd` to appear as running processes
+   (proves launchd actually started the daemons, not just that the plists were written).
 4. Hands off to the T23 E2E harness's **launchd-managed variant**:
    ```sh
    BPA_E2E_EXTERNAL_DAEMON=1 node tests/e2e/survive-restart.mjs

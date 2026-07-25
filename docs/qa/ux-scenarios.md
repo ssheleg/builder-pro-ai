@@ -1,5 +1,11 @@
 # UX-scenario catalog — Builder Pro AI
 
+> **SUPERSEDED (2026-07-24):** the maintained source of truth for user-facing scenarios is now
+> [`docs/ux/scenarios.md`](../ux/scenarios.md) (the super-ux chain, SCN-### entries with audits).
+> This file is kept as a frozen historical record of the 181-scenario catalog (`synced @ fdf1439`)
+> — do not update it, and do not treat its statuses as current. `CONTRIBUTING.md` and
+> `scripts/check-ux-scenarios.sh` point at the new catalog.
+
 **synced @ fdf1439**
 
 > Reviewed against the Soft Control Room design v2 migration (fdf1439): that change restyles

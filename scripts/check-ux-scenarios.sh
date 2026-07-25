@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# scripts/check-ux-scenarios.sh — ADVISORY reminder to keep docs/qa/ux-scenarios.md in sync
-# (S-UXR spec A2). If a change touches user-facing UI (src/components/**, src/App.tsx, src/store/**)
+# scripts/check-ux-scenarios.sh — ADVISORY reminder to keep docs/ux/scenarios.md in sync
+# (S-UXR spec A2; repointed to the super-ux catalog in the 2026-07-24 audit remediation). If a change touches user-facing UI (src/components/**, src/App.tsx, src/store/**)
 # but does NOT also update docs/qa/ux-scenarios.md in the same range, it prints a loud WARNING and
 # lists the changed files.
 #
@@ -18,7 +18,7 @@ cd "$REPO"
 
 BASE="${1:-HEAD~1}"
 HEAD_REF="${2:-HEAD}"
-CATALOG="docs/qa/ux-scenarios.md"
+CATALOG="docs/ux/scenarios.md"
 
 # No comparable base (shallow clone, or the very first commit) → nothing to compare, skip quietly.
 if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
@@ -35,8 +35,8 @@ if [[ -n "$ui_changed" && -z "$catalog_changed" ]]; then
   printf '  %s\n' $ui_changed >&2
   echo >&2
   echo "  Per CONTRIBUTING.md (UX scenarios rule): any change to a user-facing control, view, or" >&2
-  echo "  state — or a UI-consumed wire verb — must update $CATALOG in the SAME change (edit the" >&2
-  echo "  affected rows + bump the 'synced @ <commit>' header)." >&2
+  echo "  state — or a UI-consumed wire verb — must update $CATALOG in the SAME change (add/" >&2
+  echo "  adjust the affected scenarios, statuses, and coverage cites)." >&2
   echo "  This is an ADVISORY reminder — it does NOT fail the build." >&2
   exit 0
 fi
