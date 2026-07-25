@@ -269,7 +269,23 @@ primitives + theme suites, the WCAG-AA contrast guard, the diagnostics ring / `r
 crate's existing boot-path tests (the single row with no dedicated named test, honestly flagged as
 such above). This completeness sweep now extends through `[0.9.2]`.
 
-## Test totals — current (S-UXR/S-DESIGN/S-DIAG/BL-101, `[0.9.2]`, 2026-07-19)
+## Test totals — current (audit remediation sweep, `[Unreleased]`, 2026-07-24)
+
+- Rust workspace (`cargo test --workspace`): **1260 tests**, 0 failed — measured on
+  `audit-remediation-2026-07-24` (the `[0.10.0]` baseline measured 1170; the audit remediation
+  adds ~90: workspace guards, SEC/DOM/FS regression tests, the flipped fs pin-tests).
+- TypeScript (`npx vitest run`): **1270 tests**, **71 test files**, 0 failed — measured on the same
+  branch (`[0.10.0]` had 1130/63; +140 tests incl. the refresh-guard suite and the flipped UX
+  probes, +8 files).
+- E2E: `npm run e2e:survive` and `npm run e2e:orchd` — ALL PHASES PASSED on the branch.
+- Coverage: `bpa-sessiond` and `bpa-orchd` both ≥ 80% lines (`scripts/coverage-gate.sh`).
+- `scripts/final-suite.sh` is **11 stages** since the sweep (blocking `docs/ux/lint.py` added as
+  stage 2). The completeness sweep above extends through `[0.9.2]`; `[0.10.0]` contracts are
+  covered by `crates/sessiond/tests/remove_workspace.rs`, the stats epoch/family-cut tests, the
+  Docs panel tests, and the SW1 workflow tests — adding their rows here is tracked in the
+  audit's DOC-4 follow-up.
+
+## Test totals — historical (S-UXR/S-DESIGN/S-DIAG/BL-101, `[0.9.2]`, 2026-07-19)
 
 - Rust workspace (`cargo test --workspace`, `RUST_TEST_THREADS=4`): **1072 tests**, 0 failed —
   measured this pass via `cargo test --workspace -- --list | grep -c ': test$'` → 1072. Delta vs.
