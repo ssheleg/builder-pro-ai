@@ -54,6 +54,7 @@ export const strings = {
       tooLarge: "file is too large",
       alreadyExists: "a file with this name already exists",
       io: "I/O error",
+      disconnected: "daemon disconnected",
     },
     /** `describeCommandError` branches (FileTree). */
     command: {

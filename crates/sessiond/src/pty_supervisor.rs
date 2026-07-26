@@ -56,6 +56,7 @@ use crate::live_grid::LiveGrid;
 use crate::osc_parser::{advance_lifecycle, OscEvent, OscParser};
 use crate::scrollback::ScrollbackRing;
 
+use bpa_protocol::sync::lock;
 use bpa_protocol::{SessionId, SessionLifecycle, SessionMeta, WorkspaceId};
 
 /// Per-session sanitized scrollback ring capacity (spec §11: 256 KiB).
@@ -271,16 +272,41 @@ impl Supervisor {
         }
     }
 
+    /// BL-124 test-only seam: poison the `sessions` map's mutex exactly the way production gets
+    /// poisoned — a thread takes the guard (through the raw std API, not the tolerant helper) and
+    /// panics while holding it. Lets tests prove poison-tolerant acquisition
+    /// (`bpa_protocol::sync::lock`) keeps the supervisor — and with it the persistence flusher and
+    /// every dispatch arm — serving after a contained panic, where the old `.lock().unwrap()`
+    /// would have panicked on every later call, forever (the audit's "reader/flusher panics once,
+    /// the terminal/daemon is dead for the rest of the process's life" scenario).
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn poison_sessions_map_for_test(&self) {
+        std::thread::scope(|s| {
+            let panicked = s
+                .spawn(|| {
+                    let _guard = self.sessions.lock().unwrap();
+                    panic!("deliberate test panic under the sessions-map guard");
+                })
+                .join();
+            assert!(panicked.is_err(), "the poisoning thread must panic");
+        });
+        assert!(
+            self.sessions.is_poisoned(),
+            "precondition: the sessions map is now poisoned"
+        );
+    }
+
     /// Register the status callback (fired on lifecycle/cwd/waiting-for-input changes while a
     /// session is live). The broker translates each [`StatusUpdate`] into `Push::StateChanged`.
     pub fn on_status<F: Fn(StatusUpdate) + Send + Sync + 'static>(&self, cb: F) {
-        *self.on_status.lock().unwrap() = Some(Arc::new(cb));
+        *lock(&self.on_status) = Some(Arc::new(cb));
     }
 
     /// Register the created callback (fired once per successful [`create`](Self::create)).
     /// → `Push::SessionCreated`.
     pub fn on_created<F: Fn(SessionMeta) + Send + Sync + 'static>(&self, cb: F) {
-        *self.on_created.lock().unwrap() = Some(Arc::new(cb));
+        *lock(&self.on_created) = Some(Arc::new(cb));
     }
 
     /// Register the exited callback (fired once, from the wait thread, when the child is reaped).
@@ -289,7 +315,7 @@ impl Supervisor {
         &self,
         cb: F,
     ) {
-        *self.on_exited.lock().unwrap() = Some(Arc::new(cb));
+        *lock(&self.on_exited) = Some(Arc::new(cb));
     }
 
     /// Open one session: `openpty` → `spawn_command` → capture `pgid` → **drop slave** → wire the
@@ -300,7 +326,7 @@ impl Supervisor {
         // attempt, so the backoff sleep never holds the global `pty_system` mutex (other creates
         // are not blocked while this one waits for ptys to free up).
         let pair = retry_transient(OPENPTY_MAX_ATTEMPTS, OPENPTY_RETRY_BACKOFF, || {
-            self.pty_system.lock().unwrap().openpty(PtySize {
+            lock(&self.pty_system).openpty(PtySize {
                 rows: spec.rows,
                 cols: spec.cols,
                 pixel_width: 0,
@@ -368,7 +394,7 @@ impl Supervisor {
 
         // ---- Reader thread (§9.4): the ONLY writer of parser/grid/scrollback from bytes. ----
         let reader_shared = shared.clone();
-        let status_cb_reader = self.on_status.lock().unwrap().clone();
+        let status_cb_reader = lock(&self.on_status).clone();
         let reader_thread = std::thread::Builder::new()
             .name(format!("bpa-reader-{id}"))
             .spawn(move || {
@@ -386,19 +412,19 @@ impl Supervisor {
                         }
                         Ok(n) => {
                             let chunk = &buf[..n];
-                            *reader_shared.last_output.lock().unwrap() = Instant::now();
+                            *lock(&reader_shared.last_output) = Instant::now();
 
                             // (a) OSC parser: advance lifecycle + track cwd.
                             let events = parser.feed(chunk);
                             let mut status_dirty = false;
                             for ev in &events {
                                 {
-                                    let mut lc = reader_shared.lifecycle.lock().unwrap();
+                                    let mut lc = lock(&reader_shared.lifecycle);
                                     advance_lifecycle(&mut lc, ev);
                                 }
                                 match ev {
                                     OscEvent::Cwd(path) => {
-                                        *reader_shared.cwd.lock().unwrap() = path.clone();
+                                        *lock(&reader_shared.cwd) = path.clone();
                                     }
                                     OscEvent::CommandStart => {
                                         push_command_event(&reader_shared, "started", None);
@@ -412,8 +438,8 @@ impl Supervisor {
                             }
 
                             // (b) live grid, (c) sanitized scrollback ring.
-                            reader_shared.grid.lock().unwrap().feed(chunk);
-                            reader_shared.scrollback.lock().unwrap().push(chunk);
+                            lock(&reader_shared.grid).feed(chunk);
+                            lock(&reader_shared.scrollback).push(chunk);
 
                             // (d) live broadcast — verbatim bytes to every attached subscriber.
                             // The parser is a side-channel extractor and does NOT filter the
@@ -422,10 +448,7 @@ impl Supervisor {
                             // failure means that subscriber's receiver (and its forwarder) is
                             // gone, so we drop its entry here rather than waiting for an explicit
                             // `unsubscribe_output` — no leaked dead senders accumulate.
-                            reader_shared
-                                .sinks
-                                .lock()
-                                .unwrap()
+                            lock(&reader_shared.sinks)
                                 .retain(|(_, tx)| tx.send(chunk.to_vec()).is_ok());
 
                             if status_dirty {
@@ -437,7 +460,7 @@ impl Supervisor {
                         }
                     }
                 }
-                *reader_shared.is_active.lock().unwrap() = false;
+                *lock(&reader_shared.is_active) = false;
                 // Reader is the only producer into every subscribed sink. Clearing them all here
                 // drops every std-channel Sender, so each attached forwarder drains its queued
                 // bytes and then observes `Disconnected` — graceful end-of-stream instead of
@@ -451,13 +474,13 @@ impl Supervisor {
                 // unchanged). Whenever EOF (or `Err`/EIO) does arrive, both loop-break arms fall
                 // through to this single reader-exit tail (Pv2 §5.1: extends the single-sink
                 // truncation-fix design to N subscribers — every one gets the same graceful close).
-                reader_shared.sinks.lock().unwrap().clear();
+                lock(&reader_shared.sinks).clear();
             })
             .map_err(|e| SupervisorError::Spawn(format!("reader thread: {e}")))?;
 
         // ---- Wait thread (§9.6): owns the Child; reaps and records exit status. ----
         let wait_shared = shared.clone();
-        let exited_cb = self.on_exited.lock().unwrap().clone();
+        let exited_cb = lock(&self.on_exited).clone();
         let wait_thread = std::thread::Builder::new()
             .name(format!("bpa-wait-{id}"))
             .spawn(move || {
@@ -477,14 +500,14 @@ impl Supervisor {
                         (None, None)
                     }
                 };
-                *wait_shared.is_active.lock().unwrap() = false;
-                *wait_shared.exit_code.lock().unwrap() = code;
-                *wait_shared.exit_signal.lock().unwrap() = signal.clone();
-                *wait_shared.lifecycle.lock().unwrap() = SessionLifecycle::Exited {
+                *lock(&wait_shared.is_active) = false;
+                *lock(&wait_shared.exit_code) = code;
+                *lock(&wait_shared.exit_signal) = signal.clone();
+                *lock(&wait_shared.lifecycle) = SessionLifecycle::Exited {
                     code,
                     signal: signal.clone(),
                 };
-                *wait_shared.waiting.lock().unwrap() = false;
+                *lock(&wait_shared.waiting) = false;
                 if let Some(cb) = &exited_cb {
                     cb(wait_shared.id.clone(), code, signal);
                 }
@@ -495,20 +518,20 @@ impl Supervisor {
         let ticker_shared = shared.clone();
         let ticker_stop = Arc::new(Mutex::new(false));
         let ticker_stop_thread = ticker_stop.clone();
-        let status_cb_ticker = self.on_status.lock().unwrap().clone();
+        let status_cb_ticker = lock(&self.on_status).clone();
         let ticker_thread = std::thread::Builder::new()
             .name(format!("bpa-tick-{id}"))
             .spawn(move || loop {
                 std::thread::sleep(TICK);
-                if *ticker_stop_thread.lock().unwrap() {
+                if *lock(&ticker_stop_thread) {
                     break;
                 }
-                if !*ticker_shared.is_active.lock().unwrap() {
+                if !*lock(&ticker_shared.is_active) {
                     break;
                 }
-                let before = *ticker_shared.waiting.lock().unwrap();
+                let before = *lock(&ticker_shared.waiting);
                 recompute_waiting(&ticker_shared);
-                let after = *ticker_shared.waiting.lock().unwrap();
+                let after = *lock(&ticker_shared.waiting);
                 if before != after {
                     if let Some(cb) = &status_cb_ticker {
                         emit_status(cb, &ticker_shared);
@@ -531,9 +554,9 @@ impl Supervisor {
             }),
         });
 
-        self.sessions.lock().unwrap().insert(id.clone(), session);
+        lock(&self.sessions).insert(id.clone(), session);
 
-        if let Some(cb) = self.on_created.lock().unwrap().clone() {
+        if let Some(cb) = lock(&self.on_created).clone() {
             // meta() cannot fail here (we just inserted the session), but degrade gracefully.
             if let Ok(meta) = self.meta(&id) {
                 cb(meta);
@@ -543,9 +566,7 @@ impl Supervisor {
     }
 
     fn get(&self, id: &str) -> Result<Arc<Session>, SupervisorError> {
-        self.sessions
-            .lock()
-            .unwrap()
+        lock(&self.sessions)
             .get(id)
             .cloned()
             .ok_or_else(|| SupervisorError::NoSuchSession(id.to_string()))
@@ -559,7 +580,7 @@ impl Supervisor {
     pub fn write_stdin(&self, id: &str, bytes: &[u8]) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
         let pty = self.require_pty(&s, id)?;
-        let mut w = pty.writer.lock().unwrap();
+        let mut w = lock(&pty.writer);
         w.write_all(bytes)
             .map_err(|e| SupervisorError::Io(format!("write_all: {e}")))?;
         w.flush()
@@ -573,9 +594,7 @@ impl Supervisor {
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), SupervisorError> {
         let s = self.get(id)?;
         let pty = self.require_pty(&s, id)?;
-        pty.master
-            .lock()
-            .unwrap()
+        lock(&pty.master)
             .resize(PtySize {
                 rows,
                 cols,
@@ -583,9 +602,9 @@ impl Supervisor {
                 pixel_height: 0,
             })
             .map_err(|e| SupervisorError::Pty(format!("resize: {e}")))?;
-        *s.shared.cols.lock().unwrap() = cols;
-        *s.shared.rows.lock().unwrap() = rows;
-        s.shared.grid.lock().unwrap().resize(cols, rows);
+        *lock(&s.shared.cols) = cols;
+        *lock(&s.shared.rows) = rows;
+        lock(&s.shared.grid).resize(cols, rows);
         Ok(())
     }
 
@@ -633,8 +652,8 @@ impl Supervisor {
         // Either way a fresh sink is never left installed with no producer to drop it. Nothing
         // anywhere holds `is_active` while acquiring `sinks`, so nesting this short `is_active`
         // acquire under the sinks lock cannot deadlock.
-        let mut sinks_guard = s.shared.sinks.lock().unwrap();
-        if !*s.shared.is_active.lock().unwrap() {
+        let mut sinks_guard = lock(&s.shared.sinks);
+        if !*lock(&s.shared.is_active) {
             return Err(SupervisorError::NoSuchSession(id.to_string()));
         }
         sinks_guard.push((sub_id, sink));
@@ -647,20 +666,16 @@ impl Supervisor {
     /// callers (e.g. a detaching connection) never need to special-case "already gone".
     pub fn unsubscribe_output(&self, id: &str, sub_id: u64) {
         if let Ok(s) = self.get(id) {
-            s.shared
-                .sinks
-                .lock()
-                .unwrap()
-                .retain(|(sid, _)| *sid != sub_id);
+            lock(&s.shared.sinks).retain(|(sid, _)| *sid != sub_id);
         }
     }
 
     /// `(cols, rows, sanitized_scrollback_bytes)` — the payload for `Push::Replay` (spec §6.2/§11).
     pub fn snapshot_scrollback(&self, id: &str) -> Result<(u16, u16, Vec<u8>), SupervisorError> {
         let s = self.get(id)?;
-        let cols = *s.shared.cols.lock().unwrap();
-        let rows = *s.shared.rows.lock().unwrap();
-        let bytes = s.shared.scrollback.lock().unwrap().snapshot();
+        let cols = *lock(&s.shared.cols);
+        let rows = *lock(&s.shared.rows);
+        let bytes = lock(&s.shared.scrollback).snapshot();
         Ok((cols, rows, bytes))
     }
 
@@ -671,7 +686,7 @@ impl Supervisor {
     /// the only place these events reach the DB.
     pub fn drain_command_events(&self, id: &str) -> Vec<CommandEvent> {
         match self.get(id) {
-            Ok(s) => std::mem::take(&mut *s.shared.pending_command_events.lock().unwrap()),
+            Ok(s) => std::mem::take(&mut *lock(&s.shared.pending_command_events)),
             Err(_) => Vec::new(),
         }
     }
@@ -683,12 +698,12 @@ impl Supervisor {
         let s = self.get(id)?;
         let sh = s.shared.clone();
         // Collect each field into a local so every MutexGuard is dropped before `s`/`sh`.
-        let cwd = sh.cwd.lock().unwrap().clone();
-        let cols = *sh.cols.lock().unwrap();
-        let rows = *sh.rows.lock().unwrap();
-        let lifecycle = sh.lifecycle.lock().unwrap().clone();
-        let waiting_for_input = *sh.waiting.lock().unwrap();
-        let is_active = *sh.is_active.lock().unwrap();
+        let cwd = lock(&sh.cwd).clone();
+        let cols = *lock(&sh.cols);
+        let rows = *lock(&sh.rows);
+        let lifecycle = lock(&sh.lifecycle).clone();
+        let waiting_for_input = *lock(&sh.waiting);
+        let is_active = *lock(&sh.is_active);
         Ok(SessionMeta {
             id: sh.id.clone(),
             workspace_id: sh.workspace_id.clone(),
@@ -723,12 +738,12 @@ impl Supervisor {
             }
             let start = Instant::now();
             while start.elapsed() < KILL_GRACE {
-                if !*s.shared.is_active.lock().unwrap() {
+                if !*lock(&s.shared.is_active) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            if *s.shared.is_active.lock().unwrap() {
+            if *lock(&s.shared.is_active) {
                 // Grace elapsed and the child is still alive: escalate to SIGKILL on the group.
                 unsafe {
                     libc::killpg(pgid, libc::SIGKILL);
@@ -736,19 +751,19 @@ impl Supervisor {
             }
         }
         // Always kill the immediate child + reap it (join the wait thread) to avoid a zombie.
-        let _ = pty.killer.lock().unwrap().kill();
-        *pty.ticker_stop.lock().unwrap() = true;
-        if let Some(h) = pty.wait_thread.lock().unwrap().take() {
+        let _ = lock(&pty.killer).kill();
+        *lock(&pty.ticker_stop) = true;
+        if let Some(h) = lock(&pty.wait_thread).take() {
             let _ = h.join();
         }
-        if let Some(h) = pty.reader_thread.lock().unwrap().take() {
+        if let Some(h) = lock(&pty.reader_thread).take() {
             let _ = h.join();
         }
-        if let Some(h) = pty.ticker_thread.lock().unwrap().take() {
+        if let Some(h) = lock(&pty.ticker_thread).take() {
             let _ = h.join();
         }
         // Drop the session from the live map: its PTY is gone and it must not be re-driven.
-        self.sessions.lock().unwrap().remove(id);
+        lock(&self.sessions).remove(id);
         Ok(())
     }
 
@@ -765,11 +780,11 @@ impl Supervisor {
     /// (that's [`kill`](Self::kill), which actually signals the process); a caller must not be able
     /// to silently "remove" a live session out from under its running child instead of killing it.
     pub fn remove_inactive(&self, id: &str) -> Result<(), SupervisorError> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = lock(&self.sessions);
         let Some(s) = sessions.get(id) else {
             return Err(SupervisorError::NoSuchSession(id.to_string()));
         };
-        if *s.shared.is_active.lock().unwrap() {
+        if *lock(&s.shared.is_active) {
             return Err(SupervisorError::NoSuchSession(id.to_string()));
         }
         sessions.remove(id);
@@ -782,7 +797,7 @@ impl Supervisor {
     /// this loop swallows like any other per-id failure, leaving the entry in the map (harmless:
     /// the whole process is exiting either way).
     pub fn shutdown_all(&self) {
-        let ids: Vec<SessionId> = self.sessions.lock().unwrap().keys().cloned().collect();
+        let ids: Vec<SessionId> = lock(&self.sessions).keys().cloned().collect();
         for id in ids {
             let _ = self.kill(&id);
         }
@@ -813,9 +828,9 @@ impl Supervisor {
         scrollback: Vec<u8>,
     ) -> Result<(), SupervisorError> {
         {
-            let sessions = self.sessions.lock().unwrap();
+            let sessions = lock(&self.sessions);
             if let Some(existing) = sessions.get(&meta.id) {
-                if *existing.shared.is_active.lock().unwrap() {
+                if *lock(&existing.shared.is_active) {
                     // A live session always wins over a stale persisted copy.
                     return Ok(());
                 }
@@ -851,10 +866,7 @@ impl Supervisor {
         });
 
         let session = Arc::new(Session { shared, pty: None });
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(meta.id.clone(), session);
+        lock(&self.sessions).insert(meta.id.clone(), session);
         Ok(())
     }
 }
@@ -871,25 +883,21 @@ impl Default for Supervisor {
 /// sweep in `socket_server.rs` drains and persists these separately.
 fn push_command_event(shared: &Arc<Shared>, kind: &'static str, exit_code: Option<u8>) {
     let seq = shared.command_seq.fetch_add(1, Ordering::SeqCst);
-    shared
-        .pending_command_events
-        .lock()
-        .unwrap()
-        .push(CommandEvent {
-            seq,
-            ts: now_secs(),
-            kind,
-            exit_code,
-        });
+    lock(&shared.pending_command_events).push(CommandEvent {
+        seq,
+        ts: now_secs(),
+        kind,
+        exit_code,
+    });
 }
 
 /// Build + fire a [`StatusUpdate`] from the current shared state.
 fn emit_status(cb: &StatusCb, shared: &Arc<Shared>) {
     cb(StatusUpdate {
         session_id: shared.id.clone(),
-        lifecycle: shared.lifecycle.lock().unwrap().clone(),
-        waiting_for_input: *shared.waiting.lock().unwrap(),
-        cwd: shared.cwd.lock().unwrap().clone(),
+        lifecycle: lock(&shared.lifecycle).clone(),
+        waiting_for_input: *lock(&shared.waiting),
+        cwd: lock(&shared.cwd).clone(),
     });
 }
 
@@ -900,10 +908,10 @@ fn emit_status(cb: &StatusCb, shared: &Arc<Shared>) {
 /// child-forgeable (§10.3) and the tty/grid signals are inherently racy, so the broker/UI must
 /// never present this as certain.
 fn recompute_waiting(shared: &Arc<Shared>) {
-    let is_running = matches!(*shared.lifecycle.lock().unwrap(), SessionLifecycle::Running);
-    let quiescent = shared.last_output.lock().unwrap().elapsed() >= QUIESCENT;
+    let is_running = matches!(*lock(&shared.lifecycle), SessionLifecycle::Running);
+    let quiescent = lock(&shared.last_output).elapsed() >= QUIESCENT;
     let (not_alt, not_col0) = {
-        let grid = shared.grid.lock().unwrap();
+        let grid = lock(&shared.grid);
         (!grid.is_alt_screen(), grid.cursor_col() != 0)
     };
     let line_mode = match shared.master_fd {
@@ -911,7 +919,7 @@ fn recompute_waiting(shared: &Arc<Shared>) {
         None => false, // fail-safe: no fd ⇒ cannot confirm canonical line mode.
     };
     let waiting = is_running && line_mode && not_alt && quiescent && not_col0;
-    *shared.waiting.lock().unwrap() = waiting;
+    *lock(&shared.waiting) = waiting;
 }
 
 /// True iff the PTY line discipline currently has both `ICANON` and `ECHO` set (canonical line

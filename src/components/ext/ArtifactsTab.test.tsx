@@ -23,6 +23,7 @@ function makeArtifact(over: Partial<McpArtifact> = {}): McpArtifact {
     contentJson: '{"ok":true}',
     contentText: "hello world",
     isUntrusted: true,
+    truncated: null,
     createdAt: 1_720_000_000_000,
     ...over,
   };

@@ -52,6 +52,7 @@ function makeArtifact(over: Partial<McpArtifact> = {}): McpArtifact {
     contentJson: '{"raw":true}',
     contentText: "market is large",
     isUntrusted: true,
+    truncated: null,
     createdAt: 1,
     ...over,
   };

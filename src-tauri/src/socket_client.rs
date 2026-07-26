@@ -36,6 +36,7 @@ use bpa_protocol::preamble::encode_daemon_reply;
 use bpa_protocol::preamble::{
     decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply, PREAMBLE_TIMEOUT,
 };
+use bpa_protocol::sync::lock;
 use bpa_protocol::{
     encode_frame, Frame, FrameDecoder, Push, Request, Response, CLIENT_MAX_VERSION,
     CLIENT_MIN_VERSION,
@@ -445,6 +446,51 @@ impl DaemonClient {
     /// request that *is* in flight when the connection drops still resolves to `Disconnected` via
     /// the existing `pending` drain in `connection_task`, unaffected by this check.
     pub async fn request(&self, req: Request) -> Result<Response, ClientError> {
+        // The single per-request completion-tracing choke-point on the CORE side (spec D4):
+        // one structured `info!` line per request, covering ALL Tauri command handlers at the
+        // one layer they share (they all funnel through here) instead of a per-handler edit.
+        // Mirrors `OrchdClient::request`'s trace exactly (BL-125: the two clients had drifted —
+        // this line existed only on the orchd side). `verb` is the exhaustive, low-cardinality
+        // `Request::verb_name` (reused verbatim from the daemon's own dispatch trace); the line
+        // carries verb + outcome + error_code + elapsed only — never the request args/body or the
+        // error `message` (which can hold paths).
+        let verb = req.verb_name();
+        let started = std::time::Instant::now();
+        let result = self.request_inner(req).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(_) => {
+                tracing::info!(verb, outcome = "ok", elapsed_ms, "daemon request completed");
+            }
+            Err(e) => {
+                // A low-cardinality code name only — the daemon-side `Response::Error` code for
+                // a rejected request, or the client-transport failure variant otherwise. Never
+                // the accompanying `message`.
+                let error_code: &str = match e {
+                    ClientError::Daemon { code, .. } => code,
+                    ClientError::Disconnected => "Disconnected",
+                    ClientError::IncompatibleDaemon { .. } => "IncompatibleDaemon",
+                    ClientError::RequestTooLarge { .. } => "RequestTooLarge",
+                };
+                tracing::info!(
+                    verb,
+                    outcome = "err",
+                    error_code,
+                    elapsed_ms,
+                    "daemon request completed"
+                );
+            }
+        }
+        result
+    }
+
+    /// The transport half of [`request`](Self::request): allocate a monotonic id, send
+    /// `Frame::Request { id, .. }`, and await the correlated `Response` (a `Response::Error`
+    /// already arrives here as `Err(ClientError::Daemon)` — mapped by the connection task).
+    /// Split out so the completion trace above wraps a single call and sees every outcome,
+    /// including the pre-enqueue disconnected short-circuit. Mirrors
+    /// `OrchdClient::request_inner` exactly.
+    async fn request_inner(&self, req: Request) -> Result<Response, ClientError> {
         if !self.shared.live.load(Ordering::Acquire) {
             return Err(ClientError::Disconnected);
         }
@@ -473,7 +519,7 @@ impl DaemonClient {
     /// registered; each receives every push. Callbacks must not block (they run inline on the
     /// connection task) — hand off to a channel/spawn for anything slow.
     pub fn on_push(&self, cb: impl Fn(Push) + Send + 'static) {
-        self.shared.push_cb.lock().unwrap().push(Box::new(cb));
+        lock(&self.shared.push_cb).push(Box::new(cb));
     }
 
     /// Register a callback invoked on every connect/disconnect transition (spec §6.3, §13: the
@@ -490,7 +536,7 @@ impl DaemonClient {
     /// `Connected` — either via this immediate replay, or via the normal `fire_conn` call if it
     /// registers before the connection task gets there first.
     pub fn on_conn(&self, cb: impl Fn(ConnState) + Send + 'static) {
-        let mut guard = self.shared.conn_cb.lock().unwrap();
+        let mut guard = lock(&self.shared.conn_cb);
         cb(guard.current);
         guard.cbs.push(Box::new(cb));
     }
@@ -826,7 +872,7 @@ async fn connect_with_backoff(
 /// interleave with a transition and observe a stale `current` after subscribing, or miss a
 /// callback that was mid-registration.
 fn fire_conn(cbs: &Mutex<ConnCbState>, state: ConnState) {
-    let mut guard = cbs.lock().unwrap();
+    let mut guard = lock(cbs);
     guard.current = state;
     for cb in guard.cbs.iter() {
         cb(state);
@@ -834,7 +880,7 @@ fn fire_conn(cbs: &Mutex<ConnCbState>, state: ConnState) {
 }
 
 fn fire_push(cbs: &Mutex<Vec<Box<PushCb>>>, push: Push) {
-    for cb in cbs.lock().unwrap().iter() {
+    for cb in lock(cbs).iter() {
         cb(push.clone());
     }
 }
@@ -879,7 +925,7 @@ async fn run_connection(
                                 continue;
                             }
                         };
-                        pending.lock().unwrap().insert(id, reply);
+                        lock(pending).insert(id, reply);
                         if let Err(e) = write_encoded_frame(stream, &bytes).await {
                             tracing::warn!(error = %e, "write failed; dropping connection");
                             // The uniform drain in the outer loop will fail this (and every other
@@ -900,7 +946,7 @@ async fn run_connection(
                         return LoopEnd::ConnectionLost;
                     }
                     Ok(Some(Frame::Response { id, res })) => {
-                        if let Some(tx) = pending.lock().unwrap().remove(&id) {
+                        if let Some(tx) = lock(pending).remove(&id) {
                             let mapped = match res {
                                 Response::Error { code, message } => Err(ClientError::Daemon { code, message }),
                                 other => Ok(other),
@@ -965,7 +1011,7 @@ async fn connection_task(
 
         // Honest degradation (spec §13): every in-flight request fails now rather than hanging or
         // faking success, regardless of why the connection ended.
-        for (_id, tx) in pending.lock().unwrap().drain() {
+        for (_id, tx) in lock(&pending).drain() {
             let _ = tx.send(Err(ClientError::Disconnected));
         }
 

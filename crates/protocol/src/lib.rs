@@ -27,6 +27,8 @@ pub use framing::{
 };
 
 pub mod preamble;
+/// Poison-tolerant `std::sync` lock acquisition (BL-124) — plain functions, no wire/TS surface.
+pub mod sync;
 pub use preamble::{
     decode_client_preamble, decode_daemon_reply, encode_client_preamble, encode_daemon_reply,
     negotiate, ClientPreamble, DaemonReply, PreambleError, CLIENT_MAX_VERSION, CLIENT_MIN_VERSION,

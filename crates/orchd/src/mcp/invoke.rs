@@ -196,7 +196,7 @@ where
             })?;
             let content_text = extract_text(&tool_result.content);
 
-            let (artifact_id, invocation_id) = {
+            let (artifact, invocation_id) = {
                 let guard = db.lock().await;
                 let invocation = guard.insert_invocation(NewInvocation {
                     server_id: Some(server_id_owned.clone()),
@@ -219,10 +219,10 @@ where
                     account_id: None,
                     tool_name: tool_name.to_string(),
                     project_id,
-                    content_json: content_json.clone(),
+                    content_json,
                     content_text,
                 })?;
-                (artifact.id, invocation.id)
+                (artifact, invocation.id)
             };
 
             tracing::info!(
@@ -233,11 +233,16 @@ where
                 "mcp: tool call completed"
             );
 
+            // BL-120: reply with the STORED content, not the raw serialization — identical
+            // bytes whenever the artifact fit the write-time cap, the truncated prefix (with
+            // `truncated: Some(true)`) when it did not, so this response frame can never exceed
+            // `MAX_FRAME_LEN` and drop the connection.
             Ok(McpCallResult {
-                artifact_id,
+                artifact_id: artifact.id,
                 invocation_id,
-                content_json,
+                content_json: artifact.content_json,
                 is_error,
+                truncated: artifact.truncated,
             })
         }
         Err(e) => {

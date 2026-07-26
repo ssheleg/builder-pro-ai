@@ -147,7 +147,20 @@ serverId: string | null,
  * The connector account that produced this artifact (`Some` for a `ConnectorInvoke` result);
  * `null` for an `McpCallTool`.
  */
-accountId: string | null, toolName: string, projectId: string | null, contentJson: string, contentText: string | null, isUntrusted: boolean, createdAt: number, };
+accountId: string | null, toolName: string, projectId: string | null, 
+/**
+ * When the artifact was truncated at write time (BL-120), this is the truncated prefix —
+ * `truncated` is then `Some(true)`.
+ */
+contentJson: string, contentText: string | null, isUntrusted: boolean, createdAt: number, 
+/**
+ * BL-120: `Some(true)` when the stored content was truncated at write time because it
+ * exceeded the artifact content cap (the write-side guarantee that a `McpGetArtifact`/
+ * `McpListArtifacts` frame stays under the wire's `MAX_FRAME_LEN`); `None` when whole.
+ * Pre-BL-120 rows decode as `None` (the column backfills 0). Appended at the struct TAIL
+ * with `#[serde(default)]` (append-only wire rule).
+ */
+truncated: boolean | null, };
 
 export type McpAuthKind = "none" | "bearer" | "oauth";
 
@@ -155,7 +168,20 @@ export type McpAuthKind = "none" | "bearer" | "oauth";
  * `OrchdRequest::McpCallTool` / `ConnectorInvoke`'s success payload (spec §5); the JSON result
  * is the tool's full structured output, already persisted as a durable artifact row.
  */
-export type McpCallResult = { artifactId: string, invocationId: string, contentJson: string, isError: boolean, };
+export type McpCallResult = { artifactId: string, invocationId: string, 
+/**
+ * The SAME content the artifact row stored — when the tool output exceeded the artifact
+ * write-time cap (BL-120), this is the TRUNCATED form (`truncated` is then `Some(true)`),
+ * so this response frame always fits the wire's `MAX_FRAME_LEN` instead of dropping the
+ * connection outright.
+ */
+contentJson: string, isError: boolean, 
+/**
+ * BL-120: `Some(true)` when the call's content was truncated at artifact write time to keep
+ * the frame encodable; `None` (and absent on pre-BL-120 peers' wires) when the content is
+ * whole. Appended at the struct TAIL with `#[serde(default)]` (append-only wire rule).
+ */
+truncated: boolean | null, };
 
 /**
  * `OrchdRequest::McpConnect`'s success payload (spec §5).

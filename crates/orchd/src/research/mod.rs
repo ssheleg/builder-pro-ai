@@ -670,19 +670,20 @@ mod tests {
             .unwrap()
     }
 
-    // ---- schema v4 table, still present in the now-current schema v7 (fresh DB) ----
+    // ---- schema v4 table, still present in the now-current schema v8 (fresh DB) ----
 
     #[test]
-    fn fresh_db_has_research_run_table_at_schema_v7() {
+    fn fresh_db_has_research_run_table_at_schema_v8() {
         let db = new_db();
         let version: i64 = db
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only), SCN-054 bumped it
-        // 5->6 (additive, the `doc` table only), and SW1 bumped it 6->7 (additive, the `workflow`
-        // table only); the v4 `research_run` table this test checks for is unaffected.
-        assert_eq!(version, 7);
+        // 5->6 (additive, the `doc` table only), SW1 bumped it 6->7 (additive, the `workflow`
+        // table only), and BL-120 bumped it 7->8 (additive, the `mcp_artifact.truncated` column
+        // only); the v4 `research_run` table this test checks for is unaffected.
+        assert_eq!(version, 8);
         let exists: bool = db
             .conn()
             .query_row(

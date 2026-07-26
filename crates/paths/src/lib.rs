@@ -392,17 +392,20 @@ mod tests {
 
     // -- SUS-5 audit probes: the containment boundary has no workspace allowlist -----------------
 
-    /// pin: current behavior — `validate_path_within` is a PURE canonical-containment check
-    /// against whatever `root` the caller supplies; nothing cross-checks `root` against the
-    /// workspaces registered in the app store. With `root == "/"` ANY existing absolute path is
-    /// "within" it, so a caller passing `root: "/"` (e.g. from the frontend, whose `root` arg is
-    /// trusted blindly by every fs command) is accepted for `/etc/passwd` and anything else the
-    /// OS user can read. desired: `root` validated against a registered-workspace allowlist
-    /// before any fs operation honors it.
+    /// pin (BL-109, resolved at the command layer): `validate_path_within` ITSELF stays a PURE
+    /// canonical-containment check against whatever `root` the caller supplies — with `root ==
+    /// "/"` ANY existing absolute path is "within" it. That is deliberate: the registered-
+    /// workspace allowlist this probe asked for ("desired: `root` validated against a
+    /// registered-workspace allowlist before any fs operation honors it") is NOT this function's
+    /// job — it now lives one layer up, in `src-tauri`'s `commands::ensure_registered_root`
+    /// (BL-109): every fs_explorer/fs_watcher command first requires `root` to be contained in a
+    /// daemon-REGISTERED workspace root (fail-closed `Disconnected` when the roots cache has
+    /// never loaded), and only then do these lexical validators run, unchanged. This pin keeps
+    /// the lexical primitive's exact behavior locked so the two layers can't be conflated.
     #[test]
     fn pin_sus5_validate_path_within_with_root_slash_accepts_etc_passwd() {
         let got = validate_path_within(Path::new("/"), Path::new("/etc/passwd"))
-            .expect("pin: no allowlist — root \"/\" trivially contains everything");
+            .expect("pin: lexical-only by design — root \"/\" trivially contains everything");
         assert!(got.ends_with("passwd"), "got {got:?}");
     }
 

@@ -236,6 +236,8 @@ fn sample_mcp_call_result() -> McpCallResult {
         invocation_id: "invocation-1".into(),
         content_json: "{\"ok\":true}".into(),
         is_error: false,
+        // `Some(true)` so the BL-120 truncation flag is exercised through the round-trip.
+        truncated: Some(true),
     }
 }
 
@@ -269,6 +271,8 @@ fn sample_mcp_artifact() -> McpArtifact {
         content_text: Some("ok".into()),
         is_untrusted: true,
         created_at: 1_720_000_000,
+        // `Some(true)` so the BL-120 truncation flag is exercised through the round-trip.
+        truncated: Some(true),
     }
 }
 
@@ -792,6 +796,10 @@ fn all_requests() -> Vec<OrchdRequest> {
             },
         },
         OrchdRequest::WorkflowDelete { id: "wf-1".into() },
+        // BL-111 consent revoke (tail-appended).
+        OrchdRequest::TrustRevokeConsent {
+            server_id: "mcp-1".into(),
+        },
     ]
 }
 

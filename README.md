@@ -1,7 +1,7 @@
 # Builder Pro AI
 
 [![ci](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-0.10.1-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.10.2-blue)](CHANGELOG.md)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](docs/build-macos.md)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
 [![built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
@@ -24,7 +24,7 @@ Built with **Tauri 2** (Rust core + React 19 / TypeScript UI). Ships as a univer
   <em>Placeholder — a real screenshot lands here before the first public release.</em>
 </p>
 
-> **Status: `0.10.1`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
+> **Status: `0.10.2`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
 > below the "Shipped" line is implemented, tested, and documented; everything under "Planned" is
 > not built yet and is labelled as such. **Signed + notarized universal binaries are published on
 > [Releases](https://github.com/ssheleg/builder-pro-ai/releases)** (or build from source — see

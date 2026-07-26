@@ -21,6 +21,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use bpa_protocol::sync::lock;
 use tracing_subscriber::prelude::*;
 
 /// Initialize a **global** `tracing` subscriber writing structured logs to
@@ -72,10 +73,10 @@ struct SharedFileWriter(Arc<Mutex<File>>);
 
 impl Write for SharedFileWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).write(buf)
+        lock(&self.0).write(buf)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).flush()
+        lock(&self.0).flush()
     }
 }
 
@@ -119,7 +120,7 @@ pub fn init_to_file(path: &Path) -> io::Result<()> {
 /// caller reads the file back. A no-op if [`init_to_file`] was never called.
 pub fn flush() {
     if let Some(sink) = SINK.get() {
-        let _ = sink.lock().unwrap_or_else(|p| p.into_inner()).flush();
+        let _ = lock(sink).flush();
     }
 }
 

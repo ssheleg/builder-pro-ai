@@ -46,6 +46,7 @@ use tokio::task::JoinHandle;
 
 use crate::protocol::{Push, SessionId};
 use crate::pty_supervisor::Supervisor;
+use bpa_protocol::sync::lock;
 
 /// Sink for one attached client: bounded outbound channel of protocol `Push` frames. Owned by the
 /// caller (Task 12's per-connection outbound queue); `AttachRegistry` only ever `.send()`s into
@@ -224,11 +225,7 @@ impl AttachRegistry {
         // session is never touched, and is not reachable through this key) — it only prevents a
         // same-connection re-attach from silently leaking the previous forwarder's OS thread and
         // stale supervisor sink (a no-op for a stale `ReplayOnly` entry — nothing to release).
-        let stale = self
-            .entries
-            .lock()
-            .unwrap()
-            .insert((session_id.clone(), conn_id), entry);
+        let stale = lock(&self.entries).insert((session_id.clone(), conn_id), entry);
         if let Some(stale) = stale {
             self.retire(session_id, stale);
         }
@@ -385,11 +382,7 @@ impl AttachRegistry {
     /// keep-alive). For a `ReplayOnly` entry (Pv2 §7 inactive attach) this is just a map removal —
     /// there was never a sink/forwarder to release.
     pub fn detach(&self, conn_id: u64, session_id: &SessionId) {
-        let entry = self
-            .entries
-            .lock()
-            .unwrap()
-            .remove(&(session_id.clone(), conn_id));
+        let entry = lock(&self.entries).remove(&(session_id.clone(), conn_id));
         if let Some(entry) = entry {
             self.retire(session_id, entry);
         }
@@ -398,7 +391,7 @@ impl AttachRegistry {
     /// Drop every attach entry (daemon shutdown drain). Used by `serve()` shutdown and boot's
     /// belt-and-braces drain — a whole-daemon teardown, not a per-client one.
     pub fn detach_all(&self) {
-        let mut map = self.entries.lock().unwrap();
+        let mut map = lock(&self.entries);
         for ((session_id, _conn_id), entry) in map.drain() {
             self.retire(&session_id, entry);
         }
@@ -409,7 +402,7 @@ impl AttachRegistry {
     /// streaming (teardown is per-connection; a session may have many independent subscribers,
     /// Pv2 §5.2).
     pub fn detach_all_for_conn(&self, conn_id: u64) {
-        let mut map = self.entries.lock().unwrap();
+        let mut map = lock(&self.entries);
         let owned: Vec<(SessionId, u64)> =
             map.keys().filter(|(_, c)| *c == conn_id).cloned().collect();
         for key in owned {
@@ -443,7 +436,7 @@ impl AttachRegistry {
     /// detached and self-terminating; tests await them to prove termination). Empty if no entry
     /// existed for this session, or if every entry for it was `ReplayOnly`.
     pub fn remove_session(&self, session_id: &SessionId) -> Vec<JoinHandle<()>> {
-        let mut map = self.entries.lock().unwrap();
+        let mut map = lock(&self.entries);
         let owned: Vec<(SessionId, u64)> = map
             .keys()
             .filter(|(sid, _)| sid == session_id)
@@ -465,7 +458,7 @@ impl AttachRegistry {
     /// Number of live attachments (observability + test hook). May exceed the number of live
     /// sessions once multiple connections co-attach the same session (Pv2 §5.2).
     pub fn attachment_count(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        lock(&self.entries).len()
     }
 }
 

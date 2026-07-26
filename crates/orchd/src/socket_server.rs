@@ -1004,17 +1004,168 @@ async fn dispatch(
     res
 }
 
+/// Human-readable label for a [`bpa_orchd_proto::StorageMode`], used by the BL-110
+/// degraded-mode write refusal so the error names the mode the daemon booted into (the same
+/// honesty the `GetStorageStatus` banner reports).
+fn storage_mode_label(mode: &bpa_orchd_proto::StorageMode) -> &'static str {
+    match mode {
+        bpa_orchd_proto::StorageMode::Persistent => "persistent",
+        bpa_orchd_proto::StorageMode::InMemoryFallback => "in-memory fallback",
+        bpa_orchd_proto::StorageMode::RecoveredFromCorruption => "recovered from corruption",
+    }
+}
+
+/// BL-110 (degraded-mode gating): is this verb a pure READ (plus the two lifecycle verbs that
+/// must stay available regardless)? When storage is degraded (in-memory fallback / recovered
+/// from corruption), a MUTATION would be accepted and then silently lost on the next restart
+/// (or split state across a quarantined DB and its fresh replacement), so [`dispatch_inner`]
+/// refuses every non-read-only verb up front with a typed `Error{Invariant}`.
+///
+/// The read-only set: every `List*`/`Get*` verb, `Ping`, the graph retrieval verbs
+/// (`GraphNeighborhood`/`GraphSearch`), and the export verbs (`ExportProject`/`ExportAll` —
+/// export IS a read). `OrchdShutdown` is allowed too: it writes no domain state (its optional
+/// drain is a WAL checkpoint, not a mutation), and a degraded daemon must always be
+/// stoppable. Everything else — including `TrustGrantConsent`/`TrustRevokeConsent` and
+/// `McpSetServerBearer` (the Keychain secret lives outside the DB, but the account/ref row it
+/// leaves behind does not) — is a mutation.
+///
+/// The match is deliberately **exhaustive with no `_` wildcard** (mirroring
+/// [`OrchdRequest::verb_name`]'s own doctrine): adding a future variant to `OrchdRequest`
+/// fails to compile until it is classified here — a new verb can never ship silently
+/// ungated. When classifying, default to `false` (mutation) unless the verb is provably a
+/// pure read: fail-closed.
+fn is_read_only_verb(req: &OrchdRequest) -> bool {
+    match req {
+        OrchdRequest::Ping => true,
+        OrchdRequest::CreateProject { .. } => false,
+        OrchdRequest::UpdateProject { .. } => false,
+        OrchdRequest::ArchiveProject { .. } => false,
+        OrchdRequest::ListProjects => true,
+        OrchdRequest::AddProjectWorkspace { .. } => false,
+        OrchdRequest::RemoveProjectWorkspace { .. } => false,
+        OrchdRequest::CreateGoal { .. } => false,
+        OrchdRequest::UpdateGoal { .. } => false,
+        OrchdRequest::MoveGoal { .. } => false,
+        OrchdRequest::DeleteGoal { .. } => false,
+        OrchdRequest::ListGoals { .. } => true,
+        OrchdRequest::CreateIdea { .. } => false,
+        OrchdRequest::UpdateIdea { .. } => false,
+        OrchdRequest::SetIdeaProject { .. } => false,
+        OrchdRequest::SetIdeaLifecycle { .. } => false,
+        OrchdRequest::DeleteIdea { .. } => false,
+        OrchdRequest::ListIdeas { .. } => true,
+        OrchdRequest::CreateInsight { .. } => false,
+        OrchdRequest::UpdateInsight { .. } => false,
+        OrchdRequest::SetInsightFitVerdict { .. } => false,
+        OrchdRequest::SetInsightStatus { .. } => false,
+        OrchdRequest::DeleteInsight { .. } => false,
+        OrchdRequest::ListInsights { .. } => true,
+        OrchdRequest::CreateTask { .. } => false,
+        OrchdRequest::UpdateTask { .. } => false,
+        OrchdRequest::SetTaskStatus { .. } => false,
+        OrchdRequest::SetTaskRank { .. } => false,
+        OrchdRequest::DeleteTask { .. } => false,
+        OrchdRequest::ListTasks { .. } => true,
+        OrchdRequest::GetRuleSet { .. } => true,
+        OrchdRequest::UpsertRuleSet { .. } => false,
+        // Writes the re-read file's fresh hash to the DB — a mutation.
+        OrchdRequest::AcknowledgeRuleFile { .. } => false,
+        OrchdRequest::ExportProject { .. } => true,
+        OrchdRequest::ExportAll => true,
+        OrchdRequest::ImportBundle { .. } => false,
+        OrchdRequest::OrchdShutdown { .. } => true,
+        OrchdRequest::GraphAddNode { .. } => false,
+        OrchdRequest::GraphUpdateNode { .. } => false,
+        OrchdRequest::GraphMoveNode { .. } => false,
+        OrchdRequest::GraphDeleteNode { .. } => false,
+        OrchdRequest::GraphAddEdge { .. } => false,
+        OrchdRequest::GraphDeleteEdge { .. } => false,
+        OrchdRequest::GraphListProject { .. } => true,
+        OrchdRequest::GraphNeighborhood { .. } => true,
+        OrchdRequest::GraphSearch { .. } => true,
+        OrchdRequest::McpAddServer { .. } => false,
+        OrchdRequest::McpListServers { .. } => true,
+        OrchdRequest::McpUpdateServer { .. } => false,
+        OrchdRequest::McpSetServerEnabled { .. } => false,
+        OrchdRequest::McpDeleteServer { .. } => false,
+        OrchdRequest::McpSetServerBearer { .. } => false,
+        // Writes the negotiated protocol version + refreshed tool cache.
+        OrchdRequest::McpConnect { .. } => false,
+        OrchdRequest::McpDisconnect { .. } => false,
+        OrchdRequest::McpListTools { .. } => true,
+        OrchdRequest::McpSetToolEnabled { .. } => false,
+        // Writes the per-attempt invocation + artifact rows.
+        OrchdRequest::McpCallTool { .. } => false,
+        OrchdRequest::McpListInvocations { .. } => true,
+        OrchdRequest::McpListArtifacts { .. } => true,
+        OrchdRequest::McpGetArtifact { .. } => true,
+        OrchdRequest::TrustGrantConsent { .. } => false,
+        OrchdRequest::ConnectorBeginOAuth { .. } => false,
+        OrchdRequest::ConnectorCompleteOAuth { .. } => false,
+        OrchdRequest::ConnectorAddApiKey { .. } => false,
+        OrchdRequest::ConnectorListAccounts => true,
+        OrchdRequest::ConnectorDeleteAccount { .. } => false,
+        OrchdRequest::ConnectorListOps { .. } => true,
+        // Writes the per-attempt invocation + artifact rows.
+        OrchdRequest::ConnectorInvoke { .. } => false,
+        OrchdRequest::SkillAdd { .. } => false,
+        OrchdRequest::SkillList { .. } => true,
+        OrchdRequest::SkillDelete { .. } => false,
+        OrchdRequest::TrustSetPolicy { .. } => false,
+        OrchdRequest::TrustListPolicies => true,
+        OrchdRequest::TrustListAudit { .. } => true,
+        OrchdRequest::ResearchStartRun { .. } => false,
+        OrchdRequest::ResearchListRuns { .. } => true,
+        OrchdRequest::ResearchGetRun { .. } => true,
+        OrchdRequest::GetStorageStatus => true,
+        OrchdRequest::UnarchiveProject { .. } => false,
+        OrchdRequest::GraphUpdateEdge { .. } => false,
+        OrchdRequest::ConnectorListProviders => true,
+        OrchdRequest::SetTaskPriority { .. } => false,
+        OrchdRequest::ListDocs { .. } => true,
+        OrchdRequest::GetDoc { .. } => true,
+        OrchdRequest::UpsertDoc { .. } => false,
+        OrchdRequest::DeleteDoc { .. } => false,
+        // Writes the re-read file's fresh hash to the DB — a mutation.
+        OrchdRequest::AcknowledgeDocFile { .. } => false,
+        OrchdRequest::WorkflowList { .. } => true,
+        OrchdRequest::WorkflowGet { .. } => true,
+        OrchdRequest::WorkflowUpsert { .. } => false,
+        OrchdRequest::WorkflowDelete { .. } => false,
+        OrchdRequest::TrustRevokeConsent { .. } => false,
+    }
+}
+
 /// Dispatch one `OrchdRequest` to the right subsystem and produce the correlated `OrchdResponse`
 /// (spec §4.2, §5, §6, §7): every domain verb below is a thin translation between the wire
 /// request and a `persistence::Db` (T6-T8) / `export` (T9) call, plus — on success only — the
 /// matching coarse push via `broadcaster` (spec §6: "Failed requests broadcast NOTHING"). The
 /// per-request completion trace is added ONCE by the [`dispatch`] wrapper above, so no arm here
 /// logs its own outcome.
+///
+/// BL-110: the degraded-storage write gate lives HERE, once, ahead of every arm — when
+/// `storage_status` is not `Persistent`, any verb [`is_read_only_verb`] classifies as a
+/// mutation is refused with a typed `Error{Invariant}` before touching anything else. This
+/// generalizes the DOM-10 `ImportBundle`-only refusal (2026-07-24 audit remediation) to EVERY
+/// mutation, so a degraded daemon can never accept state it would silently lose on restart.
 async fn dispatch_inner(
     deps: &Arc<ServerDeps>,
     broadcaster: &Broadcaster,
     req: OrchdRequest,
 ) -> OrchdResponse {
+    if !matches!(
+        deps.storage_status.storage_mode,
+        bpa_orchd_proto::StorageMode::Persistent
+    ) && !is_read_only_verb(&req)
+    {
+        return OrchdResponse::Error {
+            code: OrchdErrorCode::Invariant,
+            message: format!(
+                "storage degraded ({}), write refused — restart with a healthy database or reset",
+                storage_mode_label(&deps.storage_status.storage_mode)
+            ),
+        };
+    }
     match req {
         OrchdRequest::Ping => OrchdResponse::Pong,
 
@@ -1504,22 +1655,10 @@ async fn dispatch_inner(
             }
         }
         OrchdRequest::ImportBundle { json } => {
-            // DOM-10 (2026-07-24 audit remediation): importing into a DEGRADED store
-            // (in-memory fallback / recovered-from-corruption) would accept the rows and
-            // silently lose them on the next restart (plus write phantom rules/doc files with no
-            // durable rows behind them). Refuse up front with a typed, honest error — the same
-            // "storage degraded" honesty the `GetStorageStatus` banner reports. Full
-            // degraded-mode gating of EVERY mutation is tracked separately (backlog); import is
-            // the bulk-restore verb where silent loss is catastrophic, so it is gated NOW.
-            if !matches!(
-                deps.storage_status.storage_mode,
-                bpa_orchd_proto::StorageMode::Persistent
-            ) {
-                return OrchdResponse::Error {
-                    code: OrchdErrorCode::Invariant,
-                    message: "storage degraded, import refused".to_string(),
-                };
-            }
+            // DOM-10 (2026-07-24 audit remediation) refused imports into a DEGRADED store here,
+            // in this arm; BL-110 has since generalized that refusal to EVERY mutation at the
+            // top of `dispatch_inner` (see its doc comment), so this arm is only ever reached
+            // with `Persistent` storage.
             let app_support = bpa_daemon_core::dirs::app_support_dir();
             let result = {
                 let db = deps.db.lock().await;
@@ -2052,6 +2191,39 @@ async fn dispatch_inner(
                 Err(e) => map_err(e),
             }
         }
+        // BL-111: the mirror of the grant arm above — removes EVERY consent grant (any `kind`)
+        // for the server, so trust can be withdrawn without deleting the server row. Like the
+        // grant, NOT routed through `trust::authorize` (revoking IS the gate-clearing action).
+        // Audited as `consent_revoke`/`allow` (mirroring the grant's SEC-5 row — the trail must
+        // answer "who withdrew trust for this server, when"; `tool_name` stays None: the revoke
+        // spans every kind, so there is no single kind to record). IDEMPOTENT by contract: an
+        // unknown server id or a server with no grants is also `Ack` (the postcondition "no
+        // grants exist" already holds) — the server is resolved only to scope the audit row and
+        // the `McpServersChanged` push honestly, never as an existence gate.
+        OrchdRequest::TrustRevokeConsent { server_id } => {
+            let db = deps.db.lock().await;
+            let server = db.get_mcp_server(&server_id).ok();
+            match db.delete_consent(&server_id) {
+                Ok(_removed) => {
+                    if let Err(e) = db.insert_audit(crate::persistence::NewAudit {
+                        action: crate::trust::AUDIT_ACTION_CONSENT_REVOKE.to_string(),
+                        server_id: Some(server_id.clone()),
+                        tool_name: None,
+                        project_id: server.as_ref().and_then(|s| s.project_id.clone()),
+                        decision: "allow".to_string(),
+                        reason: None,
+                        invocation_id: None,
+                    }) {
+                        return map_err(e);
+                    }
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
+                        project_id: server.and_then(|s| s.project_id),
+                    }));
+                    OrchdResponse::Ack
+                }
+                Err(e) => map_err(e),
+            }
+        }
 
         // ---- S-EXT Connectors / accounts (spec §5/§6/§7, task T13a): every mutating verb below
         // ⇒ `ConnectorsChanged` on success (spec §5's pushes list — no payload, the `account`
@@ -2444,8 +2616,11 @@ mod tests {
     //! exercises `run_research` without a `tokio::spawn`.
 
     use super::*;
-    use crate::mcp::{McpAuthKind, McpScope, McpTransport, NewMcpServer};
-    use bpa_orchd_proto::{InsightStatus, StorageMode, StorageStatus};
+    use crate::mcp::{McpAuthKind, McpScope, McpTransport, NewMcpServer, NewMcpTool};
+    use bpa_orchd_proto::{
+        GoalKind, GraphNodeKind, InsightStatus, PolicyScope, StorageMode, StorageStatus,
+        TaskPriority, TaskSource,
+    };
 
     /// Builds `ServerDeps` on an in-memory `Db` with the given storage mode, plus a
     /// `Broadcaster` with one registered receiver the test drains for push assertions.
@@ -2596,15 +2771,21 @@ mod tests {
         }
     }
 
-    // ---- DOM-10: ImportBundle is refused in degraded storage ----
+    // ---- DOM-10/BL-110: ImportBundle is refused in degraded storage (now by the central
+    // `dispatch_inner` mutation gate, not an arm-local check) ----
 
     #[tokio::test]
     async fn import_bundle_is_refused_in_degraded_storage_modes() {
-        for (mode, quarantined_path) in [
-            (StorageMode::InMemoryFallback, None),
+        for (mode, quarantined_path, expected_message) in [
+            (
+                StorageMode::InMemoryFallback,
+                None,
+                "storage degraded (in-memory fallback), write refused — restart with a healthy database or reset",
+            ),
             (
                 StorageMode::RecoveredFromCorruption,
                 Some("/tmp/quarantined.db".to_string()),
+                "storage degraded (recovered from corruption), write refused — restart with a healthy database or reset",
             ),
         ] {
             let (deps, broadcaster, _rx) = test_deps(StorageStatus {
@@ -2622,7 +2803,7 @@ mod tests {
             match res {
                 OrchdResponse::Error { code, message } => {
                     assert_eq!(code, OrchdErrorCode::Invariant);
-                    assert_eq!(message, "storage degraded, import refused");
+                    assert_eq!(message, expected_message);
                 }
                 other => panic!("expected Error{{Invariant}}, got {other:?}"),
             }
@@ -2644,6 +2825,507 @@ mod tests {
             OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::Validation),
             other => panic!("expected Error{{Validation}}, got {other:?}"),
         }
+    }
+
+    // ---- BL-110: degraded-mode gating of EVERY mutation ----
+
+    /// One representative mutation per verb family. The gate fires before any validation or
+    /// DB/network/Keychain access, so dummy ids/args are fine (and their use here PROVES the
+    /// refusal happens ahead of every other check).
+    fn representative_mutations() -> Vec<OrchdRequest> {
+        vec![
+            OrchdRequest::CreateProject {
+                name: "P".to_string(),
+                description: String::new(),
+                workspace_ids: vec!["w1".to_string()],
+            },
+            OrchdRequest::CreateGoal {
+                project_id: "p1".to_string(),
+                parent_id: None,
+                kind: GoalKind::Additional,
+                title: "t".to_string(),
+                body: String::new(),
+            },
+            OrchdRequest::CreateIdea {
+                project_id: None,
+                title: "t".to_string(),
+                body: String::new(),
+            },
+            OrchdRequest::CreateInsight {
+                project_id: None,
+                source: "s".to_string(),
+                title: "t".to_string(),
+                body: String::new(),
+            },
+            OrchdRequest::CreateTask {
+                project_id: "p1".to_string(),
+                parent_id: None,
+                title: "t".to_string(),
+                body: String::new(),
+                status: None,
+                source: TaskSource::Plan,
+                source_id: None,
+                tags: vec![],
+                priority: None,
+            },
+            OrchdRequest::UpsertRuleSet {
+                scope: RuleScope::Global,
+                project_id: None,
+                md_content: Some("# R".to_string()),
+                md_path: None,
+                policy: None,
+            },
+            OrchdRequest::GraphAddNode {
+                project_id: "p1".to_string(),
+                kind: GraphNodeKind::Concept,
+                label: "l".to_string(),
+                body: String::new(),
+                pos_x: 0.0,
+                pos_y: 0.0,
+            },
+            OrchdRequest::McpAddServer {
+                name: "s".to_string(),
+                transport: bpa_orchd_proto::McpTransport::Http,
+                url: Some("https://example.com/mcp".to_string()),
+                command: None,
+                args: None,
+                env: None,
+                scope: bpa_orchd_proto::McpScope::Global,
+                project_id: None,
+                auth_kind: bpa_orchd_proto::McpAuthKind::None,
+                timeout_ms: None,
+                max_retries: None,
+            },
+            OrchdRequest::McpConnect {
+                id: "s1".to_string(),
+            },
+            OrchdRequest::McpSetServerBearer {
+                id: "s1".to_string(),
+                token: "t".to_string(),
+            },
+            OrchdRequest::McpCallTool {
+                server_id: "s1".to_string(),
+                tool_name: "search".to_string(),
+                args_json: "{}".to_string(),
+                project_id: None,
+            },
+            OrchdRequest::TrustGrantConsent {
+                server_id: "s1".to_string(),
+                kind: "connect".to_string(),
+            },
+            OrchdRequest::TrustRevokeConsent {
+                server_id: "s1".to_string(),
+            },
+            OrchdRequest::TrustSetPolicy {
+                scope: PolicyScope::Global,
+                ref_id: None,
+                spend_cap_usd: None,
+                rate_per_min: Some(1),
+            },
+            OrchdRequest::ConnectorAddApiKey {
+                provider: "generic-rest".to_string(),
+                label: "l".to_string(),
+                api_key: "k".to_string(),
+            },
+            OrchdRequest::ConnectorInvoke {
+                account_id: "a1".to_string(),
+                op: "get".to_string(),
+                args_json: "{}".to_string(),
+                project_id: None,
+            },
+            OrchdRequest::SkillDelete {
+                id: "sk1".to_string(),
+            },
+            OrchdRequest::ResearchStartRun {
+                idea_id: "i1".to_string(),
+                server_id: "s1".to_string(),
+                tool_name: "search".to_string(),
+                args_json: "{}".to_string(),
+            },
+            OrchdRequest::UpsertDoc {
+                project_id: "p1".to_string(),
+                name: "d".to_string(),
+                md_content: String::new(),
+            },
+            OrchdRequest::WorkflowDelete {
+                id: "wf1".to_string(),
+            },
+            OrchdRequest::SetTaskPriority {
+                id: "t1".to_string(),
+                priority: TaskPriority::Normal,
+            },
+            OrchdRequest::UnarchiveProject {
+                id: "p1".to_string(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn degraded_storage_refuses_mutations_from_every_family() {
+        for (mode, expected_label) in [
+            (StorageMode::InMemoryFallback, "in-memory fallback"),
+            (
+                StorageMode::RecoveredFromCorruption,
+                "recovered from corruption",
+            ),
+        ] {
+            for req in representative_mutations() {
+                let verb = req.verb_name().to_string();
+                let (deps, broadcaster, _rx) = test_deps(StorageStatus {
+                    storage_mode: mode.clone(),
+                    quarantined_path: None,
+                });
+                let res = dispatch_inner(&deps, &broadcaster, req).await;
+                match res {
+                    OrchdResponse::Error { code, message } => {
+                        assert_eq!(code, OrchdErrorCode::Invariant, "{verb} in {mode:?}");
+                        assert_eq!(
+                            message,
+                            format!(
+                                "storage degraded ({expected_label}), write refused — restart with a healthy database or reset"
+                            ),
+                            "{verb} in {mode:?}"
+                        );
+                    }
+                    other => {
+                        panic!("{verb} in {mode:?}: expected Error{{Invariant}}, got {other:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn degraded_storage_allows_reads_export_status_and_shutdown() {
+        for mode in [
+            StorageMode::InMemoryFallback,
+            StorageMode::RecoveredFromCorruption,
+        ] {
+            let (deps, broadcaster, mut rx) = test_deps(StorageStatus {
+                storage_mode: mode.clone(),
+                quarantined_path: None,
+            });
+
+            // The reads whose success shape is exact even on an empty DB.
+            let res = dispatch_inner(&deps, &broadcaster, OrchdRequest::Ping).await;
+            assert_eq!(res, OrchdResponse::Pong, "Ping in {mode:?}");
+            let res = dispatch_inner(&deps, &broadcaster, OrchdRequest::ListProjects).await;
+            assert!(
+                matches!(res, OrchdResponse::Projects(_)),
+                "ListProjects in {mode:?}: {res:?}"
+            );
+            let res = dispatch_inner(&deps, &broadcaster, OrchdRequest::ExportAll).await;
+            assert!(
+                matches!(res, OrchdResponse::ExportJson(_)),
+                "ExportAll (export is a read) in {mode:?}: {res:?}"
+            );
+            let res = dispatch_inner(&deps, &broadcaster, OrchdRequest::GetStorageStatus).await;
+            assert_eq!(
+                res,
+                OrchdResponse::StorageStatus(StorageStatus {
+                    storage_mode: mode.clone(),
+                    quarantined_path: None,
+                }),
+                "GetStorageStatus in {mode:?}"
+            );
+
+            // The remaining read verbs: the response must NOT be the degraded-write refusal —
+            // an `Error{NotFound}` (unknown dummy id) or an empty list still proves the verb
+            // passed the gate and failed/succeeded on its own merits.
+            let reads = vec![
+                OrchdRequest::ListGoals {
+                    project_id: "p1".to_string(),
+                },
+                OrchdRequest::ListIdeas { project_id: None },
+                OrchdRequest::ListInsights { project_id: None },
+                OrchdRequest::ListTasks { project_id: None },
+                OrchdRequest::GetRuleSet {
+                    scope: RuleScope::Global,
+                    project_id: None,
+                },
+                OrchdRequest::ExportProject {
+                    project_id: "p1".to_string(),
+                },
+                OrchdRequest::GraphListProject {
+                    project_id: "p1".to_string(),
+                },
+                OrchdRequest::GraphNeighborhood {
+                    node_id: "n1".to_string(),
+                    depth: 1,
+                },
+                OrchdRequest::GraphSearch {
+                    query: "q".to_string(),
+                    project_id: None,
+                },
+                OrchdRequest::McpListServers { project_id: None },
+                OrchdRequest::McpListTools {
+                    server_id: "s1".to_string(),
+                },
+                OrchdRequest::McpListInvocations {
+                    server_id: None,
+                    project_id: None,
+                    limit: None,
+                },
+                OrchdRequest::McpListArtifacts {
+                    project_id: None,
+                    server_id: None,
+                    limit: None,
+                },
+                OrchdRequest::McpGetArtifact {
+                    id: "a1".to_string(),
+                },
+                OrchdRequest::ConnectorListAccounts,
+                OrchdRequest::ConnectorListOps {
+                    account_id: "a1".to_string(),
+                },
+                OrchdRequest::ConnectorListProviders,
+                OrchdRequest::SkillList { project_id: None },
+                OrchdRequest::TrustListPolicies,
+                OrchdRequest::TrustListAudit { limit: None },
+                OrchdRequest::ResearchListRuns {
+                    idea_id: "i1".to_string(),
+                },
+                OrchdRequest::ResearchGetRun {
+                    id: "r1".to_string(),
+                },
+                OrchdRequest::ListDocs {
+                    project_id: "p1".to_string(),
+                },
+                OrchdRequest::GetDoc {
+                    project_id: "p1".to_string(),
+                    name: "d".to_string(),
+                },
+                OrchdRequest::WorkflowList {
+                    scope: None,
+                    project_id: None,
+                },
+                OrchdRequest::WorkflowGet {
+                    id: "w1".to_string(),
+                },
+            ];
+            for req in reads {
+                let verb = req.verb_name().to_string();
+                let res = dispatch_inner(&deps, &broadcaster, req).await;
+                if let OrchdResponse::Error { code, message } = &res {
+                    assert!(
+                        !(*code == OrchdErrorCode::Invariant
+                            && message.starts_with("storage degraded")),
+                        "{verb} must not hit the degraded write gate in {mode:?}: {res:?}"
+                    );
+                }
+            }
+
+            // OrchdShutdown stays available in degraded mode (it writes no domain state).
+            let res = dispatch_inner(
+                &deps,
+                &broadcaster,
+                OrchdRequest::OrchdShutdown { drain: false },
+            )
+            .await;
+            assert_eq!(res, OrchdResponse::Ack, "OrchdShutdown in {mode:?}");
+            let _ = drain_pushes(&mut rx);
+        }
+    }
+
+    // ---- BL-111: TrustRevokeConsent ----
+
+    async fn add_enabled_tool(deps: &Arc<ServerDeps>, server_id: &str, tool_name: &str) {
+        deps.db
+            .lock()
+            .await
+            .upsert_mcp_tools(
+                server_id,
+                vec![NewMcpTool {
+                    name: tool_name.to_string(),
+                    title: None,
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                }],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoke_consent_makes_call_tool_consent_denied_and_audits_both_rows() {
+        let (deps, broadcaster, mut rx) = persistent_deps();
+        let server_id = add_http_server(&deps).await;
+        add_enabled_tool(&deps, &server_id, "search").await;
+
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::TrustGrantConsent {
+                server_id: server_id.clone(),
+                kind: "connect".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(res, OrchdResponse::Ack);
+
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::TrustRevokeConsent {
+                server_id: server_id.clone(),
+            },
+        )
+        .await;
+        assert_eq!(res, OrchdResponse::Ack);
+        assert!(
+            !deps
+                .db
+                .lock()
+                .await
+                .has_consent(&server_id, "connect")
+                .unwrap(),
+            "the grant must be gone after the revoke"
+        );
+
+        // The revoked consent denies the NEXT call at the trust choke-point — before any
+        // network touch — with the typed Consent error.
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::McpCallTool {
+                server_id: server_id.clone(),
+                tool_name: "search".to_string(),
+                args_json: "{}".to_string(),
+                project_id: None,
+            },
+        )
+        .await;
+        match res {
+            OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::Consent),
+            other => panic!("expected Error{{Consent}} after revoke, got {other:?}"),
+        }
+
+        // Both trust mutations are in the append-only audit trail.
+        let rows = deps.db.lock().await.list_audit(None).unwrap();
+        assert!(
+            rows.iter().any(|r| r.action == "consent_grant"
+                && r.server_id.as_deref() == Some(server_id.as_str())),
+            "the grant audit row must exist (SEC-5)"
+        );
+        let revoke = rows
+            .iter()
+            .find(|r| r.action == "consent_revoke")
+            .expect("a consent_revoke audit row must exist (BL-111)");
+        assert_eq!(revoke.decision, "allow");
+        assert_eq!(revoke.server_id.as_deref(), Some(server_id.as_str()));
+
+        // Grant + revoke each pushed McpServersChanged (the UI's consent badge invalidation).
+        let pushes = drain_pushes(&mut rx);
+        let server_changes = pushes
+            .iter()
+            .filter(|p| matches!(p, OrchdPush::McpServersChanged { .. }))
+            .count();
+        assert_eq!(
+            server_changes, 2,
+            "grant and revoke both push McpServersChanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_consent_is_idempotent_for_unknown_or_grantless_servers() {
+        let (deps, broadcaster, _rx) = persistent_deps();
+
+        // An unknown server id is Ack (NOT NotFound) — the postcondition "no grants exist for
+        // this server" already holds; a revoke is a safety verb, not an existence query.
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::TrustRevokeConsent {
+                server_id: "no-such-server".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(res, OrchdResponse::Ack);
+
+        // A real server with no grants: Ack too, and a repeated revoke stays Ack.
+        let server_id = add_http_server(&deps).await;
+        for _ in 0..2 {
+            let res = dispatch_inner(
+                &deps,
+                &broadcaster,
+                OrchdRequest::TrustRevokeConsent {
+                    server_id: server_id.clone(),
+                },
+            )
+            .await;
+            assert_eq!(
+                res,
+                OrchdResponse::Ack,
+                "a repeated revoke must stay Ack (idempotent)"
+            );
+        }
+
+        // Every revoke attempt is audited, idempotent or not.
+        let rows = deps.db.lock().await.list_audit(None).unwrap();
+        let revoke_rows = rows.iter().filter(|r| r.action == "consent_revoke").count();
+        assert_eq!(revoke_rows, 3);
+    }
+
+    // ---- BL-120: McpGetArtifact surfaces the truncation flag over the wire ----
+
+    #[tokio::test]
+    async fn mcp_get_artifact_replies_a_capped_truncated_artifact_with_the_flag() {
+        let (deps, broadcaster, _rx) = persistent_deps();
+        let server_id = add_http_server(&deps).await;
+        let artifact_id = {
+            let db = deps.db.lock().await;
+            let invocation = db
+                .insert_invocation(crate::persistence::NewInvocation {
+                    server_id: Some(server_id.clone()),
+                    account_id: None,
+                    tool_name: "search".to_string(),
+                    project_id: None,
+                    request_hash: "deadbeef".to_string(),
+                    ok: true,
+                    error_kind: None,
+                    latency_ms: 1,
+                    cost_usd: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    started_at: 0,
+                })
+                .unwrap();
+            db.insert_artifact(crate::persistence::NewArtifact {
+                invocation_id: invocation.id,
+                server_id: Some(server_id),
+                account_id: None,
+                tool_name: "search".to_string(),
+                project_id: None,
+                content_json: "x".repeat(20 * 1024 * 1024),
+                content_text: None,
+            })
+            .unwrap()
+            .id
+        };
+
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::McpGetArtifact { id: artifact_id },
+        )
+        .await;
+        let artifact = match res {
+            OrchdResponse::McpArtifact(a) => a,
+            other => panic!("expected McpArtifact, got {other:?}"),
+        };
+        assert_eq!(artifact.truncated, Some(true));
+        assert_eq!(
+            artifact.content_json.len(),
+            crate::persistence::ARTIFACT_CONTENT_CAP
+        );
+
+        // The exact frame the connection's writer task would emit encodes — the client gets an
+        // answer instead of a silent disconnect (pre-BL-120 this encode failed and the writer
+        // dropped the connection with no error reply).
+        let frame = OrchdFrame::Response {
+            id: 1,
+            res: OrchdResponse::McpArtifact(artifact),
+        };
+        encode_orchd_frame(&frame).expect("the capped McpGetArtifact frame must encode");
     }
 
     // ---- DOM-9a: accepting an insight emits GraphChanged alongside InsightsChanged ----

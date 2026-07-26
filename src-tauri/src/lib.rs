@@ -74,6 +74,7 @@ pub mod stats;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bpa_protocol::sync::write;
 use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
 
@@ -399,6 +400,7 @@ async fn bring_up_daemon(
     slot: commands::ClientSlot,
     status: StatusSlot,
     write_stdin_locks: Arc<commands::WriteStdinLocks>,
+    workspace_roots: commands::WorkspaceRootsSlot,
 ) {
     // AppState is already `manage`d SYNCHRONOUSLY in `setup()`, BEFORE this task is spawned — so
     // every command is callable from the very first webview frame. A boot-time command therefore
@@ -432,11 +434,13 @@ async fn bring_up_daemon(
         Ok(client) => {
             let client = Arc::new(client);
             // register() wires both on_push -> broker.dispatch_push (plus the H2 write-lock
-            // eviction on ChildExited, against the SAME lock map AppState holds) and on_conn ->
+            // eviction on ChildExited, against the SAME lock map AppState holds, and the BL-109
+            // workspace-roots cache update on workspace pushes, against the SAME slot AppState
+            // holds) and on_conn ->
             // broker.dispatch_conn (which itself emits daemon://disconnected/reconnected/
             // incompatible on future transitions, spec §13/§6.2) — call exactly once (locked
             // contract), BEFORE moving the client into the slot.
-            register(broker, &client, write_stdin_locks);
+            register(broker, &client, write_stdin_locks, workspace_roots);
             // Second `on_conn` registration (finding [12]): keeps `AppState.status` in sync with
             // every subsequent mid-session transition (disconnect / reconnect / fatal
             // incompatible), so `daemon_status` always reflects the current truth even for
@@ -449,7 +453,7 @@ async fn bring_up_daemon(
             client.on_conn(move |state| {
                 commands::write_status(&status_for_conn, status_for_conn_state(state));
             });
-            slot.write().unwrap().replace(client);
+            write(&slot).replace(client);
             info!("daemon connected; AppState managed");
         }
         Err(ClientError::IncompatibleDaemon {
@@ -529,7 +533,7 @@ pub(crate) async fn bring_up_orchd(
             client.on_conn(move |state| {
                 commands::write_orchd_status(&status_for_conn, status_for_orchd_conn_state(state));
             });
-            slot.write().unwrap().replace(client);
+            write(&slot).replace(client);
             info!("orchd connected; AppState.orchd populated");
         }
         Err(OrchdClientError::IncompatibleOrchd {
@@ -767,6 +771,12 @@ pub fn run() {
             let sessiond_status: StatusSlot =
                 Arc::new(std::sync::Mutex::new(DaemonStatus::Disconnected));
             let write_stdin_locks = Arc::new(commands::WriteStdinLocks::new());
+            // BL-109: the fs-command root guard's snapshot, seeded `NeverLoaded` (fail-closed
+            // until the first successful `list_workspaces`); `bring_up_daemon`'s `register` call
+            // keeps it current from the workspace push events against this SAME `Arc`.
+            let workspace_roots: commands::WorkspaceRootsSlot = Arc::new(
+                std::sync::Mutex::new(commands::WorkspaceRootsCache::NeverLoaded),
+            );
             // `false` when the sessiond binary path couldn't be resolved (e.g. missing from a dev
             // bundle): AppState is still managed (with an always-`Err` stub agent, so `upgrade_daemon`
             // fails honestly rather than the app never managing state), but there is nothing to
@@ -788,6 +798,7 @@ pub fn run() {
                 orchd: orchd_slot.clone(),
                 orchd_launchd: orchd_agent.clone(),
                 orchd_status: orchd_status.clone(),
+                workspace_roots: workspace_roots.clone(),
             });
 
             // Never block `setup()` on launchd/network I/O: spawn the bring-up sequence and return
@@ -802,6 +813,7 @@ pub fn run() {
                     sessiond_slot,
                     sessiond_status,
                     write_stdin_locks,
+                    workspace_roots,
                 ));
             } else {
                 emit_disconnected(&handle, "could not resolve the background service binary");

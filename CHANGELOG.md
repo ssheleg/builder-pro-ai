@@ -2,6 +2,41 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.10.2] — P1 hardening: locks, boundaries, degraded-write gate (2026-07-26)
+
+Second wave of the 2026-07-24 audit follow-up — the deferred P2 correctness/security cluster
+(`docs/backlog.md` BL-123/BL-124/BL-125/BL-134/BL-138/BL-139). Every fix ships with regression
+tests; `final-suite.sh` ALL GATES PASSED.
+
+### Fixed — security & data integrity
+
+- **fs commands no longer trust webview-supplied roots** (BL-123): every file-explorer command
+  and the filesystem watcher validate `root` against the registered workspace roots (a new
+  `WorkspaceRootsCache` in the core, kept current by hydrate, push events, and the commands' own
+  replies). Arbitrary roots (even `/`) are rejected fail-closed — `OutsideRoot`, or honest
+  `Disconnected` while the cache has never loaded.
+- **Degraded storage refuses writes** (BL-124): one centralized read-only/mutation gate in
+  `bpa-orchd`'s dispatch — in `InMemoryFallback`/`RecoveredFromCorruption` every mutation is a
+  typed invariant naming the mode (no more silently-lost writes); reads, export, storage status,
+  and shutdown stay live so the owner can back up and recover.
+- **Oversize MCP artifacts can't drop the UI connection** (BL-134): artifact content is capped at
+  15 MiB (UTF-8 boundary) at insert with a `truncated` flag (schema v8) that rides
+  `McpArtifact`/`McpCallResult` — the frame always encodes instead of the daemon dropping the
+  client connection without an answer.
+- **Consent can be revoked** (BL-125): `TrustRevokeConsent` (tail-appended, wire `[1,1]`) —
+  idempotent, audited (`consent_revoke`), broadcast; grant → revoke → tool call is denied before
+  the network.
+
+### Fixed — robustness
+
+- **Lock poisoning can't kill the terminal daemon** (BL-138): one `bpa_protocol::sync` helper
+  (`lock`/`read`/`write` — poison is recovered in place, never cascades) applied to every
+  production lock in sessiond, daemon-core, and both socket clients; regression tests prove the
+  scrollback flusher and dispatch survive a poisoned map.
+- **Client drift closed** (BL-139): the sessiond client gains the per-request completion trace
+  the orchd client had, and the orchd client gains the 6 reconnect/handshake regression tests the
+  sessiond one had.
+
 ## [0.10.1] — audit remediation sweep: security, reliability, data integrity (2026-07-25)
 
 A full-project audit ([`docs/qa/2026-07-24-full-audit-report.md`](docs/qa/2026-07-24-full-audit-report.md):

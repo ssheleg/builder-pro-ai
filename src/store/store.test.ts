@@ -817,6 +817,7 @@ describe("useAppStore", () => {
     contentJson: "{}",
     contentText: null,
     isUntrusted: true,
+    truncated: null,
     createdAt: 1,
     ...over,
   });

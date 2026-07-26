@@ -33,6 +33,10 @@
 //! generalized to N owner-named files per project — as ONE `Migration { upto: 6 }` step. Its
 //! CRUD lives in this file's own doc block (`list_docs`/`get_doc`/`upsert_doc`/`delete_doc`/
 //! `acknowledge_doc_file`), mirroring the ruleset block method-for-method.
+//! Schema v8 (BL-120) appends ONE additive column, `mcp_artifact.truncated INTEGER NOT NULL
+//! DEFAULT 0`, as ONE `Migration { upto: 8 }` step — existing artifacts backfill to `0` ("whole")
+//! via the column DEFAULT; see [`Db::insert_artifact`]'s doc for the write-time content cap the
+//! flag records.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -54,8 +58,8 @@ use uuid::Uuid;
 /// additive `research_run` table; SCN-051/ST-037 bumps this 4→5 for the additive
 /// `task.priority` column; SCN-054/ST-041 bumps this 5→6 for the additive `doc` table; SW1
 /// (docs/ux/plans/2026-07-24-workflow-authoring.md) bumps this 6→7 for the additive `workflow`
-/// table).
-pub const SCHEMA_VERSION: i64 = 7;
+/// table; BL-120 bumps this 7→8 for the additive `mcp_artifact.truncated` column).
+pub const SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -284,6 +288,10 @@ impl Db {
             bpa_daemon_core::migrate::Migration {
                 upto: 7,
                 apply: migrate_v7,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 8,
+                apply: migrate_v8,
             },
         ];
         bpa_daemon_core::migrate::run_migrations(&self.conn, from_version, SCHEMA_VERSION, STEPS)
@@ -714,6 +722,23 @@ pub(crate) fn migrate_v7(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
          );
          CREATE INDEX workflow_by_project ON workflow(project_id);
          -- user_version → 7",
+    )
+}
+
+/// v7 -> v8: BL-120 artifact truncation flag. ONE additive column on `mcp_artifact`:
+/// `truncated INTEGER NOT NULL DEFAULT 0` — set by [`Db::insert_artifact`] when the stored
+/// content had to be cut to [`ARTIFACT_CONTENT_CAP`] so a `McpGetArtifact`/`McpListArtifacts`
+/// response frame can never exceed the wire's `MAX_FRAME_LEN` (an oversized response previously
+/// failed `encode_orchd_frame` and dropped the client connection with no error reply). Purely
+/// additive, forward-only per D1: every pre-v8 artifact backfills to `0` ("whole") via the
+/// column DEFAULT itself (SQLite materializes the default for existing rows on `ADD COLUMN`),
+/// exactly the `task.priority` v5 precedent — see
+/// `v7_fixture_migrates_to_v8_and_backfills_existing_artifacts_to_not_truncated` below for the
+/// proof against a REAL v7 fixture.
+pub(crate) fn migrate_v8(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE mcp_artifact ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;
+         -- user_version → 8",
     )
 }
 
@@ -3986,21 +4011,21 @@ mod tests {
     }
 
     #[test]
-    fn open_in_memory_creates_schema_v7_with_every_table() {
+    fn open_in_memory_creates_schema_v8_with_every_table() {
         let db = Db::open_in_memory().unwrap();
-        // SW1 bumped SCHEMA_VERSION 6->7 (additive, the `workflow` table only).
-        assert_eq!(user_version(db.conn()), 7);
+        // BL-120 bumped SCHEMA_VERSION 7->8 (additive, the `mcp_artifact.truncated` column only).
+        assert_eq!(user_version(db.conn()), 8);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
     }
 
     #[test]
-    fn open_on_disk_creates_schema_v7_with_every_table() {
+    fn open_on_disk_creates_schema_v8_with_every_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orchd.db");
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(db.conn()), 7);
+        assert_eq!(user_version(db.conn()), 8);
         for table in TABLES {
             assert!(table_exists(db.conn(), table), "missing table {table}");
         }
@@ -4027,7 +4052,7 @@ mod tests {
         std::fs::write(&path, b"not a sqlite database").unwrap();
 
         let db = Db::open(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 7);
+        assert_eq!(user_version(db.conn()), 8);
 
         let found = std::fs::read_dir(dir.path()).unwrap().any(|e| {
             e.unwrap()
@@ -4046,7 +4071,7 @@ mod tests {
 
         let (db, outcome) =
             Db::open_with_outcome(&path).expect("open must quarantine and recreate, not error");
-        assert_eq!(user_version(db.conn()), 7);
+        assert_eq!(user_version(db.conn()), 8);
         match outcome {
             DbOpenOutcome::RecoveredFromCorruption { quarantined_to } => {
                 assert!(
@@ -4336,6 +4361,110 @@ mod tests {
         assert_eq!(
             remaining, 0,
             "project-scoped workflow rows must cascade with their project"
+        );
+    }
+
+    // ---- v7 -> v8 migration (BL-120 mcp_artifact.truncated, REAL v7 fixture) ----
+
+    /// Applies steps v1..v7 alone (a REAL pre-truncation-flag on-disk shape), inserts a
+    /// v7-shape `mcp_artifact` row (no `truncated` column), THEN applies [`migrate_v8`] —
+    /// proving both the new column's shape and that every EXISTING artifact backfills to `0`
+    /// ("whole") via the column DEFAULT (mirrors
+    /// `v4_fixture_migrates_to_v5_and_backfills_existing_tasks_to_normal`'s approach).
+    #[test]
+    fn v7_fixture_migrates_to_v8_and_backfills_existing_artifacts_to_not_truncated() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let v7_steps: &[bpa_daemon_core::migrate::Migration] = &[
+            bpa_daemon_core::migrate::Migration {
+                upto: 1,
+                apply: migrate_v1,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 2,
+                apply: migrate_v2,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 3,
+                apply: migrate_v3,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 4,
+                apply: migrate_v4,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 5,
+                apply: migrate_v5,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 6,
+                apply: migrate_v6,
+            },
+            bpa_daemon_core::migrate::Migration {
+                upto: 7,
+                apply: migrate_v7,
+            },
+        ];
+        bpa_daemon_core::migrate::run_migrations(&conn, 0, 7, v7_steps).unwrap();
+        let has_truncated: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('mcp_artifact') WHERE name = 'truncated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has_truncated, 0,
+            "the v7 fixture must NOT have mcp_artifact.truncated yet"
+        );
+
+        let now = 1_700_000_000_000i64;
+        conn.execute(
+            "INSERT INTO mcp_server (id, name, transport, url, scope, created_at, updated_at)
+             VALUES ('s1', 'Prowl', 'http', 'https://example.com/mcp', 'global', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mcp_invocation
+               (id, server_id, account_id, tool_name, project_id, request_hash, ok, error_kind,
+                latency_ms, cost_usd, input_tokens, output_tokens, started_at)
+             VALUES ('i1', 's1', NULL, 'search', NULL, 'deadbeef', 1, NULL, 5, NULL, NULL, NULL, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        // The v7 column list — no `truncated` yet.
+        conn.execute(
+            "INSERT INTO mcp_artifact
+               (id, invocation_id, server_id, account_id, tool_name, project_id, content_json,
+                content_text, is_untrusted, created_at)
+             VALUES ('a1', 'i1', 's1', NULL, 'search', NULL, '{\"ok\":true}', 'ok', 1, ?1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        let v8_steps: &[bpa_daemon_core::migrate::Migration] =
+            &[bpa_daemon_core::migrate::Migration {
+                upto: 8,
+                apply: migrate_v8,
+            }];
+        bpa_daemon_core::migrate::run_migrations(&conn, 7, 8, v8_steps).unwrap();
+
+        assert_eq!(user_version(&conn), 8);
+        let (truncated, content_json): (i64, String) = conn
+            .query_row(
+                "SELECT truncated, content_json FROM mcp_artifact WHERE id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            truncated, 0,
+            "a pre-v8 artifact must backfill to truncated=0 ('whole') via the column DEFAULT"
+        );
+        assert_eq!(
+            content_json, "{\"ok\":true}",
+            "the migration must never touch stored content"
         );
     }
 
@@ -8539,6 +8668,37 @@ struct McpArtifactRawRow {
     content_text: Option<String>,
     is_untrusted: i64,
     created_at: i64,
+    truncated: i64,
+}
+
+/// BL-120: the write-time cap on an artifact's COMBINED stored content
+/// (`content_json.len() + content_text.len()`, bytes). Chosen as 15 MiB so a
+/// `McpGetArtifact`/`McpCallResult` response carrying the capped content — plus the frame's
+/// remaining fields and CBOR overhead — always stays under the wire's
+/// `bpa_protocol::MAX_FRAME_LEN` (16 MiB) with ~1 MiB of headroom: before this cap, a tool
+/// result larger than the frame limit made `encode_orchd_frame` fail in the connection's
+/// writer task, which dropped the client connection WITHOUT any error reply. The cap is
+/// enforced once, at write time, inside [`Db::insert_artifact`] (the single funnel every
+/// artifact — `McpCallTool` or `ConnectorInvoke` — passes through), never at read time, so the
+/// stored row is always frame-safe by construction.
+pub(crate) const ARTIFACT_CONTENT_CAP: usize = 15 * 1024 * 1024;
+
+/// Truncate `content` in place to at most `budget` BYTES, rounding the cut DOWN to a UTF-8
+/// char boundary so the string stays valid. Returns `true` iff anything was cut. A raw prefix
+/// is deliberate (BL-120): the persisted row is a faithful byte-prefix of the tool's output,
+/// with the `truncated` flag on the row/entity carrying the "this is not whole" fact — no
+/// marker text is spliced into the content itself (which would corrupt the prefix AND
+/// masquerade as tool output).
+fn truncate_to_budget(content: &mut String, budget: usize) -> bool {
+    if content.len() <= budget {
+        return false;
+    }
+    let mut cut = budget;
+    while !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    content.truncate(cut);
+    true
 }
 
 impl McpArtifactRawRow {
@@ -8554,6 +8714,7 @@ impl McpArtifactRawRow {
             content_text: r.get(7)?,
             is_untrusted: r.get(8)?,
             created_at: r.get(9)?,
+            truncated: r.get(10)?,
         })
     }
 
@@ -8569,12 +8730,15 @@ impl McpArtifactRawRow {
             content_text: self.content_text,
             is_untrusted: self.is_untrusted != 0,
             created_at: self.created_at,
+            // `None` for "whole" (incl. every pre-v8 row, which backfilled 0) so an
+            // untruncated artifact's wire shape is byte-identical to before BL-120.
+            truncated: (self.truncated != 0).then_some(true),
         }
     }
 }
 
 const MCP_ARTIFACT_COLUMNS: &str = "id, invocation_id, server_id, account_id, tool_name, \
-     project_id, content_json, content_text, is_untrusted, created_at";
+     project_id, content_json, content_text, is_untrusted, created_at, truncated";
 
 fn load_artifact(conn: &Connection, id: &str) -> Result<McpArtifact, OrchdPersistError> {
     let sql = format!("SELECT {MCP_ARTIFACT_COLUMNS} FROM mcp_artifact WHERE id = ?1");
@@ -8749,15 +8913,34 @@ impl Db {
     /// `insert_artifact` (spec §4 `mcp_artifact`, D9): `is_untrusted` is ALWAYS written as `1`
     /// (spec D9: "always true for external tool output") — not a field on [`NewArtifact`], so no
     /// code path can persist an artifact any other way.
+    ///
+    /// BL-120: the content is ALSO always fitted to [`ARTIFACT_CONTENT_CAP`] here — the single
+    /// write-time funnel, so no caller (`mcp::invoke::call_tool`, `connectors::adapter::invoke`,
+    /// or any future one) can persist an artifact whose later `McpGetArtifact`/`McpCallResult`
+    /// frame would exceed the wire's `MAX_FRAME_LEN` and drop the client connection.
+    /// `content_json` (the full structured result) takes priority on the budget; `content_text`
+    /// (the derived preview/search flattening) gets what remains — when the structured content
+    /// alone exhausts the budget the preview degrades to an empty string rather than pushing the
+    /// frame back over the limit. Any cut sets the row's `truncated` flag (surfaced on the wire
+    /// entity as `Some(true)`); content within budget is stored byte-identically with the flag
+    /// clear.
     pub fn insert_artifact(&self, new: NewArtifact) -> Result<McpArtifact, OrchdPersistError> {
+        let mut content_json = new.content_json;
+        let mut content_text = new.content_text;
+        let mut truncated = truncate_to_budget(&mut content_json, ARTIFACT_CONTENT_CAP);
+        if let Some(text) = content_text.as_mut() {
+            let remaining = ARTIFACT_CONTENT_CAP.saturating_sub(content_json.len());
+            truncated |= truncate_to_budget(text, remaining);
+        }
+
         let tx = self.conn().unchecked_transaction()?;
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
         tx.execute(
             "INSERT INTO mcp_artifact
                (id, invocation_id, server_id, account_id, tool_name, project_id, content_json,
-                content_text, is_untrusted, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
+                content_text, is_untrusted, created_at, truncated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10)",
             rusqlite::params![
                 id,
                 new.invocation_id,
@@ -8765,9 +8948,10 @@ impl Db {
                 new.account_id,
                 new.tool_name,
                 new.project_id,
-                new.content_json,
-                new.content_text,
+                content_json,
+                content_text,
                 now,
+                truncated as i64,
             ],
         )?;
         let row = load_artifact(&tx, &id)?;
@@ -8888,6 +9072,23 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// `delete_consent` (BL-111, `TrustRevokeConsent`): removes EVERY consent grant (any
+    /// `kind`) for `server_id`. IDEMPOTENT by contract — returns the number of grants removed
+    /// (`0` for a never-granted or unknown server, which is NOT an error: the postcondition
+    /// "no grants exist for this server" already holds, and a revoke is a safety verb, not an
+    /// existence query). Unlike [`Db::grant_consent`] there is deliberately no
+    /// server-resolution/archived guard: revoking trust must always succeed, even against a
+    /// server row that no longer exists (a leftover grant row would otherwise be
+    /// un-reachable — `consent_grant.server_id` has `ON DELETE CASCADE`, but a revoke issued
+    /// after a failed partial delete must still clean up).
+    pub fn delete_consent(&self, server_id: &str) -> Result<usize, OrchdPersistError> {
+        let removed = self.conn().execute(
+            "DELETE FROM consent_grant WHERE server_id = ?1",
+            rusqlite::params![server_id],
+        )?;
+        Ok(removed)
     }
 
     /// `insert_audit` (spec §6/D10, task-5 brief): the trust choke-point's append-only sink —
@@ -9422,6 +9623,135 @@ mod trust_persistence_tests {
         assert_eq!(for_server.len(), 2);
     }
 
+    // ---- BL-120: artifact write-time content cap ----
+
+    /// A 20 MiB tool result (over the wire's 16 MiB `MAX_FRAME_LEN`) must be STORED truncated
+    /// with the flag set — and the capped row must always fit in a response frame (pre-BL-120
+    /// this frame failed `encode_orchd_frame` in the connection's writer task and the client
+    /// was disconnected with no error reply).
+    #[test]
+    fn insert_artifact_stores_oversize_content_truncated_with_the_flag_set() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let invocation = db.insert_invocation(new_invocation(&server_id)).unwrap();
+        let big_json = "x".repeat(20 * 1024 * 1024);
+        let big_text = "y".repeat(20 * 1024 * 1024);
+
+        let artifact = db
+            .insert_artifact(NewArtifact {
+                invocation_id: invocation.id.clone(),
+                server_id: Some(server_id.clone()),
+                account_id: None,
+                tool_name: "search".to_string(),
+                project_id: None,
+                content_json: big_json,
+                content_text: Some(big_text),
+            })
+            .unwrap();
+
+        assert_eq!(artifact.truncated, Some(true));
+        assert_eq!(
+            artifact.content_json.len(),
+            ARTIFACT_CONTENT_CAP,
+            "content_json takes priority on the whole budget"
+        );
+        assert_eq!(
+            artifact.content_text.as_deref(),
+            Some(""),
+            "content_text gets only the remaining budget — none left here"
+        );
+
+        // The fetched row is identical to the inserted one, and BOTH the single-get and the
+        // (single-entry) list response frames encode — the "must not drop the connection"
+        // guarantee (an oversized body is exactly what makes `encode_orchd_frame` fail).
+        let fetched = db.get_artifact(&artifact.id).unwrap();
+        assert_eq!(fetched, artifact);
+        let get_frame = bpa_orchd_proto::OrchdFrame::Response {
+            id: 1,
+            res: bpa_orchd_proto::OrchdResponse::McpArtifact(fetched.clone()),
+        };
+        bpa_orchd_proto::encode_orchd_frame(&get_frame)
+            .expect("a capped McpGetArtifact response must always encode");
+        let list_frame = bpa_orchd_proto::OrchdFrame::Response {
+            id: 2,
+            res: bpa_orchd_proto::OrchdResponse::McpArtifacts(vec![fetched]),
+        };
+        bpa_orchd_proto::encode_orchd_frame(&list_frame)
+            .expect("a capped McpListArtifacts response must always encode");
+    }
+
+    #[test]
+    fn insert_artifact_within_budget_is_stored_whole_without_the_flag() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let invocation = db.insert_invocation(new_invocation(&server_id)).unwrap();
+
+        let artifact = db
+            .insert_artifact(NewArtifact {
+                invocation_id: invocation.id.clone(),
+                server_id: Some(server_id.clone()),
+                account_id: None,
+                tool_name: "search".to_string(),
+                project_id: None,
+                content_json: "{\"ok\":true}".to_string(),
+                content_text: Some("ok".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(artifact.truncated, None, "no cut, no flag");
+        assert_eq!(artifact.content_json, "{\"ok\":true}");
+        assert_eq!(artifact.content_text.as_deref(), Some("ok"));
+    }
+
+    /// content_json within budget but a huge content_text: the text is truncated to the
+    /// REMAINING budget, so the row's combined content never exceeds the cap.
+    #[test]
+    fn insert_artifact_truncates_content_text_to_the_remaining_budget() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        let invocation = db.insert_invocation(new_invocation(&server_id)).unwrap();
+        let json = "j".repeat(1000);
+        let big_text = "y".repeat(20 * 1024 * 1024);
+
+        let artifact = db
+            .insert_artifact(NewArtifact {
+                invocation_id: invocation.id.clone(),
+                server_id: Some(server_id.clone()),
+                account_id: None,
+                tool_name: "search".to_string(),
+                project_id: None,
+                content_json: json.clone(),
+                content_text: Some(big_text),
+            })
+            .unwrap();
+
+        assert_eq!(artifact.truncated, Some(true));
+        assert_eq!(
+            artifact.content_json, json,
+            "in-budget content_json is whole"
+        );
+        assert_eq!(
+            artifact.content_text.as_ref().map(String::len),
+            Some(ARTIFACT_CONTENT_CAP - 1000)
+        );
+    }
+
+    #[test]
+    fn truncate_to_budget_rounds_down_to_a_char_boundary() {
+        // '€' is 3 UTF-8 bytes; a budget landing inside it must round the cut DOWN.
+        let mut s = "aaa€bbb".to_string();
+        assert!(truncate_to_budget(&mut s, 4));
+        assert_eq!(s, "aaa");
+
+        let mut whole = "short".to_string();
+        assert!(!truncate_to_budget(&mut whole, 100));
+        assert_eq!(whole, "short");
+
+        let mut exact = "abcde".to_string();
+        assert!(!truncate_to_budget(&mut exact, 5), "at-budget is not a cut");
+        assert_eq!(exact, "abcde");
+    }
+
     // ---- has_consent / grant_consent ----
 
     #[test]
@@ -9489,6 +9819,42 @@ mod trust_persistence_tests {
                 .unwrap()
                 .fingerprint,
             "https://example.com/mcp-v2"
+        );
+    }
+
+    // ---- delete_consent (BL-111, TrustRevokeConsent) ----
+
+    #[test]
+    fn delete_consent_removes_every_kind_for_the_server() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        db.grant_consent(&server_id, "connect", "https://example.com/mcp")
+            .unwrap();
+        db.grant_consent(&server_id, "stdio_exec", "fp").unwrap();
+
+        let removed = db.delete_consent(&server_id).unwrap();
+        assert_eq!(removed, 2, "both kinds must be removed");
+        assert!(!db.has_consent(&server_id, "connect").unwrap());
+        assert!(!db.has_consent(&server_id, "stdio_exec").unwrap());
+    }
+
+    #[test]
+    fn delete_consent_is_idempotent_for_missing_grants_and_unknown_servers() {
+        let db = new_db();
+        let server_id = add_server(&db);
+        db.grant_consent(&server_id, "connect", "https://example.com/mcp")
+            .unwrap();
+
+        assert_eq!(db.delete_consent(&server_id).unwrap(), 1);
+        assert_eq!(
+            db.delete_consent(&server_id).unwrap(),
+            0,
+            "a repeated revoke is Ok(0), never an error (idempotent safety verb)"
+        );
+        assert_eq!(
+            db.delete_consent("no-such-server").unwrap(),
+            0,
+            "an unknown server is Ok(0) too — the postcondition already holds"
         );
     }
 
