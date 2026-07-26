@@ -816,45 +816,15 @@ mod tests {
     // this deliberately looser (but equally honest, always-loud) equivalent). ----
 
     fn keychain_available() -> bool {
-        // FULL `set → get (assert bytes) → delete` round-trip, NOT set-only: Keychain Services'
-        // "default keychain" and "search list" are independent, so a keychain a `set` writes to is
-        // not necessarily the one a `get`/`delete` resolves. A CI keychain that was created +
-        // set-default + unlocked but NOT added to the search list makes `set` succeed while
-        // `get`/`delete` fail "not found" — a set-only probe would report "available" and the real
-        // test's `get` would then panic. The round-trip catches that and SKIPs loudly instead.
-        let probe = bpa_secrets::account_ref("connectors-accounts-probe", "test");
-        let _ = bpa_secrets::delete(&probe); // clear any stray entry from a crashed prior run
-        const PROBE_BYTES: &[u8] = b"probe-roundtrip-marker";
-        let skip = |reason: String| {
-            eprintln!(
-                "SKIP connectors::accounts keychain-backed test: {reason} — graceful skip, not a \
-                 pass. Run locally with an unlocked login keychain (or a CI keychain on the \
-                 search list) to exercise the full assertion."
-            );
-            let _ = bpa_secrets::delete(&probe);
-            false
-        };
-        if let Err(e) = bpa_secrets::set(&probe, PROBE_BYTES) {
-            return skip(format!("login keychain unavailable ({e})"));
-        }
-        match bpa_secrets::get(&probe) {
-            Ok(bytes) if bytes == PROBE_BYTES => {}
-            Ok(_) => {
-                return skip("probe get returned the wrong bytes (keychain misconfigured)".into())
-            }
-            Err(e) => {
-                return skip(format!(
-                    "probe get failed after a successful set ({e} — keychain likely not on the \
-                     search list)"
-                ));
-            }
-        }
-        if let Err(e) = bpa_secrets::delete(&probe) {
-            return skip(format!(
-                "probe delete failed after a successful set+get ({e})"
-            ));
-        }
-        true
+        // Hang-proof bounded probe (BL-107): an inline set→get→delete round-trip BLOCKS on a macOS
+        // Keychain authorization prompt when this test binary isn't pre-authorized for the login
+        // keychain, and a non-interactive shell never answers it — wedging the whole test binary
+        // (observed: `connectors::accounts::tests` at 0% CPU for 14+ min). `bpa_secrets::
+        // keychain_available` runs the round-trip on a worker thread bounded by a timeout, turning
+        // that hang into a loud SKIP instead. The probe itself (service prefix, set→get→delete
+        // round-trip, skip-on-unavailable/mismatch) is unchanged — only the hang-proofing moved
+        // into the shared helper.
+        bpa_secrets::keychain_available(std::time::Duration::from_secs(3))
     }
 
     #[test]

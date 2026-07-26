@@ -21,6 +21,12 @@ export interface FlowNode {
   id: string;
   type: string;
   position: { x: number; y: number };
+  /** xyflow node interactivity flags (GRAPH-1): an external (cross-project ghost) node is
+   * `draggable:false`/`selectable:false` so it can't be moved or selected for deletion; local nodes
+   * leave them unset (xyflow defaults both to `true`). Optional here because xyflow treats absence as
+   * the default and this module never sets them for local nodes. */
+  draggable?: boolean;
+  selectable?: boolean;
   data: {
     label: string;
     kind: string;
@@ -91,6 +97,13 @@ export function toFlowNodes(view: GraphView): FlowNode[] {
     id: node.id,
     type: node.kind,
     position: { x: node.posX, y: node.posY },
+    // GRAPH-1: an EXTERNAL (cross-project ghost) node is READ-ONLY on this canvas — it belongs to
+    // a foreign project, so it must NOT be draggable (a drag would fire GraphMoveNode at a foreign
+    // id and silently rewrite that project's layout) nor selectable (selection drives the delete
+    // handler, which would fire GraphDeleteNode at the foreign node + cascade its edges). Local
+    // nodes stay fully interactive.
+    draggable: !isExternal,
+    selectable: !isExternal,
     data: {
       label: node.label,
       kind: node.kind,

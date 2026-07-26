@@ -572,7 +572,13 @@ export function GraphCanvas(props: { projectId: string }): JSX.Element {
   const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : undefined;
 
   async function handleDeleteSelected(): Promise<void> {
-    const selectedNodeIds = nodes.filter((n) => n.selected).map((n) => n.id);
+    // GRAPH-1 (defense-in-depth): an EXTERNAL (cross-project ghost) node is read-only on this
+    // canvas — selectable:false already prevents selecting it, but never fire GraphDeleteNode at a
+    // foreign id (it would cascade-delete the node + its edges in the OTHER project). Filter it out
+    // explicitly so a future selection change can't reach the verb.
+    const selectedNodeIds = nodes
+      .filter((n) => n.selected && !(n.data as GraphNodeData).isExternal)
+      .map((n) => n.id);
     const selectedEdgeIds = edges.filter((e) => e.selected).map((e) => e.id);
     if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
     if (!window.confirm(DELETE_CONFIRM_TEXT)) return;

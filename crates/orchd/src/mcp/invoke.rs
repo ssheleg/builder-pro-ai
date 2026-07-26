@@ -86,20 +86,17 @@ where
             });
         }
 
-        // (S-EXT §6/D6/D10, task T16): Phase-1 has no persisted session — EVERY call reconnects
-        // (doc comment above: "connect-per-call is fine"), and for a stdio server "reconnect"
-        // means spawning a NEW local process. The per-tool allowlist check above says nothing
-        // about whether spawning is currently authorized, so a stdio server needs its OWN
-        // `stdio_exec` gate here too — otherwise `McpCallTool` would be a second, ungated spawn
-        // path bypassing the one `McpConnect`/`lifecycle::connect` enforces. `super::
-        // connect_action` is the SAME helper `lifecycle::connect` uses, so both paths agree on
-        // exactly what's required. HTTP is unchanged (no new gate: `connect_action` only matters
-        // for `McpTransport::Stdio` below).
-        if server.transport == super::McpTransport::Stdio {
-            let spawn_decision = trust::authorize(&guard, &super::connect_action(&server))?;
-            if matches!(spawn_decision, Decision::Deny { .. }) {
-                return Err(OrchdMcpError::ConsentRequired);
-            }
+        // SEC-1: gate EVERY call (not just stdio) against the connect/spawn consent. For HTTP this
+        // re-evaluates the URL fingerprint against the CURRENT server url — so an
+        // `McpUpdateServer{url}` that repoints an already-consented HTTP server to a new endpoint
+        // (which would otherwise receive the resolved bearer on the next `McpCallTool`, audited as
+        // `tool_call/allow`) re-prompts HERE instead of silently routing the call to the new url.
+        // `connect_action` returns `Connect{fingerprint:url}` for HTTP and `StdioSpawn` for stdio,
+        // so one gate covers both transports; `lifecycle::connect` uses the SAME helper, so the
+        // per-call and connect-time gates always agree on what is required.
+        let connect_decision = trust::authorize(&guard, &super::connect_action(&server))?;
+        if matches!(connect_decision, Decision::Deny { .. }) {
+            return Err(OrchdMcpError::ConsentRequired);
         }
 
         let bearer = resolve_bearer(&server).map_err(|e| OrchdMcpError::Secret(e.to_string()))?;
@@ -357,7 +354,9 @@ mod tests {
 
     use super::*;
     use crate::mcp::test_support::{FakeCallOutcome, FakeSession};
-    use crate::mcp::{McpAuthKind, McpScope, McpToolRow, McpTransport, NewMcpServer, NewMcpTool};
+    use crate::mcp::{
+        McpAuthKind, McpScope, McpServerPatch, McpToolRow, McpTransport, NewMcpServer, NewMcpTool,
+    };
 
     /// `call_tool` now takes the SHARED `Arc<Mutex<Db>>` (it locks internally in phases around the
     /// network await — T6 review fix), so tests build one and lock it themselves for setup /
@@ -367,7 +366,8 @@ mod tests {
     }
 
     async fn add_server(db: &Arc<Mutex<Db>>) -> McpServerRow {
-        db.lock()
+        let server = db
+            .lock()
             .await
             .add_mcp_server(NewMcpServer {
                 name: "Prowl".to_string(),
@@ -385,11 +385,20 @@ mod tests {
                 timeout_ms: 5_000,
                 max_retries: 2,
             })
-            .unwrap()
+            .unwrap();
+        // SEC-1: McpCallTool now re-gates the connect consent per call (URL fingerprint), so the
+        // HTTP test servers need a connect grant matching their url — exactly what the production
+        // flow has (the UI connects, granting consent, before invoking tools).
+        db.lock()
+            .await
+            .grant_consent(&server.id, "connect", "https://example.com/mcp")
+            .unwrap();
+        server
     }
 
     async fn add_server_with_timeout_ms(db: &Arc<Mutex<Db>>, timeout_ms: i64) -> McpServerRow {
-        db.lock()
+        let server = db
+            .lock()
             .await
             .add_mcp_server(NewMcpServer {
                 name: "Prowl".to_string(),
@@ -407,7 +416,12 @@ mod tests {
                 timeout_ms,
                 max_retries: 2,
             })
-            .unwrap()
+            .unwrap();
+        db.lock()
+            .await
+            .grant_consent(&server.id, "connect", "https://example.com/mcp")
+            .unwrap();
+        server
     }
 
     async fn add_tool(db: &Arc<Mutex<Db>>, server_id: &str, name: &str) -> McpToolRow {
@@ -953,7 +967,11 @@ mod tests {
         let db = new_db();
         let server = add_stdio_server(&db, "/nonexistent/mcp-server").await;
         add_tool(&db, &server.id, "run").await;
-        let fingerprint = crate::trust::stdio_exec_fingerprint("/nonexistent/mcp-server", &[]);
+        let fingerprint = crate::trust::stdio_exec_fingerprint(
+            "/nonexistent/mcp-server",
+            &[],
+            &Default::default(),
+        );
         db.lock()
             .await
             .grant_consent(&server.id, "stdio_exec", &fingerprint)
@@ -979,34 +997,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stdio_call_tool_http_server_is_unaffected_no_extra_gate() {
-        // Regression (task T16 brief: "an http server's 'connect' consent path stays
-        // unchanged") — an http server's per-call reconnect has never been gated by a Connect
-        // check and still isn't; only the enabled-tool allowlist applies.
+    async fn call_tool_http_server_re_prompts_after_a_url_change() {
+        // SEC-1: an http server's per-call reconnect is NOW gated by the Connect consent (URL
+        // fingerprint). After `McpUpdateServer{url}` repoints an already-consented server to a new
+        // endpoint, the next `McpCallTool` must DENY (ConsentRequired) rather than silently route
+        // the call (with the resolved bearer) to the new url — closing the bearer-exfil path where
+        // a tool call reached a url the owner never consented to.
         let db = new_db();
-        let server = add_server(&db).await;
+        let server = add_server(&db).await; // grants connect consent for "https://example.com/mcp"
         add_tool(&db, &server.id, "search").await;
 
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let call_count_for_closure = call_count.clone();
-        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
-            let call_count = call_count_for_closure.clone();
-            async move {
-                Ok::<FakeSession, McpError>(
-                    FakeSession::new(vec![], call_count)
-                        .with_outcomes(vec![FakeCallOutcome::Ok(sample_result())]),
-                )
-            }
-        };
-
-        let result = call_tool(&db, &server.id, "search", "{}", None, connect_fn)
+        // Repoint the server to a DIFFERENT url after the grant.
+        db.lock()
             .await
+            .update_mcp_server(
+                &server.id,
+                McpServerPatch {
+                    url: Some("https://attacker.example/mcp".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        assert!(!result.is_error);
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            1,
-            "an http tool call needs no consent grant at all — unchanged behavior"
+
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| async move {
+            panic!("connect_fn must never run — the consent gate must deny before the network");
+            #[allow(unreachable_code)]
+            Ok::<FakeSession, McpError>(FakeSession::new(vec![], Arc::new(AtomicUsize::new(0))))
+        };
+        let result = call_tool(&db, &server.id, "search", "{}", None, connect_fn).await;
+        assert!(
+            matches!(result, Err(OrchdMcpError::ConsentRequired)),
+            "a tool call against a repointed url must re-prompt, got {result:?}"
         );
     }
 

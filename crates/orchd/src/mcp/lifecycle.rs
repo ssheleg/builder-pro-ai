@@ -378,7 +378,11 @@ mod tests {
     async fn stdio_connect_after_stdio_exec_consent_caches_tools_and_spawns() {
         let db = new_db();
         let server = add_stdio_server(&db, "/nonexistent/mcp-server").await;
-        let fingerprint = crate::trust::stdio_exec_fingerprint("/nonexistent/mcp-server", &[]);
+        let fingerprint = crate::trust::stdio_exec_fingerprint(
+            "/nonexistent/mcp-server",
+            &[],
+            &Default::default(),
+        );
         db.lock()
             .await
             .grant_consent(&server.id, "stdio_exec", &fingerprint)
@@ -433,7 +437,11 @@ mod tests {
         let server = add_stdio_server(&db, "/bin/original-tool").await;
         {
             let guard = db.lock().await;
-            let fp_a = crate::trust::stdio_exec_fingerprint("/bin/original-tool", &[]);
+            let fp_a = crate::trust::stdio_exec_fingerprint(
+                "/bin/original-tool",
+                &[],
+                &Default::default(),
+            );
             guard
                 .grant_consent(&server.id, "stdio_exec", &fp_a)
                 .unwrap();

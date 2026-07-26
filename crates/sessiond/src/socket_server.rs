@@ -920,8 +920,12 @@ async fn dispatch_inner(
         // §3.3) so a workspace can never end up with zero roots. Same `WorkspaceUpdated` broadcast
         // as `AddWorkspaceRoot` above on success.
         Request::RemoveWorkspaceRoot { workspace_id, path } => {
+            // Canonicalize for matching (SES-6): stored roots are canonical (added via validate_dir),
+            // so a non-canonical incoming path would otherwise never match → silent no-op that hid the
+            // last-root `LastRoot` guard. Tolerates a root that no longer exists on disk.
+            let canonical = canonicalize_root_for_match(&path);
             let db = deps.db.lock().await;
-            match db.remove_workspace_root(&workspace_id, &path) {
+            match db.remove_workspace_root(&workspace_id, &canonical) {
                 Ok(updated) => {
                     broadcaster.broadcast(Frame::Push(Push::WorkspaceUpdated(updated.clone())));
                     Response::Workspace(updated)
@@ -1054,6 +1058,32 @@ async fn dispatch_inner(
             cols,
             rows,
         } => {
+            // SES-4: reject a bogus `workspace_id` UP FRONT. Without this, a session against an
+            // unknown workspace runs (the PTY is created) but EVERY persist fails on the
+            // `session.workspace_id` FK (log-only), and the session silently vanishes on the next
+            // daemon restart — no client-visible error. A real workspace is required.
+            {
+                let db = deps.db.lock().await;
+                let known = db.workspace_exists(&workspace_id);
+                drop(db);
+                match known {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Response::Error {
+                            code: "NoSuchWorkspace".into(),
+                            message: format!("no workspace {workspace_id}"),
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace = %workspace_id,
+                            error = %e,
+                            "workspace_exists probe failed"
+                        );
+                        return err("CreateSessionFailed", e);
+                    }
+                }
+            }
             let spec = match resolve_session_spec(
                 &deps.runtime_root,
                 workspace_id,
@@ -1241,6 +1271,30 @@ fn validate_dir(path: &str) -> Result<String, bpa_paths::PathError> {
     bpa_paths::validate_dir(std::path::Path::new(path)).map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Canonicalize a workspace-root path for MATCHING against the roots stored at `AddWorkspaceRoot`
+/// time (which `validate_dir` canonicalized). `RemoveWorkspaceRoot` must also work for a root that
+/// no longer exists on disk (the common case — the folder moved/was deleted), so unlike
+/// `validate_dir` this does NOT fail closed: a `canonicalize` failure falls back to canonicalizing
+/// the PARENT (which usually still exists) and re-joining the basename, matching the canonical form
+/// the root was stored under. SES-6: without this the incoming (non-canonical) path never matched
+/// the stored canonical path, so removal was a silent no-op and the last-root `LastRoot` guard
+/// never fired — the daemon ACKed without changing anything.
+fn canonicalize_root_for_match(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c.to_string_lossy().into_owned();
+    }
+    match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            match std::fs::canonicalize(parent) {
+                Ok(c) => c.join(name).to_string_lossy().into_owned(),
+                Err(_) => path.to_string(),
+            }
+        }
+        _ => path.to_string(),
+    }
+}
+
 /// Resolve a protocol `CreateSession` into a fully-specified [`SessionSpec`] (spec §9.3/§16):
 /// pick the shell, validate the cwd, assemble the §9.3 env allowlist + shell-integration env/args,
 /// and derive a title. On a cwd violation returns `Err(Response::Error{code:"CwdMissing"})`.
@@ -1365,6 +1419,41 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
 
+    #[test]
+    fn canonicalize_root_for_match_resolves_an_existing_dir_to_its_canonical_form() {
+        // SES-6: a workspace root stored via validate_dir is canonical; a remove that sends a
+        // non-canonical spelling (here: a path with a `.` segment, which canonicalize collapses)
+        // must resolve to the same canonical form so it MATCHES and the LastRoot guard can fire.
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        // A non-canonical spelling: parent + "." + basename.
+        let dot = real
+            .parent()
+            .unwrap()
+            .join(".")
+            .join(real.file_name().unwrap());
+        assert_eq!(
+            canonicalize_root_for_match(&dot.to_string_lossy()),
+            real.to_string_lossy().into_owned(),
+            "a non-canonical existing path must canonicalize to match the stored root"
+        );
+    }
+
+    #[test]
+    fn canonicalize_root_for_match_tolerates_a_gone_root_via_its_parent() {
+        // SES-6: removal must work for a root that no longer exists on disk (folder deleted/moved)
+        // — canonicalize fails, so we canonicalize the PARENT (which exists) and re-join the name.
+        let parent = tempfile::tempdir().unwrap();
+        let parent_canon = std::fs::canonicalize(parent.path()).unwrap();
+        let gone = parent_canon.join("deleted-root");
+        let got = canonicalize_root_for_match(&gone.to_string_lossy());
+        assert_eq!(
+            got,
+            gone.to_string_lossy().into_owned(),
+            "a deleted root must normalize via the canonical parent + basename, got {got}"
+        );
+    }
+
     // ---- framing helpers (mirror the server codec on the client side) ----
     async fn send_frame(s: &mut UnixStream, f: &Frame) {
         // `encode_frame` already prepends the u32-LE length prefix — write its output verbatim,
@@ -1477,6 +1566,20 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let (tx, rx) = tokio::sync::watch::channel(false);
         let (deps, runtime) = test_deps_with_shutdown(tx.clone());
+        // SES-4: CreateSession now validates the workspace exists. Seed the canonical test workspace
+        // "ws" so dispatch tests that CreateSession against it succeed, and so the cwd-rejection
+        // tests (which pair "ws" with an invalid cwd) still hit the cwd gate rather than
+        // NoSuchWorkspace.
+        deps.db
+            .lock()
+            .await
+            .upsert_workspace(&Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
+            })
+            .unwrap();
         let jh = tokio::spawn(async move {
             let _ = serve(listener, deps, rx).await;
         });
@@ -1710,8 +1813,12 @@ mod tests {
                     id: 6,
                     res: Response::Workspaces(v),
                 } => {
-                    assert_eq!(v.len(), 1);
-                    assert_eq!(v[0].name, "w");
+                    // spawn_server pre-seeds the canonical "ws" test workspace (SES-4), so the list
+                    // contains it PLUS the "w" we just created — assert "w" is present.
+                    assert!(
+                        v.iter().any(|w| w.name == "w"),
+                        "CreateWorkspace must persist 'w', got: {v:?}"
+                    );
                     break;
                 }
                 Frame::Push(_) => continue,

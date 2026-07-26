@@ -445,7 +445,11 @@ pub(crate) fn connect_action(server: &McpServerRow) -> crate::trust::Action {
 /// derive the SAME value from the SAME server row and can never silently diverge (task T16).
 pub(crate) fn fingerprint_for(server: &McpServerRow, kind: &str) -> String {
     if kind == crate::trust::CONSENT_KIND_STDIO_EXEC {
-        crate::trust::stdio_exec_fingerprint(server.command.as_deref().unwrap_or(""), &server.args)
+        crate::trust::stdio_exec_fingerprint(
+            server.command.as_deref().unwrap_or(""),
+            &server.args,
+            &server.env,
+        )
     } else {
         server.url.clone().unwrap_or_default()
     }
@@ -838,7 +842,11 @@ mod tests {
                 assert_eq!(server_id, "srv-1");
                 assert_eq!(
                     fingerprint,
-                    crate::trust::stdio_exec_fingerprint("/usr/bin/true", &["--flag".to_string()])
+                    crate::trust::stdio_exec_fingerprint(
+                        "/usr/bin/true",
+                        &["--flag".to_string()],
+                        &Default::default()
+                    )
                 );
             }
             other => panic!("expected Action::StdioSpawn, got {other:?}"),

@@ -491,21 +491,11 @@ mod tests {
     // itself takes a plain in-memory [`AccountToken`], no Keychain involved. ----
 
     fn keychain_available() -> bool {
-        let probe = bpa_secrets::account_ref("connectors-adapter-probe", "test");
-        match bpa_secrets::set(&probe, b"probe") {
-            Ok(()) => {
-                let _ = bpa_secrets::delete(&probe);
-                true
-            }
-            Err(e) => {
-                eprintln!(
-                    "SKIP connectors::adapter keychain-backed test: login keychain unavailable \
-                     in this environment ({e}) — graceful skip, not a pass. Run locally with an \
-                     unlocked login keychain to exercise the full assertion."
-                );
-                false
-            }
-        }
+        // Hang-proof bounded probe (BL-107) — see `accounts::keychain_available` for the rationale:
+        // an inline round-trip wedges the whole test binary on a Keychain authorization prompt this
+        // binary was never approved for, and the shared `bpa_secrets::keychain_available` bounds it
+        // on a worker thread into a loud SKIP instead.
+        bpa_secrets::keychain_available(std::time::Duration::from_secs(3))
     }
 
     /// Best-effort teardown so a panicking test never leaves a stray real Keychain entry.

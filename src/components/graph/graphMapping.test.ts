@@ -52,6 +52,21 @@ describe("graphMapping", () => {
       expect(ext?.data.isExternal).toBe(true);
     });
 
+    it("marks external ghosts non-draggable/non-selectable, local nodes interactive (GRAPH-1)", () => {
+      const view: GraphView = {
+        nodes: [node({ id: "local1" })],
+        edges: [],
+        externalNodes: [node({ id: "ext1" })],
+      };
+      const flowNodes = toFlowNodes(view);
+      const local = flowNodes.find((n) => n.id === "local1");
+      const ext = flowNodes.find((n) => n.id === "ext1");
+      expect(local?.draggable).toBe(true);
+      expect(local?.selectable).toBe(true);
+      expect(ext?.draggable).toBe(false);
+      expect(ext?.selectable).toBe(false);
+    });
+
     it("passes isOrphan through unchanged", () => {
       const view: GraphView = {
         ...emptyView,

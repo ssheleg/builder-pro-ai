@@ -444,10 +444,12 @@ impl Db {
     }
 
     /// `upsert_mcp_tools` (task-2 brief): REPLACES the server's entire cached tool list —
-    /// deletes every existing `mcp_tool` row for `server_id`, then inserts `tools` fresh, each
-    /// `enabled=1` (spec §4: "default on-fetch" — see [`super::NewMcpTool`]'s doc comment).
-    /// Unknown `server_id` ⇒ `NotFound` (checked up front so an empty `tools` list against an
-    /// unknown server doesn't silently no-op).
+    /// deletes every existing `mcp_tool` row for `server_id`, then inserts `tools` fresh. A tool
+    /// name the server still advertises KEEPS its previous `enabled` flag (SEC-6: an owner's
+    /// "disable this dangerous tool" must survive a reconnect, not be silently re-enabled); a
+    /// brand-new name defaults to `enabled=1` (spec §4 "default on-fetch"); a name the server no
+    /// longer advertises is dropped (its row is DELETEd). Unknown `server_id` ⇒ `NotFound` (checked
+    /// up front so an empty `tools` list against an unknown server doesn't silently no-op).
     pub fn upsert_mcp_tools(
         &self,
         server_id: &str,
@@ -464,6 +466,22 @@ impl Db {
         if server_exists.is_none() {
             return Err(OrchdPersistError::NotFound);
         }
+        // SEC-6: snapshot each existing tool's `enabled` flag by name BEFORE the REPLACE, so a tool
+        // the owner disabled (enabled=0) and that the server still advertises STAYS disabled when its
+        // descriptor is re-cached on the next McpConnect — instead of being silently re-enabled and
+        // erasing the owner's per-tool allowlist on every reconnect.
+        let mut prev_enabled: std::collections::HashMap<String, bool> = {
+            let mut stmt = tx.prepare("SELECT name, enabled FROM mcp_tool WHERE server_id = ?1")?;
+            let rows = stmt.query_map(rusqlite::params![server_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+            })?;
+            let mut m = std::collections::HashMap::new();
+            for row in rows {
+                let (name, enabled) = row?;
+                m.insert(name, enabled);
+            }
+            m
+        };
         tx.execute(
             "DELETE FROM mcp_tool WHERE server_id = ?1",
             rusqlite::params![server_id],
@@ -471,10 +489,12 @@ impl Db {
         let now = now_ms();
         for tool in &tools {
             let id = Uuid::new_v4().to_string();
+            // Preserve a previously-set disabled state for a re-advertised name; default on for new.
+            let enabled = prev_enabled.remove(&tool.name).unwrap_or(true);
             tx.execute(
                 "INSERT INTO mcp_tool
                    (id, server_id, name, title, description, input_schema_json, enabled, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     id,
                     server_id,
@@ -482,6 +502,7 @@ impl Db {
                     tool.title,
                     tool.description,
                     tool.input_schema_json,
+                    enabled as i64,
                     now,
                 ],
             )?;
@@ -915,8 +936,9 @@ mod tests {
         assert_eq!(first.len(), 2);
         let fetch_tool_id = first.iter().find(|t| t.name == "fetch").unwrap().id.clone();
 
-        // disable one, then upsert a DIFFERENT tool set — the disabled state must not survive
-        // (spec §4: "default on-fetch"), and the removed tool ("fetch") must be gone.
+        // disable one, then upsert a DIFFERENT tool set — "fetch" (disabled, no longer advertised)
+        // must be gone, and "search" (re-advertised, was enabled) stays enabled. (A disabled tool
+        // that IS re-advertised STAYS disabled — see upsert_mcp_tools_preserves_disabled_state.)
         db.set_mcp_tool_enabled(&fetch_tool_id, false).unwrap();
         db.upsert_mcp_tools(
             &row.id,
@@ -933,10 +955,93 @@ mod tests {
         assert_eq!(second.len(), 1, "second upsert must replace, not append");
         assert_eq!(second[0].name, "search");
         assert_eq!(second[0].title.as_deref(), Some("Search v2"));
-        assert!(second[0].enabled, "replaced tool defaults to enabled=1");
+        assert!(
+            second[0].enabled,
+            "re-advertised tool keeps its prior enabled state"
+        );
         assert!(
             db.get_mcp_tool(&fetch_tool_id).unwrap().is_none(),
             "the removed 'fetch' tool row must be gone"
+        );
+    }
+
+    #[test]
+    fn upsert_mcp_tools_preserves_a_disabled_tool_across_reconnect() {
+        // SEC-6: an owner who disables a dangerous tool must not see it silently re-enabled on the
+        // next McpConnect (which re-caches the tool list). A re-advertised name keeps its `enabled`
+        // flag; only a brand-new name defaults to enabled=1.
+        let db = new_db();
+        let row = db
+            .add_mcp_server(http_server("Prowl", McpScope::Global, None))
+            .unwrap();
+        db.upsert_mcp_tools(
+            &row.id,
+            vec![
+                NewMcpTool {
+                    name: "dangerous".to_string(),
+                    title: None,
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                },
+                NewMcpTool {
+                    name: "safe".to_string(),
+                    title: None,
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+        let dangerous_id = db
+            .list_mcp_tools(&row.id)
+            .unwrap()
+            .iter()
+            .find(|t| t.name == "dangerous")
+            .unwrap()
+            .id
+            .clone();
+        db.set_mcp_tool_enabled(&dangerous_id, false).unwrap();
+
+        // Reconnect: the server advertises the SAME two tools (+ a brand-new one).
+        db.upsert_mcp_tools(
+            &row.id,
+            vec![
+                NewMcpTool {
+                    name: "dangerous".to_string(),
+                    title: Some("v2".to_string()),
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                },
+                NewMcpTool {
+                    name: "safe".to_string(),
+                    title: None,
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                },
+                NewMcpTool {
+                    name: "brandnew".to_string(),
+                    title: None,
+                    description: None,
+                    input_schema_json: "{}".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+        let after = db.list_mcp_tools(&row.id).unwrap();
+        let by_name = |n: &str| after.iter().find(|t| t.name == n).unwrap();
+        assert!(
+            !by_name("dangerous").enabled,
+            "SEC-6: a disabled tool stays disabled"
+        );
+        assert!(by_name("safe").enabled, "an enabled tool stays enabled");
+        assert!(
+            by_name("brandnew").enabled,
+            "a brand-new tool defaults to enabled"
+        );
+        assert_eq!(
+            by_name("dangerous").title.as_deref(),
+            Some("v2"),
+            "descriptor refreshed"
         );
     }
 

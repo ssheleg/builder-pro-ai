@@ -112,43 +112,11 @@ async fn spawn_stub_mcp_server_capturing_auth() -> (String, Arc<StdMutex<Option<
 /// mode in a working wrapper is environment unavailability, so any `set` failure here is treated
 /// as "skip", loudly, never silently).
 fn keychain_available() -> bool {
-    // FULL `set → get (assert bytes) → delete` round-trip, NOT set-only: Keychain Services'
-    // "default keychain" and "search list" are independent, so a keychain a `set` writes to is not
-    // necessarily the one a `get`/`delete` resolves. A CI keychain created + set-default + unlocked
-    // but NOT added to the search list makes `set` succeed while `get`/`delete` fail "not found" —
-    // a set-only probe would report "available" and the real test's `get` would then panic. The
-    // round-trip catches that and SKIPs loudly instead.
-    let probe = bpa_secrets::mcp_bearer_ref("no-secrets-in-logs-mcp-probe");
-    let _ = bpa_secrets::delete(&probe); // clear any stray entry from a crashed prior run
-    const PROBE_BYTES: &[u8] = b"probe-roundtrip-marker";
-    let skip = |reason: String| {
-        eprintln!(
-            "SKIP no_secrets_in_logs_mcp: {reason} — graceful skip, not a pass. Run locally with \
-             an unlocked login keychain (or a CI keychain on the search list) to exercise the \
-             full assertion."
-        );
-        let _ = bpa_secrets::delete(&probe);
-        false
-    };
-    if let Err(e) = bpa_secrets::set(&probe, PROBE_BYTES) {
-        return skip(format!("login keychain unavailable ({e})"));
-    }
-    match bpa_secrets::get(&probe) {
-        Ok(bytes) if bytes == PROBE_BYTES => {}
-        Ok(_) => return skip("probe get returned the wrong bytes (keychain misconfigured)".into()),
-        Err(e) => {
-            return skip(format!(
-                "probe get failed after a successful set ({e} — keychain likely not on the search \
-                 list)"
-            ));
-        }
-    }
-    if let Err(e) = bpa_secrets::delete(&probe) {
-        return skip(format!(
-            "probe delete failed after a successful set+get ({e})"
-        ));
-    }
-    true
+    // Hang-proof bounded probe (BL-107) — an inline set→get→delete round-trip BLOCKS on a macOS
+    // Keychain authorization prompt this test binary was never approved for, wedging the whole
+    // integration-test binary (and this file installs a process-global tracing subscriber, so the
+    // hang is especially costly to diagnose); the shared helper bounds it into a loud SKIP.
+    bpa_secrets::keychain_available(std::time::Duration::from_secs(3))
 }
 
 /// Best-effort Keychain teardown so a panic mid-test never leaves a stray real Keychain entry.

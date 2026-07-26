@@ -638,6 +638,12 @@ const cleanup = {
   connectorProbeAccountId: null,
 };
 
+// BL-106: tracks whether the connector/keychain survival phase actually RAN its full happy path
+// (vs. SKIPped on an unavailable keychain). CI provisions an unlocked search-list keychain, so a
+// skip THERE is a keychain-provisioning regression that must fail the gate, not pass vacuously —
+// see the assertion in `main()` gated on BPA_REQUIRE_KEYCHAIN=1.
+let phase7Ran = false;
+
 /** Poll `pidAlive` until `pid` exits or `deadlineMs` elapses; throws if it never exits. */
 async function waitForExit(pid, deadlineMs, what) {
   const deadline = Date.now() + deadlineMs;
@@ -1173,6 +1179,25 @@ async function main() {
   // ---- phase 9: interrupted research run boot-reconcile (S-IDEA spec D11) ----
   conn = await researchBootReconcilePhase(conn);
 
+  // BL-106: phase7 (connector/keychain survival) can SKIP gracefully on a runner whose login
+  // keychain is unavailable. CI provisions an unlocked search-list keychain (ci.yml "unlock
+  // keychain" step, same job), so phase7 MUST run there — a SKIP in CI means keychain provisioning
+  // regressed and must fail the gate instead of passing vacuously. Locally (no
+  // BPA_REQUIRE_KEYCHAIN) a SKIP stays an allowed warning.
+  if (!phase7Ran) {
+    if (process.env.BPA_REQUIRE_KEYCHAIN === "1") {
+      throw new Error(
+        "phase7 (connector/keychain survival) SKIPPED but BPA_REQUIRE_KEYCHAIN=1 is set — a " +
+          "keychain-provisioning regression would otherwise pass vacuously (BL-106)",
+      );
+    }
+    log(
+      "WARNING: phase7 (connector/keychain survival) SKIPPED — login keychain unavailable in " +
+        "this environment. Allowed locally; CI sets BPA_REQUIRE_KEYCHAIN=1 to fail on a real " +
+        "provisioning regression.",
+    );
+  }
+
   log("ALL PHASES PASSED");
 }
 
@@ -1476,6 +1501,7 @@ async function connectorInvokePhase(conn) {
   );
 
   log("phase7 OK: connector invoke artifact survived restart");
+  phase7Ran = true;
   return conn;
 }
 

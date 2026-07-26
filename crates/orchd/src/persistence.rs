@@ -2507,6 +2507,15 @@ impl Db {
     /// insert-between midpoint math is the CLIENT's move, this verb just persists whatever it is
     /// given. Guard uses the task's OWN `project_id`. Unknown `id` ⇒ `NotFound`.
     pub fn set_task_rank(&self, id: &str, rank: f64) -> Result<DomainTask, OrchdPersistError> {
+        // DOM-3: reject non-finite ranks (+inf/-inf/NaN). A ±Infinity rank serializes as `null` in
+        // `ExportAll`, so the store can no longer re-import its OWN export — one Infinity rank makes
+        // the whole store un-backupable; NaN violates the NOT NULL constraint and surfaces as a raw
+        // `Io`. The client computes finite midpoints, so a non-finite value is never legitimate.
+        if !rank.is_finite() {
+            return Err(OrchdPersistError::Validation(
+                "task rank must be a finite number (reject +inf/-inf/NaN)".to_string(),
+            ));
+        }
         let tx = self.conn.unchecked_transaction()?;
         let project_id: String = tx
             .query_row(
@@ -6226,6 +6235,36 @@ mod domain_tests {
         let db = Db::open_in_memory().unwrap();
         let err = db.set_task_rank("nope", 1.0).unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn set_task_rank_rejects_non_finite_so_the_store_stays_backupable() {
+        // DOM-3: a ±Infinity rank serializes as `null` in ExportAll (the store then can't re-import
+        // its own export); NaN violates NOT NULL. Both must be rejected as Validation, not persisted.
+        let db = Db::open_in_memory().unwrap();
+        let project = db.create_project("A", "", &ids(&["w1"])).unwrap();
+        let task = db
+            .create_task(
+                &project.id,
+                None,
+                "t",
+                "",
+                None,
+                TaskSource::Plan,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            match db.set_task_rank(&task.id, bad) {
+                Err(OrchdPersistError::Validation(_)) => {}
+                other => panic!("rank {bad} should be Validation, got {other:?}"),
+            }
+        }
+        // A finite value (including a huge but finite one) is still accepted.
+        let moved = db.set_task_rank(&task.id, 1.0e18).unwrap();
+        assert_eq!(moved.rank, 1.0e18);
     }
 
     #[test]

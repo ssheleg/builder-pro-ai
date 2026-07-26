@@ -2,6 +2,74 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.10.1] — security + reliability + data-integrity fixes (2026-07-25)
+
+A focused fix wave driven by the full-project audit
+([`docs/qa/2026-07-24-full-audit-report.md`](docs/qa/2026-07-24-full-audit-report.md)) and the
+comprehensive QA pass
+([`docs/qa/2026-07-24-comprehensive-qa-report.md`](docs/qa/2026-07-24-comprehensive-qa-report.md)).
+No new features; every change is a bug/security/data-integrity fix with a TDD test.
+
+### Fixed — security (P1)
+
+- **REL-1 (BL-109):** every GUI launch killed both `launchd` daemons and every live terminal.
+  `launchd.rs::bootstrap()` treated launchctl exit 5 ("already bootstrapped") as *drift* and ran
+  `bootout` (a SIGTERM to the healthy running daemon) on every app start — voiding the core
+  survival promise ("live shells survive the GUI closing") on the most routine action. "Already
+  bootstrapped" is now success with no bootout; a real plist/binary reload still goes through the
+  consent-gated upgrade flow (`kickstart_force`).
+- **SEC-1:** `McpCallTool` on an HTTP server was not re-gated by connect consent after a server URL
+  change — a tool call could reach a repointed URL with the resolved bearer, audited
+  `tool_call/allow`. Per-call consent gating now covers both transports (HTTP URL fingerprint +
+  stdio spawn), so an `McpUpdateServer{url}` after a grant re-prompts.
+- **SEC-2:** the stdio `stdio_exec` consent fingerprint hashed only the resolved binary's bytes, so
+  an `McpUpdateServer` could rewrite `args` (`["-c","<payload>"]`) or inject `env` (`NODE_OPTIONS`,
+  `PYTHONPATH`, `BASH_ENV`…) after a grant and re-use it → arbitrary code execution under a stale
+  consent. The fingerprint now covers `command + args + env + sha256(binary)`.
+
+### Fixed — data integrity (P2)
+
+- **DOM-3:** `SetTaskRank(±Infinity)` was accepted; the next `ExportAll` serialized `rank:null` and
+  the store could not re-import its own export (one Infinity rank = an un-backupable store). NaN
+  also violated NOT NULL. Non-finite ranks are now rejected as `Validation`.
+- **SES-4:** `CreateSession` did not validate `workspace_id` — a session against a bogus workspace
+  ran (PTY spawned) but every persist failed on the FK (log-only) and it vanished on the next
+  restart with no client-visible error. Unknown workspaces are now rejected up front as
+  `NoSuchWorkspace`.
+- **SES-6:** `RemoveWorkspaceRoot` on the last root was a silent no-op returned as success — the
+  incoming path wasn't canonicalized, so it never matched the stored canonical root, hiding the
+  `LastRoot` guard. The path is now canonicalized (tolerating a deleted root) so the guard fires
+  honestly.
+- **SEC-6:** `McpConnect` silently re-enabled every per-tool allowlist entry (`upsert_mcp_tools`
+  inserted `enabled=1`), erasing an owner's "disable this dangerous tool" on every reconnect. A
+  re-advertised tool name now KEEPS its prior `enabled` flag; only a brand-new name defaults to on.
+- **FS-3:** `delete_entry`/`rename_entry`/`move_entry` accepted `rel == ""` (the workspace root
+  itself) — `delete_entry(root, "")` trashed the entire workspace. The root itself is now rejected
+  for every destructive verb (data-loss guard).
+- **GRAPH-1:** cross-project "ghost" graph nodes were draggable/selectable, so an accidental drag
+  or delete fired `GraphMoveNode`/`GraphDeleteNode` at a foreign id (silently rewriting another
+  project's layout / cascade-deleting its node). Ghosts are now non-draggable/non-selectable, with
+  a defense-in-depth filter in the delete handler.
+
+### Fixed — test determinism + CI honesty
+
+- **BL-102/BL-107/BL-108:** `cargo test --workspace` was non-deterministic / hung on a dev machine
+  with the installed app's live daemons (connect-retry tests hit a live daemon; Keychain prompts
+  hung the whole test binary; a production drain race lost trailing terminal output on natural
+  exit). All three fixed — the project gate is usable again as a loop. **BL-108 was a real
+  trailing-output data-loss race** (`AttachRegistry::remove_session` yanked the reader's sink
+  before the final chunk was broadcast), not just a test-timing issue.
+- **BL-106:** e2e `orchd-survive.mjs` phase7 (keychain survival) had SKIP branches that exited 0,
+  so a CI keychain-provisioning regression passed vacuously. CI now sets `BPA_REQUIRE_KEYCHAIN=1`
+  so a SKIP fails the gate.
+
+### Verified
+
+The 2026-07-19 code-audit fix plan was re-verified: every P1/P2 correctness item (A1, B1, B3, B4,
+B5, C1–C4, D1–D5) is landed; B2 is mitigated at the call site. Full `cargo test --workspace`,
+clippy `-D warnings`, `cargo fmt --check`, `tsc --noEmit`, `npx vitest run`, and the e2e
+survival harnesses are green.
+
 ## [0.10.0] — UX audit remediation + workspace removal (2026-07-23)
 
 Deep UX audit of the 13 never-audited scenarios (SCN-045..057, report

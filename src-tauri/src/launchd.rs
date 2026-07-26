@@ -190,28 +190,31 @@ impl<'a> LaunchdAgent<'a> {
         Ok(path)
     }
 
-    /// `launchctl bootstrap gui/<uid> <plist>`; "already bootstrapped" == success;
-    /// on plist drift bootout+re-bootstrap.
+    /// `launchctl bootstrap gui/<uid> <plist>`; idempotent. A clean load (exit 0) OR
+    /// "already bootstrapped" (launchctl exit 5) are BOTH success and must NEVER trigger a
+    /// `bootout`.
+    ///
+    /// Why no bootout on "already": `launchctl bootstrap` on an already-loaded label returns exit 5
+    /// regardless of whether the plist changed (it does not diff the on-disk plist against the
+    /// loaded one), so exit 5 carries NO drift information. Treating it as drift and running
+    /// `bootout` would SIGTERM the healthy running daemon — and every live PTY it owns — on EVERY
+    /// app launch, silently voiding the app's core survival promise ("live shells survive the GUI
+    /// closing") on the most routine action there is (REL-1, empirical ×3). The bitter irony: the
+    /// [`Self::kickstart`] doc forbids `-k` for exactly this reason, while the old bootstrap did the
+    /// same kill one call earlier. A plist/binary change that genuinely needs a reload goes through
+    /// the consent-gated upgrade flow ([`Self::kickstart_force`], gated by the T10b dialog) — NOT a
+    /// blind bootout here (see also BL-34: a stale-but-compatible daemon is intentionally not
+    /// force-restarted on the plain boot path).
     pub fn bootstrap(&self) -> Result<(), LaunchdError> {
         let plist = self.plist_path();
         let plist_str = plist.to_string_lossy().into_owned();
         let domain = self.domain_target();
 
         let out = self.runner.run(&["bootstrap", &domain, &plist_str])?;
-        if out.code == 0 {
+        if out.code == 0 || is_already_signal(&out) {
+            // Clean load, OR already loaded (the common case on every launch after the first) —
+            // both are success. The service is up and may hold live sessions; never bootout.
             return Ok(());
-        }
-        if is_already_signal(&out) {
-            // Drift: bootout then re-bootstrap once. bootout's own exit code is
-            // best-effort (the target may already be gone) — only the retry matters.
-            tracing::warn!(stderr = %out.stderr, "service already bootstrapped; rebootstrapping");
-            let target = self.service_target();
-            let _ = self.runner.run(&["bootout", &target])?;
-            let retry = self.runner.run(&["bootstrap", &domain, &plist_str])?;
-            if retry.code == 0 || is_already_signal(&retry) {
-                return Ok(());
-            }
-            return Err(LaunchdError::Install(retry.stderr));
         }
         Err(LaunchdError::Install(out.stderr))
     }
@@ -506,20 +509,27 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_already_bootstrapped_is_success() {
-        // first bootstrap -> "already"; drift path: bootout(ok) then bootstrap(ok)
-        let mock = MockLaunchctl::new(vec![already(), ok(), ok()]);
+    fn bootstrap_already_bootstrapped_is_success_without_bootout() {
+        // "already bootstrapped" (launchctl exit 5) is SUCCESS and must NOT bootout: `launchctl
+        // bootstrap` on an already-loaded label returns exit 5 regardless of plist drift (it does
+        // not diff), so a bootout here would SIGTERM the healthy running daemon and every live PTY
+        // it owns on EVERY app launch — voiding the survival promise (REL-1, empirical ×3). The
+        // service is already loaded; that is the goal. A genuine plist/binary reload goes through
+        // the consent-gated upgrade flow (`kickstart_force`), not a blind bootout here.
+        let mock = MockLaunchctl::new(vec![already()]);
         let tmp = tempfile::tempdir().unwrap();
         let a = agent(&mock, tmp.path());
         a.install_agent().unwrap();
         a.bootstrap()
             .expect("already-bootstrapped must be idempotent success");
         let calls = mock.calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "already-bootstrapped must NOT bootout (REL-1) — exactly one bootstrap call, no bootout"
+        );
         assert_eq!(calls[0][0], "bootstrap");
         assert_eq!(calls[0][1], "gui/501");
-        assert_eq!(calls[1][0], "bootout");
-        assert_eq!(calls[1][1], "gui/501/ai.builderpro.desktop.sessiond");
-        assert_eq!(calls[2][0], "bootstrap");
     }
 
     #[test]

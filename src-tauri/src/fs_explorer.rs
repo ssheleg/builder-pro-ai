@@ -129,6 +129,19 @@ fn join_rel(root: &Path, rel: &str) -> PathBuf {
     }
 }
 
+/// True if `rel` denotes the workspace ROOT itself (not a child) — `""`, `"."`, `"./"`, or any
+/// form that normalizes to zero real path components. The destructive verbs (delete/rename/move)
+/// must NEVER act on the root: deleting it trashes the ENTIRE workspace (FS-3 data-loss class),
+/// and rename/move detach the workspace from its registered root. `validated_existing(root, "")`
+/// is `Ok` BY DESIGN (the root is contained in itself), so this guard belongs at the verb layer,
+/// not in the validator.
+fn rel_is_root_itself(rel: &str) -> bool {
+    use std::path::Component;
+    Path::new(rel)
+        .components()
+        .all(|c| matches!(c, Component::CurDir))
+}
+
 /// Validate an EXISTING path (`root.join(rel)`) is contained within `root`. Any validator failure
 /// — escape, missing target, unresolvable symlink — collapses to `FsError::OutsideRoot` (see
 /// module doc).
@@ -385,6 +398,9 @@ pub(crate) fn create_dir_inner(root: &Path, rel_dir: &str, name: &str) -> Result
 /// names an entry in that directory: see the variant's doc for why (silent Unix rename-replace
 /// data loss, spec D8).
 pub(crate) fn rename_entry_inner(root: &Path, rel: &str, new_name: &str) -> Result<(), FsError> {
+    if rel_is_root_itself(rel) {
+        return Err(FsError::OutsideRoot); // FS-3: never rename the workspace root itself.
+    }
     let source = validated_existing(root, rel)?;
     let rel_dir = Path::new(rel)
         .parent()
@@ -407,6 +423,9 @@ pub(crate) fn move_entry_inner(
     rel_from: &str,
     rel_dir_to: &str,
 ) -> Result<(), FsError> {
+    if rel_is_root_itself(rel_from) {
+        return Err(FsError::OutsideRoot); // FS-3: never move the workspace root itself.
+    }
     let source = validated_existing(root, rel_from)?;
     let name = source
         .file_name()
@@ -424,6 +443,9 @@ pub(crate) fn move_entry_inner(
 /// Delete `root.join(rel)` to the OS Trash (spec D8: always reversible, never `remove_file`/
 /// `remove_dir_all`).
 pub(crate) fn delete_entry_inner(root: &Path, rel: &str) -> Result<(), FsError> {
+    if rel_is_root_itself(rel) {
+        return Err(FsError::OutsideRoot); // FS-3: never trash the workspace root itself.
+    }
     let target = validated_existing(root, rel)?;
     trash_delete(&target).map_err(|e| FsError::Io {
         message: e.to_string(),
@@ -1079,6 +1101,47 @@ mod tests {
         let (_tmp, root) = plain_root();
         let err = delete_entry_inner(&root, "../secret").unwrap_err();
         assert_eq!(err, FsError::OutsideRoot);
+    }
+
+    #[test]
+    fn delete_entry_rejects_the_root_itself_so_a_workspace_is_never_trashed() {
+        // FS-3 (data-loss class): `rel == ""` / `"."` is the workspace ROOT — deleting it would
+        // trash the entire workspace. Must fail closed (OutsideRoot), never touch the Trash.
+        let (_tmp, root) = plain_root();
+        for root_rel in ["", ".", "./"] {
+            assert_eq!(
+                delete_entry_inner(&root, root_rel).unwrap_err(),
+                FsError::OutsideRoot,
+                "rel {root_rel:?} is the root itself — must be rejected, not trashed"
+            );
+        }
+        // A real child is still deletable.
+        let child = root.join("child.txt");
+        fs::write(&child, b"x").unwrap();
+        delete_entry_inner(&root, "child.txt").unwrap();
+        assert!(!child.exists());
+    }
+
+    #[test]
+    fn rename_and_move_reject_the_root_itself() {
+        // FS-3: rename/move on the root itself detaches the workspace from its registered root.
+        let (_tmp, root) = plain_root();
+        assert_eq!(
+            rename_entry_inner(&root, "", "newname").unwrap_err(),
+            FsError::OutsideRoot
+        );
+        assert_eq!(
+            rename_entry_inner(&root, ".", "newname").unwrap_err(),
+            FsError::OutsideRoot
+        );
+        assert_eq!(
+            move_entry_inner(&root, "", "subdir").unwrap_err(),
+            FsError::OutsideRoot
+        );
+        assert_eq!(
+            move_entry_inner(&root, ".", "subdir").unwrap_err(),
+            FsError::OutsideRoot
+        );
     }
 
     #[test]

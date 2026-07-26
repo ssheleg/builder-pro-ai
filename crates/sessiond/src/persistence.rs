@@ -694,11 +694,19 @@ impl Db {
         Ok(ids)
     }
 
-    /// Permanently remove a workspace and EVERYTHING persisted under it — its `workspace_root`
-    /// rows, every `session` row whose `workspace_id` is it, and those sessions' `scrollback` and
-    /// `command_events` rows — in ONE transaction. Returns the ids of the sessions that were
-    /// deleted. This is the persistence half of `Request::RemoveWorkspace`; the caller
-    /// (`socket_server.rs`) is responsible for killing those sessions' live PTYs first.
+    /// Does a workspace row exist for `id`? (SES-4: `CreateSession` must reject a bogus
+    /// `workspace_id` UP FRONT instead of creating a live PTY whose every persist fails on the
+    /// `session.workspace_id` FK and which then silently vanishes on the next restart with no
+    /// client-visible error.) Cheap COUNT; never an error for a missing row (returns `Ok(false)`).
+    pub fn workspace_exists(&self, workspace_id: &WorkspaceId) -> Result<bool, PersistError> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM workspace WHERE id = ?1",
+            rusqlite::params![workspace_id],
+            |r| r.get(0),
+        )?;
+        Ok(exists > 0)
+    }
+
     ///
     /// **Explicit ordered deletes, NOT `ON DELETE CASCADE`.** The v1/v3 schema declares plain
     /// `REFERENCES workspace(id)` / `REFERENCES session(id)` with no `ON DELETE` action (see
@@ -2045,6 +2053,16 @@ mod tests {
             .workspace_session_ids(&"w3".to_string())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn workspace_exists_distinguishes_known_from_unknown() {
+        // SES-4: CreateSession gates on this — a bogus workspace_id must read false (so the dispatch
+        // returns NoSuchWorkspace up front) instead of letting a PTY spawn that can never persist.
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_workspace(&ws("w1")).unwrap();
+        assert!(db.workspace_exists(&"w1".to_string()).unwrap());
+        assert!(!db.workspace_exists(&"nope".to_string()).unwrap());
     }
 
     /// Guard on the "explicit ordered deletes, not ON DELETE CASCADE" decision: if a future

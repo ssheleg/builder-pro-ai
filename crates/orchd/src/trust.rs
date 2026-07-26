@@ -403,19 +403,36 @@ fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), Orch
 /// fallback still detects a command/args change; it just can't detect an in-place binary swap at
 /// an unresolvable path. The `"bin:"`/`"cmd:"` prefix keeps the two schemes from ever colliding
 /// with each other by construction.
-pub(crate) fn stdio_exec_fingerprint(command: &str, args: &[String]) -> String {
+pub(crate) fn stdio_exec_fingerprint(
+    command: &str,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+) -> String {
+    // SEC-2: the fingerprint MUST cover command + args + env (and the resolved binary's bytes when
+    // available). Previously the `bin:` scheme hashed ONLY the binary bytes — so `McpUpdateServer`
+    // could rewrite `args` (e.g. `["-c","<payload>"]`) or inject `env` (`NODE_OPTIONS`, `PYTHONPATH`,
+    // `BASH_ENV`…) AFTER a grant and re-use it verbatim → arbitrary code execution under a stale
+    // consent. A BTreeMap iterates in sorted key order, so the hash is deterministic regardless of
+    // insertion order. The `"bin:"`/`"cmd:"` prefix still distinguishes "binary resolved" from
+    // "fallback to command string" and the two never collide by construction.
+    let mut buf = command.as_bytes().to_vec();
+    for a in args {
+        buf.push(0);
+        buf.extend_from_slice(a.as_bytes());
+    }
+    for (k, v) in env {
+        buf.push(0);
+        buf.extend_from_slice(k.as_bytes());
+        buf.push(b'=');
+        buf.extend_from_slice(v.as_bytes());
+    }
     match read_resolved_binary(command) {
-        Some(bytes) => format!("bin:{}", sha256_hex(&bytes)),
-        None => {
-            // NUL-separated so `["ab"], ["c"]` cannot collide with `["a"], ["bc"]` — a bare
-            // concatenation could.
-            let mut buf = command.as_bytes().to_vec();
-            for a in args {
-                buf.push(0);
-                buf.extend_from_slice(a.as_bytes());
-            }
-            format!("cmd:{}", sha256_hex(&buf))
+        Some(bytes) => {
+            buf.push(0);
+            buf.extend_from_slice(&bytes);
+            format!("bin:{}", sha256_hex(&buf))
         }
+        None => format!("cmd:{}", sha256_hex(&buf)),
     }
 }
 
@@ -864,7 +881,7 @@ mod tests {
     fn stdio_spawn_without_consent_denies_and_audits_as_stdio_spawn() {
         let db = new_db();
         let server = add_stdio_server(&db, "/nonexistent/foo", vec![]);
-        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[]);
+        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[], &Default::default());
 
         let decision = authorize(
             &db,
@@ -901,7 +918,11 @@ mod tests {
     fn stdio_spawn_after_stdio_exec_consent_is_allowed_and_audits() {
         let db = new_db();
         let server = add_stdio_server(&db, "/nonexistent/foo", vec!["--flag".to_string()]);
-        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &["--flag".to_string()]);
+        let fingerprint = stdio_exec_fingerprint(
+            "/nonexistent/foo",
+            &["--flag".to_string()],
+            &Default::default(),
+        );
         db.grant_consent(&server.id, CONSENT_KIND_STDIO_EXEC, &fingerprint)
             .unwrap();
 
@@ -933,7 +954,7 @@ mod tests {
         // fingerprint text happened to match by coincidence.
         let db = new_db();
         let server = add_stdio_server(&db, "/nonexistent/foo", vec![]);
-        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[]);
+        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[], &Default::default());
         db.grant_consent(&server.id, CONSENT_KIND_CONNECT, &fingerprint)
             .unwrap();
 
@@ -962,7 +983,7 @@ mod tests {
         // a DIFFERENT binary would run under a stale grant.
         let db = new_db();
         let server = add_stdio_server(&db, "/bin/original-tool", vec![]);
-        let fp_a = stdio_exec_fingerprint("/bin/original-tool", &[]);
+        let fp_a = stdio_exec_fingerprint("/bin/original-tool", &[], &Default::default());
         db.grant_consent(&server.id, CONSENT_KIND_STDIO_EXEC, &fp_a)
             .unwrap();
 
@@ -974,7 +995,7 @@ mod tests {
             },
         )
         .unwrap();
-        let fp_b = stdio_exec_fingerprint("/bin/swapped-tool", &[]);
+        let fp_b = stdio_exec_fingerprint("/bin/swapped-tool", &[], &Default::default());
         assert_ne!(fp_a, fp_b);
 
         let decision = authorize(
@@ -999,28 +1020,43 @@ mod tests {
 
     #[test]
     fn stdio_exec_fingerprint_fallback_is_deterministic_and_distinguishes_command_and_args() {
-        let a = stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()]);
-        let a_again = stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()]);
+        let a = stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()], &Default::default());
+        let a_again =
+            stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()], &Default::default());
         assert_eq!(
             a, a_again,
             "same command+args must hash to the same fingerprint"
         );
 
-        let different_command = stdio_exec_fingerprint("/nonexistent/bar", &["x".to_string()]);
+        let different_command =
+            stdio_exec_fingerprint("/nonexistent/bar", &["x".to_string()], &Default::default());
         assert_ne!(a, different_command);
 
-        let different_args = stdio_exec_fingerprint("/nonexistent/foo", &["y".to_string()]);
+        let different_args =
+            stdio_exec_fingerprint("/nonexistent/foo", &["y".to_string()], &Default::default());
         assert_ne!(a, different_args);
 
         // NUL-separated join: ["ab"],["c"] must not collide with ["a"],["bc"].
-        let split_ab_c = stdio_exec_fingerprint("cmd", &["ab".to_string(), "c".to_string()]);
-        let split_a_bc = stdio_exec_fingerprint("cmd", &["a".to_string(), "bc".to_string()]);
+        let split_ab_c = stdio_exec_fingerprint(
+            "cmd",
+            &["ab".to_string(), "c".to_string()],
+            &Default::default(),
+        );
+        let split_a_bc = stdio_exec_fingerprint(
+            "cmd",
+            &["a".to_string(), "bc".to_string()],
+            &Default::default(),
+        );
         assert_ne!(split_ab_c, split_a_bc);
     }
 
     #[test]
     fn stdio_exec_fingerprint_uses_cmd_fallback_prefix_for_an_unresolvable_command() {
-        let fp = stdio_exec_fingerprint("/definitely/not/a/real/path/bpa-test", &[]);
+        let fp = stdio_exec_fingerprint(
+            "/definitely/not/a/real/path/bpa-test",
+            &[],
+            &Default::default(),
+        );
         assert!(
             fp.starts_with("cmd:"),
             "an unresolvable command must use the command-string fallback scheme: {fp}"
@@ -1037,18 +1073,59 @@ mod tests {
         std::fs::write(&path, b"original binary bytes").unwrap();
         let command = path.to_str().unwrap();
 
-        let fp_before = stdio_exec_fingerprint(command, &[]);
+        let fp_before = stdio_exec_fingerprint(command, &[], &Default::default());
         assert!(
             fp_before.starts_with("bin:"),
             "a readable file at an absolute path must use the resolved-binary scheme: {fp_before}"
         );
 
         std::fs::write(&path, b"swapped binary bytes (attacker payload)").unwrap();
-        let fp_after = stdio_exec_fingerprint(command, &[]);
+        let fp_after = stdio_exec_fingerprint(command, &[], &Default::default());
 
         assert_ne!(
             fp_before, fp_after,
             "swapping the binary's bytes at the SAME path must change the fingerprint"
+        );
+    }
+
+    #[test]
+    fn stdio_exec_fingerprint_covers_args_and_env_so_a_stale_grant_cannot_arbitrary_exec() {
+        // SEC-2: a consent grant must NOT survive a change to `args` or `env`. Previously the `bin:`
+        // scheme hashed ONLY the resolved binary's bytes, so `McpUpdateServer{args:["-c","<payload>"]}`
+        // (or an env injection like `NODE_OPTIONS=…`) AFTER a grant re-used it → arbitrary code
+        // execution under a stale consent. Now args+env are part of every fingerprint.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-server-bin");
+        std::fs::write(&path, b"binary bytes").unwrap();
+        let command = path.to_str().unwrap();
+
+        let base = stdio_exec_fingerprint(command, &[], &Default::default());
+
+        // An args change must change the fingerprint.
+        let with_args = stdio_exec_fingerprint(
+            command,
+            &["-c".to_string(), "rm -rf /".to_string()],
+            &Default::default(),
+        );
+        assert_ne!(base, with_args, "an args change must re-prompt (SEC-2)");
+
+        // An env change must change the fingerprint (a different value AND a different key).
+        let mut env_inject = std::collections::BTreeMap::new();
+        env_inject.insert(
+            "NODE_OPTIONS".to_string(),
+            "--require /tmp/evil".to_string(),
+        );
+        let with_env = stdio_exec_fingerprint(command, &[], &env_inject);
+        assert_ne!(base, with_env, "an env change must re-prompt (SEC-2)");
+
+        // Two different env values for the same key must NOT collide.
+        let mut env_a = std::collections::BTreeMap::new();
+        env_a.insert("K".to_string(), "a".to_string());
+        let mut env_b = std::collections::BTreeMap::new();
+        env_b.insert("K".to_string(), "b".to_string());
+        assert_ne!(
+            stdio_exec_fingerprint(command, &[], &env_a),
+            stdio_exec_fingerprint(command, &[], &env_b),
         );
     }
 

@@ -93,6 +93,11 @@ jobs:
           cargo build -p bpa-orchd
           npm run e2e:survive
       - name: e2e orchd survive+roundtrip
+        # BPA_REQUIRE_KEYCHAIN=1 (BL-106): this job's "unlock keychain" step provisions an unlocked
+        # search-list keychain, so phase7 (connector/keychain survival) MUST run — a SKIP here means
+        # keychain provisioning regressed and must fail the gate instead of passing vacuously.
+        env:
+          BPA_REQUIRE_KEYCHAIN: "1"
         run: npm run e2e:orchd
 
   coverage:

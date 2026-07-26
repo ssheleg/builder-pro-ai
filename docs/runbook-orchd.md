@@ -2,9 +2,13 @@
 
 Everything here uses REAL identifiers from the code (verified 2026-07-13, S3). `bpa-orchd` is the
 SECOND per-user LaunchAgent — the app-domain store (projects / goals / ideas / insights / tasks /
-rulesets). It has **no live runtime state to lose**: every domain row lives in `orchd.db`
-(SQLite), so restarting or upgrading it never loses data the way killing `bpa-sessiond` ends live
-shells. See the survival truth table in the platform overview §2 / `README.md`.
+rulesets). Every DOMAIN row lives in `orchd.db` (SQLite), so restarting or upgrading it never loses
+persisted data the way killing `bpa-sessiond` ends live shells — BUT it DOES carry one piece of live
+runtime state: an in-flight **research run** is a live tokio task (`research::start_run`). A restart
+mid-run interrupts it, and boot-reconcile (`D11`) flips any non-terminal run to
+`failed{interrupted}` on the next boot (the pending OAuth map is also lost). So: restart-safe for
+all stored domain data; NOT a no-op for an in-flight research run. See the survival truth table in
+the platform overview §2 / `README.md`.
 
 ## Locations
 

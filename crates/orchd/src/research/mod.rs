@@ -1092,6 +1092,12 @@ mod driver_tests {
                 }],
             )
             .unwrap();
+        // SEC-1: the research driver goes through `mcp::invoke::call_tool`, which now re-gates the
+        // connect consent per call (URL fingerprint), so the HTTP test server needs a connect grant
+        // matching its url — same as the production flow (connect before invoke).
+        guard
+            .grant_consent(&server.id, "connect", "https://example.com/mcp")
+            .unwrap();
         (idea.id, server.id)
     }
 

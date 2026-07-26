@@ -421,14 +421,24 @@ impl AttachRegistry {
 
     /// Remove EVERY attach entry for `session_id` when the session itself has ENDED (KillSession or
     /// natural child exit) — every connection currently attached to it, not just one. Graceful:
-    /// does NOT cancel/abort any `Live` forwarder — the reader thread drops the session's sink(s) on
-    /// its own exit, so each forwarder drains every remaining byte and terminates on `Disconnected`.
-    /// Cancelling here instead would race the reader thread and truncate the session's final
-    /// output to whichever attached clients are still watching (a real, user-visible loss).
-    /// `unsubscribe_output` is called per removed `Live` entry for symmetry/defense-in-depth even
-    /// though it is moot here — the supervisor's reader-exit path has already cleared its own sinks
-    /// list by the time a session ends, so this is a harmless no-op there, not a required step. A
-    /// `ReplayOnly` entry has nothing to unsubscribe and contributes no handle.
+    /// does NOT cancel/abort any `Live` forwarder AND does NOT call `unsubscribe_output` here.
+    ///
+    /// Why NOT unsubscribe: `on_exited` (the sole production trigger, `socket_server.rs`) runs on
+    /// the supervisor's WAIT thread, which can fire BEFORE the reader thread has read+broadcast the
+    /// session's final bytes (child `printf`s then exits — the trailing chunk is still in the kernel
+    /// PTY buffer when `child.wait()` returns). `unsubscribe_output` removes this sub_id's Sender
+    /// from the reader's sink list, so the reader's subsequent broadcast of that final chunk finds
+    /// the sink GONE and silently drops it — truncating trailing output to every attached client (a
+    /// real, user-visible loss, BL-108). The reader's own `sinks.clear()` on EOF/exit is the
+    /// AUTHORITATIVE, race-free graceful drain: it runs strictly AFTER the reader has read and
+    /// broadcast every byte (the read loop sends each chunk via `retain(...send...)`, THEN on EOF
+    /// breaks and clears), so every queued byte reaches every forwarder before it observes
+    /// `Disconnected`. Relying on it alone (instead of yanking the sink early) is what makes the
+    /// drain deterministic instead of a race between the wait and reader threads.
+    ///
+    /// For the KillSession path this is moot either way: `Supervisor::kill` joins the reader thread
+    /// (`pty_supervisor.rs`, kill()), so the reader has already run its `sinks.clear()` before this
+    /// returns. A `ReplayOnly` entry has no sink/handle to release.
     /// Returns the `Live` forwarders' `JoinHandle`s (production callers drop them — each task is
     /// detached and self-terminating; tests await them to prove termination). Empty if no entry
     /// existed for this session, or if every entry for it was `ReplayOnly`.
@@ -441,8 +451,11 @@ impl AttachRegistry {
             .collect();
         let mut handles = Vec::with_capacity(owned.len());
         for key in owned {
-            if let Some(AttachEntry::Live { sub_id, handle, .. }) = map.remove(&key) {
-                self.supervisor.unsubscribe_output(session_id, sub_id);
+            if let Some(AttachEntry::Live { handle, .. }) = map.remove(&key) {
+                // Deliberately NOT `unsubscribe_output` here — see the doc comment above: the
+                // reader thread's own `sinks.clear()` on exit is the graceful drain, and
+                // unsubscribing from this (wait-thread) call site races it and truncates the
+                // session's final output chunk (BL-108).
                 handles.push(handle);
             }
         }
