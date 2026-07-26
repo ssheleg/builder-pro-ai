@@ -60,6 +60,7 @@ use crate::pty_supervisor::{SessionSpec, StatusUpdate, Supervisor, SupervisorErr
 use crate::shell_integration::{classify_shell, write_session_assets};
 use crate::singleton::check_peer_cred;
 
+use bpa_protocol::sync::lock;
 use bpa_protocol::{
     encode_frame, Frame, FrameDecoder, Push, Request, Response, SessionMeta, Workspace,
     DAEMON_MAX_VERSION, DAEMON_MIN_VERSION,
@@ -168,10 +169,7 @@ impl ServerDeps {
     /// is a cheap atomic read; retaining an in-flight handle (the only kind shutdown actually
     /// needs) is exactly the awaited-drain contract.
     fn track_final_flush(&self, handle: tokio::task::JoinHandle<()>) {
-        let mut pending = self
-            .pending_final_flushes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut pending = lock(&self.pending_final_flushes);
         pending.retain(|h| !h.is_finished());
         pending.push(handle);
     }
@@ -181,10 +179,7 @@ impl ServerDeps {
     /// no-unbounded-growth contract.
     #[cfg(test)]
     pub(crate) fn pending_final_flush_count(&self) -> usize {
-        let mut pending = self
-            .pending_final_flushes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut pending = lock(&self.pending_final_flushes);
         pending.retain(|h| !h.is_finished());
         pending.len()
     }
@@ -199,12 +194,7 @@ impl ServerDeps {
     /// so a `JoinError` here would only ever come from a genuine bug, not an expected failure mode);
     /// this must never propagate a panic into the shutdown path itself.
     pub async fn await_pending_final_flushes(&self) {
-        let handles: Vec<_> = self
-            .pending_final_flushes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .collect();
+        let handles: Vec<_> = lock(&self.pending_final_flushes).drain(..).collect();
         for handle in handles {
             if let Err(e) = handle.await {
                 tracing::warn!(error = %e, "final flush task panicked during shutdown drain");
@@ -215,10 +205,7 @@ impl ServerDeps {
     /// `true` while `workspace_id` has an in-flight `RemoveWorkspace` (SES-1) — the gate
     /// `CreateSession` consults before spawning (see the field's doc).
     fn is_workspace_closing(&self, workspace_id: &bpa_protocol::WorkspaceId) -> bool {
-        self.closing_workspaces
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(workspace_id)
+        lock(&self.closing_workspaces).contains(workspace_id)
     }
 
     /// Mark `workspace_id` as closing (SES-1) and return the RAII guard that unmarks it on
@@ -229,10 +216,7 @@ impl ServerDeps {
         &self,
         workspace_id: &bpa_protocol::WorkspaceId,
     ) -> ClosingWorkspaceGuard<'_> {
-        self.closing_workspaces
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(workspace_id.clone());
+        lock(&self.closing_workspaces).insert(workspace_id.clone());
         ClosingWorkspaceGuard {
             deps: self,
             workspace_id: workspace_id.clone(),
@@ -250,11 +234,7 @@ struct ClosingWorkspaceGuard<'a> {
 
 impl Drop for ClosingWorkspaceGuard<'_> {
     fn drop(&mut self) {
-        self.deps
-            .closing_workspaces
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.workspace_id);
+        lock(&self.deps.closing_workspaces).remove(&self.workspace_id);
     }
 }
 
@@ -1035,7 +1015,7 @@ async fn dispatch_inner(
             let _closing_guard = deps.begin_closing_workspace(&workspace_id);
 
             let tracked: Vec<bpa_protocol::SessionId> =
-                deps.live_sessions.lock().unwrap().iter().cloned().collect();
+                lock(&deps.live_sessions).iter().cloned().collect();
             for id in tracked {
                 if let Ok(meta) = deps.supervisor.meta(&id) {
                     if meta.workspace_id == workspace_id {
@@ -1055,7 +1035,7 @@ async fn dispatch_inner(
                         "RemoveWorkspace: session teardown failed (continuing with the removal)"
                     );
                 }
-                deps.live_sessions.lock().unwrap().remove(id);
+                lock(&deps.live_sessions).remove(id);
             }
             deps.await_pending_final_flushes().await;
 
@@ -1072,7 +1052,7 @@ async fn dispatch_inner(
                     // any session of this workspace that is still live, through the same
                     // `close_session` machinery, and drain the flushes those kills schedule.
                     let strays: Vec<bpa_protocol::SessionId> =
-                        deps.live_sessions.lock().unwrap().iter().cloned().collect();
+                        lock(&deps.live_sessions).iter().cloned().collect();
                     for id in strays {
                         let belongs = matches!(
                             deps.supervisor.meta(&id),
@@ -1088,7 +1068,7 @@ async fn dispatch_inner(
                                 "RemoveWorkspace: stray-session teardown failed (continuing)"
                             );
                         }
-                        deps.live_sessions.lock().unwrap().remove(&id);
+                        lock(&deps.live_sessions).remove(&id);
                     }
                     deps.await_pending_final_flushes().await;
 
@@ -1134,7 +1114,7 @@ async fn dispatch_inner(
                 by_id.insert(m.id.clone(), m);
             }
             let tracked: Vec<bpa_protocol::SessionId> =
-                deps.live_sessions.lock().unwrap().iter().cloned().collect();
+                lock(&deps.live_sessions).iter().cloned().collect();
             for id in tracked {
                 if by_id.contains_key(&id) {
                     continue;
@@ -1197,7 +1177,7 @@ async fn dispatch_inner(
                     Ok(meta) => {
                         // Track the live session so ListSessions/GetSessionState surface it even if
                         // the (best-effort) persist below fails (spec §11).
-                        deps.live_sessions.lock().unwrap().insert(id.clone());
+                        lock(&deps.live_sessions).insert(id.clone());
                         // Persist immediately (spec §11); best-effort — a DB failure does not fail
                         // the create (the live session is the source of truth).
                         {
@@ -1324,7 +1304,7 @@ async fn close_session(deps: &Arc<ServerDeps>, session_id: &bpa_protocol::Sessio
             Ok(meta) if !meta.is_active => {
                 let _ = deps.attach.remove_session(session_id);
                 let _ = deps.supervisor.remove_inactive(session_id);
-                deps.live_sessions.lock().unwrap().remove(session_id);
+                lock(&deps.live_sessions).remove(session_id);
                 let db = deps.db.lock().await;
                 if let Err(e) = db.delete_session(session_id) {
                     tracing::warn!(
@@ -3493,6 +3473,91 @@ mod tests {
         );
 
         let _ = deps.supervisor.kill(&id);
+    }
+
+    // ---- BL-124 (lock-poisoning hardening): the periodic flusher must SURVIVE a poisoned
+    // supervisor `sessions` map. Pre-hardening, one panic under that guard (anywhere in the
+    // process) made every later `.lock().unwrap()` inside `meta()`/`snapshot_scrollback()` panic
+    // too — the first `flush_scrollback_once` tick after the panic would itself panic, the
+    // flusher task would die, and persistence was silently off for the rest of the daemon's life
+    // (the audit's mortal scenario). With poison-tolerant acquisition the sweep must complete and
+    // actually persist. ----
+    #[tokio::test]
+    async fn flush_survives_a_poisoned_supervisor_sessions_map() {
+        let (deps, _rt) = test_deps();
+        {
+            let db = deps.db.lock().await;
+            db.upsert_workspace(&bpa_protocol::Workspace {
+                id: "ws".into(),
+                name: "ws".into(),
+                root_path: "/tmp".into(),
+                roots: vec!["/tmp".into()],
+            })
+            .unwrap();
+        }
+
+        let mut spec = sh_spec("printf LIVE_BYTES; read _hold");
+        spec.workspace_id = "ws".into();
+        let id = deps.supervisor.create(spec).expect("create");
+        {
+            let db = deps.db.lock().await;
+            let meta = deps.supervisor.meta(&id).unwrap();
+            db.upsert_session(&meta).unwrap();
+        }
+
+        // Poison the supervisor's sessions map: a thread panics while holding its guard. Every
+        // supervisor method below (`meta`, `snapshot_scrollback`, `drain_command_events`, `kill`)
+        // acquires that same mutex on its path.
+        deps.supervisor.poison_sessions_map_for_test();
+
+        // The sweep must NOT panic (pre-hardening it would, killing the flusher task) and must
+        // genuinely persist: the live session's scrollback row lands in the DB.
+        flush_scrollback_once(&deps).await;
+
+        {
+            let db = deps.db.lock().await;
+            assert!(
+                db.scrollback_row_ts_for_test(&id).unwrap().is_some(),
+                "the flush sweep must still persist after the sessions map was poisoned"
+            );
+        }
+
+        // The supervisor itself must also still serve after the poison (not just the flusher).
+        assert!(deps.supervisor.meta(&id).unwrap().is_active);
+        let _ = deps.supervisor.kill(&id);
+    }
+
+    // ---- BL-124 (lock-poisoning hardening): a poisoned `live_sessions` set must not take the
+    // dispatch layer down with it. Pre-hardening, `Request::ListSessions`'s
+    // `live_sessions.lock().unwrap()` would panic on every call after one panic under that guard
+    // — a permanent ListSessions outage (frozen session list in the UI). ----
+    #[tokio::test]
+    async fn list_sessions_survives_a_poisoned_live_sessions_set() {
+        let (deps, _rt) = test_deps();
+
+        // Poison `live_sessions` the same way `Supervisor::poison_sessions_map_for_test` does —
+        // a thread panics while holding the guard (raw std API, not the tolerant helper).
+        {
+            let deps_ref = deps.clone();
+            std::thread::scope(|s| {
+                let panicked = s
+                    .spawn(move || {
+                        let _guard = deps_ref.live_sessions.lock().unwrap();
+                        panic!("deliberate test panic under the live_sessions guard");
+                    })
+                    .join();
+                assert!(panicked.is_err(), "the poisoning thread must panic");
+            });
+            assert!(deps.live_sessions.is_poisoned());
+        }
+
+        let (sink_tx, _sink_rx) = tokio::sync::mpsc::channel(8);
+        let broadcaster = Broadcaster::new();
+        let res = dispatch(&deps, 1, &sink_tx, &broadcaster, Request::ListSessions).await;
+        assert!(
+            matches!(res, Response::Sessions(_)),
+            "ListSessions must keep serving after live_sessions was poisoned, got {res:?}"
+        );
     }
 
     // ---- D2: lifecycle/cwd freshness through the same flush-persists-meta path. A session that

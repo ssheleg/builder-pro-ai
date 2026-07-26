@@ -48,6 +48,7 @@ use bpa_protocol::preamble::encode_daemon_reply;
 use bpa_protocol::preamble::{
     decode_daemon_reply, encode_client_preamble, ClientPreamble, DaemonReply, PREAMBLE_TIMEOUT,
 };
+use bpa_protocol::sync::lock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -437,14 +438,14 @@ impl OrchdClient {
     /// may be registered; each receives every push. Callbacks must not block (they run inline on
     /// the connection task) — hand off to a channel/spawn for anything slow.
     pub fn on_push(&self, cb: impl Fn(OrchdPush) + Send + 'static) {
-        self.shared.push_cb.lock().unwrap().push(Box::new(cb));
+        lock(&self.shared.push_cb).push(Box::new(cb));
     }
 
     /// Register a callback invoked on every connect/disconnect transition. Mirrors
     /// `DaemonClient::on_conn` exactly, including the immediate-replay-of-current-state guarantee
     /// (see its docs for the race it closes).
     pub fn on_conn(&self, cb: impl Fn(ConnState) + Send + 'static) {
-        let mut guard = self.shared.conn_cb.lock().unwrap();
+        let mut guard = lock(&self.shared.conn_cb);
         cb(guard.current);
         guard.cbs.push(Box::new(cb));
     }
@@ -709,7 +710,7 @@ async fn connect_with_backoff(
 // ---------------------------------------------------------------------------------------------
 
 fn fire_conn(cbs: &Mutex<ConnCbState>, state: ConnState) {
-    let mut guard = cbs.lock().unwrap();
+    let mut guard = lock(cbs);
     guard.current = state;
     for cb in guard.cbs.iter() {
         cb(state);
@@ -717,7 +718,7 @@ fn fire_conn(cbs: &Mutex<ConnCbState>, state: ConnState) {
 }
 
 fn fire_push(cbs: &Mutex<Vec<Box<PushCb>>>, push: OrchdPush) {
-    for cb in cbs.lock().unwrap().iter() {
+    for cb in lock(cbs).iter() {
         cb(push.clone());
     }
 }
@@ -752,7 +753,7 @@ async fn run_connection(
                                 continue;
                             }
                         };
-                        pending.lock().unwrap().insert(id, reply);
+                        lock(pending).insert(id, reply);
                         if let Err(e) = write_encoded_frame(stream, &bytes).await {
                             tracing::warn!(error = %e, "orchd write failed; dropping connection");
                             return LoopEnd::ConnectionLost;
@@ -771,7 +772,7 @@ async fn run_connection(
                         return LoopEnd::ConnectionLost;
                     }
                     Ok(Some(OrchdFrame::Response { id, res })) => {
-                        if let Some(tx) = pending.lock().unwrap().remove(&id) {
+                        if let Some(tx) = lock(pending).remove(&id) {
                             let mapped = match res {
                                 OrchdResponse::Error { code, message } => {
                                     Err(OrchdClientError::Daemon { code: format!("{code:?}"), message })
@@ -817,7 +818,7 @@ async fn connection_task(
         .await;
         shared.live.store(false, Ordering::Release);
 
-        for (_id, tx) in pending.lock().unwrap().drain() {
+        for (_id, tx) in lock(&pending).drain() {
             let _ = tx.send(Err(OrchdClientError::Disconnected));
         }
 
@@ -1458,5 +1459,334 @@ mod tests {
             "connect_at_with_retry took {elapsed:?}; expected a prompt escalation once the cap \
              is exhausted, not a hang"
         );
+    }
+
+    // ---- BL-125: reconnect/handshake coverage ported from `socket_client::tests` (the two
+    // ---- clients mirror each other; these scenarios existed only on the sessiond side). -------
+
+    #[test]
+    fn orchd_socket_path_falls_back_to_tmp_when_xdg_empty() {
+        with_env("XDG_RUNTIME_DIR", Some(""), || {
+            let sock = resolve_orchd_socket_path();
+            let uid = unsafe { libc::geteuid() };
+            assert_eq!(sock, PathBuf::from(format!("/tmp/bpa-{uid}/orchd.sock")));
+        });
+    }
+
+    #[tokio::test]
+    async fn request_during_reconnect_gap_fails_promptly() {
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            // connection #1: handshake, then immediately drop — never accept again, so the
+            // client sits in the reconnect backoff loop for the rest of the test.
+            let (mut s, _) = listener.accept().await.unwrap();
+            accept_handshake(&mut s).await;
+            drop(s);
+            // Never accept connection #2: the client stays stuck in connect_with_backoff.
+            std::future::pending::<()>().await;
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+
+        // Wait for the client to observe the drop and enter the reconnect gap.
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+        for _ in 0..100 {
+            if states.lock().unwrap().contains(&ConnState::Disconnected) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            states.lock().unwrap().contains(&ConnState::Disconnected),
+            "test setup: client never observed the disconnect"
+        );
+
+        // Now request() while the client is stuck in connect_with_backoff (reconnect gap, no live
+        // connection). This must fail promptly with Disconnected, not silently enqueue and hang
+        // for up to REQUEST_TIMEOUT (30s).
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.request(OrchdRequest::ArchiveProject { id: "x".into() }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        let err = result
+            .unwrap_or_else(|_| panic!("request() did not return within 1s (took > {elapsed:?}); it silently queued during the reconnect gap"))
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchdClientError::Disconnected),
+            "expected Disconnected, got {err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "request() took {elapsed:?} to fail; expected a prompt failure, not a queued/timed-out one"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_registered_on_conn_observes_current_connected_state() {
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        spawn_stub(path.clone(), ready.clone());
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+
+        // Force the race: yield back to the scheduler (and give the connection task a moment to
+        // run) *before* registering on_conn, so the initial `fire_conn(Connected)` has every
+        // opportunity to have already fired and been missed by a callback that isn't registered
+        // yet.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        // The callback must be replayed with the CURRENT state immediately upon registration —
+        // no further `.await` should be required to observe it.
+        let s = states.lock().unwrap().clone();
+        assert_eq!(
+            s.first(),
+            Some(&ConnState::Connected),
+            "a callback registered after connect() (with an intervening await) must observe \
+             ConnState::Connected immediately, got {s:?}"
+        );
+    }
+
+    /// Accept a connection, read the client's preamble, then close WITHOUT replying — the
+    /// "transient handshake failure" shape (EOF mid-handshake). Mirrors `socket_client`'s
+    /// `accept_and_eof` exactly.
+    async fn accept_and_eof(listener: &UnixListener) {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _client_preamble = read_client_preamble_stub(&mut s).await;
+        drop(s);
+    }
+
+    #[tokio::test]
+    async fn transient_handshake_failures_below_cap_eventually_connect_with_no_incompatible_event()
+    {
+        // N < HANDSHAKE_SUSPECT_CAP EOFs on RECONNECT attempts, then a real handshake succeeds.
+        // The client must reconnect cleanly with no IncompatibleOrchd anywhere in the process and
+        // no ConnState::Incompatible ever fired.
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+
+            // connection #1: real handshake, then drop (simulates the very first disconnect).
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                drop(s);
+            }
+            // reconnect attempts #2..#4: EOF mid-handshake (transient), well under the cap of 8.
+            for _ in 0..3 {
+                accept_and_eof(&listener).await;
+            }
+            // reconnect attempt #5: real handshake succeeds.
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                if let Some(OrchdFrame::Request { id, .. }) = read_frame(&mut s).await {
+                    write_stub_frame(
+                        &mut s,
+                        &OrchdFrame::Response {
+                            id,
+                            res: OrchdResponse::Ack,
+                        },
+                    )
+                    .await;
+                }
+                std::future::pending::<()>().await;
+            }
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        // Retry the request until it succeeds against the eventually-recovered connection —
+        // proves the client reconnected fine despite the 3 transient EOFs in between.
+        let mut got_ack = false;
+        for _ in 0..200 {
+            match client
+                .request(OrchdRequest::ArchiveProject { id: "x".into() })
+                .await
+            {
+                Ok(OrchdResponse::Ack) => {
+                    got_ack = true;
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        assert!(
+            got_ack,
+            "client must recover and connect after transient handshake failures below the cap"
+        );
+
+        let s = states.lock().unwrap().clone();
+        assert!(
+            !s.iter()
+                .any(|x| matches!(x, ConnState::Incompatible { .. })),
+            "no ConnState::Incompatible must fire while under HANDSHAKE_SUSPECT_CAP: {s:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_handshake_failures_exceeding_cap_surface_incompatible_orchd() {
+        // The daemon ALWAYS EOFs mid-handshake, forever — a stand-in for a permanently
+        // unhandshakeable orchd. After HANDSHAKE_SUSPECT_CAP consecutive transient failures, the
+        // reconnect loop must give up and fire ConnState::Incompatible{0,0} (unknown range).
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            // connection #1: real handshake, then drop, to get the client into the reconnect loop.
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                drop(s);
+            }
+            // Every subsequent attempt EOFs mid-handshake, forever.
+            loop {
+                accept_and_eof(&listener).await;
+            }
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        // Backoff doubles from 100ms up to 5s over 8 attempts — bound the wait generously.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            if states
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|x| matches!(x, ConnState::Incompatible { .. }))
+            {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let s = states.lock().unwrap().clone();
+        assert!(
+            found,
+            "expected ConnState::Incompatible after HANDSHAKE_SUSPECT_CAP transient failures: {s:?}"
+        );
+        match s
+            .iter()
+            .find(|x| matches!(x, ConnState::Incompatible { .. }))
+            .unwrap()
+        {
+            ConnState::Incompatible {
+                daemon_min,
+                daemon_max,
+            } => {
+                assert_eq!((*daemon_min, *daemon_max), (0, 0), "unknown-range sentinel");
+            }
+            _ => unreachable!(),
+        }
+
+        // The client must now be permanently dead: further requests fail Disconnected forever
+        // rather than hanging (request() checks `live` before enqueuing).
+        let err = client
+            .request(OrchdRequest::ArchiveProject { id: "x".into() })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OrchdClientError::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn genuine_incompatible_reply_on_reconnect_is_immediately_fatal_and_fires_conn_state() {
+        // A GENUINE, well-formed Incompatible{2,2} reply (not an ambiguous EOF) must remain
+        // immediately fatal with no retry at all — and must fire ConnState::Incompatible with the
+        // real daemon-advertised range, not the 0,0 unknown-range sentinel.
+        let path = tmp_sock();
+        let ready = Arc::new(AtomicBool::new(false));
+        let p = path.clone();
+        let r = ready.clone();
+        tokio::spawn(async move {
+            let listener = UnixListener::bind(&p).unwrap();
+            r.store(true, Ordering::SeqCst);
+            // connection #1: real handshake, then drop.
+            {
+                let (mut s, _) = listener.accept().await.unwrap();
+                accept_handshake(&mut s).await;
+                drop(s);
+            }
+            // reconnect attempt: a genuine Incompatible{2,2} reply.
+            let (mut s, _) = listener.accept().await.unwrap();
+            let _client_preamble = read_client_preamble_stub(&mut s).await;
+            let reply = encode_daemon_reply(&DaemonReply::Incompatible { min: 2, max: 2 });
+            s.write_all(&reply).await.unwrap();
+            s.flush().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        wait_ready(&ready).await;
+
+        let client = connect_at(path, "test".into()).await.unwrap();
+        let states: Arc<Mutex<Vec<ConnState>>> = Arc::new(Mutex::new(Vec::new()));
+        let states_cb = states.clone();
+        client.on_conn(move |s| states_cb.lock().unwrap().push(s));
+
+        let started = std::time::Instant::now();
+        let mut found = false;
+        for _ in 0..100 {
+            if states
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|x| matches!(x, ConnState::Incompatible { .. }))
+            {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let elapsed = started.elapsed();
+        let s = states.lock().unwrap().clone();
+        assert!(found, "expected ConnState::Incompatible: {s:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a genuine Incompatible reply must be immediately fatal, not retried: took {elapsed:?}"
+        );
+        match s
+            .iter()
+            .find(|x| matches!(x, ConnState::Incompatible { .. }))
+            .unwrap()
+        {
+            ConnState::Incompatible {
+                daemon_min,
+                daemon_max,
+            } => assert_eq!((*daemon_min, *daemon_max), (2, 2)),
+            _ => unreachable!(),
+        }
     }
 }

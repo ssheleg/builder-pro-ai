@@ -520,6 +520,9 @@ pub(crate) fn evict_write_lock_on_child_exited(locks: &WriteStdinLocks, push: &P
 /// the `Broker` (inside `AppState`) exist. `write_stdin_locks` is the SAME map `AppState` holds
 /// (H2): the `on_push` closure evicts a session's write-serialization lock on its `ChildExited`
 /// before dispatching, so the map cannot grow unboundedly across session churn.
+/// `workspace_roots` is likewise the SAME slot `AppState` holds (BL-109): the closure upserts/
+/// drops roots on `WorkspaceCreated`/`WorkspaceUpdated`/`WorkspaceRemoved`, keeping the
+/// fs-command root guard's snapshot current between full `list_workspaces` refreshes.
 ///
 /// `client.on_push`/`client.on_conn` callbacks run inline on `DaemonClient`'s connection task
 /// (locked contract) — both closures below only take a short `std::sync::Mutex` lock and call
@@ -528,10 +531,12 @@ pub fn register(
     broker: Arc<Broker>,
     client: &DaemonClient,
     write_stdin_locks: Arc<WriteStdinLocks>,
+    workspace_roots: crate::commands::WorkspaceRootsSlot,
 ) {
     let push_broker = broker.clone();
     client.on_push(move |push| {
         evict_write_lock_on_child_exited(&write_stdin_locks, &push);
+        crate::commands::apply_workspace_push_to_roots(&workspace_roots, &push);
         push_broker.dispatch_push(push)
     });
 

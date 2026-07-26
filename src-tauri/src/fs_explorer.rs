@@ -2,20 +2,31 @@
 //! a capped read-only file preview, create/rename/move, delete-to-Trash, and reveal/open-external.
 //!
 //! Approach A (spec §2 D4): file I/O lives in the Tauri core (foreground, GUI-lifetime), never
-//! brokered to the daemon — every command here is **PURE-LOCAL** (no `State`/daemon client), a
-//! thin `#[tauri::command]` wrapper over a unit-testable `*_inner` function.
+//! brokered to the daemon — every command here does **no daemon round-trip** (it only reads
+//! `AppState`'s LOCAL workspace-roots cache, BL-109), a thin `#[tauri::command]` wrapper over a
+//! unit-testable `*_inner` function.
 //!
 //! ## Security boundary
 //!
-//! Every operation validates its path(s) against the workspace `root` via
-//! [`bpa_paths::validate_path_within`] (existing target) or [`bpa_paths::validate_parent_within`]
-//! (not-yet-existing create/rename/move destination) **before** touching the filesystem — this is
-//! the ONLY thing standing between a webview-supplied `rel` string and an arbitrary filesystem
-//! write. Both validators fail closed (spec §16: missing path, broken symlink, or a genuine `..`
-//! escape are all indistinguishable `Err`s, by design — never leak *why* a path was rejected), so
-//! every validator failure collapses to the single [`FsError::OutsideRoot`] variant here: never a
-//! `NotFound`/`PermissionDenied` from the validator itself, only from a *post-validation*
-//! filesystem call (a genuine TOCTOU race, or an actual I/O permission error).
+//! TWO gates run before any filesystem touch, in this order:
+//!
+//! 1. **Registered-root gate (BL-109)**: the webview-supplied `root` itself must be contained in
+//!    (or equal to) a workspace root the daemon currently has REGISTERED — enforced by
+//!    [`ensure_fs_root`] over `commands::ensure_registered_root`'s local cache (fail-closed:
+//!    [`FsError::Disconnected`] when the cache has never loaded, [`FsError::NotFound`] when the
+//!    input does not canonicalize, [`FsError::OutsideRoot`] when it is not a registered root).
+//!    Without this gate a `root` of `/` passed gate 2 trivially and every verb — including the
+//!    destructive ones — worked anywhere on the filesystem.
+//! 2. **Containment validators**: every operation then validates its path(s) against the
+//!    workspace `root` via [`bpa_paths::validate_path_within`] (existing target) or
+//!    [`bpa_paths::validate_parent_within`] (not-yet-existing create/rename/move destination)
+//!    **before** touching the filesystem — this is what stands between a webview-supplied `rel`
+//!    string and an arbitrary filesystem write INSIDE a registered root. Both validators fail
+//!    closed (spec §16: missing path, broken symlink, or a genuine `..` escape are all
+//!    indistinguishable `Err`s, by design — never leak *why* a path was rejected), so every
+//!    validator failure collapses to the single [`FsError::OutsideRoot`] variant here: never a
+//!    `NotFound`/`PermissionDenied` from the validator itself, only from a *post-validation*
+//!    filesystem call (a genuine TOCTOU race, or an actual I/O permission error).
 //!
 //! `name`/`new_name` arguments (the final path segment for create/rename) get an extra,
 //! fs_explorer-local separator guard ([`reject_separator`]) that `validate_parent_within` cannot
@@ -86,6 +97,8 @@ pub enum FsError {
     PermissionDenied,
     /// Every path-validator failure (escape, missing target, unresolvable symlink) collapses here
     /// — see the module doc's "Security boundary" section for why that collapsing is intentional.
+    /// BL-109: also the shape an UNREGISTERED `root` takes (one not contained in any workspace
+    /// root the daemon currently has registered — see `commands::ensure_registered_root`).
     OutsideRoot,
     /// `rename_entry`/`move_entry`'s destination already exists (any filesystem entry — file, dir,
     /// or even a broken symlink, see [`target_exists`]). Returned INSTEAD of ever calling
@@ -98,6 +111,11 @@ pub enum FsError {
     /// currently constructs it — an oversized file is instead an *honest success*
     /// ([`FilePreview::TooLarge`]), not an error.
     TooLarge,
+    /// BL-109 (ADDITIVE): the root guard cannot decide because the workspace-roots cache has
+    /// never loaded (the daemon is down/incompatible/still booting) — fail-closed, mirroring
+    /// `commands::CommandError::Disconnected`'s honest-degradation contract: never a fake
+    /// success, never a guess at what is registered.
+    Disconnected,
     Io {
         message: String,
     },
@@ -111,6 +129,7 @@ impl std::fmt::Display for FsError {
             FsError::OutsideRoot => write!(f, "path escapes the workspace root"),
             FsError::AlreadyExists => write!(f, "destination already exists"),
             FsError::TooLarge => write!(f, "too large"),
+            FsError::Disconnected => write!(f, "daemon disconnected"),
             FsError::Io { message } => write!(f, "I/O error: {message}"),
         }
     }
@@ -501,50 +520,119 @@ pub(crate) fn open_external_inner(root: &Path, rel: &str) -> Result<(), FsError>
     Ok(())
 }
 
-// ── #[tauri::command] surface (spec §4.2) — thin, pure-local, no State/daemon client ──────────
+// ── #[tauri::command] surface (spec §4.2) — thin, no daemon round-trip (BL-109 guard only) ────
+
+/// BL-109 gate 1 (see the module doc's "Security boundary"): run the registered-workspace-root
+/// guard and translate its `CommandError` taxonomy into this module's `FsError` wire shape. The
+/// guard reads `AppState`'s LOCAL cache — no daemon round-trip, so this never blocks on the
+/// socket; a never-loaded cache fails closed as [`FsError::Disconnected`].
+fn ensure_fs_root(
+    state: &tauri::State<'_, crate::commands::AppState>,
+    root: &str,
+) -> Result<(), FsError> {
+    crate::commands::ensure_registered_root(state, root).map_err(|e| match e {
+        crate::commands::CommandError::Disconnected => FsError::Disconnected,
+        crate::commands::CommandError::Daemon { ref code, .. } if code == "NotFound" => {
+            FsError::NotFound
+        }
+        // Every other guard failure is a containment refusal — the same `OutsideRoot` the
+        // lexical validators below produce, never a leak of what IS registered.
+        _ => FsError::OutsideRoot,
+    })
+}
 
 #[tauri::command]
-pub fn list_dir(root: String, rel: String, include_ignored: bool) -> Result<Vec<FsEntry>, FsError> {
+pub fn list_dir(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel: String,
+    include_ignored: bool,
+) -> Result<Vec<FsEntry>, FsError> {
+    ensure_fs_root(&state, &root)?;
     list_dir_inner(Path::new(&root), &rel, include_ignored)
 }
 
 #[tauri::command]
-pub fn read_file_preview(root: String, rel: String) -> Result<FilePreview, FsError> {
+pub fn read_file_preview(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel: String,
+) -> Result<FilePreview, FsError> {
+    ensure_fs_root(&state, &root)?;
     read_file_preview_inner(Path::new(&root), &rel)
 }
 
 #[tauri::command]
-pub fn create_file(root: String, rel_dir: String, name: String) -> Result<(), FsError> {
+pub fn create_file(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel_dir: String,
+    name: String,
+) -> Result<(), FsError> {
+    ensure_fs_root(&state, &root)?;
     create_file_inner(Path::new(&root), &rel_dir, &name)
 }
 
 #[tauri::command]
-pub fn create_dir(root: String, rel_dir: String, name: String) -> Result<(), FsError> {
+pub fn create_dir(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel_dir: String,
+    name: String,
+) -> Result<(), FsError> {
+    ensure_fs_root(&state, &root)?;
     create_dir_inner(Path::new(&root), &rel_dir, &name)
 }
 
 #[tauri::command]
-pub fn rename_entry(root: String, rel: String, new_name: String) -> Result<(), FsError> {
+pub fn rename_entry(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel: String,
+    new_name: String,
+) -> Result<(), FsError> {
+    ensure_fs_root(&state, &root)?;
     rename_entry_inner(Path::new(&root), &rel, &new_name)
 }
 
 #[tauri::command]
-pub fn move_entry(root: String, rel_from: String, rel_dir_to: String) -> Result<(), FsError> {
+pub fn move_entry(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel_from: String,
+    rel_dir_to: String,
+) -> Result<(), FsError> {
+    ensure_fs_root(&state, &root)?;
     move_entry_inner(Path::new(&root), &rel_from, &rel_dir_to)
 }
 
 #[tauri::command]
-pub fn delete_entry(root: String, rel: String) -> Result<(), FsError> {
+pub fn delete_entry(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel: String,
+) -> Result<(), FsError> {
+    ensure_fs_root(&state, &root)?;
     delete_entry_inner(Path::new(&root), &rel)
 }
 
 #[tauri::command]
-pub fn reveal_in_finder(root: String, rel: String) -> Result<(), FsError> {
+pub fn reveal_in_finder(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel: String,
+) -> Result<(), FsError> {
+    ensure_fs_root(&state, &root)?;
     reveal_in_finder_inner(Path::new(&root), &rel)
 }
 
 #[tauri::command]
-pub fn open_external(root: String, rel: String) -> Result<(), FsError> {
+pub fn open_external(
+    state: tauri::State<'_, crate::commands::AppState>,
+    root: String,
+    rel: String,
+) -> Result<(), FsError> {
+    ensure_fs_root(&state, &root)?;
     open_external_inner(Path::new(&root), &rel)
 }
 

@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use bpa_protocol::sync::lock;
 use tokio::sync::mpsc;
 
 /// Generic over the value type `F` fanned out to every registered client (sessiond re-seats as
@@ -47,12 +48,12 @@ impl<F: Clone + Send + 'static> Broadcaster<F> {
     /// Register `id`'s outbound queue for fan-out. Replaces any existing registration under the
     /// same `id`.
     pub fn register(&self, id: u64, tx: mpsc::Sender<F>) {
-        self.inner.lock().unwrap().insert(id, tx);
+        lock(&self.inner).insert(id, tx);
     }
 
     /// Remove `id`'s registration (no-op if it was never registered, or already removed).
     pub fn deregister(&self, id: u64) {
-        self.inner.lock().unwrap().remove(&id);
+        lock(&self.inner).remove(&id);
     }
 
     /// Enqueue `f` into every registered client's outbound queue (best-effort, non-blocking). A
@@ -60,7 +61,7 @@ impl<F: Clone + Send + 'static> Broadcaster<F> {
     /// (`TrySendError::Closed`, a client already torn down) is silently skipped — this never
     /// blocks, and one dead/slow client never delays or drops the fan-out to the others.
     pub fn broadcast(&self, f: F) {
-        let map = self.inner.lock().unwrap();
+        let map = lock(&self.inner);
         for tx in map.values() {
             let _ = tx.try_send(f.clone());
         }

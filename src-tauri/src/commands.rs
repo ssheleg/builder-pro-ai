@@ -24,6 +24,7 @@
 //! defensively (belt-and-suspenders, same as `err_from_response` above), never as the only path.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bpa_orchd_proto::{
@@ -35,8 +36,10 @@ use bpa_orchd_proto::{
     RuleSetView, Skill, SkillScope, Stage, StorageStatus, SupervisorConfig, TaskPriority,
     TaskSource, TaskStatus, Workflow, WorkflowScope,
 };
+use bpa_protocol::sync::{lock, read, write};
 use bpa_protocol::{
-    CommandEvent, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace, WorkspaceId,
+    CommandEvent, Push, Request, Response, SessionId, SessionMeta, TerminalEvent, Workspace,
+    WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -141,7 +144,7 @@ impl WriteStdinLocks {
     /// accumulate one map entry per session-id-ever-written forever. `pub(crate)` (not private)
     /// so the broker's eviction tests can create entries the same way `write_stdin_locked` does.
     pub(crate) fn lock_for(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self.inner.lock().unwrap();
+        let mut map = lock(&self.inner);
         map.entry(session_id.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -157,7 +160,7 @@ impl WriteStdinLocks {
     /// connection task (locked contract, see `broker.rs` module docs) — a short,
     /// never-held-across-`.await` `std::sync::Mutex` critical section, same as `lock_for`.
     pub(crate) fn evict(&self, session_id: &SessionId) {
-        self.inner.lock().unwrap().remove(session_id);
+        lock(&self.inner).remove(session_id);
     }
 
     /// Whether an entry currently exists for `session_id` — test observability for the H2
@@ -188,6 +191,9 @@ pub struct AppState {
     pub orchd: OrchdClientSlot,
     pub orchd_launchd: Arc<crate::launchd::LaunchdAgent<'static>>,
     pub orchd_status: OrchdStatusSlot,
+    /// BL-109: the registered-workspace-roots snapshot every fs command's root guard consults
+    /// (see [`WorkspaceRootsCache`]'s docs). Seeded `NeverLoaded` in `lib.rs`'s `setup()`.
+    pub workspace_roots: WorkspaceRootsSlot,
 }
 
 /// The exact logic behind `AppState::client()`, pulled out as a free function over a bare
@@ -196,30 +202,24 @@ pub struct AppState {
 /// process without a genuine OS event loop on the main thread). `AppState::client()` below is a
 /// one-line delegate to this, so the two share the identical, real code path.
 pub(crate) fn slot_client(slot: &ClientSlot) -> Result<Arc<DaemonClient>, CommandError> {
-    slot.read()
-        .unwrap()
-        .clone()
-        .ok_or(CommandError::Disconnected)
+    read(slot).clone().ok_or(CommandError::Disconnected)
 }
 
 /// The exact logic behind `AppState::orchd()` — mirrors [`slot_client`] exactly, for the second
 /// daemon (S3 T12, spec §9).
 pub(crate) fn slot_orchd(slot: &OrchdClientSlot) -> Result<Arc<OrchdClient>, CommandError> {
-    slot.read()
-        .unwrap()
-        .clone()
-        .ok_or(CommandError::Disconnected)
+    read(slot).clone().ok_or(CommandError::Disconnected)
 }
 
 /// Read the current [`DaemonStatus`] out of a bare `StatusSlot` — pulled out as a free function for
 /// the same unit-testability reason as `slot_client` above.
 pub(crate) fn read_status(slot: &StatusSlot) -> DaemonStatus {
-    slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    lock(slot).clone()
 }
 
 /// Write a new [`DaemonStatus`] into a bare `StatusSlot`.
 pub(crate) fn write_status(slot: &StatusSlot, status: DaemonStatus) {
-    *slot.lock().unwrap_or_else(|e| e.into_inner()) = status;
+    *lock(slot) = status;
 }
 
 /// Write a new [`OrchdStatus`] into a bare `OrchdStatusSlot` — mirrors `write_status` exactly, for
@@ -228,7 +228,161 @@ pub(crate) fn write_status(slot: &StatusSlot, status: DaemonStatus) {
 /// exists because `bring_up_orchd` already needs to WRITE the truth at every connect/reconnect
 /// transition, exactly like `write_status` does for sessiond from day one.
 pub(crate) fn write_orchd_status(slot: &OrchdStatusSlot, status: OrchdStatus) {
-    *slot.lock().unwrap_or_else(|e| e.into_inner()) = status;
+    *lock(slot) = status;
+}
+
+// ── BL-109: registered-workspace-roots cache + the fs-command root guard ──────────────────────
+//
+// The `fs_explorer`/`fs_watcher` command surfaces take a webview-supplied `root` string and were
+// previously gated ONLY by `bpa_paths`'s lexical containment validators — which answer "is this
+// path inside `root`?", never "is `root` itself something the app should touch at all?". A root
+// of `/` therefore passed every check and `list_dir("/", "etc")` (or worse, a destructive verb
+// against it) happily worked. This cache is the missing second gate: the core-side snapshot of
+// every workspace root the DAEMON currently has registered, and [`ensure_registered_root_in`] is
+// the guard every fs command runs BEFORE touching the filesystem. Fail-closed throughout: an
+// unknown/never-loaded cache is `Disconnected` (honest — with the daemon down the core cannot
+// know what is registered), an uncanonicalizable input is `NotFound`-typed, and an input that is
+// not contained in any registered root is `OutsideRoot`-typed with the single honest message
+// "root is not a registered workspace root" (never a hint about what IS registered).
+
+/// Snapshot freshness: rebuilt wholesale from every successful `ListWorkspaces` reply (the
+/// frontend's hydrate/refresh path funnels through that command), and kept current between lists
+/// by the daemon's own workspace broadcasts (`Push::WorkspaceCreated`/`WorkspaceUpdated` upsert,
+/// `Push::WorkspaceRemoved` drops — applied in `broker::register`'s `on_push`) plus the
+/// create/add-root/remove-root/remove command wrappers (which update it from their own replies so
+/// the reply-vs-broadcast ordering can never leave a just-created workspace unguardable).
+///
+/// Keyed by workspace id (not a bare `HashSet<String>` of roots) precisely so `WorkspaceRemoved`
+/// — whose payload carries ONLY the id — can drop exactly that workspace's roots instead of
+/// guessing. Roots are stored canonicalized (best-effort; the daemon already canonicalizes them
+/// at `CreateWorkspace`/`AddWorkspaceRoot`, so the re-canonicalize here is normally a no-op).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkspaceRootsCache {
+    /// No successful `ListWorkspaces` has completed yet this process (daemon down, incompatible,
+    /// or simply still booting): the core knows nothing, so the guard must fail closed as
+    /// `Disconnected` rather than admit or deny on a guess.
+    NeverLoaded,
+    /// workspace id -> its CANONICAL roots (len >= 1 per entry).
+    Loaded(HashMap<WorkspaceId, Vec<String>>),
+}
+
+/// Shared slot for the [`WorkspaceRootsCache`]: created in `lib.rs`'s `setup()` and managed as
+/// part of `AppState` from the first frame (BL-101 pattern), written by `list_workspaces`'s
+/// reply, the workspace push events, and the workspace-mutating commands. Plain
+/// `std::sync::Mutex` — never held across an `.await` (the broker's `on_push` callback is
+/// non-async, same contract as `WriteStdinLocks`).
+pub type WorkspaceRootsSlot = Arc<std::sync::Mutex<WorkspaceRootsCache>>;
+
+/// Best-effort canonical form of an announced root: the daemon's roots are already canonical, so
+/// this is normally a no-op re-canonicalize; on any failure (a root deleted out from under the
+/// daemon) the raw string is kept — the guard's own `canonicalize` of the incoming path still
+/// compares honestly, and a genuinely-gone root simply never matches.
+fn canonical_root_str(root: &str) -> String {
+    match std::fs::canonicalize(root) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => root.to_string(),
+    }
+}
+
+/// Replace the whole cache from a successful `ListWorkspaces` reply (snapshot semantics: this is
+/// the authoritative full list, so entries for workspaces the daemon no longer returns are
+/// dropped too).
+pub(crate) fn load_workspace_roots(slot: &WorkspaceRootsSlot, workspaces: &[Workspace]) {
+    let map = workspaces
+        .iter()
+        .map(|w| {
+            (
+                w.id.clone(),
+                w.roots.iter().map(|r| canonical_root_str(r)).collect(),
+            )
+        })
+        .collect();
+    *lock(slot) = WorkspaceRootsCache::Loaded(map);
+}
+
+/// Upsert one workspace's roots (its `WorkspaceCreated`/`WorkspaceUpdated` push, or a
+/// create/add-root/remove-root command's own reply). Promotes `NeverLoaded` to a partial `Loaded`
+/// map: admission stays safe because every entry here is one the daemon itself announced.
+pub(crate) fn upsert_workspace_roots(slot: &WorkspaceRootsSlot, workspace: &Workspace) {
+    let roots: Vec<String> = workspace
+        .roots
+        .iter()
+        .map(|r| canonical_root_str(r))
+        .collect();
+    let mut guard = lock(slot);
+    match &mut *guard {
+        WorkspaceRootsCache::Loaded(map) => {
+            map.insert(workspace.id.clone(), roots);
+        }
+        cache @ WorkspaceRootsCache::NeverLoaded => {
+            let mut map = HashMap::new();
+            map.insert(workspace.id.clone(), roots);
+            *cache = WorkspaceRootsCache::Loaded(map);
+        }
+    }
+}
+
+/// Drop one workspace's roots (`WorkspaceRemoved` push, or `remove_workspace`'s own Ack). A no-op
+/// on a `NeverLoaded` cache.
+pub(crate) fn remove_workspace_roots(slot: &WorkspaceRootsSlot, workspace_id: &WorkspaceId) {
+    if let WorkspaceRootsCache::Loaded(map) = &mut *lock(slot) {
+        map.remove(workspace_id);
+    }
+}
+
+/// Keep the cache current from the daemon's workspace broadcasts. Called from
+/// `broker::register`'s `on_push` closure (before `dispatch_push`), so it must be cheap and
+/// non-blocking: a short `std::sync::Mutex` critical section plus, on the upsert arms, a
+/// best-effort `canonicalize` of a small number of already-canonical paths. Every non-workspace
+/// push is a no-op.
+pub(crate) fn apply_workspace_push_to_roots(slot: &WorkspaceRootsSlot, push: &Push) {
+    match push {
+        Push::WorkspaceCreated { workspace } | Push::WorkspaceUpdated(workspace) => {
+            upsert_workspace_roots(slot, workspace);
+        }
+        Push::WorkspaceRemoved { workspace_id } => remove_workspace_roots(slot, workspace_id),
+        _ => {}
+    }
+}
+
+/// The exact guard logic behind [`ensure_registered_root`], pulled out as a free function over a
+/// bare [`WorkspaceRootsSlot`] so it is unit-testable without a full `AppState` (same seam
+/// pattern as [`slot_client`]/[`read_status`] above). `root` is the webview-supplied string an fs
+/// command was called with; it is canonicalized, then must be CONTAINED IN (or equal to) at least
+/// one registered workspace root — containment, not exact membership, because the frontend is
+/// free to address a subdirectory of a workspace (the file explorer lazily descends).
+pub(crate) fn ensure_registered_root_in(
+    slot: &WorkspaceRootsSlot,
+    root: &str,
+) -> Result<(), CommandError> {
+    let map = match &*lock(slot) {
+        WorkspaceRootsCache::Loaded(map) => map.clone(),
+        WorkspaceRootsCache::NeverLoaded => return Err(CommandError::Disconnected),
+    };
+    let canonical = std::fs::canonicalize(root).map_err(|_| CommandError::Daemon {
+        code: "NotFound".into(),
+        message: "root is not a registered workspace root".into(),
+    })?;
+    let contained = map
+        .values()
+        .flatten()
+        .any(|registered| canonical.starts_with(registered));
+    if contained {
+        Ok(())
+    } else {
+        Err(CommandError::Daemon {
+            code: "OutsideRoot".into(),
+            message: "root is not a registered workspace root".into(),
+        })
+    }
+}
+
+/// BL-109 guard: every `fs_explorer`/`fs_watcher` command runs this on its webview-supplied
+/// `root` BEFORE touching the filesystem (the lexical `bpa_paths` containment validators then run
+/// on top, unchanged). See the cache's docs above for the error taxonomy; fail-closed on a
+/// never-loaded cache.
+pub(crate) fn ensure_registered_root(state: &AppState, root: &str) -> Result<(), CommandError> {
+    ensure_registered_root_in(&state.workspace_roots, root)
 }
 
 impl AppState {
@@ -239,7 +393,7 @@ impl AppState {
         slot_client(&self.client)
     }
     pub fn set_client(&self, c: Option<Arc<DaemonClient>>) {
-        *self.client.write().unwrap() = c;
+        *write(&self.client) = c;
     }
 
     /// Current live orchd client, or `Disconnected` if the slot is empty — mirrors
@@ -1061,7 +1215,11 @@ pub async fn kill_session(
 
 #[tauri::command]
 pub async fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, CommandError> {
-    expect_workspaces(state.client()?.request(Request::ListWorkspaces).await?)
+    let workspaces = expect_workspaces(state.client()?.request(Request::ListWorkspaces).await?)?;
+    // BL-109: a successful full list is the authoritative snapshot for the fs-command root
+    // guard — refresh it wholesale (this is also the frontend hydrate/refresh path).
+    load_workspace_roots(&state.workspace_roots, &workspaces);
+    Ok(workspaces)
 }
 
 #[tauri::command]
@@ -1073,12 +1231,17 @@ pub async fn create_workspace(
     // Fail fast on an invalid root BEFORE touching the daemon (spec §13/§16); the daemon
     // re-validates independently (defense in depth for S6 agents driving the same surface).
     let root_path = preflight_workspace_root(&root_path)?;
-    expect_workspace(
+    let workspace = expect_workspace(
         state
             .client()?
             .request(Request::CreateWorkspace { name, root_path })
             .await?,
-    )
+    )?;
+    // BL-109: upsert the new workspace's roots into the guard cache from our OWN reply — the
+    // daemon's `WorkspaceCreated` broadcast arrives asynchronously, and an fs command issued in
+    // between must already see the workspace as registered.
+    upsert_workspace_roots(&state.workspace_roots, &workspace);
+    Ok(workspace)
 }
 
 /// Add an additional root directory to a workspace (spec §3.3/§6.6, multi-root). The daemon
@@ -1097,12 +1260,15 @@ pub async fn add_workspace_root(
     workspace_id: WorkspaceId,
     path: String,
 ) -> Result<Workspace, CommandError> {
-    expect_workspace(
+    let workspace = expect_workspace(
         state
             .client()?
             .request(Request::AddWorkspaceRoot { workspace_id, path })
             .await?,
-    )
+    )?;
+    // BL-109: keep the guard cache in step from our own reply (see create_workspace).
+    upsert_workspace_roots(&state.workspace_roots, &workspace);
+    Ok(workspace)
 }
 
 /// Remove a root directory from a workspace (spec §3.3/§6.6). The daemon rejects removing a
@@ -1114,12 +1280,17 @@ pub async fn remove_workspace_root(
     workspace_id: WorkspaceId,
     path: String,
 ) -> Result<Workspace, CommandError> {
-    expect_workspace(
+    let workspace = expect_workspace(
         state
             .client()?
             .request(Request::RemoveWorkspaceRoot { workspace_id, path })
             .await?,
-    )
+    )?;
+    // BL-109: keep the guard cache in step from our own reply (see create_workspace) — the
+    // removed root must stop passing the guard immediately, not only once the
+    // `WorkspaceUpdated` broadcast lands.
+    upsert_workspace_roots(&state.workspace_roots, &workspace);
+    Ok(workspace)
 }
 
 /// Remove a workspace permanently (SCN-058). The daemon deletes the workspace, its roots, EVERY
@@ -1143,12 +1314,20 @@ pub async fn remove_workspace(
     state: State<'_, AppState>,
     workspace_id: WorkspaceId,
 ) -> Result<(), CommandError> {
-    expect_ack(
+    let out = expect_ack(
         state
             .client()?
-            .request(Request::RemoveWorkspace { workspace_id })
+            .request(Request::RemoveWorkspace {
+                workspace_id: workspace_id.clone(),
+            })
             .await?,
-    )
+    );
+    if out.is_ok() {
+        // BL-109: the workspace's roots must stop passing the fs-command guard immediately,
+        // from our own Ack — not only once the `WorkspaceRemoved` broadcast lands.
+        remove_workspace_roots(&state.workspace_roots, &workspace_id);
+    }
+    out
 }
 
 /// `true` when `path` definitely exists on disk; `true` ALSO when its existence cannot be
@@ -1307,7 +1486,7 @@ pub async fn upgrade_daemon(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), CommandError> {
-    let client = state.client.read().unwrap().clone();
+    let client = read(&state.client).clone();
     upgrade_daemon_core(client, &state.launchd).await?;
     app.restart();
 }
@@ -2172,7 +2351,7 @@ pub async fn orchd_reconnect(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), CommandError> {
-    state.orchd.write().unwrap().take();
+    write(&state.orchd).take();
     let agent = state.orchd_launchd.clone();
     let broker = state.broker.clone();
     let slot = state.orchd.clone();
@@ -2205,7 +2384,7 @@ pub async fn orchd_upgrade_core(
 /// verbatim, over the orchd slot/launchd agent instead of the sessiond ones (spec §9).
 #[tauri::command]
 pub async fn orchd_upgrade(state: State<'_, AppState>, app: AppHandle) -> Result<(), CommandError> {
-    let client = state.orchd.read().unwrap().clone();
+    let client = read(&state.orchd).clone();
     orchd_upgrade_core(client, &state.orchd_launchd).await?;
     app.restart();
 }
@@ -3095,6 +3274,159 @@ pub async fn workflow_delete(state: State<'_, AppState>, id: String) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── BL-109: registered-workspace-roots cache + the fs-command root guard ─────────────────
+
+    fn roots_slot() -> WorkspaceRootsSlot {
+        Arc::new(std::sync::Mutex::new(WorkspaceRootsCache::NeverLoaded))
+    }
+
+    fn ws(id: &str, roots: &[&std::path::Path]) -> Workspace {
+        Workspace {
+            id: id.into(),
+            name: id.into(),
+            root_path: roots[0].to_string_lossy().into_owned(),
+            roots: roots
+                .iter()
+                .map(|r| r.to_string_lossy().into_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn root_guard_fails_closed_disconnected_when_cache_never_loaded() {
+        let slot = roots_slot();
+        let err = ensure_registered_root_in(&slot, "/tmp").unwrap_err();
+        assert!(
+            matches!(err, CommandError::Disconnected),
+            "a never-loaded cache must fail closed as Disconnected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn root_guard_rejects_an_unregistered_root() {
+        let registered = tempfile::tempdir().unwrap();
+        let slot = roots_slot();
+        load_workspace_roots(&slot, &[ws("w1", &[registered.path()])]);
+
+        let err = ensure_registered_root_in(&slot, "/etc").unwrap_err();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "OutsideRoot");
+                assert_eq!(message, "root is not a registered workspace root");
+            }
+            other => panic!("expected OutsideRoot-typed Daemon error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn root_guard_admits_a_registered_root_and_its_subdirectories() {
+        let registered = tempfile::tempdir().unwrap();
+        let child = registered.path().join("sub");
+        std::fs::create_dir(&child).unwrap();
+        let slot = roots_slot();
+        load_workspace_roots(&slot, &[ws("w1", &[registered.path()])]);
+
+        // The registered root itself...
+        ensure_registered_root_in(&slot, &registered.path().to_string_lossy())
+            .expect("a genuinely registered root must pass the guard");
+        // ...and an unregistered SUBDIRECTORY of it (containment, not exact membership — the
+        // file explorer lazily descends into child dirs).
+        ensure_registered_root_in(&slot, &child.to_string_lossy())
+            .expect("a subdirectory of a registered root must pass the guard (containment)");
+    }
+
+    #[test]
+    fn root_guard_rejects_a_root_that_does_not_canonicalize() {
+        let registered = tempfile::tempdir().unwrap();
+        let slot = roots_slot();
+        load_workspace_roots(&slot, &[ws("w1", &[registered.path()])]);
+
+        let missing = registered.path().join("definitely-not-there");
+        let err = ensure_registered_root_in(&slot, &missing.to_string_lossy()).unwrap_err();
+        match err {
+            CommandError::Daemon { code, message } => {
+                assert_eq!(code, "NotFound");
+                assert_eq!(message, "root is not a registered workspace root");
+            }
+            other => panic!("expected NotFound-typed Daemon error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn root_guard_stops_admitting_a_root_after_the_workspace_is_removed() {
+        let registered = tempfile::tempdir().unwrap();
+        let slot = roots_slot();
+        load_workspace_roots(&slot, &[ws("w1", &[registered.path()])]);
+        let root = registered.path().to_string_lossy().into_owned();
+        ensure_registered_root_in(&slot, &root).expect("precondition: registered");
+
+        remove_workspace_roots(&slot, &"w1".to_string());
+
+        let err = ensure_registered_root_in(&slot, &root).unwrap_err();
+        assert!(
+            matches!(err, CommandError::Daemon { ref code, .. } if code == "OutsideRoot"),
+            "a removed workspace's root must stop passing the guard, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_pushes_keep_the_cache_current_between_full_lists() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let slot = roots_slot();
+
+        // A WorkspaceCreated push on a never-loaded cache promotes it to a partial Loaded map
+        // (admission stays safe: the entry is one the daemon itself announced).
+        let wa = ws("w1", &[a.path()]);
+        apply_workspace_push_to_roots(&slot, &Push::WorkspaceCreated { workspace: wa });
+        ensure_registered_root_in(&slot, &a.path().to_string_lossy())
+            .expect("a pushed workspace's root must pass immediately");
+
+        // A WorkspaceUpdated push (root added elsewhere) upserts the same workspace's roots.
+        let wa2 = ws("w1", &[a.path(), b.path()]);
+        apply_workspace_push_to_roots(&slot, &Push::WorkspaceUpdated(wa2));
+        ensure_registered_root_in(&slot, &b.path().to_string_lossy())
+            .expect("an updated workspace's new root must pass immediately");
+
+        // A WorkspaceRemoved push drops exactly that workspace's roots (payload carries only
+        // the id — the id-keyed map is what makes this precise).
+        apply_workspace_push_to_roots(
+            &slot,
+            &Push::WorkspaceRemoved {
+                workspace_id: "w1".into(),
+            },
+        );
+        assert!(
+            ensure_registered_root_in(&slot, &a.path().to_string_lossy()).is_err(),
+            "a removed workspace's root must stop passing on the push, not just on the next list"
+        );
+
+        // A non-workspace push is a no-op for the cache.
+        apply_workspace_push_to_roots(
+            &slot,
+            &Push::ChildExited {
+                session_id: "s".into(),
+                code: Some(0),
+                signal: None,
+            },
+        );
+    }
+
+    #[test]
+    fn full_list_replaces_the_snapshot_wholesale() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let slot = roots_slot();
+        load_workspace_roots(&slot, &[ws("w1", &[a.path()])]);
+
+        // The next full list no longer contains w1 — its root must stop passing (snapshot
+        // semantics, not union).
+        load_workspace_roots(&slot, &[ws("w2", &[b.path()])]);
+        assert!(ensure_registered_root_in(&slot, &a.path().to_string_lossy()).is_err());
+        ensure_registered_root_in(&slot, &b.path().to_string_lossy())
+            .expect("the newly listed workspace's root must pass");
+    }
 
     #[test]
     fn create_opts_defaults_env_overrides_and_reads_camel_case() {

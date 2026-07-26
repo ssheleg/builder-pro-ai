@@ -445,10 +445,27 @@ pub(crate) fn stop_watch_inner(slot: &WatchSlot) {
 pub fn start_workspace_watch(
     app: AppHandle,
     watch_slot: tauri::State<'_, WatchSlot>,
+    state: tauri::State<'_, crate::commands::AppState>,
     roots: Vec<String>,
     show_ignored: bool,
 ) {
-    start_watch_inner(watch_slot.inner(), app, roots, show_ignored);
+    // BL-109 (same registered-root gate as fs_explorer's commands): a webview-supplied root must
+    // be contained in a daemon-REGISTERED workspace root before we hand it to FSEvents. Each
+    // offending root surfaces exactly like this module's other per-root failures — an honest
+    // `fs://watch-error` event, never a panic and never silently watching it anyway; the roots
+    // that DO pass are watched normally (mirrors `build_root_matchers`'s per-root partial
+    // failure semantics).
+    let mut admitted = Vec::with_capacity(roots.len());
+    for root in roots {
+        match crate::commands::ensure_registered_root(&state, &root) {
+            Ok(()) => admitted.push(root),
+            Err(e) => app.send(FsEvent::WatchError {
+                root,
+                reason: format!("refusing to watch an unregistered root: {e}"),
+            }),
+        }
+    }
+    start_watch_inner(watch_slot.inner(), app, admitted, show_ignored);
 }
 
 #[tauri::command]
