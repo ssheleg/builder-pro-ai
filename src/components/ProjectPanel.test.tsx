@@ -327,6 +327,20 @@ describe("ProjectPanel", () => {
     expect(orchdExportToFileMock).not.toHaveBeenCalled();
   });
 
+  it('a rapid double-click on "Save to file…" opens only one picker (export submit guard, FE-4)', async () => {
+    // A never-settling pick keeps the guard's ref lock engaged across both clicks.
+    pickFolderMock.mockReturnValue(new Promise<never>(() => {}));
+    render(<ProjectPanel projectId="p1" />);
+    const exportBtn = screen.getByTestId("project-export-file") as HTMLButtonElement;
+
+    fireEvent.click(exportBtn);
+    fireEvent.click(exportBtn);
+
+    await waitFor(() => expect(pickFolderMock).toHaveBeenCalledTimes(1));
+    expect(exportBtn.disabled).toBe(true); // the visible affordance while the export is in flight
+    expect(orchdExportToFileMock).not.toHaveBeenCalled();
+  });
+
   it("import: browses a folder, lists only .json files, and imports the chosen one", async () => {
     pickFolderMock.mockResolvedValue("/Users/me/imports");
     listDirMock.mockResolvedValue([
@@ -350,6 +364,25 @@ describe("ProjectPanel", () => {
     await waitFor(() => {
       expect(orchdImportFromFileMock).toHaveBeenCalledWith("/Users/me/imports/a.json");
     });
+  });
+
+  it("a rapid double-click on an import file fires orchdImportFromFile only once (import submit guard, FE-4)", async () => {
+    pickFolderMock.mockResolvedValue("/Users/me/imports");
+    listDirMock.mockResolvedValue([
+      { name: "a.json", relPath: "a.json", isDir: false, size: 10, isIgnored: false },
+    ]);
+    // A never-settling import keeps the guard's ref lock engaged across both clicks.
+    orchdImportFromFileMock.mockReset().mockReturnValue(new Promise<never>(() => {}));
+
+    render(<ProjectPanel projectId="p1" />);
+    fireEvent.click(screen.getByTestId("project-import-browse"));
+    await waitFor(() => expect(screen.getByTestId("project-import-file-a.json")).toBeTruthy());
+
+    const fileBtn = screen.getByTestId("project-import-file-a.json");
+    fireEvent.click(fileBtn);
+    fireEvent.click(fileBtn);
+
+    await waitFor(() => expect(orchdImportFromFileMock).toHaveBeenCalledTimes(1));
   });
 
   it("a failed mutation shows the mapped error via a toast", async () => {

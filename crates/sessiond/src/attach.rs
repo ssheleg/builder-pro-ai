@@ -488,19 +488,18 @@ const BEL: u8 = 0x07;
 struct LiveOscStripper {
     /// Bytes of an in-progress `ESC ]` sequence not yet classified as strip-or-keep.
     carry: Vec<u8>,
-    /// Once a partial sequence is confirmed to be OSC-133/OSC-7 (i.e. classification is settled
-    /// even though the terminator hasn't arrived yet), every subsequent byte — including the
-    /// eventual terminator — must be dropped rather than re-entering ground state or failing
-    /// open; mirrors `scrollback::Sanitizer`'s `discarding_until_terminator`.
-    discarding_until_terminator: bool,
 }
 
 /// Bound the in-progress, not-yet-classified carry so a malformed/adversarial stream can't grow
 /// it unboundedly; unrecognized sequences fail open (flushed verbatim) past this cap so genuine
 /// long output is never silently lost.
 const CARRY_CAP: usize = 256;
-/// Once a carry is confirmed OSC-133/OSC-7, bound memory while still discarding-until-terminator
-/// (never fail open — leaking the tail would forward a fragment of our own protocol marker).
+/// Once a carry is confirmed OSC-133/OSC-7, hold it until the terminator (never fail open while
+/// still plausibly terminated — leaking a live fragment of our own protocol marker would forward
+/// it to the client), bounded by this larger safety cap. Past the cap the sequence is no longer
+/// "plausibly terminated" — it is an unterminated fragment, almost certainly user output that
+/// merely STARTED with `ESC ] 133 ;` (SES-5, audit 2026-07-24): the buffered bytes are then
+/// flushed DEFUSED (see [`flush_defused`]) rather than silently dropped.
 const RECOGNIZED_CAP: usize = 8192;
 
 enum Verdict {
@@ -511,29 +510,12 @@ enum Verdict {
 
 impl LiveOscStripper {
     fn new() -> Self {
-        LiveOscStripper {
-            carry: Vec::new(),
-            discarding_until_terminator: false,
-        }
+        LiveOscStripper { carry: Vec::new() }
     }
 
     fn strip(&mut self, chunk: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(chunk.len());
         for &b in chunk {
-            if self.discarding_until_terminator {
-                if b == BEL {
-                    self.discarding_until_terminator = false;
-                } else if b == b'\\' && self.carry.last() == Some(&ESC) {
-                    self.discarding_until_terminator = false;
-                    self.carry.clear();
-                } else if b == ESC {
-                    self.carry.clear();
-                    self.carry.push(ESC);
-                } else {
-                    self.carry.clear();
-                }
-                continue;
-            }
             if self.carry.is_empty() {
                 if b == ESC {
                     self.carry.push(b);
@@ -547,8 +529,15 @@ impl LiveOscStripper {
                 Verdict::Incomplete => {
                     if is_osc133_or_osc7_prefix(&self.carry) {
                         if self.carry.len() > RECOGNIZED_CAP {
-                            self.carry.clear();
-                            self.discarding_until_terminator = true;
+                            // SES-5 (audit 2026-07-24): past the cap this is no longer a real
+                            // marker — it is an UNTERMINATED fragment, almost certainly user
+                            // output that merely started with `ESC ] 133 ;`/`ESC ] 7 ;` (the
+                            // pre-fix code silently dropped EVERYTHING until a terminator that
+                            // might never come, swallowing genuine output whole). Flush the
+                            // buffered bytes DEFUSED (leading ESC replaced by U+FFFD, so the
+                            // marker can never be reconstituted downstream) and return to
+                            // ground state, so the rest of the user's output flows verbatim.
+                            flush_defused(&mut out, &mut self.carry);
                         }
                     } else if self.carry.len() > CARRY_CAP {
                         out.append(&mut self.carry);
@@ -564,6 +553,23 @@ impl LiveOscStripper {
         }
         out
     }
+}
+
+/// Emit an abandoned over-long OSC-133/OSC-7 carry as visible, inert text (SES-5): the leading
+/// ESC — the one byte that makes the sequence a control sequence at all — is replaced by U+FFFD,
+/// so the fragment prints harmlessly and can never be reconstituted into a live marker
+/// downstream, while genuine user output is not silently swallowed. Returns the state machine
+/// to ground (empty carry), so a LATE terminator arriving afterwards is just inert input (a
+/// lone BEL byte, or a lone `ESC \` kept verbatim by the ordinary classify path). Same contract
+/// as `scrollback::flush_defused`; duplicated rather than shared because the two filters are
+/// deliberately separate (different strip sets — see the section comment above).
+fn flush_defused(out: &mut Vec<u8>, carry: &mut Vec<u8>) {
+    debug_assert_eq!(carry.first(), Some(&ESC));
+    out.extend_from_slice("�".as_bytes());
+    if carry.len() > 1 {
+        out.extend_from_slice(&carry[1..]);
+    }
+    carry.clear();
 }
 
 /// True once `seq` (`ESC ] ...`) is unambiguously the start of OSC-133 or OSC-7 — i.e. it has a
@@ -960,10 +966,9 @@ mod tests {
     // This is a direct unit test of the struct (no PTY/tokio needed), exercising the same
     // split-sequence path `read()`-chunked live PTY output takes in production: a real terminal
     // emulator can hand `strip()` an OSC-133 sequence broken at an arbitrary byte boundary between
-    // two separate reads. `carry` must accumulate across calls and `discarding_until_terminator`
-    // (once the prefix is unambiguously recognized as OSC-133/OSC-7) must persist across the call
-    // boundary so the terminator arriving in the NEXT call is still swallowed, not re-entered as
-    // ground state and echoed to the client.
+    // two separate reads. `carry` must accumulate across calls (the incomplete-recognized-OSC
+    // hold path) so the terminator arriving in the NEXT call still completes the drop, rather
+    // than the fragment being re-entered as ground state and echoed to the client.
     #[test]
     fn live_osc_stripper_drops_osc133_marker_split_across_two_strip_calls() {
         let mut s = LiveOscStripper::new();
@@ -1025,6 +1030,64 @@ mod tests {
             "OSC-7 payload leaked: {combined:?}"
         );
         assert_eq!(combined, b"ab".to_vec());
+    }
+
+    // ---- SES-5 (audit 2026-07-24, probe p6): an UNTERMINATED recognized-prefix OSC that grows
+    // past RECOGNIZED_CAP is user output, not a marker — the buffered bytes must be flushed
+    // DEFUSED (leading ESC replaced by U+FFFD), never silently swallowed, and the machine must
+    // return to ground state so following output (and following well-formed markers) behave
+    // exactly as before. ----
+    #[test]
+    fn live_osc_stripper_overlong_unterminated_osc133_is_flushed_defused_not_swallowed() {
+        let mut s = LiveOscStripper::new();
+
+        let out1 = s.strip(b"pre\x1b]133;C");
+        assert_eq!(out1, b"pre", "text before the fragment flows immediately");
+
+        // 8500 bytes of visible text without a terminator: past the 8192-byte cap.
+        let out2 = s.strip(&[b'V'; 8500]);
+        let mut expected = "�]133;C".as_bytes().to_vec();
+        expected.extend_from_slice(&[b'V'; 8500]);
+        assert_eq!(
+            out2, expected,
+            "the over-long fragment must be flushed DEFUSED — payload survives as inert text"
+        );
+        assert!(
+            !contains(&out2, b"\x1b]133;"),
+            "a live OSC-133 prefix (with the ESC byte) must never survive the defused flush"
+        );
+
+        // Ground state: the late BEL terminator is an inert plain byte now, trailing text
+        // flows, and a NORMAL terminated OSC-133 afterwards is still fully stripped.
+        let out3 = s.strip(b"\x07visible\x1b]133;D;0\x07after");
+        assert!(
+            out3.contains(&BEL),
+            "a lone late BEL is inert user output, kept honestly"
+        );
+        assert!(contains(&out3, b"visible"));
+        assert!(
+            !contains(&out3, b"\x1b]133;"),
+            "a well-formed terminated OSC-133 must still be stripped after an overflow"
+        );
+        assert!(
+            !contains(&out3, b"133;D;0"),
+            "the stripped marker's payload must not leak either"
+        );
+        assert!(contains(&out3, b"after"));
+    }
+
+    #[test]
+    fn live_osc_stripper_overlong_osc7_defused_across_strip_calls() {
+        // Same overflow, exercised ACROSS two strip() calls (the carry boundary), for OSC-7.
+        let mut s = LiveOscStripper::new();
+        let out1 = s.strip(b"\x1b]7;file://h/");
+        assert_eq!(out1, Vec::<u8>::new());
+        let out2 = s.strip(&[b'p'; RECOGNIZED_CAP + 50]);
+        let mut expected = "�]7;file://h/".as_bytes().to_vec();
+        expected.extend_from_slice(&[b'p'; RECOGNIZED_CAP + 50]);
+        assert_eq!(out2, expected);
+        let out3 = s.strip(b"tail");
+        assert_eq!(out3, b"tail", "ground state after the defused flush");
     }
 
     // ---- a same-connection re-attach (no cross-connection supersede anymore) does not leak a

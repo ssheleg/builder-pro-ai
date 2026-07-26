@@ -275,7 +275,9 @@ const focusMock = vi.fn();
 const resetAllAttachmentsMock = vi.fn();
 const resetAttachmentMock = vi.fn();
 const fakeManager = {
-  ensure: vi.fn(),
+  // `ensure` returns a minimal xterm stub: TerminalPane's FE-7 restored-input effect wires an
+  // `onData` listener on the returned Terminal.
+  ensure: vi.fn(() => ({ onData: () => ({ dispose: () => {} }) })),
   has: vi.fn(() => true),
   get: vi.fn(),
   isOpened: vi.fn(() => true),
@@ -1533,6 +1535,9 @@ describe("S3 T13: orchd domain event wiring", () => {
 
     await act(async () => {
       cbs.orchdUp(null);
+      // FE-1: refreshInvocations is trailing-debounced (300ms) — let the trailing edge land
+      // before asserting its fetch alongside the immediate ones.
+      await new Promise((r) => setTimeout(r, 320));
     });
 
     // projects + the open project's goals/ideas/insights/tasks/ruleset/graph (spec D8)
@@ -1715,6 +1720,8 @@ describe("S-EXT §8 T8: «Extensions» view + MCP event wiring", () => {
     mcpListInvocationsMock.mockClear();
     await act(async () => {
       cbs.orchdMcpInvocationLogged({ serverId: "s1" });
+      // FE-1: refreshInvocations is trailing-debounced (300ms) — wait out the trailing edge.
+      await new Promise((r) => setTimeout(r, 320));
     });
     expect(mcpListInvocationsMock).toHaveBeenCalledWith(null, null, null);
   });

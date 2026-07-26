@@ -168,6 +168,19 @@ describe("ToolsBrowser", () => {
     });
   });
 
+  it("a rapid double-invoke fires mcpCallTool only once and disables the button in flight (submit guard, FE-4)", async () => {
+    // A never-settling call keeps the guard's ref lock engaged across both clicks.
+    mcpCallToolMock.mockReset().mockReturnValue(new Promise<never>(() => {}));
+    render(<ToolsBrowser />);
+    const callBtn = screen.getByTestId("tool-call-t1") as HTMLButtonElement;
+
+    fireEvent.click(callBtn);
+    fireEvent.click(callBtn);
+
+    await waitFor(() => expect(mcpCallToolMock).toHaveBeenCalledTimes(1));
+    expect(callBtn.disabled).toBe(true); // the visible affordance while the call is in flight
+  });
+
   it("invalid JSON args shows an inline error and never calls mcpCallTool", () => {
     render(<ToolsBrowser />);
     fireEvent.change(screen.getByTestId("tool-args-t1"), { target: { value: "{not json" } });

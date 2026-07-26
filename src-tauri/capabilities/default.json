@@ -1,18 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal permissions for Builder Pro AI: core IPC + UI settings store + folder picker + scoped fs. The daemon is launchd-managed (spec §8.3), never shell-spawned by the app, so shell:default is retained for the tauri-plugin-shell runtime init only — no allow-execute/allow-spawn scope is granted (externalBin sidecar bundling is a tauri.conf.json build-time setting, not a runtime capability).",
+  "description": "Minimal permissions for Builder Pro AI: core IPC + folder picker. The daemon is launchd-managed (spec §8.3), never shell-spawned by the app, so shell:default is retained for the tauri-plugin-shell runtime init only — no allow-execute/allow-spawn scope is granted (externalBin sidecar bundling is a tauri.conf.json build-time setting, not a runtime capability). The store/fs plugins were removed as dead code on the 2026-07-24 audit (FE-9/FE-5), so no store:*/fs:* permissions are granted.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "store:default",
     "dialog:default",
     "dialog:allow-open",
-    "fs:default",
-    {
-      "identifier": "fs:scope",
-      "allow": [{ "path": "$APPDATA/**" }]
-    },
     "shell:default"
   ]
 }

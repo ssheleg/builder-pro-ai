@@ -139,10 +139,12 @@ pub struct McpToolRow {
 }
 
 /// Input to `Db::upsert_mcp_tools` (spec §4: "Cached tool descriptors (refreshed on connect +
-/// tools/list_changed)"). No `enabled` field: every upserted tool is inserted `enabled=1` (spec
-/// §4 `mcp_tool.enabled` comment: "default on-fetch") — a fresh `tools/list` fetch always resets
-/// the per-tool allowlist to fully-on, and `Db::set_mcp_tool_enabled` is the ONLY way to turn one
-/// off again afterwards (until the next upsert resets it).
+/// tools/list_changed)"). No `enabled` field: a tool that is NEW to the cache is inserted
+/// `enabled=1` (spec §4 `mcp_tool.enabled` comment: "default on-fetch"), while a tool that
+/// ALREADY existed (matched by `server_id`+`name`) keeps its previous `enabled` value across the
+/// refresh — an owner's per-tool allowlist decision is not server-advertised state and must not
+/// be silently reset by a reconnect (SEC-6 of the 2026-07-24 audit remediation);
+/// `Db::set_mcp_tool_enabled` remains the only way to change it afterwards.
 #[derive(Debug, Clone)]
 pub struct NewMcpTool {
     pub name: String,
@@ -482,6 +484,12 @@ pub(crate) fn resolve_bearer(
 pub enum OrchdMcpError {
     /// `trust::authorize` denied a `Connect` action (no matching `consent_grant`).
     ConsentRequired,
+    /// The server itself is administratively disabled (`mcp_server.enabled=0`, DOM-7 of the
+    /// 2026-07-24 audit remediation) — denied before ANY other gate (allowlist, consent, bearer
+    /// resolution) on BOTH the connect and the tool-call path. Maps to the SAME `Error{Policy}`
+    /// wire code as `ToolDisabled` (an owner-policy denial); only the message differs
+    /// ("server disabled" vs "tool disabled"), so a client can tell the two scopes apart.
+    ServerDisabled,
     /// `trust::authorize` denied a `ToolCall` action (`mcp_tool.enabled=0`, or unrecognized).
     ToolDisabled,
     /// `trust::authorize` denied a `ToolCall` action for a spend/rate POLICY-CAP breach (task
@@ -506,6 +514,7 @@ impl std::fmt::Display for OrchdMcpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OrchdMcpError::ConsentRequired => write!(f, "consent required"),
+            OrchdMcpError::ServerDisabled => write!(f, "server disabled"),
             OrchdMcpError::ToolDisabled => write!(f, "tool disabled"),
             OrchdMcpError::PolicyCapExceeded(reason) => write!(f, "policy cap exceeded: {reason}"),
             OrchdMcpError::Mcp(e) => write!(f, "mcp error: {e}"),
@@ -845,7 +854,7 @@ mod tests {
                     crate::trust::stdio_exec_fingerprint(
                         "/usr/bin/true",
                         &["--flag".to_string()],
-                        &Default::default()
+                        &BTreeMap::new()
                     )
                 );
             }

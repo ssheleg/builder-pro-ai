@@ -185,6 +185,23 @@ fn node_project_id(conn: &Connection, node_id: &str) -> Result<String, OrchdPers
     .ok_or(OrchdPersistError::NotFound)
 }
 
+/// GRAPH-1 (BL-143) server-side ownership check shared by the three node-mutation verbs:
+/// `Some(expected)` rejects with `NotFound` when the node's own project differs — the SAME
+/// typed error an unknown id yields, so a caller cannot distinguish "no such node" from
+/// "the node lives in a foreign project" (no cross-project existence leak). It must run
+/// BEFORE the archived-project guard for the same reason (an `Invariant` would leak that
+/// the node exists). `None` keeps the pre-GRAPH-1 legacy behavior (no check) for peers
+/// that predate the wire field.
+fn ensure_node_project(
+    node_project: &str,
+    expected_project: Option<&str>,
+) -> Result<(), OrchdPersistError> {
+    match expected_project {
+        Some(expected) if expected != node_project => Err(OrchdPersistError::NotFound),
+        _ => Ok(()),
+    }
+}
+
 /// Maps a `graph_node_one_per_entity` partial-unique-index hit to `Conflict` (S4 spec §5:
 /// "duplicate (type,id) ⇒ Conflict"), otherwise passes the raw SQL error through unchanged.
 ///
@@ -438,15 +455,21 @@ impl Db {
     /// `GraphUpdateNode` (S4 spec §5): `label`/`body` left untouched when `None`. Unknown id ⇒
     /// `NotFound`; archived project (via the node's own project) ⇒ `Invariant`.
     ///
+    /// `expected_project` (GRAPH-1, BL-143): `Some` adds an ownership check — a node outside
+    /// that project answers `NotFound` (see [`ensure_node_project`]); `None` is the legacy
+    /// unchecked path.
+    ///
     /// `pub` (bumped from `pub(crate)` closing BL-62, S4 §8) — see [`Db::add_node`]'s note.
     pub fn update_node(
         &self,
         id: &str,
         label: Option<&str>,
         body: Option<&str>,
+        expected_project: Option<&str>,
     ) -> Result<GraphNode, OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
         let project_id = node_project_id(&tx, id)?;
+        ensure_node_project(&project_id, expected_project)?;
         ensure_project_active(&tx, &project_id)?;
         if label.is_some() || body.is_some() {
             tx.execute(
@@ -464,15 +487,17 @@ impl Db {
     }
 
     /// `GraphMoveNode` (S4 spec §5, frequent verb): unknown id ⇒ `NotFound`; archived project ⇒
-    /// `Invariant`.
+    /// `Invariant`. `expected_project` (GRAPH-1, BL-143) mirrors [`Db::update_node`].
     pub(crate) fn move_node(
         &self,
         id: &str,
         pos_x: f64,
         pos_y: f64,
+        expected_project: Option<&str>,
     ) -> Result<GraphNode, OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
         let project_id = node_project_id(&tx, id)?;
+        ensure_node_project(&project_id, expected_project)?;
         ensure_project_active(&tx, &project_id)?;
         tx.execute(
             "UPDATE graph_node SET pos_x = ?2, pos_y = ?3, updated_at = ?4 WHERE id = ?1",
@@ -485,11 +510,17 @@ impl Db {
 
     /// `GraphDeleteNode` (S4 spec §5): FK `ON DELETE CASCADE` removes incident edges
     /// automatically (D4). Unknown id ⇒ `NotFound`; archived project ⇒ `Invariant`.
+    /// `expected_project` (GRAPH-1, BL-143) mirrors [`Db::update_node`].
     ///
     /// `pub` (bumped from `pub(crate)` closing BL-62, S4 §8) — see [`Db::add_node`]'s note.
-    pub fn delete_node(&self, id: &str) -> Result<(), OrchdPersistError> {
+    pub fn delete_node(
+        &self,
+        id: &str,
+        expected_project: Option<&str>,
+    ) -> Result<(), OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
         let project_id = node_project_id(&tx, id)?;
+        ensure_node_project(&project_id, expected_project)?;
         ensure_project_active(&tx, &project_id)?;
         tx.execute(
             "DELETE FROM graph_node WHERE id = ?1",
@@ -928,6 +959,166 @@ pub(crate) fn seed_strategic_entity_ref(
     Ok(())
 }
 
+// ================================================================================
+// ---- export/import support (DOM-1/DOM-2 of the 2026-07-24 audit remediation): the bundle
+// carries a project's WHOLE graph (nodes + incident edges) verbatim, and import re-seeds the
+// entityRef nodes a bundle predating the graph-family keys lacks. ----
+// ================================================================================
+
+/// Reads a project's WHOLE graph for the export bundle (DOM-1): every `graph_node` row of the
+/// project (RAW — the STORED `label`, never the read-time-resolved one `list_project_graph`
+/// returns, and `is_orphan: false`, which is a read-time signal with no column to round-trip)
+/// plus every `graph_edge` incident to any of those nodes (the SAME incident-edge rule
+/// `list_project_graph` uses, so cross-project edges are part of the snapshot too — in a
+/// whole-store export both endpoints land inside the one import transaction; importing a
+/// single-project bundle whose edges point outside it fails honestly on the deferred FK at
+/// commit). Deterministic `created_at, id` order on both lists so an export→import→export
+/// round-trip is byte-stable. Unknown `project_id` ⇒ `NotFound` (mirrors `list_project_graph`).
+pub(crate) fn export_project_graph(
+    db: &Db,
+    project_id: &str,
+) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), OrchdPersistError> {
+    let conn = db.conn();
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM project WHERE id = ?1",
+            rusqlite::params![project_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(OrchdPersistError::NotFound);
+    }
+
+    let mut node_stmt = conn.prepare(
+        "SELECT id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+                created_at, updated_at
+         FROM graph_node WHERE project_id = ?1 ORDER BY created_at, id",
+    )?;
+    let nodes: Vec<GraphNode> = node_stmt
+        .query_map(rusqlite::params![project_id], GraphNodeRow::from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(GraphNodeRow::into_node)
+        .collect::<Result<_, _>>()?;
+
+    let mut edge_stmt = conn.prepare(
+        "SELECT id, source_node_id, target_node_id, kind, label, created_at
+         FROM graph_edge
+         WHERE source_node_id IN (SELECT id FROM graph_node WHERE project_id = ?1)
+            OR target_node_id IN (SELECT id FROM graph_node WHERE project_id = ?1)
+         ORDER BY created_at, id",
+    )?;
+    let edges: Vec<GraphEdge> = edge_stmt
+        .query_map(rusqlite::params![project_id], GraphEdgeRow::from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(GraphEdgeRow::into_edge)
+        .collect::<Result<_, _>>()?;
+
+    Ok((nodes, edges))
+}
+
+/// Raw-inserts one `graph_node` row VERBATIM (D7 field-verbatim preservation, DOM-1): ids,
+/// `entity_type`/`entity_id`, stored label, positions, and timestamps are written exactly as the
+/// bundle carries them — nothing is re-stamped. Any PK/UNIQUE hit (including the
+/// `graph_node_one_per_entity` partial unique index) ⇒ `Conflict`, rolling back the whole import.
+pub(crate) fn insert_graph_node_raw(
+    tx: &rusqlite::Transaction,
+    n: &GraphNode,
+) -> Result<(), OrchdPersistError> {
+    tx.execute(
+        "INSERT INTO graph_node
+           (id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+            created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            n.id,
+            n.project_id,
+            encode_node_kind(&n.kind),
+            n.entity_type.as_ref().map(encode_entity_type),
+            n.entity_id,
+            n.label,
+            n.body,
+            n.pos_x,
+            n.pos_y,
+            n.created_at,
+            n.updated_at
+        ],
+    )
+    .map_err(|e| crate::persistence::conflict_or_sql(e, "graph_node", &n.id))?;
+    Ok(())
+}
+
+/// Raw-inserts one `graph_edge` row VERBATIM (DOM-1). Any PK/UNIQUE hit (including the
+/// `graph_edge_uniq` index on `(source_node_id, target_node_id, kind)`) ⇒ `Conflict`, rolling
+/// back the whole import.
+pub(crate) fn insert_graph_edge_raw(
+    tx: &rusqlite::Transaction,
+    e: &GraphEdge,
+) -> Result<(), OrchdPersistError> {
+    tx.execute(
+        "INSERT INTO graph_edge (id, source_node_id, target_node_id, kind, label, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            e.id,
+            e.source_node_id,
+            e.target_node_id,
+            encode_edge_kind(&e.kind),
+            e.label,
+            e.created_at
+        ],
+    )
+    .map_err(|err| crate::persistence::conflict_or_sql(err, "graph_edge", &e.id))?;
+    Ok(())
+}
+
+/// Seeds an `entity_ref` graph node for `(entity_type, entity_id)` INSIDE the caller's already-
+/// open transaction — but ONLY if none exists yet (DOM-2 of the 2026-07-24 audit remediation):
+/// importing a bundle predates the graph-family keys (or one that lost them) would otherwise
+/// leave the project's graph without its strategic-goal / accepted-insight entityRefs, breaking
+/// S4 D6's "a project's graph is never empty" invariant (`insert_project_raw` bypasses
+/// `create_project`'s seeding). For a CURRENT bundle the verbatim-restored nodes already exist,
+/// so this is a no-op — it must never collide with the `graph_node_one_per_entity` index.
+/// Returns `true` when a node was actually inserted.
+pub(crate) fn seed_entity_ref_if_missing(
+    tx: &rusqlite::Transaction,
+    project_id: &str,
+    entity_type: &GraphEntityType,
+    entity_id: &str,
+    label: &str,
+) -> rusqlite::Result<bool> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM graph_node
+             WHERE kind = 'entity_ref' AND entity_type = ?1 AND entity_id = ?2",
+            rusqlite::params![encode_entity_type(entity_type), entity_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        return Ok(false);
+    }
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO graph_node
+           (id, project_id, kind, entity_type, entity_id, label, body, pos_x, pos_y,
+            created_at, updated_at)
+         VALUES (?1, ?2, 'entity_ref', ?3, ?4, ?5, '', 0, 0, ?6, ?6)",
+        rusqlite::params![
+            Uuid::new_v4().to_string(),
+            project_id,
+            encode_entity_type(entity_type),
+            entity_id,
+            label,
+            now
+        ],
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1355,11 +1546,15 @@ mod tests {
         let project_id = new_project(&db);
         let node = add_concept(&db, &project_id, "orig");
 
-        let updated = db.update_node(&node.id, Some("new label"), None).unwrap();
+        let updated = db
+            .update_node(&node.id, Some("new label"), None, None)
+            .unwrap();
         assert_eq!(updated.label, "new label");
         assert_eq!(updated.body, node.body);
 
-        let updated2 = db.update_node(&node.id, None, Some("new body")).unwrap();
+        let updated2 = db
+            .update_node(&node.id, None, Some("new body"), None)
+            .unwrap();
         assert_eq!(updated2.label, "new label");
         assert_eq!(updated2.body, "new body");
     }
@@ -1367,7 +1562,9 @@ mod tests {
     #[test]
     fn update_node_unknown_id_is_not_found() {
         let db = new_db();
-        let err = db.update_node("no-such-node", Some("x"), None).unwrap_err();
+        let err = db
+            .update_node("no-such-node", Some("x"), None, None)
+            .unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
     }
 
@@ -1378,7 +1575,7 @@ mod tests {
         let node = add_concept(&db, &project_id, "orig");
         db.archive_project(&project_id).unwrap();
         let err = db
-            .update_node(&node.id, Some("new label"), Some("new body"))
+            .update_node(&node.id, Some("new label"), Some("new body"), None)
             .unwrap_err();
         assert!(matches!(err, OrchdPersistError::Invariant(_)));
 
@@ -1395,12 +1592,49 @@ mod tests {
         assert_eq!(body, node.body);
     }
 
+    // ---- GRAPH-1 (BL-143) expected_project ownership check ----
+
+    #[test]
+    fn update_node_with_matching_expected_project_succeeds() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        let updated = db
+            .update_node(&node.id, Some("new label"), None, Some(&project_id))
+            .unwrap();
+        assert_eq!(updated.label, "new label");
+    }
+
+    #[test]
+    fn update_node_with_mismatched_expected_project_is_not_found() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let other_project = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        let err = db
+            .update_node(&node.id, Some("new label"), None, Some(&other_project))
+            .unwrap_err();
+        // Same typed error as an unknown id — the foreign node's existence is not revealed.
+        assert!(matches!(err, OrchdPersistError::NotFound));
+
+        // The row must be untouched — the ownership check rejects BEFORE the UPDATE runs.
+        let label: String = db
+            .conn()
+            .query_row(
+                "SELECT label FROM graph_node WHERE id = ?1",
+                rusqlite::params![node.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(label, "orig", "update must not run for a foreign project");
+    }
+
     #[test]
     fn move_node_updates_position() {
         let db = new_db();
         let project_id = new_project(&db);
         let node = add_concept(&db, &project_id, "orig");
-        let moved = db.move_node(&node.id, 10.0, 20.0).unwrap();
+        let moved = db.move_node(&node.id, 10.0, 20.0, None).unwrap();
         assert_eq!(moved.pos_x, 10.0);
         assert_eq!(moved.pos_y, 20.0);
         assert_eq!(moved.label, node.label);
@@ -1412,8 +1646,43 @@ mod tests {
         let project_id = new_project(&db);
         let node = add_concept(&db, &project_id, "orig");
         db.archive_project(&project_id).unwrap();
-        let err = db.move_node(&node.id, 1.0, 1.0).unwrap_err();
+        let err = db.move_node(&node.id, 1.0, 1.0, None).unwrap_err();
         assert!(matches!(err, OrchdPersistError::Invariant(_)));
+    }
+
+    #[test]
+    fn move_node_with_matching_expected_project_succeeds() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        let moved = db
+            .move_node(&node.id, 10.0, 20.0, Some(&project_id))
+            .unwrap();
+        assert_eq!(moved.pos_x, 10.0);
+        assert_eq!(moved.pos_y, 20.0);
+    }
+
+    #[test]
+    fn move_node_with_mismatched_expected_project_is_not_found() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let other_project = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        let err = db
+            .move_node(&node.id, 10.0, 20.0, Some(&other_project))
+            .unwrap_err();
+        assert!(matches!(err, OrchdPersistError::NotFound));
+
+        // The position must be untouched — the ownership check rejects BEFORE the UPDATE runs.
+        let (pos_x, pos_y): (f64, f64) = db
+            .conn()
+            .query_row(
+                "SELECT pos_x, pos_y FROM graph_node WHERE id = ?1",
+                rusqlite::params![node.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((pos_x, pos_y), (node.pos_x, node.pos_y));
     }
 
     // ---- delete_node ----
@@ -1428,7 +1697,7 @@ mod tests {
             .add_edge(&a.id, &b.id, GraphEdgeKind::Relates, "")
             .unwrap();
 
-        db.delete_node(&a.id).unwrap();
+        db.delete_node(&a.id, None).unwrap();
 
         let node_gone: Option<i64> = db
             .conn()
@@ -1459,8 +1728,52 @@ mod tests {
     #[test]
     fn delete_node_unknown_id_is_not_found() {
         let db = new_db();
-        let err = db.delete_node("no-such-node").unwrap_err();
+        let err = db.delete_node("no-such-node", None).unwrap_err();
         assert!(matches!(err, OrchdPersistError::NotFound));
+    }
+
+    #[test]
+    fn delete_node_with_matching_expected_project_succeeds() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        db.delete_node(&node.id, Some(&project_id)).unwrap();
+        let gone: Option<i64> = db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM graph_node WHERE id = ?1",
+                rusqlite::params![node.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(gone.is_none());
+    }
+
+    #[test]
+    fn delete_node_with_mismatched_expected_project_is_not_found() {
+        let db = new_db();
+        let project_id = new_project(&db);
+        let other_project = new_project(&db);
+        let node = add_concept(&db, &project_id, "orig");
+        let err = db.delete_node(&node.id, Some(&other_project)).unwrap_err();
+        // Same typed error as an unknown id — the foreign node's existence is not revealed.
+        assert!(matches!(err, OrchdPersistError::NotFound));
+
+        // The row must still be present — the ownership check rejects BEFORE the DELETE runs.
+        let still_present: Option<i64> = db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM graph_node WHERE id = ?1",
+                rusqlite::params![node.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            still_present.is_some(),
+            "delete must not run for a foreign project"
+        );
     }
 
     #[test]
@@ -1469,7 +1782,7 @@ mod tests {
         let project_id = new_project(&db);
         let node = add_concept(&db, &project_id, "orig");
         db.archive_project(&project_id).unwrap();
-        let err = db.delete_node(&node.id).unwrap_err();
+        let err = db.delete_node(&node.id, None).unwrap_err();
         assert!(matches!(err, OrchdPersistError::Invariant(_)));
 
         // The row must still be present — the guard rejects BEFORE the DELETE runs.

@@ -316,6 +316,11 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
   // renders a distinct failed row (not the "Loading…" placeholder) and is kept OUT of `pending`
   // until Retry clears its entry here, which re-enters it for a fresh fetch.
   const [failedDirs, setFailedDirs] = useState<Record<string, string>>({});
+  // FS-8: bumped when an in-flight `listDir` response is dropped as stale (its dir was
+  // invalidated mid-flight — see `treeEpochs` in the store). Added to the fetch effect's deps so
+  // the still-uncached dir is re-fetched immediately; without it the invalidation would be LOST
+  // (the fetchingRef guard below suppresses the effect's own re-entry while a fetch runs).
+  const [fetchNonce, setFetchNonce] = useState(0);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
@@ -335,8 +340,22 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
       const key = fsKey(root, rel);
       if (fetchingRef.current.has(key)) continue;
       fetchingRef.current.add(key);
+      // FS-8: capture the dir's invalidation epoch BEFORE the fetch; an `fs://changed`
+      // invalidation landing mid-flight bumps it (`invalidateDirs`), and the response below —
+      // captured before the on-disk change — must be dropped + re-fetched, not cached as truth.
+      const epochAtStart = useAppStore.getState().treeEpochs[key] ?? 0;
       listDir(root, rel, showIgnored)
         .then((entries) => {
+          if ((useAppStore.getState().treeEpochs[key] ?? 0) !== epochAtStart) {
+            // Stale: invalidated while in flight. Drop the response and re-enter the fetch loop
+            // (the dir is still uncached, so the nonce re-run picks it up again). The key is
+            // released HERE, not only in `finally`: React may run the nonce-triggered re-render
+            // between the `.then` and `.finally` microtasks, and the effect must already see
+            // the dir as fetchable (Set.delete is idempotent, so `finally` stays harmless).
+            fetchingRef.current.delete(key);
+            setFetchNonce((n) => n + 1);
+            return;
+          }
           cacheDir(root, rel, entries);
           // A retry (or a first success) clears any prior failed marker so a later invalidation
           // re-fetches honestly rather than surfacing the stale failed row again.
@@ -359,7 +378,7 @@ export function FileTree(props: { workspace: Workspace }): JSX.Element {
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pending, showIgnored]);
+  }, [pending, showIgnored, fetchNonce]);
 
   // Real-browser responsiveness: measure the scroll container once ResizeObserver is available
   // (jsdom has none, so tests deterministically stay at DEFAULT_VIEWPORT_HEIGHT).

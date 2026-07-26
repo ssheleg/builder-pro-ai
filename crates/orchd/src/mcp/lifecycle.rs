@@ -50,6 +50,15 @@ where
         let guard = db.lock().await;
         let server = guard.get_mcp_server(server_id)?;
 
+        // (DOM-7, 2026-07-24 audit remediation): `mcp_server.enabled=0` denies the connect path
+        // too — audited as `policy_deny`/`server_disabled`, and `connect_fn` (which would dial
+        // the network or spawn the process) is never invoked. Mirrors `invoke::call_tool`'s own
+        // first-gate check so a "disabled" server has NO live egress path at all.
+        if !server.enabled {
+            trust::audit_server_disabled(&guard, &server.id, server.project_id.clone())?;
+            return Err(OrchdMcpError::ServerDisabled);
+        }
+
         // http -> the pre-existing `connect`/URL-fingerprint gate (unchanged, spec D10); stdio ->
         // the distinct `stdio_exec` process-spawn gate (spec §6/D6/D10, task T16, closes BL-22).
         // `super::connect_action` is the SAME helper `invoke::call_tool` uses for its own
@@ -381,7 +390,7 @@ mod tests {
         let fingerprint = crate::trust::stdio_exec_fingerprint(
             "/nonexistent/mcp-server",
             &[],
-            &Default::default(),
+            &std::collections::BTreeMap::new(),
         );
         db.lock()
             .await
@@ -440,7 +449,7 @@ mod tests {
             let fp_a = crate::trust::stdio_exec_fingerprint(
                 "/bin/original-tool",
                 &[],
-                &Default::default(),
+                &std::collections::BTreeMap::new(),
             );
             guard
                 .grant_consent(&server.id, "stdio_exec", &fp_a)
@@ -471,6 +480,56 @@ mod tests {
             touched.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "connect_fn must not run: a grant for command A must not authorize spawning command B"
+        );
+    }
+
+    // ---- disabled-server gate (DOM-7 of the 2026-07-24 audit remediation): `mcp_server.
+    // enabled=0` blocks the connect path server-side too — the audit probe showed research and
+    // direct calls running to `done` on a "disabled" server. ----
+
+    #[tokio::test]
+    async fn connect_to_a_disabled_server_is_denied_as_server_disabled_and_never_dials() {
+        let db = new_db();
+        let server = add_server(&db).await;
+        db.lock()
+            .await
+            .set_mcp_server_enabled(&server.id, false)
+            .unwrap();
+
+        let touched = Arc::new(AtomicUsize::new(0));
+        let touched_for_closure = touched.clone();
+        let connect_fn = move |_server: McpServerRow, _bearer: Option<String>| {
+            touched_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Ok::<FakeSession, McpError>(FakeSession::new(vec![], Arc::new(AtomicUsize::new(0))))
+            }
+        };
+
+        let err = connect(&db, &server.id, connect_fn).await.unwrap_err();
+        assert!(
+            matches!(err, OrchdMcpError::ServerDisabled),
+            "a disabled server must deny the connect with ServerDisabled, got {err:?}"
+        );
+        assert_eq!(
+            touched.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a disabled-server denial must never call connect_fn"
+        );
+
+        let denied: i64 = db
+            .lock()
+            .await
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action='policy_deny' AND decision='deny' \
+                 AND reason='server_disabled'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            denied, 1,
+            "the disabled-server denial must be audited as policy_deny"
         );
     }
 

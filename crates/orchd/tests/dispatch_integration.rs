@@ -1886,6 +1886,7 @@ async fn graph_delete_node_cross_project_broadcasts_graph_changed_for_foreign_pr
     expect_ack(
         c1.request(OrchdRequest::GraphDeleteNode {
             id: node_a.id.clone(),
+            project_id: None,
         })
         .await,
     );
@@ -1938,6 +1939,7 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
             id: node_a.id.clone(),
             label: Some("Renamed A".to_string()),
             body: None,
+            project_id: None,
         })
         .await,
     );
@@ -1972,6 +1974,7 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
             id: node_a.id.clone(),
             pos_x: 10.0,
             pos_y: 20.0,
+            project_id: None,
         })
         .await,
     );
@@ -1996,6 +1999,105 @@ async fn graph_update_node_and_move_node_cross_project_broadcast_foreign_project
             .await
             .is_none(),
         "a cross-project GraphMoveNode must broadcast exactly two GraphChanged pushes"
+    );
+
+    c1.shutdown(boot).await;
+}
+
+#[tokio::test]
+async fn graph_move_node_scoped_to_foreign_project_is_not_found_and_broadcasts_nothing() {
+    // GRAPH-1 (BL-143): the additive `project_id` ownership check on the node-mutation verbs —
+    // a move scoped to a project that does NOT own the node fails with the SAME typed `NotFound`
+    // as an unknown id (no cross-project existence leak) and pushes nothing, while the SAME verb
+    // scoped to the OWNING project succeeds and keeps the cross-project `GraphChanged` fan-out.
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let project_a = create_project(&mut c1, "A").await;
+    let project_b = create_project(&mut c1, "B").await;
+    let node_a = add_node(&mut c1, &project_a.id, "Node A").await;
+    let node_b = add_node(&mut c1, &project_b.id, "Node B").await;
+    add_edge(&mut c1, &node_a.id, &node_b.id).await;
+
+    let mut c2 = Client::connect(&socket).await;
+    assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
+
+    // Scoped to project B (which does NOT own node A) ⇒ NotFound, and no push fires.
+    let res = c1
+        .request(OrchdRequest::GraphMoveNode {
+            id: node_a.id.clone(),
+            pos_x: 1.0,
+            pos_y: 1.0,
+            project_id: Some(project_b.id.clone()),
+        })
+        .await;
+    match res {
+        OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
+        other => panic!("expected NotFound Error, got {other:?}"),
+    }
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a foreign-project-scoped GraphMoveNode must broadcast nothing"
+    );
+
+    // The rejected move must not have landed — the node still sits at its original position.
+    let view = expect_graph_view(
+        c1.request(OrchdRequest::GraphListProject {
+            project_id: project_a.id.clone(),
+        })
+        .await,
+    );
+    let reread = view
+        .nodes
+        .iter()
+        .find(|n| n.id == node_a.id)
+        .expect("node A still listed in its own project");
+    assert_eq!(
+        (reread.pos_x, reread.pos_y),
+        (node_a.pos_x, node_a.pos_y),
+        "a foreign-project-scoped move must not modify the node"
+    );
+
+    // Scoped to the OWNING project ⇒ Ok, and the reachable foreign project (B, via the
+    // cross-project edge) still gets its `GraphChanged` — the check narrows ownership, never
+    // the fan-out.
+    let moved = expect_graph_node(
+        c1.request(OrchdRequest::GraphMoveNode {
+            id: node_a.id.clone(),
+            pos_x: 10.0,
+            pos_y: 20.0,
+            project_id: Some(project_a.id.clone()),
+        })
+        .await,
+    );
+    assert_eq!(moved.pos_x, 10.0);
+    assert_eq!(moved.pos_y, 20.0);
+
+    let seen = collect_pushes(&mut c2, 2).await;
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_a.id.clone()
+        }),
+        "missing GraphChanged for the node's own project in {seen:?}"
+    );
+    assert!(
+        seen.contains(&OrchdPush::GraphChanged {
+            project_id: project_b.id.clone()
+        }),
+        "missing GraphChanged for the FOREIGN reachable project in {seen:?}"
+    );
+    assert!(
+        c2.recv_push_timeout(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a project-scoped GraphMoveNode must broadcast exactly two GraphChanged pushes"
     );
 
     c1.shutdown(boot).await;
@@ -2513,9 +2615,102 @@ async fn mcp_call_tool_on_disabled_tool_is_error_policy_and_artifact_count_uncha
     c1.shutdown(boot).await;
 }
 
-/// T6 review fix (S-EXT §6): a slow `McpCallTool` must NOT hold the daemon DB mutex across its
-/// network round-trip — otherwise every OTHER orchd connection's DB op stalls for the whole call
-/// (up to `(1+max_retries)×timeout`, a self-inflicted DoS driven by third-party latency). Proof:
+/// SEC-3 (2026-07-24 audit remediation): the trust rate cap counted only COMPLETED invocations,
+/// so a parallel burst all read "under the cap" and EVERY call dispatched (check-then-act — the
+/// probe showed 5/5 succeeding at `ratePerMin=1`). The dispatch layer now holds a per-effective-
+/// policy async mutex across authorize+dispatch, so the burst serializes: exactly ONE call wins
+/// (its invocation row is written before the next attempt's check runs) and the other four are
+/// denied `rate_limit_exceeded`. The stub's `slow_echo` keeps the winner's network phase open
+/// long enough for all five to be genuinely in-flight at once.
+#[tokio::test]
+async fn mcp_call_tool_rate_cap_burst_of_five_at_cap_one_allows_exactly_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("orchd.sock");
+    let home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::set(home_dir.path());
+
+    let boot = boot_daemon(&socket).await;
+
+    let mut c1 = Client::connect(&socket).await;
+    let stub_url = spawn_stub_mcp_server().await;
+    let server = add_mcp_server(&mut c1, &stub_url).await;
+    expect_ack(
+        c1.request(OrchdRequest::TrustGrantConsent {
+            server_id: server.id.clone(),
+            kind: "connect".to_string(),
+        })
+        .await,
+    );
+    expect_mcp_connect_report(
+        c1.request(OrchdRequest::McpConnect {
+            id: server.id.clone(),
+        })
+        .await,
+    );
+
+    // Server-scope policy: at most ONE call per trailing minute on this server.
+    match c1
+        .request(OrchdRequest::TrustSetPolicy {
+            scope: PolicyScope::Server,
+            ref_id: Some(server.id.clone()),
+            spend_cap_usd: None,
+            rate_per_min: Some(1),
+        })
+        .await
+    {
+        OrchdResponse::Policy(_) => {}
+        other => panic!("expected Policy, got {other:?}"),
+    }
+
+    // Five SEPARATE connections (one connection serializes its own dispatch loop) fire the slow
+    // tool call simultaneously — all five are in-flight before the stub's first reply lands.
+    let mut callers = Vec::new();
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        let mut c = Client::connect(&socket).await;
+        let id = c
+            .send_request(OrchdRequest::McpCallTool {
+                server_id: server.id.clone(),
+                tool_name: "slow_echo".to_string(),
+                args_json: serde_json::json!({"msg": "burst"}).to_string(),
+                project_id: None,
+            })
+            .await;
+        ids.push(id);
+        callers.push(c);
+    }
+
+    let mut allowed = 0;
+    let mut denied_rate = 0;
+    let mut other = Vec::new();
+    for (i, mut c) in callers.into_iter().enumerate() {
+        match c.recv_response(ids[i]).await {
+            OrchdResponse::McpCallResult(_) => allowed += 1,
+            OrchdResponse::Error { code, message } => {
+                assert_eq!(
+                    code,
+                    OrchdErrorCode::Policy,
+                    "denials must be Error{{Policy}}"
+                );
+                assert!(
+                    message.contains("rate_limit_exceeded"),
+                    "denial must name the rate cap: {message}"
+                );
+                denied_rate += 1;
+            }
+            res => other.push(res),
+        }
+    }
+
+    assert!(other.is_empty(), "unexpected responses: {other:?}");
+    assert_eq!(allowed, 1, "exactly ONE burst call may pass the cap");
+    assert_eq!(
+        denied_rate, 4,
+        "the other four must deny rate_limit_exceeded"
+    );
+
+    c1.shutdown(boot).await;
+}
 /// fire a `slow_echo` call (the stub sleeps [`SLOW_ECHO_DELAY`] server-side) on `c1` WITHOUT
 /// awaiting it, then time a plain `ListProjects` DB read on `c2` — it must return in a small
 /// fraction of `SLOW_ECHO_DELAY`, whereas it would block for the full delay if `McpCallTool` held
@@ -3465,16 +3660,30 @@ async fn trust_list_policies_returns_configured_policies_and_broadcasts_nothing(
     let mut c2 = Client::connect(&socket).await;
     assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
 
+    // A REAL project is required for a project-scope policy (DOM-6: `policy.ref_id` is now
+    // existence-checked — a dangling project ref is Error{NotFound}).
+    let project = expect_project(
+        c1.request(OrchdRequest::CreateProject {
+            name: "PolicyProj".to_string(),
+            description: String::new(),
+            workspace_ids: vec!["w1".to_string()],
+        })
+        .await,
+    );
+
     let created = expect_policy(
         c1.request(OrchdRequest::TrustSetPolicy {
             scope: PolicyScope::Project,
-            ref_id: Some("proj-1".to_string()),
+            ref_id: Some(project.id.clone()),
             spend_cap_usd: Some(2.5),
             rate_per_min: Some(4),
         })
         .await,
     );
-    c2.recv_push().await; // drain TrustSetPolicy's own PoliciesChanged
+    // Drain the setup pushes: CreateProject's ProjectsChanged AND TrustSetPolicy's own
+    // PoliciesChanged, so the read verb below is the only thing that could push next.
+    c2.recv_push().await;
+    c2.recv_push().await;
 
     let policies = expect_policies(c1.request(OrchdRequest::TrustListPolicies).await);
     assert!(
@@ -3607,9 +3816,10 @@ async fn research_start_run_returns_pending_row_then_reaches_done_via_pushes_and
     );
     let idea = create_idea(&mut c1, "Research this").await;
 
-    // c2 connects only after every setup push already landed, so it observes exactly the
-    // `ResearchRunsChanged` pushes this test is proving (not `McpServersChanged`/`McpToolsChanged`/
-    // `IdeasChanged` from the setup steps above).
+    // c2 connects only after every setup push already landed, so the pushes it observes below
+    // are exactly the ones ResearchStartRun + its driver produce (not `McpServersChanged`/
+    // `McpToolsChanged`/`IdeasChanged` from the setup steps above): the lifecycle flip's
+    // `IdeasChanged` (DOM-9b), then the driver's `ResearchRunsChanged` transitions.
     let mut c2 = Client::connect(&socket).await;
     assert_eq!(c2.request(OrchdRequest::Ping).await, OrchdResponse::Pong);
 
@@ -3636,8 +3846,18 @@ async fn research_start_run_returns_pending_row_then_reaches_done_via_pushes_and
     assert!(run.artifact_id.is_none());
     assert!(run.error_kind.is_none());
 
-    // The spawned driver pushes `ResearchRunsChanged{idea_id}` on EVERY transition it drives
-    // (pending->running, then running->done) — a subscriber must observe at least one.
+    // DOM-9b (2026-07-24 audit remediation): the lifecycle flip (`captured`→`researching`) now
+    // broadcasts `IdeasChanged` FIRST (synchronously, inside `start_run`, before the reply
+    // above) — then the spawned driver pushes `ResearchRunsChanged{idea_id}` on EVERY transition
+    // it drives (pending->running, then running->done).
+    match c2
+        .recv_push_timeout(Duration::from_secs(2))
+        .await
+        .expect("expected the IdeasChanged push from the lifecycle flip")
+    {
+        OrchdPush::IdeasChanged => {}
+        other => panic!("expected IdeasChanged, got {other:?}"),
+    }
     match c2
         .recv_push_timeout(Duration::from_secs(2))
         .await

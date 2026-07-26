@@ -421,16 +421,22 @@ export function orchdGraphUpdateNode(
   id: string,
   label: string | null,
   body: string | null,
+  projectId?: string,
 ): Promise<GraphNode> {
-  return invoke<GraphNode>("orchd_graph_update_node", { id, label, body });
+  return invoke<GraphNode>("orchd_graph_update_node", { id, label, body, projectId });
 }
 
-export function orchdGraphMoveNode(id: string, posX: number, posY: number): Promise<GraphNode> {
-  return invoke<GraphNode>("orchd_graph_move_node", { id, posX, posY });
+export function orchdGraphMoveNode(
+  id: string,
+  posX: number,
+  posY: number,
+  projectId?: string,
+): Promise<GraphNode> {
+  return invoke<GraphNode>("orchd_graph_move_node", { id, posX, posY, projectId });
 }
 
-export function orchdGraphDeleteNode(id: string): Promise<void> {
-  return invoke<void>("orchd_graph_delete_node", { id });
+export function orchdGraphDeleteNode(id: string, projectId?: string): Promise<void> {
+  return invoke<void>("orchd_graph_delete_node", { id, projectId });
 }
 
 export function orchdGraphAddEdge(

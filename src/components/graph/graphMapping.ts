@@ -21,12 +21,13 @@ export interface FlowNode {
   id: string;
   type: string;
   position: { x: number; y: number };
-  /** xyflow node interactivity flags (GRAPH-1): an external (cross-project ghost) node is
-   * `draggable:false`/`selectable:false` so it can't be moved or selected for deletion; local nodes
-   * leave them unset (xyflow defaults both to `true`). Optional here because xyflow treats absence as
-   * the default and this module never sets them for local nodes. */
+  /** GRAPH-1 read-only lock: set ONLY on a ghost (`isExternal`) node, left `undefined` on a local
+   * one so xyflow's own defaults (and any future `<ReactFlow nodesDraggable=…>`-level props) keep
+   * applying there. All three are optional fields on xyflow v12's `Node` (`NodeBase` in
+   * `@xyflow/system`), so this stays shape-compatible with the real type. */
   draggable?: boolean;
   selectable?: boolean;
+  deletable?: boolean;
   data: {
     label: string;
     kind: string;
@@ -97,13 +98,11 @@ export function toFlowNodes(view: GraphView): FlowNode[] {
     id: node.id,
     type: node.kind,
     position: { x: node.posX, y: node.posY },
-    // GRAPH-1: an EXTERNAL (cross-project ghost) node is READ-ONLY on this canvas — it belongs to
-    // a foreign project, so it must NOT be draggable (a drag would fire GraphMoveNode at a foreign
-    // id and silently rewrite that project's layout) nor selectable (selection drives the delete
-    // handler, which would fire GraphDeleteNode at the foreign node + cascade its edges). Local
-    // nodes stay fully interactive.
-    draggable: !isExternal,
-    selectable: !isExternal,
+    // GRAPH-1 (UI-side fix): a ghost node belongs to a FOREIGN project, so it is read-only on
+    // this canvas — never draggable (a drag would emit a move for an id this project doesn't
+    // own), never selectable (Delete acts on the selection), never deletable. Scoping the graph
+    // mutation verbs server-side is the deferred half of GRAPH-1, tracked as a backlog item.
+    ...(isExternal ? { draggable: false, selectable: false, deletable: false } : {}),
     data: {
       label: node.label,
       kind: node.kind,

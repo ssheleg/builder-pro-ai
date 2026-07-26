@@ -127,6 +127,20 @@ pub struct ServerDeps {
     /// `boot::open_db_degrading` and returned verbatim by the `GetStorageStatus` dispatch arm so
     /// the frontend can surface an honest "running in memory / recovered from corruption" banner.
     pub storage_status: bpa_orchd_proto::StorageStatus,
+    /// Per-effective-policy async mutexes (SEC-3 of the 2026-07-24 audit remediation): the
+    /// trust rate/spend cap check counts only COMPLETED invocations, so a burst of parallel
+    /// `McpCallTool`/`ConnectorInvoke` attempts could each observe "under the cap" and ALL
+    /// dispatch (check-then-act). The `McpCallTool`/`ConnectorInvoke` dispatch arms hold the
+    /// mutex for the attempt's effective-policy key — resolved by [`crate::trust::
+    /// resolve_policy_key`], the SAME most-specific-wins rule `trust::check_policy_caps` applies
+    /// — across the WHOLE authorize+dispatch (the invocation row is written before the guard
+    /// drops), so attempts sharing a policy serialize and the count the check reads is honest.
+    /// Keyed by [`crate::trust::resolve_policy_key`]'s `"<scope>:<ref_id>"` string; entries are
+    /// never evicted (the key space is as small as the configured policy set). A
+    /// `std::sync::Mutex` around the registry itself is enough — the lock is held only for the
+    /// map lookup, never across an `.await`.
+    pub policy_locks:
+        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ServerDeps {
@@ -143,6 +157,7 @@ impl ServerDeps {
             daemon_build,
             shutdown_tx,
             storage_status,
+            policy_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -359,6 +374,37 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
 }
 
+/// Acquires the per-effective-policy async mutex for one `McpCallTool`/`ConnectorInvoke` attempt
+/// (SEC-3 of the 2026-07-24 audit remediation — see [`ServerDeps::policy_locks`]). The returned
+/// `OwnedMutexGuard` must be held across the WHOLE authorize+dispatch call it protects:
+/// `mcp::invoke::call_tool`/`connectors::adapter::invoke` write their `mcp_invocation` row
+/// before returning, so when the NEXT attempt's `trust::authorize` runs (under the same mutex),
+/// the trailing-window count it reads already includes this attempt. `Ok(None)` means no policy
+/// is configured at any applicable scope (unbounded — nothing to serialize).
+async fn policy_cap_guard(
+    deps: &Arc<ServerDeps>,
+    project_id: Option<&str>,
+    server_id: Option<&str>,
+) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, OrchdPersistError> {
+    let key = {
+        let db = deps.db.lock().await;
+        crate::trust::resolve_policy_key(&db, project_id, server_id)?
+    };
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let mutex = {
+        let mut map = deps
+            .policy_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        map.entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    Ok(Some(mutex.lock_owned().await))
+}
+
 /// Unix-ms wall-clock read for `ExportProject`/`ExportAll`'s caller-supplied `exported_at` stamp
 /// (spec §8, task-10 brief: "the daemon must NOT call a wall clock in library code, but
 /// socket_server is the daemon binary edge — you MAY read the clock here"). This is the ONE place
@@ -373,9 +419,13 @@ fn now_ms() -> i64 {
 
 /// Maps a domain persistence failure to the wire `OrchdResponse::Error` shape (spec §6):
 /// `NotFound→NotFound`, `Invariant→Invariant`, `Conflict→Conflict`, `Validation→Validation`,
-/// `Io→Io`, and `Sql→Io` (a raw SQL error is still an I/O-class failure from the wire's point of
-/// view — SQLite itself is a file on disk). The message is `OrchdPersistError`'s own `Display`
-/// text in every case; no dispatch arm below constructs an error message by hand.
+/// `Io→Io`, and `Sql→Io` — EXCEPT an `Sql` wrapping a FOREIGN KEY violation, which maps to
+/// `NotFound` (DOM-11 of the 2026-07-24 audit remediation: an FK failure means the caller
+/// referenced a row that doesn't exist — typed input, not an I/O fault; it previously leaked as
+/// a raw `Error{Io}: FOREIGN KEY constraint failed`). Every other `Sql` is still an I/O-class
+/// failure from the wire's point of view (SQLite itself is a file on disk). The message is
+/// `OrchdPersistError`'s own `Display` text in every case; no dispatch arm below constructs an
+/// error message by hand.
 fn map_err(e: OrchdPersistError) -> OrchdResponse {
     let code = match &e {
         OrchdPersistError::NotFound => OrchdErrorCode::NotFound,
@@ -383,7 +433,13 @@ fn map_err(e: OrchdPersistError) -> OrchdResponse {
         OrchdPersistError::Conflict(_) => OrchdErrorCode::Conflict,
         OrchdPersistError::Validation(_) => OrchdErrorCode::Validation,
         OrchdPersistError::Io(_) => OrchdErrorCode::Io,
-        OrchdPersistError::Sql(_) => OrchdErrorCode::Io,
+        OrchdPersistError::Sql(inner) => {
+            if crate::persistence::is_foreign_key_violation(inner) {
+                OrchdErrorCode::NotFound
+            } else {
+                OrchdErrorCode::Io
+            }
+        }
     };
     OrchdResponse::Error {
         code,
@@ -412,9 +468,12 @@ fn map_mcp_err(e: OrchdMcpError) -> OrchdResponse {
             message,
         },
         // `PolicyCapExceeded` (task T18, spec §6/BL-22 — a spend/rate cap breach) maps to the
-        // SAME `Error{Policy}` wire code as `ToolDisabled` (the per-tool allowlist denial); only
-        // the message differs (see `OrchdMcpError::PolicyCapExceeded`'s own doc comment).
-        OrchdMcpError::ToolDisabled | OrchdMcpError::PolicyCapExceeded(_) => OrchdResponse::Error {
+        // SAME `Error{Policy}` wire code as `ToolDisabled` (the per-tool allowlist denial) and
+        // `ServerDisabled` (DOM-7 of the 2026-07-24 audit remediation — the whole-server kill
+        // switch); only the message differs (see each variant's own doc comment).
+        OrchdMcpError::ServerDisabled
+        | OrchdMcpError::ToolDisabled
+        | OrchdMcpError::PolicyCapExceeded(_) => OrchdResponse::Error {
             code: OrchdErrorCode::Policy,
             message,
         },
@@ -857,6 +916,20 @@ fn import_touched_pushes(json: &str) -> Vec<OrchdPush> {
                     project_id: Some(project_id.to_string()),
                 });
             }
+            // DOM-1 (2026-07-24 audit remediation): the bundle's docs/graph families invalidate
+            // their own push families too.
+            if non_empty_json_array(bundle.get("docs")) {
+                pushes.push(OrchdPush::DocsChanged {
+                    project_id: project_id.to_string(),
+                });
+            }
+            if non_empty_json_array(bundle.get("graphNodes"))
+                || non_empty_json_array(bundle.get("graphEdges"))
+            {
+                pushes.push(OrchdPush::GraphChanged {
+                    project_id: project_id.to_string(),
+                });
+            }
             if non_empty_json_array(bundle.get("ideas")) {
                 any_idea = true;
             }
@@ -1190,11 +1263,32 @@ async fn dispatch_inner(
             status,
             resolution_reasoning,
         } => {
+            // DOM-9a (2026-07-24 audit remediation): an `Accepted` transition ALSO seeds the
+            // insight's `entity_ref` graph node inside `set_insight_status` (S-IDEA spec §6 D9),
+            // so the graph family changed too — previously only `InsightsChanged` fired and
+            // every graph view drifted until an unrelated push. The accept seeds only for a
+            // project-linked insight (`project_id: Some` — orphans are skipped by the seed path
+            // itself), so that's exactly the scope the `GraphChanged` push carries. Captured
+            // BEFORE the call moves `status`.
+            let accepted = matches!(status, bpa_orchd_proto::InsightStatus::Accepted);
             let result = {
                 let db = deps.db.lock().await;
                 db.set_insight_status(&id, status, resolution_reasoning.as_deref())
             };
-            respond_insight(result, broadcaster)
+            match result {
+                Ok(insight) => {
+                    broadcaster.broadcast(OrchdFrame::Push(OrchdPush::InsightsChanged));
+                    if accepted {
+                        if let Some(project_id) = insight.project_id.clone() {
+                            broadcaster.broadcast(OrchdFrame::Push(OrchdPush::GraphChanged {
+                                project_id,
+                            }));
+                        }
+                    }
+                    OrchdResponse::Insight(insight)
+                }
+                Err(e) => map_err(e),
+            }
         }
         OrchdRequest::DeleteInsight { id } => {
             let result = {
@@ -1410,23 +1504,51 @@ async fn dispatch_inner(
             }
         }
         OrchdRequest::ImportBundle { json } => {
+            // DOM-10 (2026-07-24 audit remediation): importing into a DEGRADED store
+            // (in-memory fallback / recovered-from-corruption) would accept the rows and
+            // silently lose them on the next restart (plus write phantom rules/doc files with no
+            // durable rows behind them). Refuse up front with a typed, honest error — the same
+            // "storage degraded" honesty the `GetStorageStatus` banner reports. Full
+            // degraded-mode gating of EVERY mutation is tracked separately (backlog); import is
+            // the bulk-restore verb where silent loss is catastrophic, so it is gated NOW.
+            if !matches!(
+                deps.storage_status.storage_mode,
+                bpa_orchd_proto::StorageMode::Persistent
+            ) {
+                return OrchdResponse::Error {
+                    code: OrchdErrorCode::Invariant,
+                    message: "storage degraded, import refused".to_string(),
+                };
+            }
             let app_support = bpa_daemon_core::dirs::app_support_dir();
             let result = {
                 let db = deps.db.lock().await;
                 export::import_bundle(&db, &app_support, &json)
             };
             match result {
-                Ok(counts) => {
+                Ok(outcome) => {
+                    // DOM-4 (2026-07-24 audit remediation): the family pushes fire whenever the
+                    // transaction committed — INCLUDING the partial-success case where a
+                    // post-commit ruleset/doc file write then failed. The rows genuinely landed
+                    // (a retry would hit `Conflict`), so clients must be invalidated either way;
+                    // the error REPLY honestly names the partial state instead of pretending
+                    // nothing was imported.
                     for push in import_touched_pushes(&json) {
                         broadcaster.broadcast(OrchdFrame::Push(push));
                     }
-                    OrchdResponse::ImportReport {
-                        projects: counts.projects,
-                        goals: counts.goals,
-                        ideas: counts.ideas,
-                        insights: counts.insights,
-                        tasks: counts.tasks,
-                        rulesets: counts.rulesets,
+                    match outcome.deferred_file_error {
+                        Some(msg) => OrchdResponse::Error {
+                            code: OrchdErrorCode::Io,
+                            message: format!("imported, file writes failed: {msg}"),
+                        },
+                        None => OrchdResponse::ImportReport {
+                            projects: outcome.counts.projects,
+                            goals: outcome.counts.goals,
+                            ideas: outcome.counts.ideas,
+                            insights: outcome.counts.insights,
+                            tasks: outcome.counts.tasks,
+                            rulesets: outcome.counts.rulesets,
+                        },
                     }
                 }
                 Err(e) => map_err(e),
@@ -1459,23 +1581,40 @@ async fn dispatch_inner(
                 Err(e) => map_err(e),
             }
         }
-        OrchdRequest::GraphUpdateNode { id, label, body } => {
+        OrchdRequest::GraphUpdateNode {
+            id,
+            label,
+            body,
+            project_id,
+        } => {
             let db = deps.db.lock().await;
-            let result = db.update_node(&id, label.as_deref(), body.as_deref());
+            let result = db.update_node(
+                &id,
+                label.as_deref(),
+                body.as_deref(),
+                project_id.as_deref(),
+            );
             respond_graph_node_reachable(&db, result, broadcaster)
         }
-        OrchdRequest::GraphMoveNode { id, pos_x, pos_y } => {
+        OrchdRequest::GraphMoveNode {
+            id,
+            pos_x,
+            pos_y,
+            project_id,
+        } => {
             let db = deps.db.lock().await;
-            let result = db.move_node(&id, pos_x, pos_y);
+            let result = db.move_node(&id, pos_x, pos_y, project_id.as_deref());
             respond_graph_node_reachable(&db, result, broadcaster)
         }
         // `node_project_ids_reachable` is resolved BEFORE `delete_node`: the cascade removes the
         // node's incident cross-project edges, so the foreign endpoints would be unreachable from
         // it afterward (mirrors `goal_project_id`/`task_project_id`'s pre-delete lookup pattern).
-        OrchdRequest::GraphDeleteNode { id } => {
+        // GRAPH-1 (BL-143): a mismatched `project_id` fails inside `delete_node` with `NotFound`
+        // AFTER this lookup — no broadcast fires on the error path, same as an unknown id.
+        OrchdRequest::GraphDeleteNode { id, project_id } => {
             let db = deps.db.lock().await;
             match db.node_project_ids_reachable(&id) {
-                Ok(project_ids) => match db.delete_node(&id) {
+                Ok(project_ids) => match db.delete_node(&id, project_id.as_deref()) {
                     Ok(()) => {
                         broadcast_graph_changed(broadcaster, project_ids);
                         OrchdResponse::Ack
@@ -1808,6 +1947,15 @@ async fn dispatch_inner(
             args_json,
             project_id,
         } => {
+            // SEC-3 (2026-07-24 audit remediation): hold the attempt's effective-policy mutex
+            // across authorize+dispatch so a parallel burst can't all read "under the cap"
+            // before any invocation row exists (check-then-act). Resolved BEFORE the call so the
+            // guard is alive for the whole `call_tool` (its phase-3 invocation-row write included).
+            let _cap_guard =
+                match policy_cap_guard(deps, project_id.as_deref(), Some(&server_id)).await {
+                    Ok(guard) => guard,
+                    Err(e) => return map_err(e),
+                };
             // Pass the shared `Arc<Mutex<Db>>` directly (NOT a locked guard): `mcp::invoke::
             // call_tool` locks it itself in short phases around the network round-trip + retry
             // loop, holding NO guard across the MCP awaits (T6 review fix).
@@ -1865,10 +2013,17 @@ async fn dispatch_inner(
         // Direct grant — NOT itself gated by `trust::authorize` (granting consent IS the
         // gate-setting action, not something that needs to pass through the choke-point it
         // configures). `kind` is `'connect'` (http, fingerprint = URL) or `'stdio_exec'` (stdio,
-        // task T16, fingerprint = the resolved-binary/command-args hash) — `mcp::fingerprint_for`
+        // task T16, fingerprint = the resolved-binary/command-args-env hash) — `mcp::fingerprint_for`
         // is the SAME function `mcp::connect_action` calls at authorize time, so a grant made
         // here and a later `McpConnect`/`McpCallTool` authorize check always agree on what "the
         // current fingerprint" is.
+        //
+        // SEC-5 (2026-07-24 audit remediation): the grant itself is audited (`consent_grant`/
+        // allow) — the append-only audit trail records every allow/deny decision but previously
+        // said nothing about WHO granted the trust those decisions check, leaving "who approved
+        // this server, when" unanswerable. The row carries the server id and the consent `kind`
+        // (in the reused `tool_name` column, the "operation name" slot per `write_audit`'s own
+        // precedent) — never a secret or payload.
         OrchdRequest::TrustGrantConsent { server_id, kind } => {
             let db = deps.db.lock().await;
             let server = match db.get_mcp_server(&server_id) {
@@ -1878,6 +2033,17 @@ async fn dispatch_inner(
             let fingerprint = mcp::fingerprint_for(&server, &kind);
             match db.grant_consent(&server_id, &kind, &fingerprint) {
                 Ok(()) => {
+                    if let Err(e) = db.insert_audit(crate::persistence::NewAudit {
+                        action: crate::trust::AUDIT_ACTION_CONSENT_GRANT.to_string(),
+                        server_id: Some(server_id.clone()),
+                        tool_name: Some(kind.clone()),
+                        project_id: server.project_id.clone(),
+                        decision: "allow".to_string(),
+                        reason: None,
+                        invocation_id: None,
+                    }) {
+                        return map_err(e);
+                    }
                     broadcaster.broadcast(OrchdFrame::Push(OrchdPush::McpServersChanged {
                         project_id: server.project_id,
                     }));
@@ -2005,6 +2171,15 @@ async fn dispatch_inner(
             args_json,
             project_id,
         } => {
+            // SEC-3 (2026-07-24 audit remediation): the SAME per-effective-policy mutex
+            // discipline as `McpCallTool` above — `ConnectorInvoke` passes through
+            // `trust::authorize` IDENTICALLY (spec §6), so it serializes identically. A connector
+            // has no `server_id` (spec §4's XOR), so the key can only resolve to a
+            // project/global policy — `resolve_policy_key` handles that (one tier shorter).
+            let _cap_guard = match policy_cap_guard(deps, project_id.as_deref(), None).await {
+                Ok(guard) => guard,
+                Err(e) => return map_err(e),
+            };
             match connectors::adapter::invoke(
                 &deps.connectors,
                 &deps.db,
@@ -2146,6 +2321,9 @@ async fn dispatch_inner(
         // driver ALREADY fires that push on every transition it drives (running/done/failed,
         // `research::run_research`'s own doc comment), so pushing here too would double-fire for
         // the SAME `pending`->`running` transition the driver's own phase 1 push already covers.
+        // The lifecycle FLIP's own `IdeasChanged` push (DOM-9 of the 2026-07-24 audit
+        // remediation) is emitted by `start_run` itself when the flip actually happened — not
+        // here, so the arm stays a pure reply mapping.
         // Pass the shared `Arc<Mutex<Db>>` + `broadcaster` directly (not a locked guard) — mirrors
         // `McpConnect`/`McpCallTool` above: `start_run` only holds the guard for its own short
         // insert+resolve phase, then drops it before spawning, so no guard is ever held across the
@@ -2168,7 +2346,7 @@ async fn dispatch_inner(
             )
             .await
             {
-                Ok(row) => OrchdResponse::ResearchRun(row.into()),
+                Ok((row, _lifecycle_flipped)) => OrchdResponse::ResearchRun(row.into()),
                 Err(e) => map_err(e),
             }
         }
@@ -2255,5 +2433,379 @@ async fn dispatch_inner(
                 Err(e) => map_err(e),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Dispatch-level tests for the 2026-07-24 audit remediation (SEC-5, DOM-4/9/10/11): they
+    //! drive [`dispatch_inner`] directly against an in-memory `Db` with a hand-registered
+    //! broadcast receiver — no socket, no daemon boot — mirroring how `research::driver_tests`
+    //! exercises `run_research` without a `tokio::spawn`.
+
+    use super::*;
+    use crate::mcp::{McpAuthKind, McpScope, McpTransport, NewMcpServer};
+    use bpa_orchd_proto::{InsightStatus, StorageMode, StorageStatus};
+
+    /// Builds `ServerDeps` on an in-memory `Db` with the given storage mode, plus a
+    /// `Broadcaster` with one registered receiver the test drains for push assertions.
+    fn test_deps(
+        storage_status: StorageStatus,
+    ) -> (Arc<ServerDeps>, Broadcaster, mpsc::Receiver<OrchdFrame>) {
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let connectors = Arc::new(ConnectorsState::new());
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let deps = Arc::new(ServerDeps::new(
+            db,
+            connectors,
+            "test".to_string(),
+            shutdown_tx,
+            storage_status,
+        ));
+        let broadcaster = Broadcaster::default();
+        let (tx, rx) = mpsc::channel(64);
+        broadcaster.register(1, tx);
+        (deps, broadcaster, rx)
+    }
+
+    fn persistent_deps() -> (Arc<ServerDeps>, Broadcaster, mpsc::Receiver<OrchdFrame>) {
+        test_deps(StorageStatus {
+            storage_mode: StorageMode::Persistent,
+            quarantined_path: None,
+        })
+    }
+
+    fn drain_pushes(rx: &mut mpsc::Receiver<OrchdFrame>) -> Vec<OrchdPush> {
+        let mut out = Vec::new();
+        while let Ok(OrchdFrame::Push(p)) = rx.try_recv() {
+            out.push(p);
+        }
+        out
+    }
+
+    async fn add_http_server(deps: &Arc<ServerDeps>) -> String {
+        deps.db
+            .lock()
+            .await
+            .add_mcp_server(NewMcpServer {
+                name: "Prowl".to_string(),
+                transport: McpTransport::Http,
+                url: Some("https://example.com/mcp".to_string()),
+                command: None,
+                args: vec![],
+                env: Default::default(),
+                scope: McpScope::Global,
+                project_id: None,
+                auth_kind: McpAuthKind::None,
+                secret_ref: None,
+                account_id: None,
+                enabled: true,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            })
+            .unwrap()
+            .id
+    }
+
+    // ---- SEC-5: TrustGrantConsent writes the consent_grant audit row ----
+
+    #[tokio::test]
+    async fn trust_grant_consent_writes_a_consent_grant_audit_row() {
+        let (deps, broadcaster, _rx) = persistent_deps();
+        let server_id = add_http_server(&deps).await;
+
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::TrustGrantConsent {
+                server_id: server_id.clone(),
+                kind: "connect".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(res, OrchdResponse::Ack);
+
+        let rows = deps.db.lock().await.list_audit(None).unwrap();
+        let grant = rows
+            .iter()
+            .find(|r| r.action == "consent_grant")
+            .expect("a consent_grant audit row must exist (SEC-5)");
+        assert_eq!(grant.decision, "allow");
+        assert_eq!(grant.server_id.as_deref(), Some(server_id.as_str()));
+        assert_eq!(
+            grant.tool_name.as_deref(),
+            Some("connect"),
+            "the consent kind rides the reused tool_name column"
+        );
+    }
+
+    // ---- DOM-11: FK violations map to the typed NotFound ----
+
+    #[test]
+    fn map_err_maps_a_foreign_key_violation_to_not_found() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE parent (id TEXT PRIMARY KEY);
+             CREATE TABLE child (id TEXT PRIMARY KEY, pid TEXT REFERENCES parent(id));",
+        )
+        .unwrap();
+        let err = conn
+            .execute("INSERT INTO child VALUES ('c1', 'missing-parent')", [])
+            .unwrap_err();
+        assert!(crate::persistence::is_foreign_key_violation(&err));
+
+        match map_err(OrchdPersistError::Sql(err)) {
+            OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::NotFound),
+            other => panic!("expected Error{{NotFound}}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_add_server_with_a_bogus_project_id_replies_not_found() {
+        let (deps, broadcaster, _rx) = persistent_deps();
+
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::McpAddServer {
+                name: "Prowl".to_string(),
+                transport: bpa_orchd_proto::McpTransport::Http,
+                url: Some("https://example.com/mcp".to_string()),
+                command: None,
+                args: None,
+                env: None,
+                scope: bpa_orchd_proto::McpScope::Project,
+                project_id: Some("no-such-project".to_string()),
+                auth_kind: bpa_orchd_proto::McpAuthKind::None,
+                timeout_ms: None,
+                max_retries: None,
+            },
+        )
+        .await;
+
+        match res {
+            OrchdResponse::Error { code, .. } => {
+                assert_eq!(
+                    code,
+                    OrchdErrorCode::NotFound,
+                    "a bogus project_id must be the typed NotFound, never a raw FK Io"
+                );
+            }
+            other => panic!("expected Error{{NotFound}}, got {other:?}"),
+        }
+    }
+
+    // ---- DOM-10: ImportBundle is refused in degraded storage ----
+
+    #[tokio::test]
+    async fn import_bundle_is_refused_in_degraded_storage_modes() {
+        for (mode, quarantined_path) in [
+            (StorageMode::InMemoryFallback, None),
+            (
+                StorageMode::RecoveredFromCorruption,
+                Some("/tmp/quarantined.db".to_string()),
+            ),
+        ] {
+            let (deps, broadcaster, _rx) = test_deps(StorageStatus {
+                storage_mode: mode,
+                quarantined_path,
+            });
+            let res = dispatch_inner(
+                &deps,
+                &broadcaster,
+                OrchdRequest::ImportBundle {
+                    json: "{}".to_string(),
+                },
+            )
+            .await;
+            match res {
+                OrchdResponse::Error { code, message } => {
+                    assert_eq!(code, OrchdErrorCode::Invariant);
+                    assert_eq!(message, "storage degraded, import refused");
+                }
+                other => panic!("expected Error{{Invariant}}, got {other:?}"),
+            }
+        }
+
+        // Persistent storage passes the gate (the same malformed bundle then fails on its own
+        // merits — Validation for a missing project/projects key — proving the refusal above is
+        // the storage gate, not the parser).
+        let (deps, broadcaster, _rx) = persistent_deps();
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::ImportBundle {
+                json: "{}".to_string(),
+            },
+        )
+        .await;
+        match res {
+            OrchdResponse::Error { code, .. } => assert_eq!(code, OrchdErrorCode::Validation),
+            other => panic!("expected Error{{Validation}}, got {other:?}"),
+        }
+    }
+
+    // ---- DOM-9a: accepting an insight emits GraphChanged alongside InsightsChanged ----
+
+    #[tokio::test]
+    async fn set_insight_status_accepted_broadcasts_graph_changed_too() {
+        let (deps, broadcaster, mut rx) = persistent_deps();
+        let (project_id, insight_id) = {
+            let db = deps.db.lock().await;
+            let project = db.create_project("P", "", &["w1".to_string()]).unwrap();
+            let insight = db
+                .create_insight(Some(&project.id), "research", "T", "B")
+                .unwrap();
+            (project.id, insight.id)
+        };
+
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::SetInsightStatus {
+                id: insight_id,
+                status: InsightStatus::Accepted,
+                resolution_reasoning: None,
+            },
+        )
+        .await;
+        assert!(matches!(res, OrchdResponse::Insight(_)), "got {res:?}");
+
+        let pushes = drain_pushes(&mut rx);
+        assert!(
+            pushes
+                .iter()
+                .any(|p| matches!(p, OrchdPush::InsightsChanged)),
+            "InsightsChanged must fire: {pushes:?}"
+        );
+        assert!(
+            pushes.iter().any(|p| matches!(
+                p,
+                OrchdPush::GraphChanged { project_id: pid } if *pid == project_id
+            )),
+            "GraphChanged for the insight's project must fire on accept (DOM-9a): {pushes:?}"
+        );
+    }
+
+    // ---- DOM-9b: ResearchStartRun's lifecycle flip emits IdeasChanged ----
+
+    #[tokio::test]
+    async fn research_start_run_broadcasts_ideas_changed_on_the_lifecycle_flip() {
+        let (deps, broadcaster, mut rx) = persistent_deps();
+        let (idea_id, server_id) = {
+            let db = deps.db.lock().await;
+            let idea = db.create_idea(None, "Idea", "").unwrap();
+            let server = db
+                .add_mcp_server(NewMcpServer {
+                    name: "local".to_string(),
+                    transport: McpTransport::Stdio,
+                    url: None,
+                    command: Some("/nonexistent/prowl".to_string()),
+                    args: vec![],
+                    env: Default::default(),
+                    scope: McpScope::Global,
+                    project_id: None,
+                    auth_kind: McpAuthKind::None,
+                    secret_ref: None,
+                    account_id: None,
+                    enabled: true,
+                    timeout_ms: 5_000,
+                    max_retries: 0,
+                })
+                .unwrap();
+            (idea.id, server.id)
+        };
+
+        let res = dispatch_inner(
+            &deps,
+            &broadcaster,
+            OrchdRequest::ResearchStartRun {
+                idea_id,
+                server_id,
+                tool_name: "search".to_string(),
+                args_json: "{}".to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(res, OrchdResponse::ResearchRun(_)), "got {res:?}");
+
+        // `IdeasChanged` is pushed synchronously inside `start_run` (before the reply); the
+        // spawned driver may add its own `ResearchRunsChanged` pushes — drain and select.
+        let pushes = drain_pushes(&mut rx);
+        assert!(
+            pushes.iter().any(|p| matches!(p, OrchdPush::IdeasChanged)),
+            "the captured→researching flip must broadcast IdeasChanged (DOM-9b): {pushes:?}"
+        );
+    }
+
+    // ---- DOM-4: a post-commit file write failure still emits the family pushes, and the error
+    // reply honestly says the rows landed ----
+
+    #[tokio::test]
+    async fn import_with_a_failing_post_commit_file_write_still_broadcasts_and_reports_honestly() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::HomeGuard::set(home.path());
+        let (deps, broadcaster, mut rx) = persistent_deps();
+
+        let app_support = home
+            .path()
+            .join("Library/Application Support/ai.builderpro.desktop");
+        // A DIRECTORY at the ruleset's verbatim-honored write path makes the post-commit atomic
+        // write fail (tmp+rename cannot replace a directory).
+        let collision = app_support.join("rules").join("collision.md");
+        std::fs::create_dir_all(&collision).unwrap();
+
+        let project_id = "11111111-1111-1111-1111-111111111111";
+        let json = serde_json::json!({
+            "bundleFormat": 1, "exportedAt": 0,
+            "project": {
+                "id": project_id, "name": "P", "description": "",
+                "status": "active", "workspaceIds": [],
+                "createdAt": 0, "updatedAt": 0
+            },
+            "goals": [], "ideas": [], "insights": [], "tasks": [],
+            "ruleset": {
+                "rule": {
+                    "id": "r1", "scope": "project", "projectId": project_id,
+                    "mdPath": collision.to_str().unwrap(), "mdHash": "",
+                    "policy": {"spendCapUsd": null, "approvalClasses": [], "pathAllowlist": []},
+                    "createdAt": 0, "updatedAt": 0
+                },
+                "mdContent": "pwned"
+            }
+        })
+        .to_string();
+
+        let res = dispatch_inner(&deps, &broadcaster, OrchdRequest::ImportBundle { json }).await;
+
+        match res {
+            OrchdResponse::Error { code, message } => {
+                assert_eq!(code, OrchdErrorCode::Io);
+                assert!(
+                    message.starts_with("imported, file writes failed:"),
+                    "the error must honestly say the rows landed: {message}"
+                );
+            }
+            other => panic!("expected Error{{Io}}, got {other:?}"),
+        }
+
+        let pushes = drain_pushes(&mut rx);
+        assert!(
+            pushes
+                .iter()
+                .any(|p| matches!(p, OrchdPush::ProjectsChanged)),
+            "ProjectsChanged must fire even on the partial failure (DOM-4): {pushes:?}"
+        );
+        assert!(
+            pushes.iter().any(|p| matches!(
+                p,
+                OrchdPush::RuleSetChanged { project_id: Some(pid), .. } if pid == project_id
+            )),
+            "RuleSetChanged must fire even on the partial failure (DOM-4): {pushes:?}"
+        );
+
+        // And the rows really did commit (the "imported" half of the honest message).
+        assert!(deps.db.lock().await.get_project(project_id).is_ok());
     }
 }

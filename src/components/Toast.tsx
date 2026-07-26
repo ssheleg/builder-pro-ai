@@ -13,19 +13,23 @@ import { strings } from "../strings";
  * next pending toast (or clears it when empty) — so a burst of failures can be read and dismissed
  * one at a time rather than clobbering each other.
  *
- * `statusExited` (red) is the DEFAULT left-edge accent, not opt-in: this atom exists to surface
- * failures honestly, so a caller wanting a neutral/success notice is the exception, not the
- * common case (no such variant exists yet — add one only when a real caller needs it, per the
- * design system's "build once, reuse everywhere" rule).
+ * `statusExited` (red) is the DEFAULT left-edge accent — this atom exists to surface failures
+ * honestly, so `"error"` is the common case. FE-6 adds the opt-in `"success"` tone (`var(--ok)`
+ * accent) for positive confirmations (saved/created/copied), driven by the store's `toastTone`
+ * (kept in lockstep with the visible head of the queue, see `store.ts::showToast`).
  */
 export function Toast(): JSX.Element | null {
   const toast = useAppStore((s) => s.toast);
+  const toastTone = useAppStore((s) => s.toastTone);
   const dismissToast = useAppStore((s) => s.dismissToast);
   if (toast === null) return null;
+
+  const accent = toastTone === "success" ? "var(--ok)" : "var(--danger)";
 
   return (
     <div
       role="alert"
+      data-tone={toastTone}
       style={{
         position: "fixed",
         left: "50%",
@@ -43,7 +47,7 @@ export function Toast(): JSX.Element | null {
         lineHeight: 1.5,
         // The tone edge is an inset shadow, not a border-left: a 3px border under a 14px radius
         // renders as a curved wedge, while an inset shadow follows the corner cleanly.
-        boxShadow: "inset 3px 0 0 var(--danger), var(--shadow-1)",
+        boxShadow: `inset 3px 0 0 ${accent}, var(--shadow-1)`,
         zIndex: 1100,
       }}
     >

@@ -60,7 +60,10 @@ beforeEach(() => {
   orchdDeleteTaskMock.mockReset().mockResolvedValue(undefined);
   orchdListTasksMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
-  useAppStore.setState({ tasksByProject: {}, toast: null, toastQueue: [], orchdDown: false }, false);
+  useAppStore.setState(
+    { tasksByProject: {}, tasksFetched: {}, toast: null, toastQueue: [], orchdDown: false },
+    false,
+  );
 });
 
 describe("TasksList", () => {
@@ -295,6 +298,29 @@ describe("TasksList", () => {
     orchdListTasksMock.mockResolvedValue([]);
     render(<TasksList projectId={projectId} />);
     await waitFor(() => expect(orchdListTasksMock).toHaveBeenCalledWith(projectId));
+  });
+
+  it("UX-1: until the first fetch settles, ONE common loading row shows — never six false empty groups", async () => {
+    // orchdListTasks stays pending: the FIRST fetch for this project has not settled, so
+    // `tasksFetched[projectId]` is unset and the cache is still empty — exactly the window in
+    // which the pre-fix component flashed six strings.tasks.empty groups at a user who HAS tasks.
+    orchdListTasksMock.mockReset().mockImplementation(
+      () => new Promise<DomainTask[]>(() => {}),
+    );
+
+    render(<TasksList projectId={projectId} />);
+
+    expect(orchdListTasksMock).toHaveBeenCalledTimes(1); // the fetch IS in flight meanwhile
+    expect(screen.getByTestId("tasks-loading").textContent).toBe(strings.tasks.loading);
+    expect(screen.queryByText(strings.tasks.empty)).toBeNull(); // no false empty flash
+    expect(screen.queryByTestId("task-status-group-backlog")).toBeNull();
+
+    // Flag set + empty data → the six groups render with their honest empty copy, no loading row.
+    await act(async () => {
+      useAppStore.setState({ tasksFetched: { [projectId]: true } }, false);
+    });
+    expect(screen.queryByTestId("tasks-loading")).toBeNull();
+    expect(screen.getAllByText(strings.tasks.empty)).toHaveLength(6);
   });
 
   it("while orchdDown: every mutating control is disabled and clicking one never calls the orchd wrapper (spec §10)", () => {

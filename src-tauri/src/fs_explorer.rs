@@ -129,25 +129,30 @@ fn join_rel(root: &Path, rel: &str) -> PathBuf {
     }
 }
 
-/// True if `rel` denotes the workspace ROOT itself (not a child) — `""`, `"."`, `"./"`, or any
-/// form that normalizes to zero real path components. The destructive verbs (delete/rename/move)
-/// must NEVER act on the root: deleting it trashes the ENTIRE workspace (FS-3 data-loss class),
-/// and rename/move detach the workspace from its registered root. `validated_existing(root, "")`
-/// is `Ok` BY DESIGN (the root is contained in itself), so this guard belongs at the verb layer,
-/// not in the validator.
-fn rel_is_root_itself(rel: &str) -> bool {
-    use std::path::Component;
-    Path::new(rel)
-        .components()
-        .all(|c| matches!(c, Component::CurDir))
-}
-
 /// Validate an EXISTING path (`root.join(rel)`) is contained within `root`. Any validator failure
 /// — escape, missing target, unresolvable symlink — collapses to `FsError::OutsideRoot` (see
 /// module doc).
 fn validated_existing(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
     let candidate = join_rel(root, rel);
     bpa_paths::validate_path_within(root, &candidate).map_err(|_| FsError::OutsideRoot)
+}
+
+/// FS-3 (audit 2026-07-24, SUS-3): [`validated_existing`] PLUS a same-as-root rejection, for the
+/// DESTRUCTIVE verbs (delete/rename/move). Containment is deliberately inclusive — `candidate ==
+/// root` passes `validate_path_within` by design (`list_dir("")` must list the root) — but for a
+/// destructive verb a `rel` that canonicalizes to the root itself (`""`, `"."`, `"sub/.."`) means
+/// "trash/rename/move THE ENTIRE WORKSPACE": `delete_entry(root, "")` sent the whole root,
+/// contents and all, to the OS Trash. That is data loss with a perfectly ordinary-shaped request,
+/// so it collapses to the same `OutsideRoot` as any other containment failure. A canonicalize
+/// failure of `root` here is unreachable in practice (`validated_existing` already canonicalized
+/// it successfully) and fails closed identically.
+fn validated_existing_non_root(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
+    let candidate = validated_existing(root, rel)?;
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| FsError::OutsideRoot)?;
+    if candidate == canonical_root {
+        return Err(FsError::OutsideRoot);
+    }
+    Ok(candidate)
 }
 
 /// Reject a `name`/`new_name` argument that is empty, `.`/`..`, or contains a path separator.
@@ -359,6 +364,15 @@ pub(crate) fn read_file_preview_inner(root: &Path, rel: &str) -> Result<FilePrev
             message: "cannot preview a directory".to_string(),
         });
     }
+    // FS-4 (audit 2026-07-24, SUS-4): only REGULAR files may be opened. A FIFO/socket/device
+    // inside the root stats as size 0 (≤ PREVIEW_CAP) and is not a dir, so without this guard
+    // `File::open` + `read_to_end` BLOCKS until a writer shows up — hanging the command's
+    // worker thread indefinitely. Fail fast and honestly instead.
+    if !metadata.file_type().is_file() {
+        return Err(FsError::Io {
+            message: "not a regular file".to_string(),
+        });
+    }
     let size = metadata.len();
     if size > PREVIEW_CAP {
         return Ok(FilePreview::TooLarge { size });
@@ -398,10 +412,7 @@ pub(crate) fn create_dir_inner(root: &Path, rel_dir: &str, name: &str) -> Result
 /// names an entry in that directory: see the variant's doc for why (silent Unix rename-replace
 /// data loss, spec D8).
 pub(crate) fn rename_entry_inner(root: &Path, rel: &str, new_name: &str) -> Result<(), FsError> {
-    if rel_is_root_itself(rel) {
-        return Err(FsError::OutsideRoot); // FS-3: never rename the workspace root itself.
-    }
-    let source = validated_existing(root, rel)?;
+    let source = validated_existing_non_root(root, rel)?;
     let rel_dir = Path::new(rel)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -423,10 +434,7 @@ pub(crate) fn move_entry_inner(
     rel_from: &str,
     rel_dir_to: &str,
 ) -> Result<(), FsError> {
-    if rel_is_root_itself(rel_from) {
-        return Err(FsError::OutsideRoot); // FS-3: never move the workspace root itself.
-    }
-    let source = validated_existing(root, rel_from)?;
+    let source = validated_existing_non_root(root, rel_from)?;
     let name = source
         .file_name()
         .ok_or(FsError::OutsideRoot)?
@@ -441,12 +449,11 @@ pub(crate) fn move_entry_inner(
 }
 
 /// Delete `root.join(rel)` to the OS Trash (spec D8: always reversible, never `remove_file`/
-/// `remove_dir_all`).
+/// `remove_dir_all`). The target is validated via [`validated_existing_non_root`] (FS-3): `rel`
+/// values that canonicalize to the root itself (`""`, `"."`) would otherwise send THE ENTIRE
+/// WORKSPACE to the Trash.
 pub(crate) fn delete_entry_inner(root: &Path, rel: &str) -> Result<(), FsError> {
-    if rel_is_root_itself(rel) {
-        return Err(FsError::OutsideRoot); // FS-3: never trash the workspace root itself.
-    }
-    let target = validated_existing(root, rel)?;
+    let target = validated_existing_non_root(root, rel)?;
     trash_delete(&target).map_err(|e| FsError::Io {
         message: e.to_string(),
     })?;
@@ -1104,47 +1111,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_entry_rejects_the_root_itself_so_a_workspace_is_never_trashed() {
-        // FS-3 (data-loss class): `rel == ""` / `"."` is the workspace ROOT — deleting it would
-        // trash the entire workspace. Must fail closed (OutsideRoot), never touch the Trash.
-        let (_tmp, root) = plain_root();
-        for root_rel in ["", ".", "./"] {
-            assert_eq!(
-                delete_entry_inner(&root, root_rel).unwrap_err(),
-                FsError::OutsideRoot,
-                "rel {root_rel:?} is the root itself — must be rejected, not trashed"
-            );
-        }
-        // A real child is still deletable.
-        let child = root.join("child.txt");
-        fs::write(&child, b"x").unwrap();
-        delete_entry_inner(&root, "child.txt").unwrap();
-        assert!(!child.exists());
-    }
-
-    #[test]
-    fn rename_and_move_reject_the_root_itself() {
-        // FS-3: rename/move on the root itself detaches the workspace from its registered root.
-        let (_tmp, root) = plain_root();
-        assert_eq!(
-            rename_entry_inner(&root, "", "newname").unwrap_err(),
-            FsError::OutsideRoot
-        );
-        assert_eq!(
-            rename_entry_inner(&root, ".", "newname").unwrap_err(),
-            FsError::OutsideRoot
-        );
-        assert_eq!(
-            move_entry_inner(&root, "", "subdir").unwrap_err(),
-            FsError::OutsideRoot
-        );
-        assert_eq!(
-            move_entry_inner(&root, ".", "subdir").unwrap_err(),
-            FsError::OutsideRoot
-        );
-    }
-
-    #[test]
     fn delete_entry_moves_file_out_of_its_original_location() {
         let (_tmp, root) = plain_root();
         let target = root.join("todelete.txt");
@@ -1255,5 +1221,100 @@ mod tests {
         assert_eq!(v["isDir"], false);
         assert_eq!(v["size"], 3);
         assert_eq!(v["isIgnored"], true);
+    }
+
+    // ── FS-3 (audit 2026-07-24, SUS-3): rel == "" / "." targets the workspace ROOT ITSELF ─────
+
+    /// desired (was pin_sus3_delete_entry_inner_empty_rel_trashes_the_whole_root): `delete_entry`
+    /// must NEVER target the root itself — pre-fix, `delete_entry_inner(root, "")` passed
+    /// validation (`join_rel(root, "") == root`, and `validate_path_within(root, root)` is Ok by
+    /// design) and sent THE ENTIRE WORKSPACE ROOT, contents and all, to the OS Trash.
+    /// Now: `Err(FsError::OutsideRoot)` BEFORE any syscall, root untouched.
+    #[test]
+    fn delete_entry_inner_rejects_rel_targeting_the_root_itself() {
+        for rel in ["", ".", "sub/.."] {
+            let (_tmp, root) = plain_root();
+            fs::write(root.join("precious.txt"), b"important work").unwrap();
+            fs::create_dir(root.join("sub")).unwrap();
+
+            let err = delete_entry_inner(&root, rel).unwrap_err();
+            assert_eq!(
+                err,
+                FsError::OutsideRoot,
+                "rel={rel:?} canonicalizes to the root itself and must be rejected"
+            );
+            assert!(
+                root.join("precious.txt").exists(),
+                "the workspace root must be completely untouched after a rejected delete (rel={rel:?})"
+            );
+            assert!(root.join("sub").is_dir());
+        }
+    }
+
+    /// desired (was pin_sus3_rename_entry_inner_empty_rel_attempts_rename_of_root_into_itself):
+    /// pre-fix, `rename_entry_inner(root, "", "renamed")` passed validation and attempted
+    /// `std::fs::rename(root, root/renamed)` — the root survived only because the kernel refused
+    /// (EINVAL), and the wire got a confusing generic `FsError::Io`. Now: typed `OutsideRoot`.
+    #[test]
+    fn rename_entry_inner_rejects_rel_targeting_the_root_itself() {
+        let (_tmp, root) = plain_root();
+        fs::write(root.join("precious.txt"), b"important work").unwrap();
+
+        let err = rename_entry_inner(&root, "", "renamed").unwrap_err();
+        assert_eq!(err, FsError::OutsideRoot);
+        assert!(
+            root.join("precious.txt").exists(),
+            "the root must be untouched, and no 'renamed' entry may appear"
+        );
+        assert!(!root.join("renamed").exists());
+    }
+
+    /// desired (was pin_sus3_move_entry_inner_empty_rel_attempts_move_of_root_into_own_subdir):
+    /// same shape for `move_entry_inner(root, "", "sub")` — pre-fix it attempted
+    /// `std::fs::rename(root, root/sub/root)`, rejected only by the kernel → generic `FsError::Io`.
+    /// Now: typed `OutsideRoot` before any syscall.
+    #[test]
+    fn move_entry_inner_rejects_rel_targeting_the_root_itself() {
+        let (_tmp, root) = plain_root();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("precious.txt"), b"important work").unwrap();
+
+        let err = move_entry_inner(&root, "", "sub").unwrap_err();
+        assert_eq!(err, FsError::OutsideRoot);
+        assert!(root.join("precious.txt").exists());
+        assert!(root.join("sub").is_dir());
+    }
+
+    // ── FS-4 (audit 2026-07-24, SUS-4): preview of a FIFO must fail fast, not block ───────────
+
+    /// desired (was pin_sus4_read_file_preview_inner_on_fifo_blocks_indefinitely): pre-fix,
+    /// `read_file_preview_inner` never checked `metadata.is_file()` — a FIFO stats as size 0 and
+    /// is not a dir, so `File::open` + capped `read_to_end` BLOCKED until a writer showed up,
+    /// hanging the command's worker thread indefinitely. Now: a fast typed `Err` for non-regular
+    /// files. The call is made DIRECTLY (no reader thread, no writer hygiene): with the fix it
+    /// returns immediately — blocking would hang the test process itself.
+    #[test]
+    fn read_file_preview_inner_on_fifo_fails_fast_not_a_regular_file() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let (_tmp, root) = plain_root();
+        let fifo = root.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(
+            rc,
+            0,
+            "mkfifo failed: {:?}",
+            std::io::Error::last_os_error()
+        );
+
+        let err = read_file_preview_inner(&root, "pipe").unwrap_err();
+        match err {
+            FsError::Io { message } => assert_eq!(
+                message, "not a regular file",
+                "a FIFO must be rejected as a non-regular file, got: {message}"
+            ),
+            other => panic!("expected FsError::Io, got {other:?}"),
+        }
     }
 }

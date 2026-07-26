@@ -26,6 +26,7 @@ vi.mock("./FormInsightDialog", () => ({
 
 import { ResearchPane } from "./ResearchPane";
 import { useAppStore } from "../../store/store";
+import { strings } from "../../strings";
 import type { Idea, McpArtifact, McpServer, ResearchRun } from "../../ipc/orchd-types";
 
 const idea: Idea = {
@@ -104,6 +105,10 @@ beforeEach(() => {
   useAppStore.setState(
     {
       researchRunsByIdea: {},
+      // `researchRunsFetched` pre-set (UX-1): these tests exercise the post-first-fetch render
+      // paths — with the flag unset an empty run list now shows the loading placeholder instead
+      // of the empty state.
+      researchRunsFetched: { [idea.id]: true },
       mcpServers: [makeServer()],
       toast: null,
       toastQueue: [],
@@ -116,6 +121,27 @@ beforeEach(() => {
 describe("ResearchPane", () => {
   it("renders an empty state when the idea has no research runs", () => {
     render(<ResearchPane idea={idea} disabled={false} />);
+    expect(screen.getByTestId("research-pane-empty")).toBeTruthy();
+  });
+
+  it("UX-1: until the first fetch settles, the loading placeholder shows — never the false empty state", async () => {
+    // `researchRunsFetched[idea.id]` unset (the beforeEach pre-sets it for the post-fetch paths;
+    // here we want the pre-settle window) + an empty cache — exactly the window in which the
+    // pre-fix component flashed the false empty state at a user whose idea HAS runs.
+    useAppStore.setState({ researchRunsByIdea: {}, researchRunsFetched: {} }, false);
+
+    render(<ResearchPane idea={idea} disabled={false} />);
+
+    expect(screen.getByTestId("research-pane-loading").textContent).toBe(
+      strings.research.loadingRuns,
+    );
+    expect(screen.queryByTestId("research-pane-empty")).toBeNull(); // no false empty flash
+
+    // Flag set + still-empty data → the honest empty state shows, the loading row is gone.
+    await act(async () => {
+      useAppStore.setState({ researchRunsFetched: { [idea.id]: true } }, false);
+    });
+    expect(screen.queryByTestId("research-pane-loading")).toBeNull();
     expect(screen.getByTestId("research-pane-empty")).toBeTruthy();
   });
 

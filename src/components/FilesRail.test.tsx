@@ -104,6 +104,18 @@ describe("FilesRail", () => {
     expect(listDirMock).toHaveBeenCalledWith("/proj", "", true);
   });
 
+  it("the show-ignored toggle also restarts the live watch with the NEW flag (FS-7)", async () => {
+    useAppStore.setState({ filesRailOpen: true }, false);
+    render(<FilesRail workspace={ws} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox"));
+    });
+    expect(useAppStore.getState().showIgnored).toBe(true);
+    // The watcher filters fs events by the flag it was STARTED with — without this restart it
+    // would keep filtering by the OLD value until re-activation (probe sus7).
+    expect(startWorkspaceWatchMock).toHaveBeenCalledWith(["/proj"], true);
+  });
+
   it("shows the watch-paused affordance only when watchPaused is true", () => {
     useAppStore.setState({ filesRailOpen: true, watchPaused: false }, false);
     const { rerender } = render(<FilesRail workspace={ws} />);

@@ -4,6 +4,7 @@
 // `getDerivedStateFromError`/`componentDidCatch` have no hook equivalent.
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { useAppStore } from "../store/store";
+import { scrubSecrets } from "../ipc/diag";
 import { Button } from "../ui/primitives";
 
 type Props = {
@@ -32,7 +33,11 @@ export class ErrorBoundary extends Component<Props, State> {
 
   private copyDetails = () => {
     const { error, componentStack } = this.state;
-    const text = `${error?.name ?? "Error"}: ${error?.message ?? ""}\n${componentStack}`;
+    // REL-3: scrub before copying — a raw message/stack can carry a token or the operator's home
+    // path, and the clipboard is a leak vector into issues and chats (same rule as the diag ring).
+    const text = scrubSecrets(
+      `${error?.name ?? "Error"}: ${error?.message ?? ""}\n${componentStack}`,
+    );
     void navigator.clipboard?.writeText(text);
   };
 

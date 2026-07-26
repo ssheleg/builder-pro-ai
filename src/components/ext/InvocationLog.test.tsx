@@ -204,6 +204,16 @@ describe("InvocationLog", () => {
     });
   });
 
+  it("SEC-4: the limits editor carries the inert spend-cap hint (a stored cap never reads as a blocking one)", () => {
+    render(<InvocationLog />);
+
+    const hint = screen.getByTestId("policy-spend-cap-inert-hint");
+    expect(hint.textContent).toBe(strings.ext.log.spendCapInertHint);
+    // Proximity: the hint sits under the limits editor, after the spend-cap input it de-implies.
+    const spendCap = screen.getByTestId("policy-spend-cap");
+    expect(spendCap.compareDocumentPosition(hint) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("two rapid 'set limit' clicks apply the policy ONCE (double-submit guard, spec D6 / P-19)", async () => {
     let resolveSet!: (v: unknown) => void;
     trustSetPolicyMock.mockReset().mockImplementation(

@@ -79,6 +79,14 @@ const bearerInputStyle: CSSProperties = {
   fontFamily: "var(--font-mono)",
 };
 
+/** UX-1 first-fetch placeholder — the same dim muted register as GoalTree's `loadingTextStyle`
+ * (and DocsPanel's `docs-loading` row before it), so a still-loading tab never reads as a
+ * genuinely empty one. */
+const loadingTextStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
+};
+
 /**
  * Servers tab (S-EXT §8, T8): MCP server registry — list + add-server form + per-server
  * enable/disable, connect/disconnect, and a masked set-bearer input. Phase 1 ships HTTP transport
@@ -98,6 +106,7 @@ const bearerInputStyle: CSSProperties = {
  */
 export function ServersTab(): JSX.Element {
   const servers = useAppStore((s) => s.mcpServers);
+  const mcpServersFetched = useAppStore((s) => s.mcpServersFetched);
   const orchdDown = useAppStore((s) => s.orchdDown);
   const refreshMcpServers = useAppStore((s) => s.refreshMcpServers);
   const showToast = useAppStore((s) => s.showToast);
@@ -178,7 +187,7 @@ export function ServersTab(): JSX.Element {
       // Never keep the token in local state once submitted — the input is cleared, matching
       // "masked, never echoed back" (spec §8): even THIS component never re-displays it.
       setBearerDrafts((prev) => ({ ...prev, [server.id]: "" }));
-      showToast(strings.ext.servers.tokenSaved);
+      showToast(strings.ext.servers.tokenSaved, "success");
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -251,7 +260,19 @@ export function ServersTab(): JSX.Element {
       </div>
 
       {servers.length === 0 ? (
-        <EmptyState data-testid="servers-empty" title={strings.ext.servers.empty} />
+        // UX-1: an empty cache means "no servers" only once the FIRST fetch has settled
+        // (`mcpServersFetched` flips on success AND failure and never resets) — before that it
+        // just means "not loaded yet", so render the loading placeholder instead of flashing the
+        // false empty state at a user who HAS servers (the GoalTree/DocsPanel loading-vs-empty
+        // split). After a FAILED first fetch the empty state is the honest copy, which is exactly
+        // what the never-reset flag yields.
+        mcpServersFetched !== true ? (
+          <div data-testid="servers-loading" style={loadingTextStyle}>
+            {strings.ext.servers.loading}
+          </div>
+        ) : (
+          <EmptyState data-testid="servers-empty" title={strings.ext.servers.empty} />
+        )
       ) : (
         <div role="list">
           {servers.map((server) => (

@@ -8,8 +8,8 @@
 |----|-------|---------|---------|--------|--------|------------|
 | SCN-001 | First launch — empty app | onboarding | P-02 | ST-001 | implemented | 2026-07-22 PASS |
 | SCN-002 | Add first workspace | onboarding | P-02 | ST-002 | implemented | 2026-07-22 PASS |
-| SCN-058 | Remove a workspace | onboarding | P-01 | ST-044 | validated | — |
-| SCN-059 | Clear out workspaces whose folder is gone | onboarding | P-01 | ST-044 | validated | — |
+| SCN-058 | Remove a workspace | onboarding | P-01 | ST-044 | implemented | 2026-07-24 PASS |
+| SCN-059 | Clear out workspaces whose folder is gone | onboarding | P-01 | ST-044 | implemented | 2026-07-24 PASS |
 | SCN-003 | Capture first idea with ⌘K | capture | P-02 | ST-003 | implemented | 2026-07-22 PASS |
 | SCN-004 | Home attention triage | home | P-01 | ST-004 | implemented | 2026-07-22 PASS |
 | SCN-005 | Home goals overview | home | P-01 | ST-005 | implemented | 2026-07-22 PASS |
@@ -129,7 +129,7 @@ in different lifecycle states.
 - **UI elements:** per-row "Remove workspace" control, confirmation dialog naming the workspace + the live-terminal consequence, sidebar row, toast on failure
 - **States covered:** success, error
 - **Errors & recovery:** removal rejects (daemon down / unknown id) → toast with the reason, the row stays; a workspace with live terminals is NOT silently skipped — its shells are terminated as part of the removal, which the confirmation states up front (never an orphan PTY with no tab to reach it)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** crates/protocol/src/lib.rs:219 (`Request::RemoveWorkspace`, tail-appended),:312 (`Push::WorkspaceRemoved` — a dedicated id-only push, NOT `WorkspaceUpdated`, whose consumers upsert and would resurrect the removed row); crates/sessiond/src/socket_server.rs (`close_session` extracted from `KillSession` and reused, existence gate → kill victims → drain pending final flushes → delete → broadcast); crates/sessiond/src/persistence.rs (`delete_workspace`: command_events → scrollback → session → workspace_root → workspace in ONE transaction; schema has no ON DELETE cascade); crates/sessiond/tests/remove_workspace.rs (full destructive path incl. live PTY reaped, bystander workspace untouched, no resurrection on cold rehydrate); src-tauri/src/commands.rs:1123 (`remove_workspace`) + src-tauri/src/broker.rs (`workspace://removed`); src/ipc/commands.ts:115, src/ipc/events.ts:94,105; src/store/store.ts:833 (`removeWorkspace`),:813 (`dropWorkspace`); src/components/WorkspaceSidebar.tsx:317 (per-row remove + confirm); src/App.tsx:184-196 (push handling + dead-view fallback + `TerminalManager.disposeMissing`)
 
 ### SCN-059: Clear out workspaces whose folder is gone
@@ -147,7 +147,7 @@ in different lifecycle states.
 - **UI elements:** "folder missing" marker on the row, bulk clean-up control with count, confirmation dialog, toast on partial failure
 - **States covered:** empty, success, error
 - **Errors & recovery:** a root that cannot be checked (permission error) is treated as PRESENT and left alone — never removed on a guess; if some removals fail, the successful ones stand and a toast names how many failed (no silent partial success)
-- **Status:** validated
+- **Status:** implemented
 - **Coverage:** src-tauri/src/commands.rs:1140 (`path_present_unless_definitely_missing` — `try_exists().unwrap_or(true)`, so an unreadable root counts as PRESENT and is never removed on a guess),:1157 (`paths_exist`); src/ipc/commands.ts:128; src/components/WorkspaceSidebar.tsx:121-149 (presence effect, re-runs on root-set change),:157 (`isMissing` = every root definitely gone),:303 (row marker),:647 (bulk control with exact count, rendered only when ≥1 missing); removal reuses SCN-058's path with `Promise.allSettled` so successes stand and one toast names the failures
 
 ### SCN-003: Capture first idea with ⌘K
@@ -160,7 +160,7 @@ in different lifecycle states.
   1. User presses ⌘K
   2. User types a title (Enter submits; textarea Enter inserts newline)
   3. User optionally picks a project ("no project" default) and clicks "Save"
-- **Expected result:** dialog "New idea" opens focused on title; on save, toast "idea saved" and the dialog closes; idea lands in the chosen project (or as orphan)
+- **Expected result:** dialog "New idea" opens focused on title; the project picker lists only ACTIVE projects (archived ones are never offered — the daemon would reject the save); on save, toast "idea saved" and the dialog closes; idea lands in the chosen project (or as orphan)
 - **UI elements:** QuickCapture dialog, title input, description textarea, project select, "Cancel" / "Save" buttons
 - **States covered:** success, error
 - **Errors & recovery:** ⌘K ignored while typing in input/textarea/.xterm or while an upgrade dialog is open; empty title → Save disabled; orchd down → inline "orchestrator unavailable" note, Save disabled; save rejects → toast, dialog stays open for retry
@@ -226,10 +226,10 @@ in different lifecycle states.
 - **Entry point:** left sidebar (always visible)
 - **Preconditions:** projects and workspaces exist
 - **Steps:**
-  1. User clicks "⌂ Home" / "⚙ Extensions" / "⚙ Workflows" / "✦ Stats" / a project header / a workspace row
+  1. User clicks "⌂ Home" / "⚙ Extensions" / "✉ Inbox" / "✦ Stats" / "⛓ Workflows" / a project header / a workspace row
   2. User expands "Archived (N)" and opens an archived project
-- **Expected result:** view switches accordingly; "⚙ Workflows" opens the workflow library (SCN-060); project header opens the project panel; workspace row activates the workspace and shows terminals; archived group is collapsed by default and toggles with ▸/▾
-- **UI elements:** "⌂ Home", "⚙ Extensions", "⚙ Workflows" *(draft — SCN-060)*, "✦ Stats", "✉ Inbox" (+ orphan count badge), project group headers, workspace rows, "Archived (N)" toggle, archived project rows
+- **Expected result:** view switches accordingly; "⛓ Workflows" opens the workflow library (SCN-060); project header opens the project panel; workspace row activates the workspace and shows terminals; archived group is collapsed by default and toggles with ▸/▾
+- **UI elements:** "⌂ Home", "⚙ Extensions", "✉ Inbox" (+ orphan count badge), "✦ Stats", "⛓ Workflows", project group headers, workspace rows, "Archived (N)" toggle, archived project rows
 - **States covered:** empty, success
 - **Errors & recovery:** zero projects and workspaces → empty-state sentence (SCN-001); nothing else can fail (navigation is local)
 - **Status:** implemented
@@ -279,7 +279,7 @@ in different lifecycle states.
 - **Preconditions:** project exists
 - **Steps:**
   1. User opens the project; Overview tab shows Goals/Ideas/Tasks/Insights counters and the workspaces panel
-  2. User switches among 7 tabs (Overview/Goals/Ideas/Tasks/Insights/Rules/Graph)
+  2. User switches among 8 tabs (Overview/Goals/Ideas/Tasks/Insights/Rules/Graph/Docs)
   3. User detaches a workspace ("Unlink") or attaches one via "+ add workspace…" select
 - **Expected result:** counters populate after eager refresh; unlink/attach update the list after refreshProjects
 - **UI elements:** header (name + description), tab bar, counter tiles, workspaces panel, "Unlink" buttons, "+ add workspace…" select, "workspace unavailable" badge
@@ -377,7 +377,7 @@ in different lifecycle states.
 - **Preconditions:** session running
 - **Steps:**
   1. User watches the dot as the session runs, waits for input, and exits
-- **Expected result:** running → info dot; running + waitingForInput → warn dot "waiting for input"; atPrompt/typing → muted idle dot; exited → danger dot "exited"; exited tab stays with last scrollback until closed; a late state event cannot resurrect an exited session. A session cold-rehydrated after a daemon restart has no live PTY and is reported as **restored**, never as live — it keeps its scrollback and is reachable, but the app never claims a shell is running when it is not
+- **Expected result:** running → info dot; running + waitingForInput → warn dot "waiting for input"; atPrompt/typing → muted idle dot; exited → danger dot "exited"; exited tab stays with last scrollback until closed; a late state event cannot resurrect an exited session. A session cold-rehydrated after a daemon restart has no live PTY and is reported as **restored**, never as live — it keeps its scrollback and is reachable, but the app never claims a shell is running when it is not. Restored sessions carry a hollow restored dot (never the idle dot), and typing into one shows a one-time "no live shell" hint instead of the input being silently swallowed
 - **UI elements:** StatusDot (aria labels idle/running/exited/"waiting for input"), session tab, Home rows
 - **States covered:** success
 - **Errors & recovery:** nothing can fail (display of pushed state); exited always wins over stale updates
@@ -407,7 +407,7 @@ in different lifecycle states.
 - **Preconditions:** session with output
 - **Steps:**
   1. User clicks a path-like token (/a/b, ./a, a/b.ext) or an OSC-8 link
-- **Expected result:** workspace file → file preview opens in the right rail; http(s) → OS default browser; file:// inside a root → preview
+- **Expected result:** workspace file → file preview opens in the right rail; http(s) → OS default browser; file:// inside a root → preview; a token that matches only as a TRIMMED prefix (spaces/non-ASCII in the path) never links to a wrong target (no silent link onto the root itself)
 - **UI elements:** underlined links in terminal, FilesRail preview
 - **States covered:** success, error
 - **Errors & recovery:** file:// outside roots → toast "file is outside the workspace or not found"; non-existent lexical path → honest "not found" from the preview read; other schemes ignored
@@ -441,7 +441,7 @@ in different lifecycle states.
   1. User expands a directory (click or Enter/Space)
   2. User toggles "show ignored"; collapses/reopens the rail with ⟩/⟨
   3. User clicks "+ Add root" and picks a folder
-- **Expected result:** lazy fetch per dir with cache; dirs first, locale-sorted; ignored entries dimmed and hidden unless toggled; new root appears
+- **Expected result:** lazy fetch per dir with cache; dirs first, locale-sorted; ignored entries dimmed and hidden unless toggled (toggling also restarts the live watch with the new filter, so later edits to ignored files arrive too); new root appears. A directory listing invalidated while its fetch is in flight can never repopulate the cache with a stale result
 - **UI elements:** rail header (⟩ collapse, "Files", "show ignored"), tree rows (role=treeitem), "Loading…" row, "empty folder" row, failed row + Retry, "+ Add root" button, ⟨ reopen strip
 - **States covered:** loading, empty, error, success
 - **Errors & recovery:** listDir fails → danger row "Failed to read folder: {msg}" + inline Retry (no auto-retry loop) + toast; add-root fails → toast "Failed to add root: {msg}"; no workspace → rail renders nothing
@@ -524,9 +524,9 @@ in different lifecycle states.
   2. User edits title/body inline (blur/Enter commits)
   3. User changes lifecycle via select (captured/researching/specced/in development/shipped/archived)
   4. User deletes an idea and confirms "delete idea?"
-- **Expected result:** list updates after each action, sorted newest-first; research count badge/status shown per idea
+- **Expected result:** until the first fetch completes a loading row shows instead of a false "empty"; list updates after each action, sorted newest-first; research count badge/status shown per idea
 - **UI elements:** create form, idea rows, inline title input, body textarea, lifecycle select, "Delete" danger button, "Research" button, "research (N)"/"hide research" toggle
-- **States covered:** empty, error, success
+- **States covered:** loading, empty, error, success
 - **Errors & recovery:** empty title → "+ idea" disabled; blank/unchanged edit → silent revert; rejected save → revert to store value + toast; delete confirm cancelled → no-op; orchd down → all mutating controls disabled, reads stay live; empty list → "No ideas in this project yet."
 - **Status:** implemented
 - **Coverage:** src/components/IdeasList.tsx:21-28,154-314,333-492
@@ -540,9 +540,9 @@ in different lifecycle states.
 - **Steps:**
   1. User clicks "✉ Inbox" in the sidebar and sees the orphan Ideas/Insights sections
   2. User either links the idea to a project (select + "link to project") or clicks "Create project" (folder pick → workspace → project → link, resumable on partial failure without duplicates)
-- **Expected result:** orphan idea becomes part of a project; partial failure shows honest resume message and "Retry linking"; Inbox badge count drops
+- **Expected result:** orphan idea becomes part of a project; partial failure shows honest resume message and "Retry linking"; Inbox badge count drops; the idea attach picker lists only active projects
 - **UI elements:** "✉ Inbox" nav button, orphan count badge, Inbox panel (title, subtitle, Ideas/Insights sections), orphan idea rows, project select, "link to project" button, SpawnProjectFromIdea button, inline spawn error
-- **States covered:** empty, error, success
+- **States covered:** loading, empty, error, success
 - **Errors & recovery:** folder cancel → no-op; picker/workspace/link failures → inline + toast with exact resume semantics; orchd down → OrchdDownBanner in the panel, mutating controls disabled; empty → "No ideas without a project." / "No insights without a project."
 - **Status:** implemented
 - **Coverage:** src/components/InboxPanel.tsx, src/components/WorkspaceSidebar.tsx:229-269, src/App.tsx:511-514, src/components/IdeasList.tsx:280-307, src/components/idea/SpawnProjectFromIdea.tsx:62-124, src/strings.ts:98-100,282-289
@@ -597,9 +597,9 @@ in different lifecycle states.
   1. User changes status via select (new/accepted/archived)
   2. For "archived": user types a reason and clicks "confirm archival"
   3. User overrides the fit verdict (select + reasoning + "apply verdict")
-- **Expected result:** non-archive statuses apply immediately; archive applies only with a reason; verdict badge updates (fit/no fit/unclear/—)
+- **Expected result:** until the first fetch completes a loading row shows instead of a false "empty"; non-archive statuses apply immediately; archive applies only with a reason; verdict badge updates (fit/no fit/unclear/—)
 - **UI elements:** insight rows, status select, archive reason input, "confirm archival" button, verdict select, reasoning input, "apply verdict" button, source caption
-- **States covered:** empty, error, success
+- **States covered:** loading, empty, error, success
 - **Errors & recovery:** empty archive reason → inline "an archive reason is required"; mutations reject → toast; orchd down → status/archival/apply disabled; empty list → "No insights in this project yet."
 - **Status:** implemented
 - **Coverage:** src/components/InsightsList.tsx:33,117-281,339-363
@@ -617,9 +617,9 @@ in different lifecycle states.
   2. User moves a task between the six status groups via select
   3. User reorders within a group with ▲/▼
   4. User deletes a task; confirm names the cascade ("delete task? will delete N subtasks")
-- **Expected result:** six groups always rendered (backlog/to do/waiting/in progress/testing/done) with counts; reorder is a single fractional-rank call; delete removes the subtree
+- **Expected result:** until the first fetch completes one loading row shows instead of six falsely-empty groups; six groups always rendered (backlog/to do/waiting/in progress/testing/done) with counts; reorder is a single fractional-rank call; delete removes the subtree
 - **UI elements:** create form, group headers "{label} ({count})", "no tasks" note, task rows (source badge), status select, ▲/▼ buttons, "Delete" button, window.confirm
-- **States covered:** empty, error, success
+- **States covered:** loading, empty, error, success
 - **Errors & recovery:** empty title → "+ task" disabled; ▲ disabled on first, ▼ on last row; confirm cancelled → no-op; mutations reject → toast; orchd down → mutating controls disabled
 - **Status:** implemented
 - **Coverage:** src/components/TasksList.tsx:52-73,202-264,296-355,461-492
@@ -653,9 +653,9 @@ in different lifecycle states.
   3. User moves a non-strategic goal with ▲/▼ (sibling swap)
   4. User deletes a branch; confirms "delete the entire branch?"
   5. User edits metric chips (add via "+ metric" input Enter, remove via ×)
-- **Expected result:** DFS-indented tree updates after each mutation; strategic root never movable/deletable; no top-level add
+- **Expected result:** until the first fetch completes a loading row shows instead of a false "the goal tree is empty"; DFS-indented tree updates after each mutation; strategic root never movable/deletable; no top-level add
 - **UI elements:** "Goals" panel + count badge, tree rows (role=treeitem), title input, status select, ▲/▼, "+ subgoal", Delete, metric chip editor, window.confirm
-- **States covered:** empty, error, success
+- **States covered:** loading, empty, error, success
 - **Errors & recovery:** blank/unchanged rename → revert; rejected save → revert + toast; confirm cancelled → no-op; orchd down → all row controls disabled; empty tree → "The goal tree is empty."
 - **Status:** implemented
 - **Coverage:** src/components/GoalTree.tsx:36-61,192-371,404-536, src/components/HomeGoals.tsx:141-201
@@ -675,7 +675,7 @@ in different lifecycle states.
   4. User selects an edge and changes its kind (relates/depends/derives/supports/contradicts/parent)
   5. User selects nodes/edges and clicks "Delete selection"; confirms "delete selection?"
   6. User searches (debounced) — matches highlighted
-- **Expected result:** canvas reflects each change; entityRef nodes show "ref · {type}" (or "source removed" when orphaned); external ghost node click opens the foreign project; local entityRef click is an honest no-op
+- **Expected result:** canvas reflects each change; entityRef nodes show "ref · {type}" (or "source removed" when orphaned); external ghost nodes are READ-ONLY on the canvas (not draggable, not selectable — a stray drag or delete can never rewrite another project's layout); ghost node click opens the foreign project; local entityRef click is an honest no-op
 - **UI elements:** add-node form, canvas nodes/edges, rename bar, edge-kind select, "Delete selection" danger button, search input, empty overlay
 - **States covered:** empty, error, success
 - **Errors & recovery:** rejected edge add (self-loop/duplicate/failure) → optimistic edge rolled back + toast; deletes reconcile via refresh even on partial failure; stale search responses dropped; orchd down → mutating controls disabled, move/connect early-return; empty graph → "empty" overlay
@@ -695,9 +695,9 @@ in different lifecycle states.
   2. User clicks "connect" → consent gate: ConnectDialog "Connect to server "{name}"" showing the endpoint and access note
   3. User confirms → consent granted, connection established
   4. User sets a bearer token ("Token saved"), disconnects, disables, or deletes the server
-- **Expected result:** server states update; connected servers become available in research/tools
+- **Expected result:** until the first fetch completes a loading row shows instead of a false "no servers"; server states update; connected servers become available in research/tools
 - **UI elements:** Servers tab, add form, per-row set-bearer input, connect/disconnect/enable/disable/delete buttons, ConnectDialog (confirm/cancel)
-- **States covered:** empty, error, success
+- **States covered:** loading, empty, error, success
 - **Errors & recovery:** consent-kind rejection routes to ConnectDialog; dialog errors inline + toast; consent-denial toasts append "To reconnect, open Extensions → Servers → Connect."; orchd down → OrchdDownBanner above tabs, controls disabled
 - **Status:** implemented
 - **Coverage:** src/components/ext/ServersTab.tsx:174-341, src/components/ext/ConnectDialog.tsx:110-153, src/strings.ts:45,497-501,540-562
@@ -728,9 +728,9 @@ in different lifecycle states.
   1. Log: user sets spend/rate caps (scope, refId, spend cap, calls/min, "set limit"); reviews Calls and Audit tables
   2. Artifacts: user shows/hides saved tool results (each with "⚠ unverified data")
   3. Skills: user adds/deletes skills from SKILL.md; sees "modified"/"file missing" badges
-- **Expected result:** limits persist; tables list invocations (source/tool/status/latency/cost/time) and audit decisions; skills registry updates
+- **Expected result:** until the first fetch completes a loading row shows instead of a false "no artifacts"; limits persist (the spend-cap control carries an inert-until-cost-reporting hint — no server reports cost yet); tables list invocations (source/tool/status/latency/cost/time) and audit decisions; skills registry updates
 - **UI elements:** limits editor, Calls table, Audit table, artifact rows + unverified banners, skills list, plumbing note "Skills are a registry; they run once an orchestrator agent exists (S6b)."
-- **States covered:** empty, error, success
+- **States covered:** loading, empty, error, success
 - **Errors & recovery:** "no limits set" / "no artifacts" honest empty states; mutations reject → toast; orchd down → controls disabled
 - **Status:** implemented
 - **Coverage:** src/components/ext/InvocationLog.tsx:124-297, src/components/ext/ArtifactsTab.tsx:98-154, src/components/ext/SkillsTab.tsx:101-296, src/strings.ts:495,571-611
@@ -748,7 +748,7 @@ in different lifecycle states.
   2. User edits the policy form: "Spend cap, $", confirmation classes chips, allowed-path chips; clicks "Save policy"
   3. If the file changed externally → user clicks "Accept"; if the file is lost → user clicks "Recreate"
   4. User clicks "reveal file" to open it in Finder
-- **Expected result:** rules and policy persist; file-state banners (blue info accent) clear after Accept/Recreate
+- **Expected result:** rules and policy persist; the spend-cap control carries an inert-until-cost-reporting hint (no server reports cost yet — the cap binds nothing until then); file-state banners (blue info accent) clear after Accept/Recreate
 - **UI elements:** "Loading rules…" line, mdPath row + "reveal file", "file changed externally" + Accept, "file lost" + Recreate, markdown textarea + Save, policy form (number input, chip lists, "+ add", ×), "Save policy"
 - **States covered:** loading, error, success
 - **Errors & recovery:** inline validation "spend cap must be a number" / "spend cap cannot be negative" / "empty entries are not allowed"; mutations reject → toast; orchd down → Save/Accept/Recreate disabled ("reveal file" stays live)
@@ -906,7 +906,7 @@ in different lifecycle states.
 - **States covered:** success, error
 - **Errors & recovery:** OS denies the assertion → honest banner/toast "keep-awake unavailable: {reason}" + Diagnostics record — never a silent fake "awake"; app quit/crash → assertion released by OS (no orphan lock)
 - **Status:** implemented
-- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-387 (SleepAsserter, reconcile, IOKit FFI, commands), src-tauri/src/lib.rs:604,727-729 (new_power_slot manage + handler registration), src/ipc/power.ts:13-48, src/store/store.ts:443-457 (keepAwake slice types),617 (applyPowerStatus mirror),1064-1090 (init + setKeepAwakeEnabled + syncKeepAwake), src/App.tsx:470-476 (live-count sync effect), src/components/WorkspaceSidebar.tsx:479 (pill mount),563-636 (KeepAwakePill), src/strings.ts:697-711 (keepAwake group: keepAwakeOn/keepAwakeFailed)
+- **Coverage:** src-tauri/src/power.rs:36-90,95-161,197-360,362-387 (SleepAsserter, reconcile, IOKit FFI, commands), src-tauri/src/lib.rs:604,727-729 (new_power_slot manage + handler registration), src/ipc/power.ts:13-48, src/store/store.ts:443-457 (keepAwake slice types),617 (applyPowerStatus mirror),1064-1090 (init + setKeepAwakeEnabled + syncKeepAwake), src/App.tsx:470-476 (live-count sync effect), src/components/WorkspaceSidebar.tsx:479 (pill mount),563-636 (KeepAwakePill), src/strings.ts:786-800 (keepAwake group: keepAwakeOn/keepAwakeFailed)
 
 ## supervisor
 
@@ -1185,7 +1185,7 @@ in different lifecycle states.
 - **UI elements:** project "Run workflow" button, workflow picker, run detail (terminal swimlanes — one per agent block — with a stage progress rail, per-terminal session link, the run-journal / heartbeat panel between terminals, decision log, honest failed/stalled state), Home "open run" link
 - **States covered:** loading, success, error
 - **Errors & recovery:** run trigger rejects → toast, no run created; a stage's session fails to spawn → the run parks in an honest failed state with the reason (never fake busy); orchd/runtime down → the run cannot start and says so
-- **Note (honesty boundary, S6b — A-10):** the RUN is gated on the S6b orchestrator-agent runtime, which does not exist yet. The trigger and the run surface are designed now; until S6b, "Run workflow" carries the pending note "Workflows run once the orchestrator agent runtime lands (S6b)." and does not fake execution — exactly the SCN-046 boundary
+- **Note (honesty boundary, S6b — A-10):** the RUN is gated on the S6b orchestrator-agent runtime, which does not exist yet. The trigger and the run surface are designed now; until S6b, "Run workflow" carries the pending note "Workflows run once the orchestrator agent runtime lands (S6b)." and does not fake execution — exactly the SCN-046 boundary. What IS built today: the run picker in the workflow library (per-row "Run →" preselects that workflow by id; project-scoped rows intentionally have no row action while the picker is global-only); NOT built: the project-level "Run workflow" entry point, run creation, and the run detail surface
 - **Status:** draft
 - **Coverage:** none yet — S6b runtime (SW1 executor + WorkflowRun/StageState persistence)
 

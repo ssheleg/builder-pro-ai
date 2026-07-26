@@ -112,7 +112,7 @@ export function SpawnProjectFromIdea(props: { idea: Idea }): JSX.Element {
       await orchdSetIdeaProject(idea.id, projectId);
       await refreshProjects();
       await refreshIdeas();
-      showToast(strings.ideas.spawn.createdFromIdea);
+      showToast(strings.ideas.spawn.createdFromIdea, "success");
       setCreatedWorkspaceId(null);
       setCreatedProjectId(null);
       setError(null);

@@ -116,6 +116,14 @@ const createFormStyle: CSSProperties = {
   borderRadius: "var(--r-md)",
 };
 
+/** UX-1 first-fetch placeholder — the same dim muted register as GoalTree's `loadingTextStyle`
+ * (and DocsPanel's `docs-loading` row before it), so a still-loading inbox never reads as a
+ * genuinely empty one. */
+const loadingTextStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
+};
+
 interface IdeaRowProps {
   idea: Idea;
   isOrphan: boolean;
@@ -334,6 +342,7 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
   const { projectId } = props;
 
   const ideas = useAppStore((s) => s.ideas);
+  const ideasFetched = useAppStore((s) => s.ideasFetched);
   const projects = useAppStore((s) => s.projects);
   const refreshIdeas = useAppStore((s) => s.refreshIdeas);
   const showToast = useAppStore((s) => s.showToast);
@@ -354,6 +363,11 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
     .sort((a, b) => b.createdAt - a.createdAt);
 
   const isOrphanView = projectId === null;
+
+  // Only ACTIVE projects are offered as idea-attach targets (UX-2): an archived project is
+  // read-only history, so attaching a fresh idea to it would be a dead end. Mirrors
+  // QuickCapture's `activeProjects` filter and WorkspaceSidebar's (spec D7).
+  const activeProjects = projects.filter((p) => p.status === "active");
 
   // Eagerly populate `researchRunsByIdea` for every idea rendered here (S-IDEA §7, T6) — mirrors
   // `ProjectPanel`'s own-mount-fetch role for `IdeasList`/`InsightsList` (that component's doc
@@ -466,17 +480,29 @@ export function IdeasList(props: { projectId: string | null }): JSX.Element {
       </div>
 
       {rows.length === 0 ? (
-        <EmptyState
-          data-testid="ideas-list-empty"
-          title={isOrphanView ? strings.ideas.emptyOrphan : strings.ideas.emptyProject}
-        />
+        // UX-1: an empty cache means "no ideas" only once the FIRST fetch has settled
+        // (`ideasFetched` flips on success AND failure and never resets) — before that it just
+        // means "not loaded yet", so render the loading placeholder instead of flashing the false
+        // empty state at a user who HAS ideas (the GoalTree/DocsPanel loading-vs-empty split).
+        // After a FAILED first fetch the empty state is the honest copy, which is exactly what
+        // the never-reset flag yields.
+        ideasFetched !== true ? (
+          <div data-testid="ideas-list-loading" style={loadingTextStyle}>
+            {strings.ideas.loading}
+          </div>
+        ) : (
+          <EmptyState
+            data-testid="ideas-list-empty"
+            title={isOrphanView ? strings.ideas.emptyOrphan : strings.ideas.emptyProject}
+          />
+        )
       ) : (
         rows.map((idea) => (
           <IdeaRow
             key={idea.id}
             idea={idea}
             isOrphan={isOrphanView}
-            projects={projects}
+            projects={activeProjects}
             disabled={orchdDown}
             researchRuns={researchRunsByIdea[idea.id] ?? []}
             onTitleCommit={handleTitleCommit}

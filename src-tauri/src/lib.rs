@@ -588,9 +588,7 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         // fs_watcher's `WatchSlot` never depends on daemon connectivity (spec §5: core-local,
         // GUI-lifetime), so it's `manage`d immediately here on the builder. (`AppState` is likewise
@@ -1091,17 +1089,17 @@ mod tests {
 
     #[tokio::test]
     async fn connect_with_retry_gives_up_after_bounded_attempts_without_panicking() {
-        // XDG repointed at a guaranteed-dead runtime dir so the give-up branch fires
-        // deterministically EVEN ON A MACHINE WITH A LIVE bpa-sessiond bound at the ambient
-        // /tmp/bpa-{uid}/d.sock (the installed app's agent) — without it the test connects to the
-        // real daemon and the is_err() assertion fails (BL-102). 3 attempts are clamped up to
-        // HANDSHAKE_SUSPECT_CAP = 8 by the H3 guard, so 8 attempts x 5ms.
+        // No daemon is listening near a fresh tempdir — point XDG_RUNTIME_DIR there (serialized
+        // against the other env-mutating tests) so a live daemon at the /tmp/bpa-<uid> fallback
+        // can never answer and make this flap on a machine running the installed app.
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
         let started = std::time::Instant::now();
-        let result = with_dead_xdg(|| {
-            connect_with_retry("test-build".to_string(), 3, Duration::from_millis(5))
-        })
-        .await;
+        let result =
+            connect_with_retry("test-build".to_string(), 3, Duration::from_millis(5)).await;
         let elapsed = started.elapsed();
+        std::env::remove_var("XDG_RUNTIME_DIR");
 
         assert!(
             result.is_err(),
@@ -1118,12 +1116,14 @@ mod tests {
         // A misconfigured 0-attempt call must not silently return without ever trying: the H3
         // clamp raises it to HANDSHAKE_SUSPECT_CAP (8) real attempts (pre-H3, `attempts.max(1)`
         // guaranteed exactly one) — still bounded, still an honest Err when nothing is listening.
-        // Dead XDG (BL-102) so a live ambient daemon can't make it succeed.
+        // Hermetic: fresh tempdir as XDG_RUNTIME_DIR, same discipline as the test above.
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
         let started = std::time::Instant::now();
-        let result = with_dead_xdg(|| {
-            connect_with_retry("test-build".to_string(), 0, Duration::from_millis(5))
-        })
-        .await;
+        let result =
+            connect_with_retry("test-build".to_string(), 0, Duration::from_millis(5)).await;
+        std::env::remove_var("XDG_RUNTIME_DIR");
         assert!(result.is_err());
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -1135,32 +1135,6 @@ mod tests {
     // path from it), same discipline as `commands::commands_over_stub_daemon::ENV_TEST_LOCK` and
     // for the identical shared-process-state reason.
     static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// Drive `f` with `XDG_RUNTIME_DIR` repointed at a guaranteed-DEAD runtime dir — one with no
-    /// `bpa/d.sock` nor `bpa/orchd.sock` bound — serialized on `ENV_TEST_LOCK`. This is what makes
-    /// the connect-retry give-up/clamp tests deterministic even on a machine whose INSTALLED app
-    /// has a LIVE `bpa-sessiond`/`bpa-orchd` bound at the ambient `/tmp/bpa-{uid}/...` (BL-102):
-    /// without it `DaemonClient::connect` resolves the ambient socket, connects to the real daemon,
-    /// succeeds, and the `result.is_err()` assertion fails. The tempdir is held alive for the whole
-    /// `f().await`, then dropped (and XDG unset) before the lock guard releases.
-    async fn with_dead_xdg<F, Fut, R>(f: F) -> R
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = R>,
-    {
-        let _guard = ENV_TEST_LOCK.lock().await;
-        let dir = tempfile::tempdir().expect("tempdir for dead XDG");
-        // SAFETY: serialized on ENV_TEST_LOCK so no other test observes this mutation; the ambient
-        // value is unset on the way out, matching the sibling `*_does_not_retry_incompatible` tests.
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
-        }
-        let result = f().await;
-        unsafe {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
-        result
-    }
 
     #[tokio::test]
     async fn connect_with_retry_does_not_retry_incompatible() {
@@ -1423,15 +1397,18 @@ mod tests {
 
     #[tokio::test]
     async fn connect_orchd_with_retry_gives_up_after_bounded_attempts_without_panicking() {
-        // Dead XDG (BL-102) — no live orchd at the repointed runtime dir can satisfy the connect,
-        // so the give-up branch fires deterministically and quickly (clamped up to
-        // HANDSHAKE_SUSPECT_CAP = 8 by the same H3 guard `orchd_client::connect_with_retry` applies).
+        // No orchd daemon is listening near a fresh tempdir — exercises the give-up branch
+        // deterministically and quickly (clamped up to HANDSHAKE_SUSPECT_CAP = 8 by the same H3
+        // guard `orchd_client::connect_with_retry` applies). Hermetic: same XDG_RUNTIME_DIR
+        // discipline as the sessiond twin above, so a live installed daemon can't answer.
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
         let started = std::time::Instant::now();
-        let result = with_dead_xdg(|| {
-            connect_orchd_with_retry("test-build".to_string(), 3, Duration::from_millis(5))
-        })
-        .await;
+        let result =
+            connect_orchd_with_retry("test-build".to_string(), 3, Duration::from_millis(5)).await;
         let elapsed = started.elapsed();
+        std::env::remove_var("XDG_RUNTIME_DIR");
 
         assert!(
             result.is_err(),

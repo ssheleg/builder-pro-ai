@@ -231,9 +231,15 @@ export function FormInsightDialog(props: {
       return;
     }
     let cancelled = false;
-    void orchdGraphNeighborhood(ideaNode.id, 1).then((n) => {
-      if (!cancelled) setNeighborhood(n);
-    });
+    // FE-3 (deliberate silent catch): this neighborhood load is a best-effort context prefetch —
+    // on failure `neighborhood` simply stays `null` and the dialog renders its existing
+    // "no related nodes" state (`strings.insights.form.noRelatedNodes`), the honest fallback for
+    // missing context, so the rejection is swallowed here.
+    void orchdGraphNeighborhood(ideaNode.id, 1)
+      .then((n) => {
+        if (!cancelled) setNeighborhood(n);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -257,7 +263,7 @@ export function FormInsightDialog(props: {
       const updated = await orchdSetInsightFitVerdict(insightId, verdict, fitReasoning);
       setInsight(updated);
       await refreshInsights();
-      showToast(strings.insights.form.created);
+      showToast(strings.insights.form.created, "success");
     } catch (e) {
       const message = describeOrchdError(e);
       setErrorMessage(message);
@@ -306,7 +312,7 @@ export function FormInsightDialog(props: {
       await orchdSetIdeaLifecycle(idea.id, "specced");
       await refreshTasks(projectId);
       await refreshIdeas();
-      showToast(strings.insights.form.addedToBacklog);
+      showToast(strings.insights.form.addedToBacklog, "success");
       onClose();
     } catch (e) {
       const reason = describeOrchdError(e);

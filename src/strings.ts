@@ -178,6 +178,9 @@ export const strings = {
     restoredSection: "Restored (no live shell)",
     /** Per-row meta text on Home — what the owner can still expect from such a session. */
     restoredNote: "restored — scrollback only",
+    /** StatusDot state for the same bucket (FE-7): a restored session is NOT "idle" — idle implies
+     * a live shell at its prompt. */
+    restoredDotLabel: "restored — no live shell",
     /** One dim line under the section heading, so the state is explained where it is shown. */
     restoredHint:
       "These came back after a restart: their scrollback was kept, but the shell that produced it is gone.",
@@ -232,6 +235,10 @@ export const strings = {
      * it a failed attach was a silently blank terminal (both call sites `void` the promise). */
     attachFailed: (msg: string) => `Terminal could not attach: ${msg}`,
     attachRetry: "Retry",
+    /** One-time-per-session hint (FE-7) when the owner types into a RESTORED session (no live PTY
+     * behind it): the keystroke has nowhere to go, so the input must not be swallowed silently. */
+    restoredInputHint:
+      "This session was restored — its shell is gone. Start a new terminal to keep working.",
     commandHistory: "Command history",
     noCommands: "No commands yet",
     /** In-flight placeholder while the first `getCommandEvents` is still resolving (P-13) — kept
@@ -307,6 +314,9 @@ export const strings = {
     statusAria: "Goal status",
     addSubgoal: "+ subgoal",
     empty: "The goal tree is empty.",
+    /** First-fetch placeholder (UX-1): shown until `goalsFetched[projectId]` flips — kept DISTINCT
+     * from `empty` so a still-loading tree never flashes the false empty state. */
+    loading: "Loading goals…",
     treeAria: "Goal tree",
     /** metric_refs chip editor (O-4, spec D7): the row's success-metric references — added via the
      * text input + Enter, each removable via its chip's ×. */
@@ -352,6 +362,10 @@ export const strings = {
     spendCapLabel: "Spend cap, $",
     spendCapAria: "Spend cap in dollars, empty — no limit",
     spendCapPlaceholder: "no limit",
+    /** SEC-4 honesty note under every spend-cap control: the cap is INERT until MCP servers
+     * report per-call costs (the orchestrator cannot stop what it cannot price). */
+    spendCapInertHint:
+      "Enforced once servers report call costs — until then the cap is stored but does not block calls.",
     confirmClassesLabel: "Classes requiring confirmation",
     confirmClassAria: "New confirmation class",
     confirmClassPlaceholder: "class",
@@ -467,6 +481,9 @@ export const strings = {
     addIdea: "+ idea",
     emptyOrphan: "No ideas without a project.",
     emptyProject: "No ideas in this project yet.",
+    /** First-fetch placeholder (UX-1): shown until `ideasFetched` flips — kept DISTINCT from the
+     * two empty states so a still-loading list never flashes a false empty state. */
+    loading: "Loading ideas…",
     spawn: {
       folderPickerFailed: "failed to open the folder picker",
       createdFromIdea: "Project created from idea",
@@ -501,6 +518,9 @@ export const strings = {
       "the cost of an external call is usually unknown in advance — the orchestrator will stop the call only if it exceeds the current limit.",
     run: "Run",
     emptyRuns: "no research for this idea yet",
+    /** First-fetch placeholder (UX-1): shown until `researchRunsFetched[ideaId]` flips — kept
+     * DISTINCT from `emptyRuns` so a still-loading pane never flashes the false empty state. */
+    loadingRuns: "Loading research…",
     showArtifact: "show artifact",
     formInsight: "Form insight",
     formInsightNoResearch: "form insight without research",
@@ -523,6 +543,9 @@ export const strings = {
     applyVerdict: "apply verdict",
     emptyOrphan: "No insights without a project.",
     emptyProject: "No insights in this project yet.",
+    /** First-fetch placeholder (UX-1): shown until `insightsFetched` flips — kept DISTINCT from
+     * the two empty states so a still-loading list never flashes a false empty state. */
+    loading: "Loading insights…",
     form: {
       created: "Insight created",
       addedToBacklog: "Task added to backlog",
@@ -581,6 +604,9 @@ export const strings = {
     tagsPlaceholder: "comma-separated tags",
     addTask: "+ task",
     empty: "no tasks",
+    /** First-fetch placeholder (UX-1): shown until `tasksFetched[projectId]` flips — kept DISTINCT
+     * from `empty` so still-loading groups never flash the false empty state. */
+    loading: "Loading tasks…",
   },
 
   // ── graph canvas ─────────────────────────────────────────────────────────────────────────────
@@ -627,6 +653,9 @@ export const strings = {
       toggleHide: "hide",
       toggleShow: "show content",
       empty: "no artifacts",
+      /** First-fetch placeholder (UX-1): shown until `mcpArtifactsFetched` flips — kept DISTINCT
+       * from `empty` so a still-loading tab never flashes the false empty state. */
+      loading: "Loading artifacts…",
     },
     connectDialog: {
       title: (name: string) => `Connect to server "${name}"`,
@@ -684,6 +713,9 @@ export const strings = {
       authAria: "Authorization",
       addServer: "+ server",
       empty: "no servers",
+      /** First-fetch placeholder (UX-1): shown until `mcpServersFetched` flips — kept DISTINCT
+       * from `empty` so a still-loading tab never flashes the false empty state. */
+      loading: "Loading servers…",
       protocol: (v: string) => `protocol ${v}`,
       notConnected: "not yet connected",
       disable: "disable",
@@ -723,6 +755,10 @@ export const strings = {
       refIdPlaceholder: "project/server id",
       spendCapAria: "Spend cap, USD",
       spendCapPlaceholder: "cap $ (empty = no limit)",
+      /** SEC-4 honesty note (same register as `rules.spendCapInertHint`): the cap is INERT until
+       * MCP servers report per-call costs. */
+      spendCapInertHint:
+        "Enforced once servers report call costs — until then the cap is stored but does not block calls.",
       ratePerMinAria: "Calls-per-minute limit",
       ratePerMinPlaceholder: "calls/min (empty = no limit)",
       setLimit: "set limit",

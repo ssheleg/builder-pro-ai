@@ -54,6 +54,14 @@ const errorKindStyle: CSSProperties = {
   color: "var(--danger)",
 };
 
+/** UX-1 first-fetch placeholder — the same dim muted register as GoalTree's `loadingTextStyle`
+ * (and DocsPanel's `docs-loading` row before it), so a still-loading pane never reads as a
+ * genuinely empty one. */
+const loadingTextStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
+};
+
 interface OpenInsightTarget {
   runId: string;
   artifact: McpArtifact | null;
@@ -91,6 +99,7 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
   // `mcpToolsByServer`-then-derive pattern).
   const researchRunsByIdea = useAppStore((s) => s.researchRunsByIdea);
   const runs = researchRunsByIdea[idea.id] ?? [];
+  const researchRunsFetched = useAppStore((s) => s.researchRunsFetched);
   const mcpServers = useAppStore((s) => s.mcpServers);
   const showToast = useAppStore((s) => s.showToast);
 
@@ -148,6 +157,19 @@ export function ResearchPane(props: { idea: Idea; disabled: boolean }): JSX.Elem
   }
 
   if (runs.length === 0) {
+    // UX-1: an empty cache means "no runs" only once the FIRST fetch for this idea has settled
+    // (`researchRunsFetched[idea.id]` flips on success AND failure and never resets) — before
+    // that it just means "not loaded yet", so render the loading placeholder instead of flashing
+    // the false empty state at a user whose idea HAS runs (the GoalTree/DocsPanel
+    // loading-vs-empty split). After a FAILED first fetch the empty state is the honest copy,
+    // which is exactly what the never-reset flag yields.
+    if (researchRunsFetched[idea.id] !== true) {
+      return (
+        <div data-testid="research-pane-loading" style={loadingTextStyle}>
+          {strings.research.loadingRuns}
+        </div>
+      );
+    }
     return <EmptyState data-testid="research-pane-empty" title={strings.research.emptyRuns} />;
   }
 

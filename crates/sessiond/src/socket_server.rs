@@ -102,6 +102,15 @@ pub struct ServerDeps {
     /// transient DB error). Entries are added on `CreateSession`; a dead entry is simply skipped
     /// because `supervisor.meta(id)` returns `NoSuchSession` once the session is reaped.
     live_sessions: std::sync::Mutex<std::collections::HashSet<bpa_protocol::SessionId>>,
+    /// Ids of workspaces with an in-flight `RemoveWorkspace` (SES-1, audit 2026-07-24, probe
+    /// p5). Set right after the removal's existence check and held (via an RAII guard) until
+    /// the delete transaction AND the post-delete stray sweep complete. `CreateSession` rejects
+    /// any id in this set with the same typed `NoSuchWorkspace` error it returns for a
+    /// never-existent id (SES-4), so a create can no longer slip between the removal's victim
+    /// sweep and its delete tx and survive as an orphaned live shell inside a deleted
+    /// workspace. `std::sync::Mutex` like `live_sessions`: an instant insert/contains/remove,
+    /// never held across an `.await`.
+    closing_workspaces: std::sync::Mutex<std::collections::HashSet<bpa_protocol::WorkspaceId>>,
     /// The SAME `watch::Sender` whose receiver drives [`serve`]'s accept loop (and every connected
     /// client's dispatch loop, and the scrollback flusher). `Request::DaemonShutdown` is the only
     /// dispatch arm that fires this (spec §6.1): flipping it to `true` is exactly the SIGTERM path
@@ -143,6 +152,7 @@ impl ServerDeps {
             daemon_build,
             runtime_root,
             live_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
+            closing_workspaces: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutdown_tx,
             pending_final_flushes: std::sync::Mutex::new(Vec::new()),
         }
@@ -200,6 +210,51 @@ impl ServerDeps {
                 tracing::warn!(error = %e, "final flush task panicked during shutdown drain");
             }
         }
+    }
+
+    /// `true` while `workspace_id` has an in-flight `RemoveWorkspace` (SES-1) — the gate
+    /// `CreateSession` consults before spawning (see the field's doc).
+    fn is_workspace_closing(&self, workspace_id: &bpa_protocol::WorkspaceId) -> bool {
+        self.closing_workspaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(workspace_id)
+    }
+
+    /// Mark `workspace_id` as closing (SES-1) and return the RAII guard that unmarks it on
+    /// drop — so EVERY exit path of the `RemoveWorkspace` dispatch arm (success, a teardown
+    /// error, a delete-tx error, an early not-found return is impossible here because the
+    /// existence check runs before this is called) releases the gate.
+    fn begin_closing_workspace(
+        &self,
+        workspace_id: &bpa_protocol::WorkspaceId,
+    ) -> ClosingWorkspaceGuard<'_> {
+        self.closing_workspaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(workspace_id.clone());
+        ClosingWorkspaceGuard {
+            deps: self,
+            workspace_id: workspace_id.clone(),
+        }
+    }
+}
+
+/// RAII guard for [`ServerDeps::closing_workspaces`] (SES-1): removes the id from the closing
+/// set on drop. Never panics on a poisoned mutex (poison-safe cleanup, same pattern as
+/// `pending_final_flushes`).
+struct ClosingWorkspaceGuard<'a> {
+    deps: &'a ServerDeps,
+    workspace_id: bpa_protocol::WorkspaceId,
+}
+
+impl Drop for ClosingWorkspaceGuard<'_> {
+    fn drop(&mut self) {
+        self.deps
+            .closing_workspaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.workspace_id);
     }
 }
 
@@ -920,9 +975,10 @@ async fn dispatch_inner(
         // §3.3) so a workspace can never end up with zero roots. Same `WorkspaceUpdated` broadcast
         // as `AddWorkspaceRoot` above on success.
         Request::RemoveWorkspaceRoot { workspace_id, path } => {
-            // Canonicalize for matching (SES-6): stored roots are canonical (added via validate_dir),
-            // so a non-canonical incoming path would otherwise never match → silent no-op that hid the
-            // last-root `LastRoot` guard. Tolerates a root that no longer exists on disk.
+            // Canonicalize for matching (SES-6, ported from the concurrent main-tree fix): stored
+            // roots are canonical (added via validate_dir), so a non-canonical incoming path would
+            // otherwise never match → silent no-op that hid the last-root `LastRoot` guard.
+            // Tolerates a root that no longer exists on disk.
             let canonical = canonicalize_root_for_match(&path);
             let db = deps.db.lock().await;
             match db.remove_workspace_root(&workspace_id, &canonical) {
@@ -937,19 +993,28 @@ async fn dispatch_inner(
         // spec §3.3: remove a whole workspace — destructive and TOTAL. Ordering is the whole design:
         //
         //   1. existence gate (an unknown id must not kill anything),
-        //   2. collect every session that belongs to the workspace — the persisted rows UNION the
+        //   2. SES-1 (audit 2026-07-24, probe p5): mark the workspace CLOSING — from here on,
+        //      `CreateSession` rejects it with the same `NoSuchWorkspace` a never-existent id
+        //      gets, so no new session can be spawned into a workspace that is being torn down
+        //      (previously a create racing this arm could slip in after the victim sweep and
+        //      survive as an orphaned live shell inside a deleted workspace),
+        //   3. collect every session that belongs to the workspace — the persisted rows UNION the
         //      live ones the supervisor tracks, because persistence is best-effort (spec §11) and a
         //      running PTY whose row failed to write is exactly the one we must not miss,
-        //   3. kill/close each one through [`close_session`] — the SAME machinery `KillSession`
+        //   4. kill/close each one through [`close_session`] — the SAME machinery `KillSession`
         //      uses, never a second teardown — so a removal can never leave an orphaned child
         //      process behind (the "zombie" failure D3 already guards against elsewhere),
-        //   4. await the final-flush tasks those kills scheduled, so no detached best-effort write
-        //      can land AFTER the delete and leave a resurrected row, and
-        //   5. delete the workspace + its roots + its sessions + those sessions' dependent rows in
-        //      ONE transaction (`Db::delete_workspace`).
+        //   5. await the final-flush tasks those kills scheduled, so no detached best-effort write
+        //      can land AFTER the delete and leave a resurrected row,
+        //   6. delete the workspace + its roots + its sessions + those sessions' dependent rows in
+        //      ONE transaction (`Db::delete_workspace`), and
+        //   7. SES-1 post-delete stray sweep: a create that had passed BOTH of `CreateSession`'s
+        //      gates before the closing mark was set can still land a live session during steps
+        //      3-6 — kill any such survivor now, through the same `close_session` machinery.
         //
         // The DB lock is taken and released around each step — never held across a kill or across
-        // the flush drain, both of which take that same lock themselves.
+        // the flush drain, both of which take that same lock themselves. The closing mark is held
+        // by an RAII guard from step 2 until this arm returns, so every exit path releases it.
         //
         // The push is `Push::WorkspaceRemoved`, NOT `WorkspaceUpdated`: consumers upsert an
         // `Updated` payload into their store, so reusing it here would re-insert the workspace the
@@ -965,6 +1030,10 @@ async fn dispatch_inner(
                     Err(e) => return err(e.code(), e),
                 }
             };
+            // Step 2 (SES-1): the workspace exists — gate out any new `CreateSession` for it
+            // until this arm has fully finished (guard clears the mark on drop, any path).
+            let _closing_guard = deps.begin_closing_workspace(&workspace_id);
+
             let tracked: Vec<bpa_protocol::SessionId> =
                 deps.live_sessions.lock().unwrap().iter().cloned().collect();
             for id in tracked {
@@ -996,6 +1065,33 @@ async fn dispatch_inner(
             };
             match deleted {
                 Ok(_session_ids) => {
+                    // Step 7 (SES-1): post-delete stray sweep. A `CreateSession` that passed its
+                    // gates BEFORE the closing mark was set could have spawned a live session
+                    // during the steps above (its best-effort persist then failed the FK —
+                    // workspace row gone — but the live PTY would survive as an orphan). Kill
+                    // any session of this workspace that is still live, through the same
+                    // `close_session` machinery, and drain the flushes those kills schedule.
+                    let strays: Vec<bpa_protocol::SessionId> =
+                        deps.live_sessions.lock().unwrap().iter().cloned().collect();
+                    for id in strays {
+                        let belongs = matches!(
+                            deps.supervisor.meta(&id),
+                            Ok(meta) if meta.workspace_id == workspace_id
+                        );
+                        if !belongs {
+                            continue;
+                        }
+                        if let Response::Error { code, message } = close_session(deps, &id).await {
+                            tracing::warn!(
+                                session = %id, workspace = %workspace_id, code = %code,
+                                message = %message,
+                                "RemoveWorkspace: stray-session teardown failed (continuing)"
+                            );
+                        }
+                        deps.live_sessions.lock().unwrap().remove(&id);
+                    }
+                    deps.await_pending_final_flushes().await;
+
                     broadcaster.broadcast(Frame::Push(Push::WorkspaceRemoved {
                         workspace_id: workspace_id.clone(),
                     }));
@@ -1058,15 +1154,22 @@ async fn dispatch_inner(
             cols,
             rows,
         } => {
-            // SES-4: reject a bogus `workspace_id` UP FRONT. Without this, a session against an
-            // unknown workspace runs (the PTY is created) but EVERY persist fails on the
-            // `session.workspace_id` FK (log-only), and the session silently vanishes on the next
-            // daemon restart — no client-visible error. A real workspace is required.
+            // SES-4 (audit 2026-07-24, probe p4): a session for a workspace that does not exist
+            // must be REJECTED up front — previously the create succeeded and only the persist
+            // failed (silently, FK, log-only), so the session worked until the next restart and
+            // then vanished, with no client-visible error anywhere on the path.
+            // SES-1 (probe p5): the same typed error gates a workspace that is mid-
+            // `RemoveWorkspace`, closing the create/remove race at the entry point (the
+            // removal's post-delete stray sweep covers the residual window — see that arm).
+            if deps.is_workspace_closing(&workspace_id) {
+                return Response::Error {
+                    code: "NoSuchWorkspace".into(),
+                    message: format!("no workspace {workspace_id}"),
+                };
+            }
             {
                 let db = deps.db.lock().await;
-                let known = db.workspace_exists(&workspace_id);
-                drop(db);
-                match known {
+                match db.workspace_exists(&workspace_id) {
                     Ok(true) => {}
                     Ok(false) => {
                         return Response::Error {
@@ -1074,14 +1177,7 @@ async fn dispatch_inner(
                             message: format!("no workspace {workspace_id}"),
                         };
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            workspace = %workspace_id,
-                            error = %e,
-                            "workspace_exists probe failed"
-                        );
-                        return err("CreateSessionFailed", e);
-                    }
+                    Err(e) => return err("DbError", e),
                 }
             }
             let spec = match resolve_session_spec(
@@ -1276,9 +1372,10 @@ fn validate_dir(path: &str) -> Result<String, bpa_paths::PathError> {
 /// no longer exists on disk (the common case — the folder moved/was deleted), so unlike
 /// `validate_dir` this does NOT fail closed: a `canonicalize` failure falls back to canonicalizing
 /// the PARENT (which usually still exists) and re-joining the basename, matching the canonical form
-/// the root was stored under. SES-6: without this the incoming (non-canonical) path never matched
-/// the stored canonical path, so removal was a silent no-op and the last-root `LastRoot` guard
-/// never fired — the daemon ACKed without changing anything.
+/// the root was stored under. SES-6 (ported from the concurrent main-tree fix): without this the
+/// incoming (non-canonical) path never matched the stored canonical path, so removal was a silent
+/// no-op and the last-root `LastRoot` guard never fired — the daemon ACKed without changing
+/// anything.
 fn canonicalize_root_for_match(path: &str) -> String {
     let p = std::path::Path::new(path);
     if let Ok(c) = std::fs::canonicalize(p) {
@@ -1421,9 +1518,10 @@ mod tests {
 
     #[test]
     fn canonicalize_root_for_match_resolves_an_existing_dir_to_its_canonical_form() {
-        // SES-6: a workspace root stored via validate_dir is canonical; a remove that sends a
-        // non-canonical spelling (here: a path with a `.` segment, which canonicalize collapses)
-        // must resolve to the same canonical form so it MATCHES and the LastRoot guard can fire.
+        // SES-6 (ported from the concurrent main-tree fix): a workspace root stored via
+        // validate_dir is canonical; a remove that sends a non-canonical spelling (here: a path
+        // with a `.` segment, which canonicalize collapses) must resolve to the same canonical
+        // form so it MATCHES and the LastRoot guard can fire.
         let dir = tempfile::tempdir().unwrap();
         let real = std::fs::canonicalize(dir.path()).unwrap();
         // A non-canonical spelling: parent + "." + basename.
@@ -1566,20 +1664,6 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let (tx, rx) = tokio::sync::watch::channel(false);
         let (deps, runtime) = test_deps_with_shutdown(tx.clone());
-        // SES-4: CreateSession now validates the workspace exists. Seed the canonical test workspace
-        // "ws" so dispatch tests that CreateSession against it succeed, and so the cwd-rejection
-        // tests (which pair "ws" with an invalid cwd) still hit the cwd gate rather than
-        // NoSuchWorkspace.
-        deps.db
-            .lock()
-            .await
-            .upsert_workspace(&Workspace {
-                id: "ws".into(),
-                name: "ws".into(),
-                root_path: "/tmp".into(),
-                roots: vec!["/tmp".into()],
-            })
-            .unwrap();
         let jh = tokio::spawn(async move {
             let _ = serve(listener, deps, rx).await;
         });
@@ -1813,12 +1897,8 @@ mod tests {
                     id: 6,
                     res: Response::Workspaces(v),
                 } => {
-                    // spawn_server pre-seeds the canonical "ws" test workspace (SES-4), so the list
-                    // contains it PLUS the "w" we just created — assert "w" is present.
-                    assert!(
-                        v.iter().any(|w| w.name == "w"),
-                        "CreateWorkspace must persist 'w', got: {v:?}"
-                    );
+                    assert_eq!(v.len(), 1);
+                    assert_eq!(v[0].name, "w");
                     break;
                 }
                 Frame::Push(_) => continue,
@@ -2236,6 +2316,8 @@ mod tests {
             DaemonReply::Accepted { .. }
         ));
 
+        // SES-1/SES-4: CreateSession now requires a real, existing workspace — create one first.
+        let ws = create_workspace(&mut c, 100, "ws", "/tmp").await;
         // Use /bin/sh (unrecognized by classify_shell) so no integration assets are needed and the
         // resolution is deterministic; cwd=/tmp exists.
         send_frame(
@@ -2243,7 +2325,7 @@ mod tests {
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/tmp".into()),
                     env_overrides: vec![],
@@ -2343,12 +2425,14 @@ mod tests {
             preamble(&mut c).await,
             DaemonReply::Accepted { .. }
         ));
+        // SES-1/SES-4: the workspace must exist before cwd validation is even reached.
+        let ws = create_workspace(&mut c, 100, "ws", "/tmp").await;
         send_frame(
             &mut c,
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/nonexistent/xyzzy".into()),
                     env_overrides: vec![],
@@ -2377,13 +2461,15 @@ mod tests {
             preamble(&mut c).await,
             DaemonReply::Accepted { .. }
         ));
+        // SES-1/SES-4: the workspace must exist before cwd validation is even reached.
+        let ws = create_workspace(&mut c, 100, "ws", "/tmp").await;
         // A relative path that does not exist relative to the daemon's cwd ⇒ rejected.
         send_frame(
             &mut c,
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("relative/does/not/exist".into()),
                     env_overrides: vec![],
@@ -2413,6 +2499,8 @@ mod tests {
             DaemonReply::Accepted { .. }
         ));
 
+        // SES-1/SES-4: CreateSession now requires a real, existing workspace — create one first.
+        let ws = create_workspace(&mut c, 100, "ws", "/tmp").await;
         // Create a shell that waits for a go-signal, so we can attach before any output.
         // We drive the child via WriteStdin over the same connection.
         send_frame(
@@ -2420,7 +2508,7 @@ mod tests {
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/tmp".into()),
                     env_overrides: vec![],
@@ -2627,12 +2715,14 @@ mod tests {
             preamble(&mut a).await,
             DaemonReply::Accepted { .. }
         ));
+        // SES-1/SES-4: CreateSession now requires a real, existing workspace — create one first.
+        let ws = create_workspace(&mut a, 100, "ws", "/tmp").await;
         send_frame(
             &mut a,
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/tmp".into()),
                     env_overrides: vec![],
@@ -2768,7 +2858,7 @@ mod tests {
             &Frame::Request {
                 id: 2,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/tmp".into()),
                     env_overrides: vec![],
@@ -3449,11 +3539,13 @@ mod tests {
         flush_scrollback_once(&deps).await;
 
         let db = deps.db.lock().await;
-        let rows = db.list_sessions().unwrap();
-        let row = rows.iter().find(|m| m.id == id).expect("row present");
+        // Read the RAW lifecycle tag, not `list_sessions`: the read path deliberately maps a
+        // persisted `running` to `Exited { code: None }` (SES-3), which would mask exactly the
+        // write-side freshness this test proves — the flush must have written the CURRENT
+        // (`running`) tag over the create-time `atPrompt`.
+        let tag = db.raw_lifecycle_tag(&id);
         assert_eq!(
-            row.lifecycle,
-            bpa_protocol::SessionLifecycle::Running,
+            tag, "running",
             "a flush sweep must persist the live lifecycle, not the create-time AtPrompt"
         );
 
@@ -3949,12 +4041,14 @@ mod tests {
             preamble(&mut c).await,
             DaemonReply::Accepted { .. }
         ));
+        // SES-1/SES-4: the workspace must exist before cwd validation is even reached.
+        let ws = create_workspace(&mut c, 100, "ws", "/tmp").await;
         send_frame(
             &mut c,
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some(link),
                     env_overrides: vec![],
@@ -4243,12 +4337,14 @@ mod tests {
             preamble(&mut a).await,
             DaemonReply::Accepted { .. }
         ));
+        // SES-1/SES-4: CreateSession now requires a real, existing workspace — create one first.
+        let ws = create_workspace(&mut a, 100, "ws", "/tmp").await;
         send_frame(
             &mut a,
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/tmp".into()),
                     env_overrides: vec![],
@@ -4313,7 +4409,7 @@ mod tests {
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/tmp".into()),
                     env_overrides: vec![],
@@ -4509,12 +4605,14 @@ mod tests {
             preamble(&mut a).await,
             DaemonReply::Accepted { .. }
         ));
+        // SES-1/SES-4: CreateSession now requires a real, existing workspace — create one first.
+        let ws = create_workspace(&mut a, 100, "ws", "/tmp").await;
         send_frame(
             &mut a,
             &Frame::Request {
                 id: 1,
                 req: Request::CreateSession {
-                    workspace_id: "ws".into(),
+                    workspace_id: ws.id.clone(),
                     shell: Some("/bin/sh".into()),
                     cwd: Some("/tmp".into()),
                     env_overrides: vec![],

@@ -24,6 +24,11 @@
  *   `/x/y`, dropping the `~`) and then explicitly skipped rather than guessed at. Threading a
  *   home directory in would require either a Tauri API call (breaking store-freedom) or trusting
  *   a value the terminal itself never confirms; deferred until a real need appears.
+ * - A root-resolving match (`rel === ""`) that is only a TRIMMED PREFIX of the raw token — the
+ *   token continued past the match at a character outside the match class (a space inside a
+ *   spaced directory name like `/x/My Dir/f.ts`, or a non-ASCII segment like `/x/My/<cyrillic>.ts`):
+ *   the link would target the root DIRECTORY instead of the file the owner meant, the classic
+ *   wrong-target click (LNK-1). A full-token match that genuinely IS the root still linkifies.
  */
 
 /** One lexically-resolved file link inside a single terminal line. */
@@ -139,6 +144,22 @@ export function matchWorkspaceRoot(
 }
 
 /**
+ * LNK-1 wrong-target guard: `true` when the regex match ending at `matchEnd` is only a PREFIX
+ * of the raw token the owner actually typed — i.e. the token was trimmed at a character outside
+ * the match class. Two shapes: the very next char is `/` whose following segment failed the
+ * class (`/x/My/<cyrillic>.ts` — trimmed at the Cyrillic), or the match is followed by whitespace AND
+ * the next whitespace-delimited word itself contains a `/` (`/x/My Dir/f.ts` — trimmed at the
+ * space inside a spaced directory name). A match followed by nothing, or by plainly non-path
+ * prose (`/x/My now`), is a genuine full-token match, not a trim.
+ */
+function isTrimmedPrefix(line: string, matchEnd: number): boolean {
+  const rest = line.slice(matchEnd);
+  if (rest.startsWith("/")) return true;
+  const nextWord = /^\s+(\S+)/.exec(rest);
+  return nextWord !== null && nextWord[1].includes("/");
+}
+
+/**
  * Find every file-like link in one raw terminal line (spec §6.5). See the module doc for what is
  * deliberately NOT linkified. `cwd` and every entry of `roots` are expected to already be
  * absolute, canonical paths (the store's contract — `SessionMeta.cwd` / `Workspace.roots`); this
@@ -164,6 +185,11 @@ export function findFileLinks(line: string, cwd: string, roots: string[]): Resol
 
     const match = matchWorkspaceRoot(absolute, roots);
     if (!match) continue;
+
+    // LNK-1 (wrong-target kill): a match that resolves to the ROOT ITSELF while being only a
+    // trimmed prefix of the raw token would link the root directory instead of the file the
+    // owner meant — never emit it. Genuine full-token root matches still linkify.
+    if (match.rel === "" && isTrimmedPrefix(line, m.index + m[0].length)) continue;
 
     links.push({
       startCol: m.index + 1,

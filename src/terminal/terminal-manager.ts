@@ -186,10 +186,17 @@ export class TerminalManager {
     }
 
     term.onData((data) => {
-      void writeStdin(sessionId, data);
+      // FE-3 (deliberate silent catch): a rejected write (dead/restored PTY, daemon gone) is
+      // already surfaced through the daemon's session-lifecycle event path (the store's `exited`
+      // state) and the FE-7 restored-input hint in `TerminalPane` — the rejection itself carries
+      // nothing the owner would not already see, so it is swallowed here. `Promise.resolve` wraps
+      // the call so a non-promise (mock) return value cannot crash the xterm callback.
+      void Promise.resolve(writeStdin(sessionId, data)).catch(() => {});
     });
     term.onResize(({ cols: c, rows: r }) => {
-      void resize(sessionId, c, r);
+      // FE-3 (deliberate silent catch): same side channel as `writeStdin` above — a failed resize
+      // on a dead session is covered by the lifecycle/`exited` surface, nothing extra to report.
+      void Promise.resolve(resize(sessionId, c, r)).catch(() => {});
     });
 
     this.entries.set(sessionId, {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
 const orchdSetInsightFitVerdictMock = vi.fn();
 const orchdSetInsightStatusMock = vi.fn();
@@ -16,6 +16,7 @@ vi.mock("../ipc/orchd", () => ({
 
 import { InsightsList } from "./InsightsList";
 import { useAppStore } from "../store/store";
+import { strings } from "../strings";
 import type { Insight } from "../ipc/orchd-types";
 
 const projectId = "proj-1";
@@ -43,7 +44,13 @@ beforeEach(() => {
   orchdSetInsightStatusMock.mockReset().mockResolvedValue(makeInsight({ id: "in1" }));
   orchdListInsightsMock.mockReset().mockResolvedValue([]);
   describeOrchdErrorMock.mockReset().mockReturnValue("orchestrator: error");
-  useAppStore.setState({ insights: [], toast: null, toastQueue: [], orchdDown: false }, false);
+  // `insightsFetched: true` (UX-1): these tests exercise the post-first-fetch render paths —
+  // with the flag unset an empty list now shows the loading placeholder instead of the empty
+  // state.
+  useAppStore.setState(
+    { insights: [], insightsFetched: true, toast: null, toastQueue: [], orchdDown: false },
+    false,
+  );
 });
 
 describe("InsightsList", () => {
@@ -158,6 +165,26 @@ describe("InsightsList", () => {
 
   it("renders an empty state when there are no matching insights", () => {
     render(<InsightsList projectId={projectId} />);
+    expect(screen.getByTestId("insights-list-empty")).toBeTruthy();
+  });
+
+  it("UX-1: until the first fetch settles, the loading placeholder shows — never the false empty state", async () => {
+    // `insightsFetched` unset (the beforeEach flips it true for the post-fetch paths; here we
+    // want the pre-settle window) + an empty cache — exactly the window in which the pre-fix
+    // component flashed the false empty state at a user who HAS insights.
+    useAppStore.setState({ insights: [], insightsFetched: false }, false);
+
+    render(<InsightsList projectId={projectId} />);
+
+    expect(screen.getByTestId("insights-list-loading").textContent).toBe(strings.insights.loading);
+    expect(screen.queryByTestId("insights-list-empty")).toBeNull(); // no false empty flash
+    expect(screen.queryByText(strings.insights.emptyProject)).toBeNull();
+
+    // Flag set + still-empty data → the honest empty state shows, the loading row is gone.
+    await act(async () => {
+      useAppStore.setState({ insightsFetched: true }, false);
+    });
+    expect(screen.queryByTestId("insights-list-loading")).toBeNull();
     expect(screen.getByTestId("insights-list-empty")).toBeTruthy();
   });
 

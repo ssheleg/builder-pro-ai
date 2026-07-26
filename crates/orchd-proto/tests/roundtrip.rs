@@ -575,14 +575,17 @@ fn all_requests() -> Vec<OrchdRequest> {
             id: "node-1".into(),
             label: Some("Updated label".into()),
             body: Some("Updated body".into()),
+            project_id: Some("proj-1".into()),
         },
         OrchdRequest::GraphMoveNode {
             id: "node-1".into(),
             pos_x: 5.5,
             pos_y: 6.5,
+            project_id: None,
         },
         OrchdRequest::GraphDeleteNode {
             id: "node-1".into(),
+            project_id: Some("proj-1".into()),
         },
         OrchdRequest::GraphAddEdge {
             source_node_id: "node-1".into(),
@@ -1120,6 +1123,35 @@ fn create_task_without_priority_key_deserializes_as_none() {
     match req {
         OrchdRequest::CreateTask { priority, .. } => assert_eq!(priority, None),
         other => panic!("expected CreateTask, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_node_mutation_verbs_without_project_id_key_deserialize_as_none() {
+    // GRAPH-1 (BL-143) back-compat mirror of the CreateTask test above: a pre-GRAPH-1 peer
+    // omits the `project_id` key on the three node-mutation verbs — `#[serde(default)]` must
+    // decode it as `None` (⇒ legacy unchecked behavior) instead of failing the frame. Field
+    // names stay snake_case (Hop-B frames are NOT camelCased).
+    let update: OrchdRequest = serde_json::from_str(
+        r#"{"GraphUpdateNode": {"id": "node-1", "label": "L", "body": null}}"#,
+    )
+    .expect("pre-GRAPH-1 GraphUpdateNode decodes");
+    match update {
+        OrchdRequest::GraphUpdateNode { project_id, .. } => assert_eq!(project_id, None),
+        other => panic!("expected GraphUpdateNode, got {other:?}"),
+    }
+    let mv: OrchdRequest =
+        serde_json::from_str(r#"{"GraphMoveNode": {"id": "node-1", "pos_x": 1.0, "pos_y": 2.0}}"#)
+            .expect("pre-GRAPH-1 GraphMoveNode decodes");
+    match mv {
+        OrchdRequest::GraphMoveNode { project_id, .. } => assert_eq!(project_id, None),
+        other => panic!("expected GraphMoveNode, got {other:?}"),
+    }
+    let delete: OrchdRequest = serde_json::from_str(r#"{"GraphDeleteNode": {"id": "node-1"}}"#)
+        .expect("pre-GRAPH-1 GraphDeleteNode decodes");
+    match delete {
+        OrchdRequest::GraphDeleteNode { project_id, .. } => assert_eq!(project_id, None),
+        other => panic!("expected GraphDeleteNode, got {other:?}"),
     }
 }
 

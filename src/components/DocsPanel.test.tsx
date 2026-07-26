@@ -199,6 +199,41 @@ describe("DocsPanel", () => {
     );
   });
 
+  // ---- double-submit guards (FE-4, spec D6): one test per guard instance ----
+
+  it('a rapid double-click on "+ doc" fires the create only once (create guard)', async () => {
+    useAppStore.setState({ docsByProject: { p1: [] } }, false);
+    // A never-settling upsert keeps the guard's ref lock engaged across both clicks.
+    orchdUpsertDocMock.mockReset().mockReturnValue(new Promise<never>(() => {}));
+
+    render(<DocsPanel projectId="p1" />);
+    fireEvent.change(screen.getByTestId("docs-add-name"), { target: { value: "notes" } });
+    const addBtn = screen.getByTestId("docs-add") as HTMLButtonElement;
+    fireEvent.click(addBtn);
+    fireEvent.click(addBtn);
+
+    await waitFor(() => expect(orchdUpsertDocMock).toHaveBeenCalledTimes(1));
+    expect(addBtn.disabled).toBe(true); // the visible affordance while the create is in flight
+  });
+
+  it("a rapid double-click on Save fires the upsert only once (editor guard)", async () => {
+    seedDoc(makeView({ name: "notes", mdContent: "old\n" }));
+    orchdGetDocMock.mockResolvedValue(makeView({ name: "notes", mdContent: "old\n" }));
+    // A never-settling upsert keeps the guard's ref lock engaged across both clicks.
+    orchdUpsertDocMock.mockReset().mockReturnValue(new Promise<never>(() => {}));
+
+    render(<DocsPanel projectId="p1" />);
+    fireEvent.click(screen.getByTestId("docs-row-notes"));
+    await waitFor(() => expect(screen.getByTestId("docs-content")).toBeTruthy());
+
+    const saveBtn = screen.getByTestId("docs-save") as HTMLButtonElement;
+    fireEvent.click(saveBtn);
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => expect(orchdUpsertDocMock).toHaveBeenCalledTimes(1));
+    expect(saveBtn.disabled).toBe(true); // the visible affordance while the save is in flight
+  });
+
   it("a rejected Save surfaces inline + toast and PRESERVES the editor content (SCN-054)", async () => {
     seedDoc(makeView({ name: "notes", mdContent: "old\n" }));
     orchdGetDocMock.mockResolvedValue(makeView({ name: "notes", mdContent: "old\n" }));
@@ -279,6 +314,11 @@ describe("DocsPanel", () => {
     fireEvent.click(screen.getByTestId("docs-delete"));
     expect(confirmSpy).toHaveBeenCalledWith(strings.docs.deleteConfirm);
     expect(orchdDeleteDocMock).not.toHaveBeenCalled();
+
+    // FE-4: the cancelled click still took the submit guard's lock for its synchronous early
+    // return — flush the microtask that releases it before the NEXT user click (in a real UI the
+    // confirm dialog itself provides that gap between the two attempts).
+    await act(async () => {});
 
     // Confirmed → DeleteDoc by the daemon-issued id.
     confirmSpy.mockReturnValueOnce(true);

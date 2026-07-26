@@ -199,23 +199,32 @@ impl Db {
     /// concurrent run, keeps its own lifecycle). One transaction so a concurrent `DeleteIdea`
     /// (FK `idea_id` `ON DELETE CASCADE`) can't interleave a half-completed insert+flip. Unknown
     /// `idea_id`/`server_id` ⇒ `NotFound`.
+    ///
+    /// DOM-5 of the 2026-07-24 audit remediation: the idea's OWN `project_id` passes the
+    /// archived-project guard (`ensure_optional_project_active`) — previously this was the ONLY
+    /// child mutation that escaped the spec §5.2 archived doctrine, starting a run (and flipping
+    /// the lifecycle) on an ARCHIVED project. An orphan idea (`project_id NULL`) stays runnable
+    /// (no project to be archived).
+    ///
+    /// Returns the inserted row PLUS whether the lifecycle flip actually happened (DOM-9 of the
+    /// same remediation): the dispatch layer must emit `IdeasChanged` exactly when the idea
+    /// visibly changed — the conditional `UPDATE`'s affected-row count is that signal.
     pub fn start_research_run(
         &self,
         new: NewResearchRun,
-    ) -> Result<ResearchRunRow, OrchdPersistError> {
+    ) -> Result<(ResearchRunRow, bool), OrchdPersistError> {
         let tx = self.conn().unchecked_transaction()?;
 
-        let idea_exists = tx
+        let idea_project: Option<Option<String>> = tx
             .query_row(
-                "SELECT 1 FROM idea WHERE id = ?1",
+                "SELECT project_id FROM idea WHERE id = ?1",
                 rusqlite::params![new.idea_id],
-                |_| Ok(()),
+                |r| r.get(0),
             )
-            .optional()?
-            .is_some();
-        if !idea_exists {
-            return Err(OrchdPersistError::NotFound);
-        }
+            .optional()?;
+        let idea_project = idea_project.ok_or(OrchdPersistError::NotFound)?;
+        crate::persistence::ensure_optional_project_active(&tx, idea_project.as_deref())?;
+
         let server_exists = tx
             .query_row(
                 "SELECT 1 FROM mcp_server WHERE id = ?1",
@@ -246,15 +255,15 @@ impl Db {
 
         // Only-if-captured idea flip (spec §6 step 2) — same tx as the insert above, so the
         // "Transition atomicity" note's concurrent-DeleteIdea guard covers this write too.
-        tx.execute(
+        let flipped = tx.execute(
             "UPDATE idea SET lifecycle = 'researching', updated_at = ?2
              WHERE id = ?1 AND lifecycle = 'captured'",
             rusqlite::params![new.idea_id, now],
-        )?;
+        )? > 0;
 
         let row = load_research_run(&tx, &id)?;
         tx.commit()?;
-        Ok(row)
+        Ok((row, flipped))
     }
 
     /// `set_research_run_running` (spec §6 step 3a). Unknown `id` ⇒ `NotFound`.
@@ -508,6 +517,7 @@ pub async fn run_research<F, Fut, S>(
 fn classify_run_error(err: &OrchdMcpError) -> &'static str {
     match err {
         OrchdMcpError::PolicyCapExceeded(_) => "policy_cap_exceeded",
+        OrchdMcpError::ServerDisabled => "server_disabled",
         OrchdMcpError::ToolDisabled => "tool_disabled",
         OrchdMcpError::ConsentRequired => "consent_required",
         // Covers `Transport`/`Protocol`/`Timeout`/`ToolError`/`Auth` uniformly — the SAME mapping
@@ -543,12 +553,12 @@ pub async fn start_run(
     db: &Arc<Mutex<Db>>,
     broadcaster: &Broadcaster<OrchdFrame>,
     new: NewResearchRun,
-) -> Result<ResearchRunRow, OrchdPersistError> {
-    let (row, project_id) = {
+) -> Result<(ResearchRunRow, bool), OrchdPersistError> {
+    let (row, project_id, flipped) = {
         let guard = db.lock().await;
-        let row = guard.start_research_run(new)?;
+        let (row, flipped) = guard.start_research_run(new)?;
         let project_id = resolve_idea_project_id(guard.conn(), &row.idea_id)?;
-        (row, project_id)
+        (row, project_id, flipped)
     };
 
     tokio::spawn(run_research(
@@ -563,7 +573,16 @@ pub async fn start_run(
         crate::mcp::connect_session,
     ));
 
-    Ok(row)
+    // DOM-9 of the 2026-07-24 audit remediation: the insert above may have flipped the idea's
+    // lifecycle `captured`→`researching` INSIDE the same transaction — other clients/views must
+    // learn about it NOW (the run driver's own `ResearchRunsChanged` pushes don't cover the
+    // ideas family). Emitted here, after the tx committed and before the reply, mirroring every
+    // other successful mutating verb's push discipline.
+    if flipped {
+        broadcaster.broadcast(OrchdFrame::Push(OrchdPush::IdeasChanged));
+    }
+
+    Ok((row, flipped))
 }
 
 /// Resolve `idea_id`'s OWN `project_id` (spec §6 step b). [`Db::start_research_run`]'s own
@@ -683,10 +702,11 @@ mod tests {
         let idea_id = new_idea(&db, IdeaLifecycle::Captured);
         let server_id = new_server(&db);
 
-        let run = db
+        let (run, flipped) = db
             .start_research_run(new_run(&idea_id, &server_id))
             .unwrap();
 
+        assert!(flipped, "a captured idea must flip to researching (DOM-9)");
         assert_eq!(run.status, ResearchStatus::Pending);
         assert_eq!(run.idea_id, idea_id);
         assert_eq!(run.server_id, server_id);
@@ -705,9 +725,11 @@ mod tests {
         let idea_id = new_idea(&db, IdeaLifecycle::Specced);
         let server_id = new_server(&db);
 
-        db.start_research_run(new_run(&idea_id, &server_id))
+        let (_run, flipped) = db
+            .start_research_run(new_run(&idea_id, &server_id))
             .unwrap();
 
+        assert!(!flipped, "a specced idea keeps its lifecycle (DOM-9)");
         assert_eq!(idea_lifecycle(&db, &idea_id), "specced");
     }
 
@@ -717,10 +739,35 @@ mod tests {
         let idea_id = new_idea(&db, IdeaLifecycle::Archived);
         let server_id = new_server(&db);
 
-        db.start_research_run(new_run(&idea_id, &server_id))
+        let (_run, flipped) = db
+            .start_research_run(new_run(&idea_id, &server_id))
             .unwrap();
 
+        assert!(!flipped, "an archived idea keeps its lifecycle (DOM-9)");
         assert_eq!(idea_lifecycle(&db, &idea_id), "archived");
+    }
+
+    #[test]
+    fn start_research_run_on_an_idea_of_an_archived_project_is_invariant() {
+        // DOM-5 of the 2026-07-24 audit remediation: this was the ONLY child mutation that
+        // escaped the archived doctrine — a run started (and flipped `captured`→`researching`)
+        // on an ARCHIVED project. It must now deny as `Invariant("project archived")`.
+        let db = new_db();
+        let project = db.create_project("P", "", &["w-dom5".to_string()]).unwrap();
+        let idea = db.create_idea(Some(&project.id), "An idea", "").unwrap();
+        let server_id = new_server(&db);
+        db.archive_project(&project.id).unwrap();
+
+        let err = db
+            .start_research_run(new_run(&idea.id, &server_id))
+            .unwrap_err();
+
+        assert!(
+            matches!(err, OrchdPersistError::Invariant(_)),
+            "a run on an archived project's idea must be Invariant, got {err:?}"
+        );
+        assert_eq!(idea_lifecycle(&db, &idea.id), "captured");
+        assert!(db.list_research_runs(&idea.id).unwrap().is_empty());
     }
 
     #[test]
@@ -752,7 +799,8 @@ mod tests {
         let server_id = new_server(&db);
         let run = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
 
         let updated = db.set_research_run_running(&run.id).unwrap();
         assert_eq!(updated.status, ResearchStatus::Running);
@@ -765,7 +813,8 @@ mod tests {
         let server_id = new_server(&db);
         let run = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
 
         let updated = db.set_research_run_done(&run.id, "inv-1", "art-1").unwrap();
 
@@ -785,7 +834,8 @@ mod tests {
         let server_id = new_server(&db);
         let run = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
 
         let updated = db.set_research_run_failed(&run.id, "timeout").unwrap();
 
@@ -833,7 +883,8 @@ mod tests {
 
         let run1 = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
         // Backdate explicitly so ordering doesn't depend on two `now_ms()` calls landing in
         // different milliseconds (fast CI clocks can tie).
         db.conn()
@@ -844,7 +895,8 @@ mod tests {
             .unwrap();
         let run2 = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
         db.conn()
             .execute(
                 "UPDATE research_run SET created_at = 2000 WHERE id = ?1",
@@ -889,7 +941,8 @@ mod tests {
         let server_id = new_server(&db);
         let run = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
 
         let fetched = db.get_research_run(&run.id).unwrap().unwrap();
         assert_eq!(fetched, run);
@@ -905,18 +958,22 @@ mod tests {
 
         let pending = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
         let running = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
         db.set_research_run_running(&running.id).unwrap();
         let done = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
         db.set_research_run_done(&done.id, "inv", "art").unwrap();
         let failed = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
         db.set_research_run_failed(&failed.id, "tool_error")
             .unwrap();
 
@@ -960,7 +1017,8 @@ mod tests {
         let server_id = new_server(&db);
         let run = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
 
         db.delete_idea(&idea_id).unwrap();
 
@@ -974,7 +1032,8 @@ mod tests {
         let server_id = new_server(&db);
         let run = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
 
         db.delete_mcp_server(&server_id).unwrap();
 
@@ -990,7 +1049,8 @@ mod tests {
         let server_id = new_server(&db);
         let row = db
             .start_research_run(new_run(&idea_id, &server_id))
-            .unwrap();
+            .unwrap()
+            .0;
         let row = db.set_research_run_done(&row.id, "inv-1", "art-1").unwrap();
 
         let wire: bpa_orchd_proto::ResearchRun = row.clone().into();
@@ -1060,6 +1120,10 @@ mod driver_tests {
     /// simplest honest case; `start_run`'s own project-resolution path is exercised separately by
     /// `start_run_returns_pending_row_and_flips_idea_to_researching`) + an enabled `search` tool
     /// on an HTTP server, mirroring `mcp::invoke`'s own `add_server`/`add_tool` test helpers.
+    /// ALSO grants the HTTP `connect` consent — SEC-1 of the 2026-07-24 audit remediation made
+    /// EVERY HTTP tool call (including the run driver's) re-authorize its per-call reconnect
+    /// against the CURRENT url fingerprint, so a test expecting the driver to reach the network
+    /// must consent first.
     async fn seed_idea_and_tool(db: &Arc<Mutex<Db>>) -> (String, String) {
         let guard = db.lock().await;
         let idea = guard.create_idea(None, "An idea", "").unwrap();
@@ -1092,11 +1156,8 @@ mod driver_tests {
                 }],
             )
             .unwrap();
-        // SEC-1: the research driver goes through `mcp::invoke::call_tool`, which now re-gates the
-        // connect consent per call (URL fingerprint), so the HTTP test server needs a connect grant
-        // matching its url — same as the production flow (connect before invoke).
         guard
-            .grant_consent(&server.id, "connect", "https://example.com/mcp")
+            .grant_consent(&server.id, "connect", server.url.as_deref().unwrap())
             .unwrap();
         (idea.id, server.id)
     }
@@ -1187,8 +1248,9 @@ mod driver_tests {
             )
         };
         let broadcaster: Broadcaster<OrchdFrame> = Broadcaster::new();
+        let mut rx = subscribe(&broadcaster);
 
-        let row = start_run(
+        let (row, flipped) = start_run(
             &db,
             &broadcaster,
             NewResearchRun {
@@ -1201,6 +1263,7 @@ mod driver_tests {
         .await
         .unwrap();
 
+        assert!(flipped, "a captured idea must flip to researching");
         assert_eq!(row.status, ResearchStatus::Pending);
         assert_eq!(row.idea_id, idea_id);
         assert_eq!(row.server_id, server_id);
@@ -1218,6 +1281,21 @@ mod driver_tests {
             )
             .unwrap();
         assert_eq!(lifecycle, "researching");
+
+        // DOM-9 of the 2026-07-24 audit remediation: the lifecycle flip must fan out as
+        // `IdeasChanged` — previously only the run driver's `ResearchRunsChanged` fired, and
+        // every other client/view drifted until an unrelated push. Drain everything queued so
+        // far: the spawned driver may interleave its own `ResearchRunsChanged` pushes.
+        let mut saw_ideas_changed = false;
+        while let Ok(frame) = rx.try_recv() {
+            if matches!(frame, OrchdFrame::Push(OrchdPush::IdeasChanged)) {
+                saw_ideas_changed = true;
+            }
+        }
+        assert!(
+            saw_ideas_changed,
+            "the lifecycle flip must broadcast IdeasChanged"
+        );
     }
 
     // ---- run_research: fake success ----
@@ -1236,6 +1314,7 @@ mod driver_tests {
                     args_json: "{}".to_string(),
                 })
                 .unwrap()
+                .0
         };
 
         let broadcaster: Broadcaster<OrchdFrame> = Broadcaster::new();
@@ -1315,6 +1394,7 @@ mod driver_tests {
                     args_json: "{}".to_string(),
                 })
                 .unwrap()
+                .0
         };
 
         let broadcaster: Broadcaster<OrchdFrame> = Broadcaster::new();
@@ -1377,6 +1457,7 @@ mod driver_tests {
                     args_json: "{}".to_string(),
                 })
                 .unwrap()
+                .0
         };
 
         let broadcaster: Broadcaster<OrchdFrame> = Broadcaster::new();

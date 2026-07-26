@@ -58,3 +58,57 @@ pub use boot::app_support_dir_for_test;
 /// Testable daemon boot core (spec §5): bind, open the DB, ensure the global ruleset, run
 /// `serve` until shutdown, then drain. `main.rs` is a thin process-concerns wrapper over this.
 pub use boot::run;
+
+/// Shared `$HOME` isolation for the lib test binary. `bpa_daemon_core::dirs::app_support_dir()`
+/// resolves from process-global `$HOME` FRESH at every call, and `cargo test` runs same-binary
+/// tests concurrently — so EVERY test module that overrides `$HOME` must serialize on the ONE
+/// lock defined here (a second private copy of the lock would not exclude the other copies).
+/// `persistence::workflow_tests` and `socket_server`'s own tests both use this guard.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// The one lock for the whole lib test binary — see the module doc comment.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Overrides `$HOME` with `dir` until dropped (restoring the prior value), serialized on
+    /// [`HOME_LOCK`]. Mirrors `tests/dispatch_integration.rs`'s `HomeGuard` byte-for-byte.
+    pub(crate) struct HomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        pub(crate) fn set(dir: &std::path::Path) -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prior = std::env::var_os("HOME");
+            // Symlink `Library/Keychains` from the REAL `$HOME` into this test's isolated `dir`:
+            // OTHER same-binary tests (e.g. `connectors::accounts`/`adapter`) resolve the macOS
+            // default keychain via a `$HOME`-derived path THROUGH `bpa_secrets`, and run
+            // CONCURRENTLY with this override — without the symlink their Keychain access
+            // resolves to a nonexistent keychain under the bare tempdir and fails/hangs. The
+            // symlink points at the SAME keychain those tests could already reach directly (no
+            // new access granted); only `Library/Keychains` is shared — the
+            // `Library/Application Support` subtree stays a fresh isolated tempdir.
+            if let Some(real_home) = &prior {
+                let keychains_link = dir.join("Library/Keychains");
+                if let Some(parent) = keychains_link.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::os::unix::fs::symlink(
+                    std::path::Path::new(real_home).join("Library/Keychains"),
+                    &keychains_link,
+                );
+            }
+            std::env::set_var("HOME", dir);
+            HomeGuard { _lock: lock, prior }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}

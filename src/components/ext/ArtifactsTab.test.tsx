@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
 const mcpListArtifactsMock = vi.fn();
 vi.mock("../../ipc/orchd", () => ({
@@ -55,7 +55,10 @@ function makeServer(over: Partial<McpServer> = {}): McpServer {
 afterEach(cleanup);
 beforeEach(() => {
   mcpListArtifactsMock.mockReset().mockResolvedValue([]);
-  useAppStore.setState({ mcpArtifacts: [], mcpServers: [] }, false);
+  // `mcpArtifactsFetched: true` (UX-1): these tests exercise the post-first-fetch render paths —
+  // with the flag unset an empty list now shows the loading placeholder instead of the empty
+  // state.
+  useAppStore.setState({ mcpArtifacts: [], mcpArtifactsFetched: true, mcpServers: [] }, false);
 });
 
 describe("ArtifactsTab", () => {
@@ -68,6 +71,32 @@ describe("ArtifactsTab", () => {
 
   it("renders an empty-state message when there are no artifacts", () => {
     render(<ArtifactsTab />);
+    expect(screen.getByTestId("artifacts-empty")).toBeTruthy();
+  });
+
+  it("UX-1: until the first fetch settles, the loading placeholder shows — never the false empty state", async () => {
+    // mcpListArtifacts stays pending: the FIRST fetch (this tab fires it on mount) has not
+    // settled, so `mcpArtifactsFetched` is unset and the cache is still empty — exactly the
+    // window in which the pre-fix component flashed the false empty state at a user who HAS
+    // artifacts.
+    mcpListArtifactsMock.mockReset().mockImplementation(
+      () => new Promise<McpArtifact[]>(() => {}),
+    );
+    useAppStore.setState({ mcpArtifacts: [], mcpArtifactsFetched: false }, false);
+
+    render(<ArtifactsTab />);
+
+    expect(mcpListArtifactsMock).toHaveBeenCalledTimes(1); // the fetch IS in flight meanwhile
+    expect(screen.getByTestId("artifacts-loading").textContent).toBe(
+      strings.ext.artifacts.loading,
+    );
+    expect(screen.queryByTestId("artifacts-empty")).toBeNull(); // no false empty flash
+
+    // Flag set + still-empty data → the honest empty state shows, the loading row is gone.
+    await act(async () => {
+      useAppStore.setState({ mcpArtifactsFetched: true }, false);
+    });
+    expect(screen.queryByTestId("artifacts-loading")).toBeNull();
     expect(screen.getByTestId("artifacts-empty")).toBeTruthy();
   });
 

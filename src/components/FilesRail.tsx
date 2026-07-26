@@ -88,29 +88,39 @@ export function FilesRail(props: { workspace: Workspace | undefined }): JSX.Elem
   // there even though it provably isn't at this point in render.
   const roots = workspace.roots;
 
-  // Toggling what's included changes the wire request (`listDir(..., includeIgnored)`); any
-  // cached listing fetched under the OLD flag would silently misrepresent the new one, so every
-  // cached dir for this workspace is dropped — a re-expand (or the still-expanded root, via
-  // FileTree's own auto-refetch effect) pulls a fresh, honest listing.
-  function onToggleShowIgnored(): void {
-    toggleShowIgnored();
-    for (const root of roots) {
-      invalidateDirs(root, ["*"]);
-    }
-  }
-
-  // "Refresh" (spec §7 "Watcher dies -> ... manual refresh; auto-retry on re-activation"):
-  // restart the live watch (fire-and-forget — a renewed failure re-fires `fs://watch-error`,
-  // a later task's concern) and drop every cached dir so the visible tree re-pulls honestly
-  // rather than keep showing whatever was last seen before the watch died.
-  function onRefreshWatch(): void {
-    // Optimistically clear the paused flag, but re-set it if the restart itself rejects (C2) so
-    // the tree never falsely reads "live" — and the rejection never escapes as unhandled.
-    void startWorkspaceWatch(roots, showIgnored).catch(() => setWatchPaused(true));
+  // Shared watch-restart sequence (FS-7 — used by both the show-ignored toggle and the
+  // watch-paused "refresh" affordance): restart the live watch with the given includeIgnored
+  // flag (fire-and-forget — a renewed failure re-fires `fs://watch-error`, a later task's
+  // concern) and drop every cached dir so the visible tree re-pulls honestly rather than keep
+  // showing whatever was last seen under the old flag. The paused flag is cleared
+  // optimistically, but re-set if the restart itself rejects (C2) so the tree never falsely
+  // reads "live" — and the rejection never escapes as unhandled.
+  function restartWatch(includeIgnored: boolean): void {
+    void startWorkspaceWatch(roots, includeIgnored).catch(() => setWatchPaused(true));
     for (const root of roots) {
       invalidateDirs(root, ["*"]);
     }
     setWatchPaused(false);
+  }
+
+  // Toggling what's included changes the wire request (`listDir(..., includeIgnored)`); any
+  // cached listing fetched under the OLD flag would silently misrepresent the new one, so every
+  // cached dir for this workspace is dropped — a re-expand (or the still-expanded root, via
+  // FileTree's own auto-refetch effect) pulls a fresh, honest listing. The LIVE watcher filters
+  // fs events by the flag it was STARTED with, so it must be restarted with the new flag too
+  // (FS-7) — otherwise it would keep filtering by the OLD value until re-activation while the
+  // listings already show the new one. `showIgnored` here is the pre-toggle render value, so
+  // the new flag is its negation.
+  function onToggleShowIgnored(): void {
+    toggleShowIgnored();
+    restartWatch(!showIgnored);
+  }
+
+  // "Refresh" (spec §7 "Watcher dies -> ... manual refresh; auto-retry on re-activation"):
+  // restart the live watch and drop every cached dir so the visible tree re-pulls honestly
+  // rather than keep showing whatever was last seen before the watch died.
+  function onRefreshWatch(): void {
+    restartWatch(showIgnored);
   }
 
   return (

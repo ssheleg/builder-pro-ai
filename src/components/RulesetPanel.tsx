@@ -224,7 +224,8 @@ const checkboxLabelStyle: CSSProperties = {
   cursor: "pointer",
 };
 
-/** Muted informational lines: inherited-caps, info-access, scope summary, "MCP tools — soon". */
+/** Muted informational lines: the SEC-4 spend-cap inert hint, inherited-caps, info-access, scope
+ * summary, "MCP tools — soon". */
 const mutedLineStyle: CSSProperties = {
   fontSize: "var(--fs-xs)",
   color: "var(--muted)",
@@ -686,6 +687,12 @@ export function RulesetPanel(props: { scope: RuleScope; projectId: string | null
           }}
           style={numberInputStyle}
         />
+        {/* SEC-4: the cap is INERT until MCP servers report per-call costs (the orchestrator
+            cannot stop what it cannot price) — the control says so instead of implying live
+            enforcement. */}
+        <span data-testid="ruleset-spend-cap-inert-hint" style={mutedLineStyle}>
+          {strings.rules.spendCapInertHint}
+        </span>
 
         <span style={labelStyle}>{strings.rules.confirmClassesLabel}</span>
         <ChipList

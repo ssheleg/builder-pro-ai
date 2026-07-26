@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react
 import { useAppStore } from "../store/store";
 import { upgradeDaemon } from "../ipc/commands";
 import { orchdUpgrade } from "../ipc/orchd";
+import { useSubmitGuard } from "../hooks/useSubmitGuard";
 import { strings } from "../strings";
 
 // Shared dialog-atom styles (token-only, theme-aware) reused by both the sessiond and orchd
@@ -120,6 +121,13 @@ function extractUpgradeFailureReason(err: unknown): string {
  * local `orchdUpgradeError` state — there is no dedicated store field for it (T19 does not modify
  * `store.ts`), which is fine since only one dialog is ever visible at a time and this component is
  * the sole reader of either.
+ *
+ * Both "Update" actions route through the shared double-submit guard (FE-4, spec D6): a second
+ * click while a kickstart is in flight is dropped by the ref lock (a duplicate `kickstart` +
+ * `app.restart()` is never wanted), and the button renders `disabled` meanwhile. A REJECTED
+ * attempt releases the lock (the guard is `finally`-only), so the finding-[13] retry path stays
+ * live. ONE guard instance covers both variants — only one dialog is ever visible at a time
+ * (the precedence rule above), so the lock is never contested between them.
  */
 export function UpgradeDialog(): JSX.Element | null {
   const daemonIncompatible = useAppStore((s) => s.daemonIncompatible);
@@ -143,6 +151,15 @@ export function UpgradeDialog(): JSX.Element | null {
 
   const primaryRef = useRef<HTMLButtonElement>(null);
 
+  // FE-4 (spec D6): one shared double-submit guard for both variants' "Update" (only one dialog
+  // can be visible at a time — see the component doc's precedence rule). The wrapped call keeps
+  // its fire-and-forget + `.catch` shape below: the guard awaits the kickstart internally, a
+  // rejection still propagates to the `.catch` (finally-only, never swallowed) and releases the
+  // lock for the retry.
+  const upgradeGuard = useSubmitGuard();
+  const runSessiondUpgrade = upgradeGuard.guard(() => upgradeDaemon());
+  const runOrchdUpgrade = upgradeGuard.guard(() => orchdUpgrade());
+
   /**
    * Retry-safe click handler (finding [13]): attach `.catch` — never `await` — so a rejection
    * surfaces as `upgradeError` instead of vanishing, while a successful kickstart's
@@ -151,7 +168,7 @@ export function UpgradeDialog(): JSX.Element | null {
    */
   const handleUpgradeClick = (): void => {
     setUpgradeError(null);
-    upgradeDaemon().catch((err: unknown) => {
+    runSessiondUpgrade().catch((err: unknown) => {
       setUpgradeError(extractUpgradeFailureReason(err));
     });
   };
@@ -160,7 +177,7 @@ export function UpgradeDialog(): JSX.Element | null {
    * `orchdUpgradeError` state instead of the store's sessiond-specific field. */
   const handleOrchdUpgradeClick = (): void => {
     setOrchdUpgradeError(null);
-    orchdUpgrade().catch((err: unknown) => {
+    runOrchdUpgrade().catch((err: unknown) => {
       setOrchdUpgradeError(extractUpgradeFailureReason(err));
     });
   };
@@ -214,7 +231,13 @@ export function UpgradeDialog(): JSX.Element | null {
             >
               {strings.common.cancel}
             </button>
-            <button ref={primaryRef} type="button" onClick={handleUpgradeClick} style={primaryButtonStyle}>
+            <button
+              ref={primaryRef}
+              type="button"
+              onClick={handleUpgradeClick}
+              disabled={upgradeGuard.submitting}
+              style={primaryButtonStyle}
+            >
               {strings.common.update}
             </button>
           </div>
@@ -256,6 +279,7 @@ export function UpgradeDialog(): JSX.Element | null {
             ref={primaryRef}
             type="button"
             onClick={handleOrchdUpgradeClick}
+            disabled={upgradeGuard.submitting}
             style={primaryButtonStyle}
           >
             {strings.common.update}

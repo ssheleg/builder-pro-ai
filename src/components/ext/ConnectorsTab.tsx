@@ -328,7 +328,7 @@ export function ConnectorsTab(): JSX.Element {
       setOauthChallenge(null);
       setOauthCode("");
       await refreshAccounts();
-      showToast(strings.ext.connectors.accountConnected);
+      showToast(strings.ext.connectors.accountConnected, "success");
     } catch (e) {
       // Keep the challenge/code fields as-is so the owner can retry the paste (spec §8 v1 flow).
       showToast(describeOrchdError(e));

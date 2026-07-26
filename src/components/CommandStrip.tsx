@@ -227,7 +227,7 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element {
             data-testid="command-chip-running"
             style={{ ...chipBaseStyle, color: "var(--info)", background: "var(--info-weak)" }}
           >
-            <StatusDot lifecycle={{ kind: "running" }} waitingForInput={false} />
+            <StatusDot lifecycle={{ kind: "running" }} waitingForInput={false} isActive={true} />
             running
           </span>
         ) : item.kind === "interrupted" ? (
@@ -246,6 +246,7 @@ export function CommandStrip(props: { sessionId: SessionId }): JSX.Element {
             <StatusDot
               lifecycle={{ kind: "exited", code: null, signal: null }}
               waitingForInput={false}
+              isActive={false}
             />
             {strings.terminal.interrupted}
           </span>

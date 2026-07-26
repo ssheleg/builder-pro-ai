@@ -141,8 +141,24 @@ const AUDIT_ACTION_CONNECTOR_INVOKE: &str = "connector_invoke";
 /// so a cap breach is never indistinguishable from an ordinary tool-disabled/allowed row in the
 /// audit trail (mirrors `AUDIT_ACTION_STDIO_SPAWN`'s own distinct-action precedent).
 const AUDIT_ACTION_POLICY_DENY: &str = "policy_deny";
+/// `audit_log.action` literal for a `TrustGrantConsent` (SEC-5 of the 2026-07-24 audit
+/// remediation): the consent-grant itself is a trust-relevant mutation and must leave an
+/// append-only audit trail exactly like every allow/deny decision — spec §4's `audit_log.action`
+/// literal set already names `'consent_grant'`. Written by `socket_server`'s `TrustGrantConsent`
+/// dispatch arm (granting consent is the gate-SETTING action, so it is not itself routed through
+/// [`authorize`]).
+pub(crate) const AUDIT_ACTION_CONSENT_GRANT: &str = "consent_grant";
 const AUDIT_DECISION_ALLOW: &str = "allow";
 const AUDIT_DECISION_DENY: &str = "deny";
+
+/// `audit_log` reason literal for a `Connect`/`ToolCall` denied because the server itself is
+/// administratively disabled (`mcp_server.enabled=0`, DOM-7 of the 2026-07-24 audit remediation):
+/// a disabled server must deny EVERY egress path (`McpConnect` AND `McpCallTool`), audited under
+/// the SAME `policy_deny` action a spend/rate cap denial uses (it's an owner-policy denial, not a
+/// consent or allowlist one) — the write_audit policy-deny override below keys off the two
+/// cap-specific reasons, so this reason is written directly via [`audit_server_disabled`] with
+/// [`AUDIT_ACTION_POLICY_DENY`] spelled out explicitly.
+pub(crate) const REASON_SERVER_DISABLED: &str = "server_disabled";
 
 /// Rolling window (spec §6, task T18): BOTH the rate-limit check ("count `mcp_invocation` rows
 /// ... in the last 60s") and the spend-cap check ("sum `cost_usd` ... over the window") count
@@ -254,6 +270,57 @@ fn resolve_policy(
         }
     }
     db.get_policy(PolicyScope::Global, None)
+}
+
+/// A stable lock-registry key for the effective policy a `ToolCall`/`ConnectorInvoke` attempt
+/// resolves to (SEC-3 of the 2026-07-24 audit remediation): `socket_server`'s per-policy async
+/// mutex registry is keyed by this string so every attempt that WOULD resolve the same policy row
+/// serializes its authorize+dispatch against the same mutex — closing the check-then-act race
+/// where a burst of parallel calls all counted zero in-flight invocations and every one passed a
+/// `rate_per_min=1` cap. Returns `None` when no policy applies at any scope (unbounded — nothing
+/// to serialize). The key shape is `"<scope>:<ref_id-or-empty>"` (`"global:"` for the single
+/// global row) — scope-tagged so a project id and a server id that happen to be byte-identical
+/// can never alias onto one mutex.
+pub(crate) fn resolve_policy_key(
+    db: &Db,
+    project_id: Option<&str>,
+    server_id: Option<&str>,
+) -> Result<Option<String>, OrchdPersistError> {
+    let Some(policy) = resolve_policy(db, project_id, server_id)? else {
+        return Ok(None);
+    };
+    let scope = match policy.scope {
+        PolicyScope::Global => "global",
+        PolicyScope::Project => "project",
+        PolicyScope::Server => "server",
+    };
+    Ok(Some(format!(
+        "{scope}:{}",
+        policy.ref_id.as_deref().unwrap_or("")
+    )))
+}
+
+/// Writes the standalone `policy_deny`/`server_disabled` audit row for a DOM-7 disabled-server
+/// denial (2026-07-24 audit remediation). NOT routed through [`authorize`] — a disabled server
+/// denies before any `Action` is even constructed (there is no `Action::ServerDisabled` variant;
+/// the enabled flag lives on the server row, which `mcp::lifecycle::connect`/`mcp::invoke::
+/// call_tool` already hold when they call this). Uses the SAME fixed literal vocabulary as every
+/// other audit row — never args, secrets, or result content.
+pub(crate) fn audit_server_disabled(
+    db: &Db,
+    server_id: &str,
+    project_id: Option<String>,
+) -> Result<(), OrchdPersistError> {
+    db.insert_audit(NewAudit {
+        action: AUDIT_ACTION_POLICY_DENY.to_string(),
+        server_id: Some(server_id.to_string()),
+        tool_name: None,
+        project_id,
+        decision: AUDIT_DECISION_DENY.to_string(),
+        reason: Some(REASON_SERVER_DISABLED.to_string()),
+        invocation_id: None,
+    })?;
+    Ok(())
 }
 
 /// Checks the resolved effective policy's rate/spend caps for one `ToolCall`/`ConnectorInvoke`
@@ -382,39 +449,55 @@ fn write_audit(db: &Db, action: &Action, decision: &Decision) -> Result<(), Orch
     Ok(())
 }
 
-/// Compute the `stdio_exec` consent fingerprint for a stdio MCP server's `command`/`args` (spec
-/// D10: "fingerprint = command + sha256 of the resolved binary"). Both the `TrustGrantConsent`
+/// Compute the `stdio_exec` consent fingerprint for a stdio MCP server's CURRENT
+/// `command`/`args`/`env` (spec D10: "fingerprint = command + sha256 of the resolved binary",
+/// extended by the 2026-07-24 audit remediation, SEC-2: a grant must ALSO stop authorizing once
+/// the args or env it was granted under change — `McpUpdateServer` can rewrite both, and an
+/// args/env swap under a stale grant was arbitrary code execution, e.g. consent on `/bin/sh` with
+/// `args:[]` silently authorizing a later `args:["-c", ...]`). Both the `TrustGrantConsent`
 /// dispatch handler (grant time) and [`Action::StdioSpawn`]'s construction (authorize time, via
-/// `mcp::connect_action`) call this SAME function on the SAME server row's CURRENT
-/// `command`/`args`, so a grant and a later authorize check can never silently diverge.
+/// `mcp::connect_action`) call this SAME function on the SAME server row's CURRENT row state, so
+/// a grant and a later authorize check can never silently diverge.
 ///
-/// Prefers hashing the ACTUAL RESOLVED BINARY's bytes (`command`, taken literally if it contains
-/// a `/`, else searched for on `$PATH` — mirroring how the OS resolves a bare command name), not
-/// just the command string: that's what makes this catch a supply-chain swap where the owner
-/// consented to `/usr/local/bin/foo` and the file at that exact path later got replaced with a
-/// different binary — the command string alone never changes, only the bytes do, and "re-prompt
-/// on binary change" (spec D10) means the byte-level swap specifically, not merely the command
-/// line.
+/// The fingerprint ALWAYS commits to [`canonical_stdio_invocation`]'s serialization of
+/// `command`+`args`+`env`. When the ACTUAL RESOLVED BINARY can also be read (`command`, taken
+/// literally if it contains a `/`, else searched for on `$PATH` — mirroring how the OS resolves a
+/// bare command name), its sha256 is mixed in as a second component (`"bin:<binary-hash>:<invocation-hash>"`):
+/// that's what catches a supply-chain swap where the owner consented to `/usr/local/bin/foo` and
+/// the file at that exact path later got replaced with different bytes — "re-prompt on binary
+/// change" (spec D10) means the byte-level swap specifically, not merely the command line.
 ///
-/// Falls back to hashing `command` NUL-joined with `args` when the binary can't be resolved/read
-/// at fingerprint-compute time (honest degradation, not a hard failure — e.g. consent is being
-/// granted for a server whose binary isn't installed yet, or `command` is intentionally
-/// PATH-relative and this daemon's `$PATH` differs between grant-time and connect-time). The
-/// fallback still detects a command/args change; it just can't detect an in-place binary swap at
-/// an unresolvable path. The `"bin:"`/`"cmd:"` prefix keeps the two schemes from ever colliding
-/// with each other by construction.
+/// Falls back to hashing ONLY the canonical invocation (`"cmd:<invocation-hash>"`) when the
+/// binary can't be resolved/read at fingerprint-compute time (honest degradation, not a hard
+/// failure — e.g. consent is being granted for a server whose binary isn't installed yet, or
+/// `command` is intentionally PATH-relative and this daemon's `$PATH` differs between grant-time
+/// and connect-time). The fallback still detects a command/args/env change; it just can't detect
+/// an in-place binary swap at an unresolvable path. The `"bin:"`/`"cmd:"` prefix keeps the two
+/// schemes from ever colliding with each other by construction.
 pub(crate) fn stdio_exec_fingerprint(
     command: &str,
     args: &[String],
     env: &std::collections::BTreeMap<String, String>,
 ) -> String {
-    // SEC-2: the fingerprint MUST cover command + args + env (and the resolved binary's bytes when
-    // available). Previously the `bin:` scheme hashed ONLY the binary bytes — so `McpUpdateServer`
-    // could rewrite `args` (e.g. `["-c","<payload>"]`) or inject `env` (`NODE_OPTIONS`, `PYTHONPATH`,
-    // `BASH_ENV`…) AFTER a grant and re-use it verbatim → arbitrary code execution under a stale
-    // consent. A BTreeMap iterates in sorted key order, so the hash is deterministic regardless of
-    // insertion order. The `"bin:"`/`"cmd:"` prefix still distinguishes "binary resolved" from
-    // "fallback to command string" and the two never collide by construction.
+    let invocation = canonical_stdio_invocation(command, args, env);
+    match read_resolved_binary(command) {
+        Some(bytes) => format!("bin:{}:{}", sha256_hex(&bytes), sha256_hex(&invocation)),
+        None => format!("cmd:{}", sha256_hex(&invocation)),
+    }
+}
+
+/// The canonical byte serialization of one stdio invocation's `command`+`args`+`env` (SEC-2).
+/// NUL (`0x00`) separates entries so `["ab"], ["c"]` cannot collide with `["a"], ["bc"]` — a bare
+/// concatenation could; a `0x01` unit separator splits each env key from its value so
+/// `args:["k", "v"]` can never collide with `env:{"k": "v"}`. `env` is a `BTreeMap`, whose
+/// iteration order is key-sorted BY CONSTRUCTION — two env maps built from the same pairs in
+/// different insertion orders serialize identically (a reordered-but-unchanged env must NOT
+/// re-prompt; only a real content change may).
+fn canonical_stdio_invocation(
+    command: &str,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+) -> Vec<u8> {
     let mut buf = command.as_bytes().to_vec();
     for a in args {
         buf.push(0);
@@ -423,17 +506,10 @@ pub(crate) fn stdio_exec_fingerprint(
     for (k, v) in env {
         buf.push(0);
         buf.extend_from_slice(k.as_bytes());
-        buf.push(b'=');
+        buf.push(1);
         buf.extend_from_slice(v.as_bytes());
     }
-    match read_resolved_binary(command) {
-        Some(bytes) => {
-            buf.push(0);
-            buf.extend_from_slice(&bytes);
-            format!("bin:{}", sha256_hex(&buf))
-        }
-        None => format!("cmd:{}", sha256_hex(&buf)),
-    }
+    buf
 }
 
 /// Resolve `command` to a file and read its bytes — `None` on any failure (not found, not a
@@ -463,6 +539,7 @@ mod tests {
     use crate::mcp::{
         McpAuthKind, McpScope, McpServerPatch, McpServerRow, McpTransport, NewMcpServer, NewMcpTool,
     };
+    use std::collections::BTreeMap;
 
     fn new_db() -> Db {
         Db::open_in_memory().unwrap()
@@ -881,7 +958,7 @@ mod tests {
     fn stdio_spawn_without_consent_denies_and_audits_as_stdio_spawn() {
         let db = new_db();
         let server = add_stdio_server(&db, "/nonexistent/foo", vec![]);
-        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[], &Default::default());
+        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[], &BTreeMap::new());
 
         let decision = authorize(
             &db,
@@ -921,7 +998,7 @@ mod tests {
         let fingerprint = stdio_exec_fingerprint(
             "/nonexistent/foo",
             &["--flag".to_string()],
-            &Default::default(),
+            &BTreeMap::new(),
         );
         db.grant_consent(&server.id, CONSENT_KIND_STDIO_EXEC, &fingerprint)
             .unwrap();
@@ -954,7 +1031,7 @@ mod tests {
         // fingerprint text happened to match by coincidence.
         let db = new_db();
         let server = add_stdio_server(&db, "/nonexistent/foo", vec![]);
-        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[], &Default::default());
+        let fingerprint = stdio_exec_fingerprint("/nonexistent/foo", &[], &BTreeMap::new());
         db.grant_consent(&server.id, CONSENT_KIND_CONNECT, &fingerprint)
             .unwrap();
 
@@ -983,7 +1060,7 @@ mod tests {
         // a DIFFERENT binary would run under a stale grant.
         let db = new_db();
         let server = add_stdio_server(&db, "/bin/original-tool", vec![]);
-        let fp_a = stdio_exec_fingerprint("/bin/original-tool", &[], &Default::default());
+        let fp_a = stdio_exec_fingerprint("/bin/original-tool", &[], &BTreeMap::new());
         db.grant_consent(&server.id, CONSENT_KIND_STDIO_EXEC, &fp_a)
             .unwrap();
 
@@ -995,7 +1072,7 @@ mod tests {
             },
         )
         .unwrap();
-        let fp_b = stdio_exec_fingerprint("/bin/swapped-tool", &[], &Default::default());
+        let fp_b = stdio_exec_fingerprint("/bin/swapped-tool", &[], &BTreeMap::new());
         assert_ne!(fp_a, fp_b);
 
         let decision = authorize(
@@ -1016,38 +1093,94 @@ mod tests {
         );
     }
 
-    // ---- stdio_exec_fingerprint (task T16) ----
+    // ---- stdio_exec_fingerprint (task T16; SEC-2 of the 2026-07-24 audit remediation added
+    // args+env coverage to BOTH schemes) ----
 
     #[test]
     fn stdio_exec_fingerprint_fallback_is_deterministic_and_distinguishes_command_and_args() {
-        let a = stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()], &Default::default());
+        let a = stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()], &BTreeMap::new());
         let a_again =
-            stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()], &Default::default());
+            stdio_exec_fingerprint("/nonexistent/foo", &["x".to_string()], &BTreeMap::new());
         assert_eq!(
             a, a_again,
             "same command+args must hash to the same fingerprint"
         );
 
         let different_command =
-            stdio_exec_fingerprint("/nonexistent/bar", &["x".to_string()], &Default::default());
+            stdio_exec_fingerprint("/nonexistent/bar", &["x".to_string()], &BTreeMap::new());
         assert_ne!(a, different_command);
 
         let different_args =
-            stdio_exec_fingerprint("/nonexistent/foo", &["y".to_string()], &Default::default());
+            stdio_exec_fingerprint("/nonexistent/foo", &["y".to_string()], &BTreeMap::new());
         assert_ne!(a, different_args);
 
         // NUL-separated join: ["ab"],["c"] must not collide with ["a"],["bc"].
         let split_ab_c = stdio_exec_fingerprint(
             "cmd",
             &["ab".to_string(), "c".to_string()],
-            &Default::default(),
+            &BTreeMap::new(),
         );
         let split_a_bc = stdio_exec_fingerprint(
             "cmd",
             &["a".to_string(), "bc".to_string()],
-            &Default::default(),
+            &BTreeMap::new(),
         );
         assert_ne!(split_ab_c, split_a_bc);
+    }
+
+    #[test]
+    fn stdio_exec_fingerprint_distinguishes_env_and_ignores_env_insertion_order() {
+        // SEC-2: an env swap under a stale grant was arbitrary code execution (the env denylist
+        // only strips DYLD_*/LD_*; NODE_OPTIONS/PYTHONPATH/... sail through), so env MUST be
+        // fingerprinted — in the `cmd:` fallback AND in the `bin:` scheme alike.
+        let env_a = BTreeMap::from([(
+            "NODE_OPTIONS".to_string(),
+            "--require /tmp/a.js".to_string(),
+        )]);
+        let env_b = BTreeMap::from([(
+            "NODE_OPTIONS".to_string(),
+            "--require /tmp/b.js".to_string(),
+        )]);
+
+        let base = stdio_exec_fingerprint("/nonexistent/foo", &[], &BTreeMap::new());
+        let with_env_a = stdio_exec_fingerprint("/nonexistent/foo", &[], &env_a);
+        let with_env_b = stdio_exec_fingerprint("/nonexistent/foo", &[], &env_b);
+        assert_ne!(
+            base, with_env_a,
+            "adding an env var must change the fingerprint"
+        );
+        assert_ne!(
+            with_env_a, with_env_b,
+            "an env VALUE change must change the fingerprint"
+        );
+
+        // Canonicalization: the same pairs in a different insertion order are the SAME map
+        // (BTreeMap iterates key-sorted by construction) and must NOT re-prompt.
+        let mut ordered_1 = BTreeMap::new();
+        ordered_1.insert("AAA".to_string(), "1".to_string());
+        ordered_1.insert("ZZZ".to_string(), "2".to_string());
+        let mut ordered_2 = BTreeMap::new();
+        ordered_2.insert("ZZZ".to_string(), "2".to_string());
+        ordered_2.insert("AAA".to_string(), "1".to_string());
+        assert_eq!(
+            stdio_exec_fingerprint("/nonexistent/foo", &[], &ordered_1),
+            stdio_exec_fingerprint("/nonexistent/foo", &[], &ordered_2),
+            "an unchanged env (only insertion order differs) must keep the same fingerprint"
+        );
+
+        // `bin:` scheme too: a readable binary with a changed env must re-prompt even though the
+        // binary bytes are identical.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-server-bin");
+        std::fs::write(&path, b"same bytes").unwrap();
+        let command = path.to_str().unwrap();
+        let bin_no_env = stdio_exec_fingerprint(command, &[], &BTreeMap::new());
+        let bin_with_env = stdio_exec_fingerprint(command, &[], &env_a);
+        assert!(bin_no_env.starts_with("bin:"), "{bin_no_env}");
+        assert_ne!(
+            bin_no_env, bin_with_env,
+            "the bin: scheme must also commit to args+env, not just the binary bytes"
+        );
     }
 
     #[test]
@@ -1055,7 +1188,7 @@ mod tests {
         let fp = stdio_exec_fingerprint(
             "/definitely/not/a/real/path/bpa-test",
             &[],
-            &Default::default(),
+            &BTreeMap::new(),
         );
         assert!(
             fp.starts_with("cmd:"),
@@ -1073,59 +1206,18 @@ mod tests {
         std::fs::write(&path, b"original binary bytes").unwrap();
         let command = path.to_str().unwrap();
 
-        let fp_before = stdio_exec_fingerprint(command, &[], &Default::default());
+        let fp_before = stdio_exec_fingerprint(command, &[], &BTreeMap::new());
         assert!(
             fp_before.starts_with("bin:"),
             "a readable file at an absolute path must use the resolved-binary scheme: {fp_before}"
         );
 
         std::fs::write(&path, b"swapped binary bytes (attacker payload)").unwrap();
-        let fp_after = stdio_exec_fingerprint(command, &[], &Default::default());
+        let fp_after = stdio_exec_fingerprint(command, &[], &BTreeMap::new());
 
         assert_ne!(
             fp_before, fp_after,
             "swapping the binary's bytes at the SAME path must change the fingerprint"
-        );
-    }
-
-    #[test]
-    fn stdio_exec_fingerprint_covers_args_and_env_so_a_stale_grant_cannot_arbitrary_exec() {
-        // SEC-2: a consent grant must NOT survive a change to `args` or `env`. Previously the `bin:`
-        // scheme hashed ONLY the resolved binary's bytes, so `McpUpdateServer{args:["-c","<payload>"]}`
-        // (or an env injection like `NODE_OPTIONS=…`) AFTER a grant re-used it → arbitrary code
-        // execution under a stale consent. Now args+env are part of every fingerprint.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp-server-bin");
-        std::fs::write(&path, b"binary bytes").unwrap();
-        let command = path.to_str().unwrap();
-
-        let base = stdio_exec_fingerprint(command, &[], &Default::default());
-
-        // An args change must change the fingerprint.
-        let with_args = stdio_exec_fingerprint(
-            command,
-            &["-c".to_string(), "rm -rf /".to_string()],
-            &Default::default(),
-        );
-        assert_ne!(base, with_args, "an args change must re-prompt (SEC-2)");
-
-        // An env change must change the fingerprint (a different value AND a different key).
-        let mut env_inject = std::collections::BTreeMap::new();
-        env_inject.insert(
-            "NODE_OPTIONS".to_string(),
-            "--require /tmp/evil".to_string(),
-        );
-        let with_env = stdio_exec_fingerprint(command, &[], &env_inject);
-        assert_ne!(base, with_env, "an env change must re-prompt (SEC-2)");
-
-        // Two different env values for the same key must NOT collide.
-        let mut env_a = std::collections::BTreeMap::new();
-        env_a.insert("K".to_string(), "a".to_string());
-        let mut env_b = std::collections::BTreeMap::new();
-        env_b.insert("K".to_string(), "b".to_string());
-        assert_ne!(
-            stdio_exec_fingerprint(command, &[], &env_a),
-            stdio_exec_fingerprint(command, &[], &env_b),
         );
     }
 
@@ -1412,6 +1504,9 @@ mod tests {
         let db = new_db();
         let server = add_server(&db);
         enable_tool(&db, &server.id, "search");
+        // A REAL project row is required for the project-scope policy (DOM-6: `policy.ref_id`
+        // is now existence-checked — a dangling project ref is `NotFound`).
+        let project = db.create_project("P", "", &["w1".to_string()]).unwrap();
         // Global and project both set a rate cap of 1 (would deny after 1 prior call); the
         // server-scope row sets a MUCH higher cap of 100 and must win outright.
         db.upsert_policy(NewPolicy {
@@ -1423,7 +1518,7 @@ mod tests {
         .unwrap();
         db.upsert_policy(NewPolicy {
             scope: PolicyScope::Project,
-            ref_id: Some("proj-1".to_string()),
+            ref_id: Some(project.id.clone()),
             spend_cap_usd: None,
             rate_per_min: Some(1),
         })
@@ -1435,14 +1530,14 @@ mod tests {
             rate_per_min: Some(100),
         })
         .unwrap();
-        seed_invocation(&db, &server.id, Some("proj-1"), None, 1_000);
+        seed_invocation(&db, &server.id, Some(&project.id), None, 1_000);
 
         let decision = authorize(
             &db,
             &Action::ToolCall {
                 server_id: server.id.clone(),
                 tool_name: "search".to_string(),
-                project_id: Some("proj-1".to_string()),
+                project_id: Some(project.id.clone()),
             },
         )
         .unwrap();
@@ -1458,6 +1553,7 @@ mod tests {
         let db = new_db();
         let server = add_server(&db);
         enable_tool(&db, &server.id, "search");
+        let project = db.create_project("P", "", &["w1".to_string()]).unwrap();
         db.upsert_policy(NewPolicy {
             scope: PolicyScope::Global,
             ref_id: None,
@@ -1467,19 +1563,19 @@ mod tests {
         .unwrap();
         db.upsert_policy(NewPolicy {
             scope: PolicyScope::Project,
-            ref_id: Some("proj-1".to_string()),
+            ref_id: Some(project.id.clone()),
             spend_cap_usd: None,
             rate_per_min: Some(1),
         })
         .unwrap();
-        seed_invocation(&db, &server.id, Some("proj-1"), None, 1_000);
+        seed_invocation(&db, &server.id, Some(&project.id), None, 1_000);
 
         let decision = authorize(
             &db,
             &Action::ToolCall {
                 server_id: server.id.clone(),
                 tool_name: "search".to_string(),
-                project_id: Some("proj-1".to_string()),
+                project_id: Some(project.id.clone()),
             },
         )
         .unwrap();
@@ -1548,21 +1644,24 @@ mod tests {
     fn connector_invoke_spend_cap_breach_denies_with_policy_deny_audit() {
         let db = new_db();
         add_account(&db, "acct-1");
+        // A REAL project row is required for the project-scope policy (DOM-6: `policy.ref_id`
+        // is now existence-checked — a dangling project ref is `NotFound`).
+        let project = db.create_project("P", "", &["w1".to_string()]).unwrap();
         db.upsert_policy(NewPolicy {
             scope: PolicyScope::Project,
-            ref_id: Some("proj-1".to_string()),
+            ref_id: Some(project.id.clone()),
             spend_cap_usd: Some(1.0),
             rate_per_min: None,
         })
         .unwrap();
-        seed_connector_invocation(&db, "acct-1", Some("proj-1"), Some(1.5), 1_000);
+        seed_connector_invocation(&db, "acct-1", Some(&project.id), Some(1.5), 1_000);
 
         let decision = authorize(
             &db,
             &Action::ConnectorInvoke {
                 account_id: "acct-1".to_string(),
                 op: "get".to_string(),
-                project_id: Some("proj-1".to_string()),
+                project_id: Some(project.id.clone()),
             },
         )
         .unwrap();

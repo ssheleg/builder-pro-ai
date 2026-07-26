@@ -370,6 +370,13 @@ function GoalRow(props: GoalRowProps): JSX.Element {
   );
 }
 
+/** UX-1 first-fetch placeholder — the same dim muted register as DocsPanel's `docs-loading` row
+ * (`mutedTextStyle` there), so a still-loading tree never reads as a genuinely empty one. */
+const loadingTextStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: "var(--fs-md)",
+};
+
 /**
  * Goal-hierarchy editor (S3 spec §10, D5). Renders `goalsByProject[projectId]` as an indent tree
  * — the strategic goal is the pinned root (`parentId: null`, never deletable/movable per the
@@ -394,6 +401,7 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
   const { projectId } = props;
 
   const goalsByProject = useAppStore((s) => s.goalsByProject);
+  const goalsFetched = useAppStore((s) => s.goalsFetched);
   const refreshGoals = useAppStore((s) => s.refreshGoals);
   const showToast = useAppStore((s) => s.showToast);
   const orchdDown = useAppStore((s) => s.orchdDown);
@@ -511,6 +519,19 @@ export function GoalTree(props: { projectId: string }): JSX.Element {
   }
 
   if (rows.length === 0) {
+    // UX-1: an empty cache means "no goals" only once the FIRST fetch for this project has
+    // settled (`goalsFetched[projectId]` flips on success AND failure and never resets) — before
+    // that it just means "not loaded yet", so render the loading placeholder instead of flashing
+    // the false empty state at a user who HAS goals (the DocsPanel `docs-loading`/`docs-empty`
+    // split, DocsPanel.tsx:421-429). After a FAILED first fetch the empty state is the honest
+    // copy, which is exactly what the never-reset flag yields.
+    if (goalsFetched[projectId] !== true) {
+      return (
+        <div data-testid="goal-tree-loading" style={loadingTextStyle}>
+          {strings.goals.loading}
+        </div>
+      );
+    }
     return <EmptyState data-testid="goal-tree-empty" title={strings.goals.empty} />;
   }
 

@@ -44,13 +44,22 @@ const pendingNoteStyle: CSSProperties = {
  * whole story (the S6b orchestrator-agent runtime that would actually execute a workflow does not
  * exist yet). Authoring, saving and this trigger are the live surface; the run is not. The picker
  * reads `store.workflows` directly (already loaded by the library) and filters to `global` scope.
+ *
+ * WIP-4: `initialWorkflowId` carries the library row the "Run →" was clicked on, so the picker
+ * opens with THAT workflow selected rather than the first one in the list. It only wins when it
+ * names a listed (global) workflow — project-scoped workflows are never listed here (a project
+ * workflow is bound to its own project while the picker targets the active one), which is why
+ * the library offers "Run →" on global rows only.
  */
 export function RunWorkflowPicker(props: {
   open: boolean;
   onClose: () => void;
   projectName: string;
+  /** WIP-4: the workflow the library row's "Run →" names — preselected on open; `null` (or an id
+   * that is not a listed global workflow) falls back to the first global workflow. */
+  initialWorkflowId?: string | null;
 }): JSX.Element {
-  const { open, onClose, projectName } = props;
+  const { open, onClose, projectName, initialWorkflowId = null } = props;
   const workflows = useAppStore((s) => s.workflows);
 
   const globalWorkflows = useMemo(
@@ -60,15 +69,23 @@ export function RunWorkflowPicker(props: {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Default the selection to the first global workflow whenever the picker (re)opens or the list
-  // changes — but never clobber a still-valid explicit pick.
+  // Selection discipline (WIP-4): on (re)open the row's own workflow (`initialWorkflowId`) wins
+  // over the positional first-in-list default, while a still-valid explicit pick is never
+  // clobbered by a list refresh landing mid-open. Closing resets the selection so the next open
+  // starts from the row that triggered it, never from a stale earlier pick.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setSelectedId(null);
+      return;
+    }
     setSelectedId((cur) => {
       if (cur !== null && globalWorkflows.some((w) => w.id === cur)) return cur;
+      if (initialWorkflowId !== null && globalWorkflows.some((w) => w.id === initialWorkflowId)) {
+        return initialWorkflowId;
+      }
       return globalWorkflows[0]?.id ?? null;
     });
-  }, [open, globalWorkflows]);
+  }, [open, globalWorkflows, initialWorkflowId]);
 
   const hasWorkflows = globalWorkflows.length > 0;
 

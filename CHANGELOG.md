@@ -2,75 +2,93 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
-## [0.10.1] — security + reliability + data-integrity fixes (2026-07-25)
+## [0.10.1] — audit remediation sweep: security, reliability, data integrity (2026-07-25)
 
-A focused fix wave driven by the full-project audit
-([`docs/qa/2026-07-24-full-audit-report.md`](docs/qa/2026-07-24-full-audit-report.md)) and the
-comprehensive QA pass
-([`docs/qa/2026-07-24-comprehensive-qa-report.md`](docs/qa/2026-07-24-comprehensive-qa-report.md)).
-No new features; every change is a bug/security/data-integrity fix with a TDD test.
+A full-project audit ([`docs/qa/2026-07-24-full-audit-report.md`](docs/qa/2026-07-24-full-audit-report.md):
+66 UX scenarios code-traced, ~60 adversarial probes against isolated daemons) and a comprehensive
+QA pass ([`docs/qa/2026-07-24-comprehensive-qa-report.md`](docs/qa/2026-07-24-comprehensive-qa-report.md)),
+remediated on two concurrent lines (`audit-remediation-2026-07-24` + a working-tree pass) merged
+here. Every change is a bug/security/data-integrity fix with a regression test; deferred items are
+filed in `docs/backlog.md` (BL-109..BL-170 across both lines). Plan:
+`docs/superpowers/plans/2026-07-24-audit-remediation.md`.
 
-### Fixed — security (P1)
+### Fixed — critical (P1)
 
-- **REL-1 (BL-109):** every GUI launch killed both `launchd` daemons and every live terminal.
-  `launchd.rs::bootstrap()` treated launchctl exit 5 ("already bootstrapped") as *drift* and ran
-  `bootout` (a SIGTERM to the healthy running daemon) on every app start — voiding the core
-  survival promise ("live shells survive the GUI closing") on the most routine action. "Already
-  bootstrapped" is now success with no bootout; a real plist/binary reload still goes through the
-  consent-gated upgrade flow (`kickstart_force`).
-- **SEC-1:** `McpCallTool` on an HTTP server was not re-gated by connect consent after a server URL
-  change — a tool call could reach a repointed URL with the resolved bearer, audited
-  `tool_call/allow`. Per-call consent gating now covers both transports (HTTP URL fingerprint +
-  stdio spawn), so an `McpUpdateServer{url}` after a grant re-prompts.
-- **SEC-2:** the stdio `stdio_exec` consent fingerprint hashed only the resolved binary's bytes, so
-  an `McpUpdateServer` could rewrite `args` (`["-c","<payload>"]`) or inject `env` (`NODE_OPTIONS`,
-  `PYTHONPATH`, `BASH_ENV`…) after a grant and re-use it → arbitrary code execution under a stale
-  consent. The fingerprint now covers `command + args + env + sha256(binary)`.
+- **Every GUI launch used to kill both daemons and every live terminal** (REL-1): `bootstrap()`
+  treated "already bootstrapped" as drift and ran `bootout` (SIGTERM) — the exact data-loss class
+  the `kickstart()` fix had banned one call later. "Already" is now success; drift handling stays
+  with the upgrade flow; the pinning test asserts no bootout.
+- **MCP consent bypasses** (SEC-1/SEC-2): HTTP tool calls are now re-gated by consent on every
+  call (fingerprint recomputed; grants invalidated on any server mutation), and the stdio
+  fingerprint covers command+args+env+binary bytes — a post-consent `args`/`env` patch no longer
+  executes under a stale grant.
+- **Cross-project graph damage** (GRAPH-1): ghost nodes are read-only on the canvas, and
+  `GraphUpdateNode`/`GraphMoveNode`/`GraphDeleteNode` accept an optional `project_id` scope the
+  daemon enforces as typed `NotFound` (wire stays `[1,1]`) — BL-143 closed.
+- **`RemoveWorkspace` × `CreateSession` race** (SES-1): removal is serialized per workspace
+  (`closing_workspaces` guard + post-delete orphan sweep); `CreateSession` rejects unknown
+  workspace ids with typed `NoSuchWorkspace` (SES-4).
+- **False "empty" flashes** (UX-1): every domain list (goals/tasks/ideas/insights/servers/
+  artifacts/research runs) shows a loading row until its first fetch completes — never a fake
+  empty state.
 
-### Fixed — data integrity (P2)
+### Fixed — reliability & security (P2)
 
-- **DOM-3:** `SetTaskRank(±Infinity)` was accepted; the next `ExportAll` serialized `rank:null` and
-  the store could not re-import its own export (one Infinity rank = an un-backupable store). NaN
-  also violated NOT NULL. Non-finite ranks are now rejected as `Validation`.
-- **SES-4:** `CreateSession` did not validate `workspace_id` — a session against a bogus workspace
-  ran (PTY spawned) but every persist failed on the FK (log-only) and it vanished on the next
-  restart with no client-visible error. Unknown workspaces are now rejected up front as
-  `NoSuchWorkspace`.
-- **SES-6:** `RemoveWorkspaceRoot` on the last root was a silent no-op returned as success — the
-  incoming path wasn't canonicalized, so it never matched the stored canonical root, hiding the
-  `LastRoot` guard. The path is now canonicalized (tolerating a deleted root) so the guard fires
-  honestly.
-- **SEC-6:** `McpConnect` silently re-enabled every per-tool allowlist entry (`upsert_mcp_tools`
-  inserted `enabled=1`), erasing an owner's "disable this dangerous tool" on every reconnect. A
-  re-advertised tool name now KEEPS its prior `enabled` flag; only a brand-new name defaults to on.
-- **FS-3:** `delete_entry`/`rename_entry`/`move_entry` accepted `rel == ""` (the workspace root
-  itself) — `delete_entry(root, "")` trashed the entire workspace. The root itself is now rejected
-  for every destructive verb (data-loss guard).
-- **GRAPH-1:** cross-project "ghost" graph nodes were draggable/selectable, so an accidental drag
-  or delete fired `GraphMoveNode`/`GraphDeleteNode` at a foreign id (silently rewriting another
-  project's layout / cascade-deleting its node). Ghosts are now non-draggable/non-selectable, with
-  a defense-in-depth filter in the delete handler.
+- Trust layer: rate/spend caps hold a per-policy mutex across authorize+dispatch (parallel bursts
+  can no longer overrun the cap, SEC-3); `TrustGrantConsent` is audited (SEC-5); tool-cache
+  refresh preserves per-tool disables (SEC-6); `mcp_server.enabled=0` is enforced server-side
+  (DOM-7); spend-cap controls are labelled inert until servers report cost (SEC-4).
+- Domain: research runs enforce the archived guard (DOM-5); archived/NotFound guards across
+  MCP/skill/consent/policy CRUD (DOM-6); non-finite task ranks rejected (DOM-3); import validates
+  rogue roots/goal cycles/ranks (DOM-8) and is refused in degraded storage (DOM-10); import emits
+  family pushes on post-commit file failures (DOM-4); missing `GraphChanged`/`IdeasChanged` pushes
+  added (DOM-9); FK violations surface as typed `NotFound` (DOM-11).
+- Export/import is a full snapshot again: bundles now carry docs and graph nodes/edges (additive),
+  and import re-seeds entityRefs (DOM-1/DOM-2).
+- sessiond: rehydrated sessions no longer report a stale `running` lifecycle (SES-3); an
+  unterminated OSC no longer swallows user output in live stream or scrollback (SES-5);
+  last-root removal returns the typed `LastRoot` error, and the remove-root path is canonicalized
+  so a non-canonical spelling can no longer no-op past that guard (SES-6).
+- Filesystem: destructive verbs reject `rel` targeting the root itself (FS-3, data-loss);
+  preview rejects non-regular files instead of blocking forever (FS-4); the watcher reports
+  root loss and full-refresh sentinels instead of going silently stale (FS-1/FS-2) and routes
+  nested roots by longest prefix (FS-6).
+- Frontend: all `refresh*` actions are epoch/in-flight guarded (FE-1); string errors surface
+  verbatim instead of "unknown orchestrator error" (FE-2); submit guards on the remaining
+  side-effecting invokes (FE-4); restored sessions show their own dot + a no-shell hint (FE-7);
+  show-ignored restarts the watcher (FS-7); FileTree drops stale in-flight listings (FS-8);
+  archived projects are filtered from pickers (UX-2); terminal links never resolve to a wrong
+  root target (LNK-1); ErrorBoundary copies scrubbed details (REL-3); the diagnostics scrubber
+  covers JWT/`gho_`/`glpat-`/`AKIA`/JSON-quoted keys/userinfo/Cookie/PEM (REL-4).
+- Tests/infra: the launchd bootstrap drift branch is gone; `launchctl` calls are bounded and the
+  plist write is atomic (REL-7); the BL-108 attach drain race is fixed (a real trailing-output
+  data-loss race — sinks are no longer unsubscribed on session end); the BL-102 non-hermetic
+  connect tests take `ENV_TEST_LOCK` + isolated `XDG_RUNTIME_DIR` (green with live daemons
+  installed); the keychain skip-guard is a bounded probe — a wedged OS auth agent no longer hangs
+  the whole test binary for hours (BL-107), and CI enforces `BPA_REQUIRE_KEYCHAIN=1` so the e2e
+  keychain phase can never pass vacuously again (BL-106).
 
-### Fixed — test determinism + CI honesty
+### Changed
 
-- **BL-102/BL-107/BL-108:** `cargo test --workspace` was non-deterministic / hung on a dev machine
-  with the installed app's live daemons (connect-retry tests hit a live daemon; Keychain prompts
-  hung the whole test binary; a production drain race lost trailing terminal output on natural
-  exit). All three fixed — the project gate is usable again as a loop. **BL-108 was a real
-  trailing-output data-loss race** (`AttachRegistry::remove_session` yanked the reader's sink
-  before the final chunk was broadcast), not just a test-timing issue.
-- **BL-106:** e2e `orchd-survive.mjs` phase7 (keychain survival) had SKIP branches that exited 0,
-  so a CI keychain-provisioning regression passed vacuously. CI now sets `BPA_REQUIRE_KEYCHAIN=1`
-  so a SKIP fails the gate.
+- `final-suite.sh` is 11 stages: `docs/ux/lint.py` is now a blocking stage (and in CI), and the
+  UX-scenario rule points at `docs/ux/scenarios.md` (the old `docs/qa` catalog is superseded).
+- Smoke-guard extended (`outerHTML`/`insertAdjacentHTML`/`document.write`/`srcDoc`/`innerHTML+=`);
+  capabilities pruned (`fs:default`, `fs` scope `$APPDATA/**`, `store:default`); unused
+  plugin-store/plugin-fs and `@xterm` addon dependencies removed.
+- Toast tone: success messages use the `--ok` accent instead of looking like errors.
+- SW1: the daemon rejects zero-stage workflows and empty/duplicate `stage.id`s (matches the
+  client guard); the run picker preselects the row's workflow.
+- Docs: runbook-orchd restart honesty (research runs are live state), architecture.md 0.10.0
+  section + schema v1..v7, traceability stage refs, changelog 0.10.0 headings merged and the
+  wire-version misreference fixed, README numbers re-measured.
 
 ### Verified
 
-The 2026-07-19 code-audit fix plan was re-verified: every P1/P2 correctness item (A1, B1, B3, B4,
-B5, C1–C4, D1–D5) is landed; B2 is mitigated at the call site. Full `cargo test --workspace`,
-clippy `-D warnings`, `cargo fmt --check`, `tsc --noEmit`, `npx vitest run`, and the e2e
-survival harnesses are green.
+`bash scripts/final-suite.sh` (11 stages) → ALL GATES PASSED: `cargo test --workspace`, clippy
+`-D warnings`, `cargo fmt --check`, `tsc --noEmit`, `npx vitest run`, ts-rs parity, both daemons
+≥80% coverage, and both e2e survival harnesses — all green on the merged tree.
 
-## [0.10.0] — UX audit remediation + workspace removal (2026-07-23)
+## [0.10.0] — Soft Control Room v2, autonomy/analytics, UX audit remediation (2026-07-23)
 
 Deep UX audit of the 13 never-audited scenarios (SCN-045..057, report
 [`docs/ux/audits/2026-07-23.md`](docs/ux/audits/2026-07-23.md)) plus the remediation of every
@@ -84,8 +102,8 @@ The app previously had **no way to delete a workspace**: the wire carried
 anything ever created was permanent (a real install had silently accumulated 151 undeletable
 workspaces, every root a deleted temp dir, from test harnesses that attached to the live daemon).
 
-- **`Request::RemoveWorkspace` + `Push::WorkspaceRemoved`** (appended at the enum tail; wire stays
-  `[1,1]`). Removal is total and honest: it terminates any live PTY the workspace owns through the
+- **`Request::RemoveWorkspace` + `Push::WorkspaceRemoved`** (appended at the enum tail; the sessiond
+  wire stays at v3 — append-only). Removal is total and honest: it terminates any live PTY the workspace owns through the
   same teardown as `KillSession`, drains pending final flushes so a detached write cannot resurrect
   a row, then deletes the workspace, its roots, its sessions and their scrollback in one
   transaction — nothing survives a restart. A dedicated id-only push (not `WorkspaceUpdated`, whose
@@ -173,7 +191,7 @@ workspaces, every root a deleted temp dir, from test harnesses that attached to 
 - Task create-form and row selects carry `title`s; SCN-046 step 2 amended to spend-only (the
   connector `ratePerMin` is a separate trust axis the CEO does not inherit).
 
-## [0.10.0] — Soft Control Room design v2 (2026-07-20)
+### Soft Control Room design v2 (2026-07-20)
 
 New visual base (spec `docs/superpowers/specs/2026-07-20-soft-control-room-design.md`,
 guidebook [`docs/design-system.md`](docs/design-system.md)): warm paper neutrality — depth
@@ -208,7 +226,7 @@ by fill steps instead of borders/shadows.
   the build on any reintroduced `var(--border…)` read, so outlined containers cannot creep
   back one component at a time.
 
-## [0.10.0] — UX scenario base + audit fix pass (2026-07-19)
+### UX scenario base + audit fix pass (2026-07-19)
 
 super-ux adopted: [`docs/ux/scenarios.md`](docs/ux/scenarios.md) is now the source of truth for
 user-facing behavior (44 scenarios, all `implemented`). First full audit
@@ -233,7 +251,7 @@ same day. Frontend suite 932 → 949 tests.
 - **Strings doctrine (AUD-05):** the "Daemon disconnected — reconnecting…" banner copy moved from
   an inline literal into `strings.chrome.daemonDisconnected`.
 
-## [0.10.0] — QA audit + test-hardening pass (2026-07-19)
+### QA audit + test-hardening pass (2026-07-19)
 
 Full-tree QA audit (five parallel surface auditors) + a TDD fix loop. Plan and finding disposition:
 [`docs/qa/2026-07-19-code-audit-test-plan.md`](docs/qa/2026-07-19-code-audit-test-plan.md).

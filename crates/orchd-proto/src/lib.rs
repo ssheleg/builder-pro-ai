@@ -1205,16 +1205,29 @@ pub enum OrchdRequest {
         id: String,
         label: Option<String>,
         body: Option<String>,
+        /// GRAPH-1 (BL-143) additive ownership check: when `Some`, the daemon answers
+        /// `NotFound` unless the node's own project matches — the same "no such node in
+        /// this project" semantics as an unknown id, so a foreign node's existence is not
+        /// revealed. `#[serde(default)]` keeps pre-GRAPH-1 peers (no key on the wire)
+        /// decoding as `None` ⇒ legacy unchecked behavior.
+        #[serde(default)]
+        project_id: Option<String>,
     },
     /// → `OrchdResponse::GraphNode` (frequent).
     GraphMoveNode {
         id: String,
         pos_x: f64,
         pos_y: f64,
+        /// GRAPH-1 (BL-143) additive ownership check — see `GraphUpdateNode::project_id`.
+        #[serde(default)]
+        project_id: Option<String>,
     },
     /// → `OrchdResponse::Ack` (cascades edges).
     GraphDeleteNode {
         id: String,
+        /// GRAPH-1 (BL-143) additive ownership check — see `GraphUpdateNode::project_id`.
+        #[serde(default)]
+        project_id: Option<String>,
     },
     /// → `OrchdResponse::GraphEdge`.
     GraphAddEdge {

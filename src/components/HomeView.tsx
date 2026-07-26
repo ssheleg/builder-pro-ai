@@ -304,7 +304,7 @@ export function HomeView(props: {
                       data-testid={`home-row-${meta.id}`}
                       style={waitingRowStyle}
                     >
-                      <StatusDot lifecycle={meta.lifecycle} waitingForInput={meta.waitingForInput} />
+                      <StatusDot lifecycle={meta.lifecycle} waitingForInput={meta.waitingForInput} isActive={meta.isActive} />
                       <span style={monoNameStyle}>
                         {group.workspaceName}/{meta.title}
                       </span>
@@ -343,7 +343,7 @@ export function HomeView(props: {
                       style={clickableRowStyle}
                       onClick={() => goTo(meta.workspaceId, meta.id)}
                     >
-                      <StatusDot lifecycle={meta.lifecycle} waitingForInput={meta.waitingForInput} />
+                      <StatusDot lifecycle={meta.lifecycle} waitingForInput={meta.waitingForInput} isActive={meta.isActive} />
                       <span style={monoNameStyle}>
                         {group.workspaceName}/{meta.title}
                       </span>
@@ -388,6 +388,7 @@ export function HomeView(props: {
                       <StatusDot
                         lifecycle={meta.lifecycle}
                         waitingForInput={meta.waitingForInput}
+                        isActive={meta.isActive}
                       />
                       <span style={monoNameStyle}>
                         {group.workspaceName}/{meta.title}

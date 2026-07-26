@@ -6,7 +6,7 @@ import { useAppStore } from "../store/store";
 
 afterEach(cleanup);
 beforeEach(() => {
-  useAppStore.setState({ toast: null, toastQueue: [] }, false);
+  useAppStore.setState({ toast: null, toastQueue: [], toastTone: "error", toastToneQueue: [] }, false);
 });
 
 describe("Toast (S2 T9, design-system.md Toast atom, spec §7 honest error surface)", () => {
@@ -66,5 +66,28 @@ describe("Toast (S2 T9, design-system.md Toast atom, spec §7 honest error surfa
 
     fireEvent.click(screen.getByTestId("toast-dismiss"));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("FE-6: the default tone is the danger accent; an explicit success tone uses the ok accent", () => {
+    render(<Toast />);
+    act(() => useAppStore.getState().showToast("broke"));
+    let alert = screen.getByRole("alert");
+    expect(alert.getAttribute("data-tone")).toBe("error");
+    expect(alert.style.boxShadow).toContain("var(--danger)");
+
+    act(() => useAppStore.getState().dismissToast());
+    act(() => useAppStore.getState().showToast("idea saved", "success"));
+    alert = screen.getByRole("alert");
+    expect(alert.getAttribute("data-tone")).toBe("success");
+    expect(alert.style.boxShadow).toContain("var(--ok)");
+  });
+
+  it("FE-6: the tone advances with the queue head, not just the message", () => {
+    render(<Toast />);
+    act(() => useAppStore.getState().showToast("saved", "success"));
+    act(() => useAppStore.getState().showToast("broke"));
+    expect(screen.getByRole("alert").getAttribute("data-tone")).toBe("success");
+    fireEvent.click(screen.getByTestId("toast-dismiss"));
+    expect(screen.getByRole("alert").getAttribute("data-tone")).toBe("error");
   });
 });

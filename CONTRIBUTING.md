@@ -24,14 +24,17 @@ on a clean checkout). When a slice ships, its PR updates the README roadmap + ve
 
 ## UX scenarios
 
-[`docs/qa/ux-scenarios.md`](docs/qa/ux-scenarios.md) is the maintained catalog of every user-facing
-scenario (all features / buttons / states / worked-or-not / errors / results) and the base for UX
-testing. **Rule:** any change that adds, changes, or removes a user-facing control, view, or state
-— or a wire verb the UI consumes — MUST update `docs/qa/ux-scenarios.md` in the **same change**
-(add/edit the affected rows + bump the `synced @ <commit>` header). This is part of Definition of
-Done. The advisory `scripts/check-ux-scenarios.sh` (a non-blocking stage in `final-suite.sh` and a
+[`docs/ux/scenarios.md`](docs/ux/scenarios.md) is the source of truth for every user-facing
+scenario (SCN-### entries with statuses, coverage cites, and audit links), maintained with the
+`ux-scenarios` skill; the older `docs/qa/ux-scenarios.md` catalog is superseded and kept as a
+frozen record. **Rule:** any change that adds, changes, or removes a user-facing control, view, or
+state — or a wire verb the UI consumes — MUST update `docs/ux/scenarios.md` in the **same
+change** (add/adjust scenarios, statuses, coverage). This is part of Definition of Done. The
+advisory `scripts/check-ux-scenarios.sh` (a non-blocking stage in `final-suite.sh` and a
 `continue-on-error` CI step) warns when `src/components/**`, `src/App.tsx`, or `src/store/**`
-changed without the catalog — it reminds, it never fails the build. UX-test findings land in
+changed without the catalog — it reminds, it never fails the build. The chain's integrity
+(traces resolve, index in sync) is enforced by `python3 docs/ux/lint.py` (a blocking
+`final-suite.sh` stage). UX-test findings land in
 [`docs/qa/ux-test-results.md`](docs/qa/ux-test-results.md).
 
 ## Dev setup

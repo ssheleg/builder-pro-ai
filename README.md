@@ -169,7 +169,7 @@ downloadable there. See [`docs/build-macos.md`](docs/build-macos.md#manual-relea
 
 ## Running the tests
 
-One command runs the whole gate (the same 10 stages CI runs):
+One command runs the whole gate (the same 11 stages CI runs):
 
 ```sh
 bash scripts/final-suite.sh   # → "ALL GATES PASSED"
@@ -177,8 +177,8 @@ bash scripts/final-suite.sh   # → "ALL GATES PASSED"
 
 | Suite | Command | Covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1153 tests** (`0.10.0`) |
-| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **1070 tests, 63 files** (`0.10.0`) |
+| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1260 tests** (`[Unreleased]`; `0.10.0` had 1170) |
+| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **1270 tests, 71 files** (`[Unreleased]`; `0.10.0` had 1130/63) |
 | e2e (terminals) | `npm run e2e:survive` | create → run → status → quit client → daemon+shell survive → reattach + scrollback |
 | e2e (app domain) | `npm run e2e:orchd` | create → drain-restart → data intact → export → wipe → re-import → graph/MCP/research survival |
 | Coverage gate | `bash scripts/coverage-gate.sh` | ≥80% line coverage on both daemon crates (needs `cargo install cargo-llvm-cov`) |

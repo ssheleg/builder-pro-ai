@@ -175,11 +175,17 @@ src-tauri/src/                    # Tauri core (the broker)
 ├─ fs_watcher.rs                  # S2: debounced FSEvents watch (`notify`/`notify-debouncer-full`)
 │                                  # per active workspace root, gitignore-filtered → `fs://changed`
 │                                  # / `fs://watch-error`; GUI-lifetime only (spec §5)
-└─ launchd.rs                     # install/bootstrap/kickstart the per-user LaunchAgent for
-                                   # EITHER daemon; S3 parameterizes `LaunchdAgent` additively
-                                   # (label/stdout_log_name/stderr_log_name fields) — sessiond
-                                   # call sites pass the pre-existing values byte-identically,
-                                   # orchd call sites pass ORCHD_LABEL/orchd.out.log/orchd.err.log
+├─ launchd.rs                     # install/bootstrap/kickstart the per-user LaunchAgent for
+│                                  # EITHER daemon; S3 parameterizes `LaunchdAgent` additively
+│                                  # (label/stdout_log_name/stderr_log_name fields) — sessiond
+│                                  # call sites pass the pre-existing values byte-identically,
+│                                  # orchd call sites pass ORCHD_LABEL/orchd.out.log/orchd.err.log
+├─ power.rs                       # SCN-045: IOPMAssertion keep-awake — enable toggle, reconcile
+│                                  # acquire-on-first-live-session / release-on-last, honest
+│                                  # denied/error status to the sidebar pill
+└─ stats.rs                       # SCN-052/053: usage scan of ~/.claude/projects/*.jsonl (mtime
+                                   # cache, per-model-family cut, cancellable) + git log --numstat
+                                   # per root — both timeout/worker-honest (no fake zeros)
 
 crates/protocol/src/lib.rs        # SHARED sessiond Hop-B wire types (serde + ts-rs) — source of
                                    # truth; S3 generalizes the framing primitives additively so
@@ -253,9 +259,10 @@ crates/orchd/src/                 # NEW (S3, bpa-orchd): the app-domain daemon b
 │                                  # adds a boot-reconcile step right after open_db that flips any
 │                                  # research_run stuck pending/running to failed{interrupted} (D11)
 ├─ persistence.rs                 # rusqlite (WAL), orchd.db schema v1 (S4: v2; S-EXT: v3,
-│                                  # additive) — CRUD × 6 entity families + the S-EXT MCP/connector/
-│                                  # skill/trust tables, every invariant/cascade, migration runner
-│                                  # (daemon-core)
+│                                  # S-IDEA: v4; SCN-051: v5 task.priority; SCN-054: v6 doc;
+│                                  # SW1: v7 workflow — all additive, forward-only) — CRUD × 6
+│                                  # entity families + the S-EXT MCP/connector/skill/trust tables,
+│                                  # every invariant/cascade, migration runner (daemon-core)
 ├─ socket_server.rs               # tokio UnixListener; dispatch every OrchdRequest verb (S4: the 9
 │                                  # graph verbs; S-EXT: every Mcp*/Connector*/Skill*/Trust* verb
 │                                  # too; S-IDEA: the 3 Research* verbs); peer-cred; bounded outq;
@@ -395,9 +402,10 @@ both daemons build on.
 **Still ADR-HOST roadmap, NOT part of S3:** the scheduler + event-trigger runtime (SW2), the
 workflow-engine runtime (SW1), and the agent runtime (S6b+) are future hosts INSIDE `bpa-orchd` —
 S3 ships the store and daemon they'll eventually run in, not the schedulers/engines/agents
-themselves. Until those land, `bpa-orchd` has no live runtime state of its own to lose on restart
-(see the survival-truth-table row in `README.md`/platform overview §2) — every row it owns is
-already durable SQLite.
+themselves. Live state caveat: since S-IDEA, an in-flight **research run** IS live runtime state —
+a restart interrupts it (boot-reconcile marks it `failed{interrupted}`; see the survival truth
+table in `docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md` §2). Every committed
+row is durable SQLite.
 
 ## Knowledge graph — SHIPPED in S4 (`[0.5.0]`)
 
@@ -752,7 +760,9 @@ in the sidebar, an archived-project read-only banner + «Un-archive» button) ar
 edges but never RE-KIND an existing one, and had no node title/body form or rename. P4 adds the
 append-only wire verb `GraphUpdateEdge { id, kind } -> OrchdResponse::GraphEdge`
 (`crates/orchd/src/graph.rs`) — an edge's rendered "label" IS its `kind`, so changing the kind is
-the whole edit; there is no separate label column and therefore **no v5 migration**. It pushes
+the whole edit; there is no separate label column and therefore **no v5 migration for this
+change** (schema v5 later arrived with `task.priority` in SCN-051, and v6 with the `doc` table in
+SCN-054). It pushes
 `GraphChanged` for BOTH endpoint projects (a cross-project edge re-kind invalidates both sides,
 same fan-out rule as `GraphAddEdge`); an unknown `id` ⇒ `NotFound`; an archived endpoint project ⇒
 `Invariant` — guards mirroring `GraphAddEdge`. Node add (title/body form) and inline rename reuse
@@ -785,7 +795,7 @@ schema change, no new verb, no backend change at all. Detail is in
 
 ## Frontend design system + diagnostics — SHIPPED in S-UXR / S-DIAG / S-DESIGN (`[0.9.x]`)
 
-Frontend-only slices — no wire verb, no schema migration (orchd stays `[1,1]`); the ~925 vitest
+Frontend-only slices — no wire verb, no schema migration (orchd stays `[1,1]`); the ~1130 vitest
 tests are the behavior-preservation guarantee.
 
 - **Design tokens + primitives (`src/ui/`, `[0.9.0]`).** A single CSS-variable layer
@@ -796,9 +806,12 @@ tests are the behavior-preservation guarantee.
   every view consumes — no raw hex in the component tree. The legacy static dark-only palette was
   retired. Palette legibility is a VERIFIED invariant: `contrast.ts` + `contrast.test.ts` assert
   every ink/tone/on-accent text pair clears WCAG AA in both themes (`[0.9.1]`, S-DESIGN).
-- **UX-scenario base (`docs/qa/`, `[0.9.0]`).** 181 first-session scenarios across 15 epics, a
-  maintenance rule (CONTRIBUTING), an advisory CI gate (`check-ux-scenarios.sh`), and a code-traced
-  audit-results file — the regression map the redesign was checked against.
+- **UX-scenario base (`docs/ux/`, `[0.9.0]`, moved to the super-ux chain in `[0.10.0]`).** The
+  current source of truth is `docs/ux/scenarios.md` (66 SCN entries with foundation/flows/screens
+  and dated audit reports under `docs/ux/audits/`); the original 181-scenario catalog
+  (`docs/qa/ux-scenarios.md`) is a frozen record. Maintenance rule in CONTRIBUTING, an advisory CI
+  gate (`check-ux-scenarios.sh`), and a blocking integrity lint (`docs/ux/lint.py`, a final-suite
+  stage since the 2026-07-24 audit remediation).
 - **Diagnostics — reconstructable failures (`src/ipc/diag.ts` + store, `[0.9.1]`, S-DIAG).** Errors
   were previously a 4 s toast and then lost, and a render crash was a white screen. Now
   `store.reportError(op, e)` classifies the error, scrubs secrets (Bearer/token/key/app-password/
@@ -814,6 +827,46 @@ tests are the behavior-preservation guarantee.
   raw Tauri "state not managed" error. Now such a command extracts a managed `AppState` and returns
   an honest `Disconnected` (→ the orchestrator-unavailable banner + reconnect, self-healing on
   `orchd://up`). The diagnostics log above is what surfaced this on a live install.
+
+## Soft Control Room v2 + autonomy/analytics — SHIPPED in `[0.10.0]`
+
+A mixed frontend/core slice: a new visual base plus the first autonomy-analytics features, followed
+by a full UX-audit remediation of the 13 previously un-audited scenarios (SCN-045..057, report
+`docs/ux/audits/2026-07-23.md`).
+
+- **Warm fill-model design base (`src/ui/tokens.css` + 36 views).** Depth by fill steps instead of
+  borders/shadows (ivory/charcoal surfaces, terracotta `--accent`, blue `--data` voice); new atoms
+  `SegmentedPill`/`Heatmap`; every text pairing stays WCAG-AA under the extended contrast test.
+- **Keep-awake (`src-tauri/src/power.rs`, SCN-045).** An IOPMAssertion held while the toggle is on
+  AND at least one session is live; the sidebar pill reports enabled/active/denied honestly (no
+  fake "on" when macOS refused the assertion).
+- **Task priority (SCN-051).** `task.priority` (`urgent`/`normal`, schema v5) with per-segment
+  midpoint ranking in the Tasks tab.
+- **Docs tab (SCN-054, schema v6).** File-backed per-project markdown docs (`doc` table, files
+  under `rules/docs/<project>/`) with the ruleset's files-as-truth state machine (hash check,
+  external-edit/missing banners, acknowledge) and a dependency-free inline-markdown preview (no
+  HTML sink).
+- **CEO delegation CONFIG (SCN-046, S6b honesty boundary).** The supervisor policy section
+  persists scope (delegated approval classes, instruction, custom rules) and explicitly does NOT
+  act — the runtime CEO arrives with S6b; a disabled CEO progressively discloses nothing that
+  reads as an active grant.
+- **Stats dashboard (`src-tauri/src/stats.rs`, SCN-052/053).** Token/cost/session tiles from
+  `~/.claude/projects/*.jsonl` (mtime-cached scan, cancellable, per-model-family cut) + git
+  commits/numstat per root, attributed longest-prefix to workspace roots with an honest "other"
+  bucket; a request-epoch guard kills the range-switch race, and failed/loading sources render
+  "—" instead of zeros that look like data.
+- **Workspace removal + session accounting (SCN-058/059, audit remediation).**
+  `Request::RemoveWorkspace` + `Push::WorkspaceRemoved` (sessiond wire, append-only): kills the
+  workspace's live PTYs through the KillSession teardown, drains final flushes, and deletes
+  workspace/roots/sessions/scrollback in one transaction — plus per-row confirm and a bulk
+  "clean up missing" action (a root that cannot be stat'd counts as present, never removed on a
+  guess). Session counters/Home became one exhaustive disjoint partition
+  (`live / waiting / restored / exited`) — a cold-rehydrated session can no longer vanish from
+  every count while rendering as a tab.
+- **Workflow authoring (SW1, schema v7).** Reusable workflow definitions (ordered stages, agent
+  roster, optional supervisor reuse of the CEO policy config) as files-as-truth rows with a
+  library + editor view and a run picker — the data model the S6b runtime will execute; run
+  engine explicitly NOT part of this slice.
 
 ## Resource envelope (per session)
 

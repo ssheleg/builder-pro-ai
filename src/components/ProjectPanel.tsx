@@ -139,6 +139,15 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
   const [importDir, setImportDir] = useState<string | null>(null);
   const [importFiles, setImportFiles] = useState<FsEntry[]>([]);
   const { submitting, guard } = useSubmitGuard();
+  // FE-4 (spec D6): export and import get their own guard instances rather than sharing the
+  // archive one — the export buttons, the import picker and the archive button are all visible on
+  // the same Overview tab, so an export must stay clickable while an archive is in flight (and
+  // vice versa). One instance per independent control group, the `ConnectorsTab` discipline:
+  //  - exportGuard: "Copy JSON" + "Save to file…" — two triggers of the same logical export.
+  //  - importGuard: browse + the per-file import buttons — one sequential import flow (a
+  //    double-click on Browse must not open two native pickers whose results clobber each other).
+  const exportGuard = useSubmitGuard();
+  const importGuard = useSubmitGuard();
 
   useEffect(() => {
     void refreshGoals(projectId);
@@ -201,7 +210,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
     try {
       const json = await orchdExportProject(projectId);
       await navigator.clipboard.writeText(json);
-      showToast(strings.project.jsonCopied);
+      showToast(strings.project.jsonCopied, "success");
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -212,7 +221,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
       const dir = await pickFolder();
       if (dir === null) return; // cancelled -> no-op
       await orchdExportToFile(projectId, dir);
-      showToast(strings.project.exportedToFile);
+      showToast(strings.project.exportedToFile, "success");
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -234,7 +243,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
     if (importDir === null) return;
     try {
       const report = await orchdImportFromFile(`${importDir}/${entry.relPath}`);
-      showToast(strings.project.importSummary(report));
+      showToast(strings.project.importSummary(report), "success");
       setImportDir(null);
       setImportFiles([]);
       await refreshProjects();
@@ -252,7 +261,7 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
     try {
       await orchdArchiveProject(projectId);
       await refreshProjects();
-      showToast(strings.project.archived);
+      showToast(strings.project.archived, "success");
     } catch (e) {
       showToast(describeOrchdError(e));
     }
@@ -269,6 +278,12 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
 
   const archiveProject = guard(handleArchive);
   const unarchiveProject = guard(handleUnarchive);
+  // Guarded export/import handlers (FE-4) — `finally`-only wrappers, so each handler's own
+  // try/catch → toast path above is untouched and a rejection still releases the lock.
+  const submitCopyJson = exportGuard.guard(handleCopyJson);
+  const submitExportToFile = exportGuard.guard(handleExportToFile);
+  const submitBrowseImport = importGuard.guard(handleBrowseImport);
+  const submitImportFile = importGuard.guard(handleImportFile);
   const isArchived = project.status === "archived";
 
   return (
@@ -423,7 +438,10 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                   variant="ghost"
                   size="sm"
                   data-testid="project-export-copy"
-                  onClick={() => void handleCopyJson()}
+                  // Export stays live for an archived project (it's a read) — only an in-flight
+                  // export disables it (FE-4).
+                  disabled={exportGuard.submitting}
+                  onClick={() => void submitCopyJson()}
                 >
                   {strings.project.copyJson}
                 </Button>
@@ -432,7 +450,8 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                   variant="ghost"
                   size="sm"
                   data-testid="project-export-file"
-                  onClick={() => void handleExportToFile()}
+                  disabled={exportGuard.submitting}
+                  onClick={() => void submitExportToFile()}
                 >
                   {strings.project.saveToFile}
                 </Button>
@@ -445,10 +464,11 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                 variant="ghost"
                 size="sm"
                 data-testid="project-import-browse"
-                onClick={() => void handleBrowseImport()}
+                onClick={() => void submitBrowseImport()}
                 // Import mutates the project — gated the same way as workspace management
-                // (AUD-2026-07-19-04): an archived project's banner promises read-only.
-                disabled={orchdDown || isArchived}
+                // (AUD-2026-07-19-04): an archived project's banner promises read-only. FE-4: a
+                // second click while a browse/import is in flight is dropped by the guard.
+                disabled={orchdDown || isArchived || importGuard.submitting}
               >
                 {strings.project.importFromFile}
               </Button>
@@ -464,8 +484,8 @@ export function ProjectPanel(props: { projectId: string }): JSX.Element {
                         variant="ghost"
                         size="sm"
                         data-testid={`project-import-file-${f.name}`}
-                        onClick={() => void handleImportFile(f)}
-                        disabled={orchdDown || isArchived}
+                        onClick={() => void submitImportFile(f)}
+                        disabled={orchdDown || isArchived || importGuard.submitting}
                         style={{ alignSelf: "flex-start" }}
                       >
                         {f.name}

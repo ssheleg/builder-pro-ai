@@ -1,6 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore, type JSX } from "react";
 import type { SessionId } from "../ipc/commands";
 import type { TerminalManager } from "../terminal/terminal-manager";
+import { useAppStore } from "../store/store";
 import { strings } from "../strings";
 
 /**
@@ -40,6 +41,10 @@ export function TerminalPane(props: {
 }): JSX.Element {
   const { sessionId, manager } = props;
   const containerRef = useRef<HTMLDivElement>(null);
+  // Session ids this pane already showed the FE-7 restored-input hint for — keyed by id because
+  // this ONE instance is reused across tab switches (no React `key`), so a plain boolean would
+  // latch on the first restored session and mute the hint for every later one.
+  const restoredHintedRef = useRef<Set<SessionId>>(new Set());
 
   // Honest attach-failure surface (AUD-2026-07-19-01): the manager records the last failed
   // `attach_session` per session; this subscription re-renders ONLY on error/clear transitions
@@ -64,6 +69,30 @@ export function TerminalPane(props: {
       // the manager; only a real close (TerminalTabs) calls dispose().
       manager.hide(sessionId);
     };
+  }, [sessionId, manager]);
+
+  // FE-7: typing into a RESTORED session (`isActive === false`, not exited — the PTY is gone
+  // after a daemon restart) is silently swallowed by `writeStdin`, so surface a hint the FIRST
+  // time the owner types, once per session. The store is read via `getState()` INSIDE the xterm
+  // callback — deliberately NO subscription — so live sessions see zero extra renders and zero
+  // behavior change. The pane instance is reused across tab switches (no React `key`), so the
+  // "already hinted" memory must be keyed by session id, not a per-instance boolean.
+  useEffect(() => {
+    const term = manager.ensure(sessionId); // idempotent — the attach effect created it already
+    const sub = term.onData(() => {
+      const s = useAppStore.getState();
+      const meta = s.sessions[sessionId];
+      if (
+        meta !== undefined &&
+        !meta.isActive &&
+        meta.lifecycle.kind !== "exited" &&
+        !restoredHintedRef.current.has(sessionId)
+      ) {
+        restoredHintedRef.current.add(sessionId);
+        s.showToast(strings.terminal.restoredInputHint);
+      }
+    });
+    return () => sub.dispose();
   }, [sessionId, manager]);
 
   return (
