@@ -218,7 +218,7 @@ async fn second_instance_flock_refusal() {
 }
 
 #[tokio::test]
-async fn fresh_boot_creates_schema_v7_and_global_ruleset() {
+async fn fresh_boot_creates_schema_v8_and_global_ruleset() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("orchd.sock");
     let home_dir = tempfile::tempdir().unwrap();
@@ -250,8 +250,9 @@ async fn fresh_boot_creates_schema_v7_and_global_ruleset() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     // SCN-051 bumped SCHEMA_VERSION 4->5 (additive, `task.priority` only); SCN-054 bumped it
-    // 5->6 (additive, the `doc` table only); SW1 bumped it 6->7 (additive, the `workflow` table).
-    assert_eq!(user_version, 7);
+    // 5->6 (additive, the `doc` table only); SW1 bumped it 6->7 (additive, the `workflow` table);
+    // BL-120 bumped it 7->8 (additive, the `mcp_artifact.truncated` column).
+    assert_eq!(user_version, 8);
 
     for table in [
         "project",

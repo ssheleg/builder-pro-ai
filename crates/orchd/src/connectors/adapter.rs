@@ -357,7 +357,7 @@ pub async fn invoke(
                 )))
             })?;
 
-            let (artifact_id, invocation_id) = {
+            let (artifact, invocation_id) = {
                 let guard = db.lock().await;
                 let invocation = guard.insert_invocation(NewInvocation {
                     server_id: None,
@@ -381,13 +381,13 @@ pub async fn invoke(
                     account_id: Some(account_id.to_string()),
                     tool_name: op.to_string(),
                     project_id,
-                    content_json: content_json.clone(),
+                    content_json,
                     // No MCP-content-block shape to flatten for an arbitrary REST JSON result;
                     // the full result lives in content_json. (A future adapter that returns a
                     // known text shape could populate this.)
                     content_text: None,
                 })?;
-                (artifact.id, invocation.id)
+                (artifact, invocation.id)
             };
 
             // Structured tracing — account id/provider/op only, NEVER the bearer/args/result
@@ -401,11 +401,15 @@ pub async fn invoke(
                 "connector: invoke completed"
             );
 
+            // BL-120: reply with the STORED content (identical unless the artifact write-time
+            // cap truncated it — then the truncated prefix plus `truncated: Some(true)`), so
+            // this response frame can never exceed `MAX_FRAME_LEN` and drop the connection.
             Ok(McpCallResult {
-                artifact_id,
+                artifact_id: artifact.id,
                 invocation_id,
-                content_json,
+                content_json: artifact.content_json,
                 is_error: false,
+                truncated: artifact.truncated,
             })
         }
         Err(e) => {

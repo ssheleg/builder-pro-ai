@@ -542,8 +542,17 @@ pub struct McpConnectReport {
 pub struct McpCallResult {
     pub artifact_id: String,
     pub invocation_id: String,
+    /// The SAME content the artifact row stored — when the tool output exceeded the artifact
+    /// write-time cap (BL-120), this is the TRUNCATED form (`truncated` is then `Some(true)`),
+    /// so this response frame always fits the wire's `MAX_FRAME_LEN` instead of dropping the
+    /// connection outright.
     pub content_json: String,
     pub is_error: bool,
+    /// BL-120: `Some(true)` when the call's content was truncated at artifact write time to keep
+    /// the frame encodable; `None` (and absent on pre-BL-120 peers' wires) when the content is
+    /// whole. Appended at the struct TAIL with `#[serde(default)]` (append-only wire rule).
+    #[serde(default)]
+    pub truncated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -593,11 +602,20 @@ pub struct McpArtifact {
     pub account_id: Option<String>,
     pub tool_name: String,
     pub project_id: Option<String>,
+    /// When the artifact was truncated at write time (BL-120), this is the truncated prefix —
+    /// `truncated` is then `Some(true)`.
     pub content_json: String,
     pub content_text: Option<String>,
     pub is_untrusted: bool,
     #[ts(type = "number")]
     pub created_at: i64,
+    /// BL-120: `Some(true)` when the stored content was truncated at write time because it
+    /// exceeded the artifact content cap (the write-side guarantee that a `McpGetArtifact`/
+    /// `McpListArtifacts` frame stays under the wire's `MAX_FRAME_LEN`); `None` when whole.
+    /// Pre-BL-120 rows decode as `None` (the column backfills 0). Appended at the struct TAIL
+    /// with `#[serde(default)]` (append-only wire rule).
+    #[serde(default)]
+    pub truncated: Option<bool>,
 }
 
 // ---- S-EXT Connector/OAuth entities (spec §5/§7, appended — order FROZEN append-only) ----
@@ -1567,6 +1585,16 @@ pub enum OrchdRequest {
     WorkflowDelete {
         id: String,
     },
+    /// → `OrchdResponse::Ack` + pushes `McpServersChanged` (BL-111). Revokes EVERY consent grant
+    /// (any `kind`) for `server_id` — the mirror of `TrustGrantConsent`, so the owner's "stop
+    /// trusting this server" action exists on the wire, not just via server deletion. Audited as
+    /// `consent_revoke`/`allow` (mirroring the grant's SEC-5 audit row). IDEMPOTENT by contract:
+    /// an unknown `server_id` or a server with no grants is `Ack` too (the postcondition "no
+    /// grants exist for this server" already holds) — a revoke is a safety verb, never an
+    /// existence query. Appended at the enum TAIL (append-only wire rule).
+    TrustRevokeConsent {
+        server_id: String,
+    },
 }
 
 impl OrchdRequest {
@@ -1676,6 +1704,7 @@ impl OrchdRequest {
             Self::WorkflowGet { .. } => "WorkflowGet",
             Self::WorkflowUpsert { .. } => "WorkflowUpsert",
             Self::WorkflowDelete { .. } => "WorkflowDelete",
+            Self::TrustRevokeConsent { .. } => "TrustRevokeConsent",
         }
     }
 }

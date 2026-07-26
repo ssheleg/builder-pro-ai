@@ -148,6 +148,12 @@ const AUDIT_ACTION_POLICY_DENY: &str = "policy_deny";
 /// dispatch arm (granting consent is the gate-SETTING action, so it is not itself routed through
 /// [`authorize`]).
 pub(crate) const AUDIT_ACTION_CONSENT_GRANT: &str = "consent_grant";
+/// `audit_log.action` literal for a `TrustRevokeConsent` (BL-111): revoking consent is the exact
+/// mirror of the grant — a trust-relevant mutation that must answer "who withdrew trust for this
+/// server, when" from the append-only trail alone, so it is audited with the SAME shape as the
+/// grant row (server id, `allow` = the revoke was performed). Written by `socket_server`'s
+/// `TrustRevokeConsent` dispatch arm (like the grant, it is not routed through [`authorize`]).
+pub(crate) const AUDIT_ACTION_CONSENT_REVOKE: &str = "consent_revoke";
 const AUDIT_DECISION_ALLOW: &str = "allow";
 const AUDIT_DECISION_DENY: &str = "deny";
 
