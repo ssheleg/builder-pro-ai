@@ -742,19 +742,6 @@ impl Db {
         Ok(ids)
     }
 
-    /// Does a workspace row exist for `id`? (SES-4: `CreateSession` must reject a bogus
-    /// `workspace_id` UP FRONT instead of creating a live PTY whose every persist fails on the
-    /// `session.workspace_id` FK and which then silently vanishes on the next restart with no
-    /// client-visible error.) Cheap COUNT; never an error for a missing row (returns `Ok(false)`).
-    pub fn workspace_exists(&self, workspace_id: &WorkspaceId) -> Result<bool, PersistError> {
-        let exists: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM workspace WHERE id = ?1",
-            rusqlite::params![workspace_id],
-            |r| r.get(0),
-        )?;
-        Ok(exists > 0)
-    }
-
     ///
     /// **Explicit ordered deletes, NOT `ON DELETE CASCADE`.** The v1/v3 schema declares plain
     /// `REFERENCES workspace(id)` / `REFERENCES session(id)` with no `ON DELETE` action (see
