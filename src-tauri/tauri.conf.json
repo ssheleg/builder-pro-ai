@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -37,6 +38,15 @@
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true,
       "minimumSystemVersion": "12.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc2ODJEMjEzNTU2RTZCMTIKUldRU2EyNVZFOUtDZGtQUEdKWHFuQVZqZWJLdVlEa0k0OHRVTXIxNTI1QklhM2VOSnNSZVhSMHcK",
+      "endpoints": [
+        "https://github.com/ssheleg/builder-pro-ai/releases/latest/download/latest.json"
+      ],
+      "dialog": false
     }
   }
 }

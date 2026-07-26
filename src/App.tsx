@@ -37,6 +37,7 @@ import { listSessions, listWorkspaces, daemonStatus } from "./ipc/commands";
 import type { WorkspaceId } from "./ipc/commands";
 import type { SessionMeta, Workspace } from "./ipc/types";
 import { startWorkspaceWatch, stopWorkspaceWatch } from "./ipc/fs";
+import { promptAndInstallStartupUpdate } from "./updater";
 import { TerminalManager } from "./terminal/terminal-manager";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { TerminalTabs } from "./components/TerminalTabs";
@@ -131,6 +132,14 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
    */
   const activeWorkspaceIdRef = useRef<WorkspaceId | null>(null);
   activeWorkspaceIdRef.current = activeWorkspaceId;
+
+  // Self-update (Tauri updater → GitHub Releases): one non-blocking check on mount. If a newer
+  // version is published, prompt; on accept, download + install + relaunch. Never throws and never
+  // blocks the daemon hydrate below. `reconcile_daemon_version` (Rust) reloads both daemons from
+  // the new `.app` after the relaunch so daemon fixes take effect.
+  useEffect(() => {
+    void promptAndInstallStartupUpdate();
+  }, []);
 
   useEffect(() => {
     let disposed = false;
