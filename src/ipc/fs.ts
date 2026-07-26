@@ -42,6 +42,7 @@ export type FsError =
   | { kind: "outsideRoot" }
   | { kind: "tooLarge" }
   | { kind: "alreadyExists" }
+  | { kind: "disconnected" }
   | { kind: "io"; message: string };
 
 /**

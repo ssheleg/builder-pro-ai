@@ -18,6 +18,8 @@ function describeFsError(err: unknown): string {
       return strings.errors.fs.outsideRoot;
     case "tooLarge":
       return strings.errors.fs.tooLarge;
+    case "disconnected":
+      return strings.errors.fs.disconnected;
     case "io":
       return e.message ?? strings.errors.fs.io;
     default:

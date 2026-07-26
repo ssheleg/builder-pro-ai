@@ -57,6 +57,8 @@ export function describeFsError(err: unknown): string {
       return strings.errors.fs.tooLarge;
     case "alreadyExists":
       return strings.errors.fs.alreadyExists;
+    case "disconnected":
+      return strings.errors.fs.disconnected;
     case "io":
       return e.message ?? strings.errors.fs.io;
     default:
