@@ -444,9 +444,9 @@ in different lifecycle states.
 - **Expected result:** lazy fetch per dir with cache; dirs first, locale-sorted; ignored entries dimmed and hidden unless toggled (toggling also restarts the live watch with the new filter, so later edits to ignored files arrive too); new root appears. A directory listing invalidated while its fetch is in flight can never repopulate the cache with a stale result
 - **UI elements:** rail header (⟩ collapse, "Files", "show ignored"), tree rows (role=treeitem), "Loading…" row, "empty folder" row, failed row + Retry, "+ Add root" button, ⟨ reopen strip
 - **States covered:** loading, empty, error, success
-- **Errors & recovery:** listDir fails → danger row "Failed to read folder: {msg}" + inline Retry (no auto-retry loop) + toast; add-root fails → toast "Failed to add root: {msg}"; no workspace → rail renders nothing
+- **Errors & recovery:** listDir fails → danger row "Failed to read folder: {msg}" + inline Retry (no auto-retry loop) + toast; add-root fails → toast "Failed to add root: {msg}"; no workspace → rail renders nothing. Every fs command and the watcher are validated against the REGISTERED workspace roots server-side (a stale/foreign root → "path is outside the workspace root"; the roots cache not yet loaded → honest "daemon disconnected", fail-closed — never a silent fallthrough to arbitrary paths)
 - **Status:** implemented
-- **Coverage:** src/components/FileTree.tsx:111-168,298-415,482-491,658-707,714-772,786-805, src/components/FilesRail.tsx:22-152, src/strings.ts:140-152,161
+- **Coverage:** src/components/FileTree.tsx:111-168,298-415,482-491,658-707,714-772,786-805, src/components/FilesRail.tsx:22-152, src/strings.ts:140-152,161, src-tauri/src/fs_explorer.rs (registered-root guard), src-tauri/src/commands.rs (WorkspaceRootsCache)
 
 ### SCN-021: Preview a file
 - **Persona:** P-01
@@ -828,12 +828,12 @@ in different lifecycle states.
 - **Preconditions:** orchd database degraded
 - **Steps:**
   1. App connects to orchd running degraded
-- **Expected result:** red banner — in-memory: "Storage unavailable — running in memory. Changes will NOT survive a restart."; corruption: "Database was corrupted and has been reset. The damaged copy was saved to {path}."; persists until a healthy daemon restart (no dismiss, no in-app recovery)
+- **Expected result:** red banner — in-memory: "Storage unavailable — running in memory. Changes will NOT survive a restart."; corruption: "Database was corrupted and has been reset. The damaged copy was saved to {path}."; persists until a healthy daemon restart (no dismiss, no in-app recovery). While degraded, WRITES are refused server-side with a typed invariant ("storage degraded, write refused…") surfacing as a toast on any mutation attempt — reads, lists, export and the status poll stay live, so the owner can still back up via export
 - **UI elements:** StorageBanner (red, role=alert)
 - **States covered:** error
-- **Errors & recovery:** honest permanent warning; recovery is external (restart daemon healthy)
+- **Errors & recovery:** honest permanent warning + write-refusal toasts; recovery is external (restart daemon healthy)
 - **Status:** implemented
-- **Coverage:** src/components/StorageBanner.tsx:32-45, src/App.tsx:302,402,478, src/strings.ts:617-619
+- **Coverage:** src/components/StorageBanner.tsx:32-45, src/App.tsx:302,402,478, src/strings.ts:617-619, crates/orchd/src/socket_server.rs (dispatch read-only gate)
 
 ## diagnostics
 
