@@ -268,6 +268,58 @@ fn ensure_daemon_running(agent: &LaunchdAgent<'_>) -> Result<(), LaunchdError> {
     Ok(())
 }
 
+/// Auto-update daemon reconcile: after the Tauri updater swaps the `.app` and relaunches the GUI,
+/// `launchd` is STILL running the OLD daemon binary (REL-1: `bootstrap` deliberately does NOT bootout
+/// an already-loaded service, and the plain `kickstart` is non-force so it never reloads a running
+/// one). A new app version would otherwise run its NEW GUI against the OLD daemons — daemon fixes
+/// (e.g. the 0.10.1 SEC-1/SEC-2/REL-1 fixes) would never take effect. This reloads the daemon from
+/// the CURRENT `.app`'s bundled binary exactly once, gated by a persisted version marker file:
+///   - marker == `CARGO_PKG_VERSION` → the daemon binary last loaded is current → no-op (the normal
+///     launch path — no terminal disruption).
+///   - marker absent (first-ever launch) → the daemon is being bootstrapped fresh by
+///     `ensure_daemon_running` from the current `.app`, so it is already current → write the marker.
+///   - marker != current (just auto-updated) → `kickstart_force` (`-k`) kills the old daemon and
+///     relaunches it from the new `.app` → write the marker. Live terminals in the old daemon are
+///     interrupted (their scrollback/history persists in `bpa.db` and re-attaches — the update
+///     dialog warns the user this will happen).
+///
+/// Best-effort: a marker read/write or kickstart failure is logged + swallowed (the daemon is still
+/// running, just possibly stale) — it never blocks app bring-up or panics.
+fn reconcile_daemon_version(agent: &LaunchdAgent<'_>, marker_path: &std::path::Path) {
+    let current = env!("CARGO_PKG_VERSION");
+    let on_disk = std::fs::read_to_string(marker_path)
+        .ok()
+        .map(|s| s.trim().to_string());
+    match on_disk.as_deref() {
+        Some(v) if v == current => {
+            // Daemon binary last loaded is current — nothing to do.
+        }
+        None => {
+            // First-ever launch: the daemon is being bootstrapped fresh from the current `.app` by
+            // `ensure_daemon_running`, so it is already current. Record the marker.
+            let _ =
+                std::fs::create_dir_all(marker_path.parent().unwrap_or(std::path::Path::new(".")));
+            let _ = std::fs::write(marker_path, current);
+        }
+        Some(stale) => {
+            warn!(
+                current_version = current,
+                marker_version = stale,
+                "auto-update: reloading the daemon from the current app bundle (kickstart -k)"
+            );
+            match agent.kickstart_force() {
+                Ok(()) => {
+                    let _ = std::fs::write(marker_path, current);
+                }
+                Err(e) => error!(
+                    error = %e,
+                    "auto-update: daemon force-reload failed (daemon left running, possibly stale)"
+                ),
+            }
+        }
+    }
+}
+
 /// Emit the no-payload `daemon://disconnected` banner event, logging the reason (spec §13:
 /// actionable degradation, never a silent hang).
 fn emit_disconnected(app: &tauri::AppHandle, reason: &str) {
@@ -415,6 +467,13 @@ async fn bring_up_daemon(
         return; // `status` stays `Disconnected`, seeded at manage time in setup()
     }
 
+    // Auto-update reconcile: if the Tauri updater just swapped the `.app`, launchd is still running
+    // the OLD daemon binary — reload it from the current `.app` so daemon fixes take effect (see
+    // `reconcile_daemon_version`). Best-effort; never blocks the connect below.
+    if let Ok(dir) = app.path().app_data_dir() {
+        reconcile_daemon_version(&agent, &dir.join("daemon-applied-sessiond.txt"));
+    }
+
     // Kickstart is asynchronous: give the daemon a moment to fork and bind its socket.
     // BOOT_CONNECT_ATTEMPTS (8) x 500ms = up to ~4s of bounded retry, inside the spec's "~3-5s"
     // window. IncompatibleDaemon short-circuits this (no retry, see `connect_with_retry`'s docs).
@@ -510,6 +569,12 @@ pub(crate) async fn bring_up_orchd(
         return;
     }
 
+    // Auto-update reconcile for orchd (mirror of sessiond's): reload from the current `.app` if an
+    // update just swapped it in. Best-effort.
+    if let Ok(dir) = app.path().app_data_dir() {
+        reconcile_daemon_version(&agent, &dir.join("daemon-applied-orchd.txt"));
+    }
+
     // Same bounded-retry budget/backoff shape as `bring_up_daemon` (BOOT_CONNECT_ATTEMPTS x
     // 500ms = up to ~4s), via the orchd-specific NAMED const so the HANDSHAKE_SUSPECT_CAP
     // coupling stays enforced (see `orchd_client::BOOT_CONNECT_ATTEMPTS`'s doc).
@@ -594,6 +659,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // fs_watcher's `WatchSlot` never depends on daemon connectivity (spec §5: core-local,
         // GUI-lifetime), so it's `manage`d immediately here on the builder. (`AppState` is likewise
         // `manage`d synchronously — inside `setup()` below, before either bring-up task is spawned,
@@ -1082,6 +1149,97 @@ mod tests {
             vec!["kickstart", "gui/501/ai.builderpro.desktop.sessiond"],
             "boot-path kickstart must NEVER carry -k: force-killing a running daemon on every \
              app launch destroys live sessions with zero consent (findings [10]/[16])"
+        );
+    }
+
+    // `reconcile_daemon_version` test fixture: an agent whose runner records every launchctl call.
+    // `kickstart_force` runs `kickstart -k <target>`, so a force-reload shows up as a 1-entry call
+    // list with `-k` in it; a no-op reconcile records nothing.
+    fn reconcile_agent<'a>(
+        mock: &'a MockLaunchctl,
+        tmp: &'a tempfile::TempDir,
+    ) -> crate::launchd::LaunchdAgent<'a> {
+        crate::launchd::LaunchdAgent {
+            runner: mock,
+            uid: 501,
+            launch_agents_dir: tmp.path().join("LaunchAgents"),
+            app_support_dir: tmp.path().join("AppSupport"),
+            daemon_path: std::path::PathBuf::from(
+                "/Applications/Builder Pro AI.app/Contents/MacOS/bpa-sessiond",
+            ),
+            socket_path: std::path::PathBuf::from("/tmp/bpa-501/d.sock"),
+            label: crate::launchd::LABEL,
+            stdout_log_name: "sessiond.out.log",
+            stderr_log_name: "sessiond.err.log",
+        }
+    }
+
+    #[test]
+    fn reconcile_daemon_version_is_a_noop_when_the_marker_matches_current() {
+        // Normal launch: the daemon binary last loaded is current → no force-reload (no terminal
+        // disruption). This is the common path — the reconcile must be inert most of the time.
+        let mock = MockLaunchctl::new(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = reconcile_agent(&mock, &tmp);
+        let marker = tmp.path().join("daemon-applied-sessiond.txt");
+        std::fs::write(&marker, env!("CARGO_PKG_VERSION")).unwrap();
+        reconcile_daemon_version(&agent, &marker);
+        assert!(
+            mock.calls().is_empty(),
+            "marker == current must NOT kickstart_force (got {:?})",
+            mock.calls()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            env!("CARGO_PKG_VERSION"),
+            "marker unchanged"
+        );
+    }
+
+    #[test]
+    fn reconcile_daemon_version_seeds_the_marker_on_first_launch_without_a_reload() {
+        // First-ever launch: the daemon is being bootstrapped fresh from the current `.app` by
+        // `ensure_daemon_running`, so it is ALREADY current — record the marker, do NOT force-reload.
+        let mock = MockLaunchctl::new(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = reconcile_agent(&mock, &tmp);
+        let marker = tmp.path().join("daemon-applied-sessiond.txt");
+        assert!(!marker.exists());
+        reconcile_daemon_version(&agent, &marker);
+        assert!(
+            mock.calls().is_empty(),
+            "first-launch must NOT kickstart_force (got {:?})",
+            mock.calls()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            env!("CARGO_PKG_VERSION"),
+            "marker seeded to the current version"
+        );
+    }
+
+    #[test]
+    fn reconcile_daemon_version_force_reloads_when_the_marker_is_stale() {
+        // Just auto-updated: the `.app` swapped, but launchd is still running the OLD daemon binary
+        // (REL-1: no auto-bootout). The marker (older version) ≠ current → kickstart_force (`-k`)
+        // reloads from the current `.app`, and the marker advances to current.
+        let mock = MockLaunchctl::new(vec![ok_output()]); // kickstart_force's single launchctl call
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = reconcile_agent(&mock, &tmp);
+        let marker = tmp.path().join("daemon-applied-sessiond.txt");
+        std::fs::write(&marker, "0.10.1").unwrap(); // stale (older) marker
+        reconcile_daemon_version(&agent, &marker);
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 1, "expected exactly one kickstart_force call");
+        assert_eq!(
+            calls[0],
+            vec!["kickstart", "-k", "gui/501/ai.builderpro.desktop.sessiond"],
+            "stale marker must force-reload the daemon with -k"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            env!("CARGO_PKG_VERSION"),
+            "marker advances to current after a successful reload"
         );
     }
 

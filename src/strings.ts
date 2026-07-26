@@ -30,6 +30,16 @@ export const strings = {
     scope: { global: "global", project: "project", server: "server" },
   },
 
+  // ── self-update (Tauri updater plugin → GitHub Releases) ─────────────────────────────────────
+  updater: {
+    available: (version: string) =>
+      `Builder Pro AI ${version} is available.\n\nInstall now? The app will restart and any running terminals will be interrupted (their history is preserved).`,
+    availableWithNotes: (version: string, notes: string) =>
+      `Builder Pro AI ${version} is available.\n\nInstall now? The app will restart and any running terminals will be interrupted (their history is preserved).\n\nRelease notes:\n${notes}`,
+    installFailed:
+      "The update could not be installed. Check your connection and try again, or download it manually from the GitHub Releases page.",
+  },
+
   // ── error mapping: orchd, filesystem, and daemon command errors ──────────────────────────────
   errors: {
     invariant: (msg: string) => `invalid operation: ${msg}`,

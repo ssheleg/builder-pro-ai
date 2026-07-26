@@ -83,6 +83,14 @@ jobs:
           # Notarization option B — Apple ID + app-specific password (no file needed).
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # Tauri updater signing: when the private key is present, `tauri build` (with
+          # bundle.createUpdaterArtifacts) additionally emits `<app>.app.tar.gz` + `.app.tar.gz.sig`
+          # — the auto-update bundle + its detached minisign signature. The matching PUBLIC key is
+          # embedded in tauri.conf.json > plugins.updater.pubkey. Absent the secret, the updater
+          # bundle is still built but UNSIGNED (the `.sig` is not produced), so published updates
+          # would fail the client's signature verification — set the secret for a working auto-update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
@@ -115,7 +123,50 @@ jobs:
             ditto -c -k --keepParent "$app" "dist-release/Builder-Pro-AI-${{ inputs.version }}-universal-app.zip"
             echo "  found app: $app"
           fi
+          # Tauri updater bundle + signature (auto-produced by `tauri build` with
+          # createUpdaterArtifacts + TAURI_SIGNING_PRIVATE_KEY). The `.tar.gz` is what the updater
+          # downloads; the `.sig` is verified against the embedded pubkey before install.
+          tgz="$(find target src-tauri/target -path '*universal-apple-darwin/release/bundle/macos/*.app.tar.gz' ! -name '*.sig' 2>/dev/null | head -n1 || true)"
+          if [ -n "$tgz" ]; then
+            cp "$tgz" "dist-release/Builder-Pro-AI-${{ inputs.version }}-universal.app.tar.gz"
+            cp "${tgz}.sig" "dist-release/Builder-Pro-AI-${{ inputs.version }}-universal.app.tar.gz.sig"
+            echo "  found updater bundle: $tgz (+ .sig)"
+          else
+            echo "::warning::no updater .app.tar.gz produced — is TAURI_SIGNING_PRIVATE_KEY set? Auto-update will not work for this release."
+          fi
           ls -la dist-release
+
+      # Auto-update manifest consumed by the Tauri updater plugin
+      # (plugins.updater.endpoints → …/releases/latest/download/latest.json). Both macOS arches
+      # point at the SAME universal bundle, so a single tar.gz + sig serves darwin-aarch64 and
+      # darwin-x86_64 alike. The signature is the .sig file CONTENTS (not a URL).
+      - name: Generate updater manifest (latest.json)
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          repo="ssheleg/builder-pro-ai"
+          base="https://github.com/${repo}/releases/download/v${v}"
+          sig_file="dist-release/Builder-Pro-AI-${v}-universal.app.tar.gz.sig"
+          if [ ! -f "$sig_file" ]; then
+            echo "::warning::no .sig — skipping latest.json (auto-update disabled this release)."
+            exit 0
+          fi
+          sig="$(cat "$sig_file")"
+          url="${base}/Builder-Pro-AI-${v}-universal.app.tar.gz"
+          notes=$(printf 'Builder Pro AI %s — see CHANGELOG.md for details.' "$v")
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n \
+            --arg version "$v" \
+            --arg notes "$notes" \
+            --arg pub_date "$pub_date" \
+            --arg sig "$sig" \
+            --arg url "$url" \
+            '{version:$version, notes:$notes, pub_date:$pub_date,
+              platforms:{
+                "darwin-aarch64":{signature:$sig, url:$url},
+                "darwin-x86_64":{signature:$sig, url:$url}
+              }}' > dist-release/latest.json
+          echo "wrote dist-release/latest.json:"; cat dist-release/latest.json
 
       # Keep the build downloadable from the run even if the Release step is skipped/edited later.
       - name: Upload workflow artifact
