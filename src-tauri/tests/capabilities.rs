@@ -86,29 +86,18 @@ fn entitlements_plist_has_hardened_runtime_keys() {
     let raw = include_str!("../entitlements.plist");
     assert!(raw.contains("<!DOCTYPE plist"), "must be a plist doctype");
     assert!(raw.contains("<plist"), "must have a <plist> root");
-    // BL-174: the Tauri v2 WKWebView-JIT minimum — allow-jit + allow-unsigned-executable-memory.
-    // (NOTE: this asserts the SOURCE plist; the shipped binary's entitlements are produced by the
-    // CI signer over this file — if a 0.10.7+ release still ships 4 keys, Tauri's bundler is
-    // re-injecting the two below at sign time and BL-174 needs a post-build `codesign --entitlements`
-    // override in build-universal.sh. Verify on the next release.)
+    // Hardened runtime for a WKWebView app that also embeds signed sidecars (spec §14.3): the app
+    // uses JS, so it needs the JIT / unsigned-executable-memory / library-validation exceptions
+    // WKWebView + the deep-signed daemon sidecars require, plus allow-dyld-environment-variables
+    // for the sidecar launch. (BL-174 tried to drop the latter two but the narrowed set broke
+    // deep-sign/notarization; all four restored.)
     for key in [
         "com.apple.security.cs.allow-jit",
         "com.apple.security.cs.allow-unsigned-executable-memory",
-    ] {
-        assert!(raw.contains(key), "entitlements must declare {key}");
-    }
-    // BL-174: the dyld-injection surface is CLOSED — library-validation stays ON (hardened-runtime
-    // default) and DYLD_* env vars are ignored (default). The app loads no unsigned dylibs (every
-    // Rust crate is statically linked), so neither exception is needed; keeping them would let a
-    // launch-time attacker dyld-inject into the GUI (the IPC/Keychain control plane).
-    for forbidden in [
         "com.apple.security.cs.disable-library-validation",
         "com.apple.security.cs.allow-dyld-environment-variables",
     ] {
-        assert!(
-            !raw.contains(forbidden),
-            "entitlements must NOT declare {forbidden} (BL-174: closes the dyld-injection surface)"
-        );
+        assert!(raw.contains(key), "entitlements must declare {key}");
     }
     // The app is deliberately NOT sandboxed — it orchestrates real terminals and spawns the two
     // launchd daemons — so the sandbox keys are intentionally ABSENT. `com.apple.security.inherit`
