@@ -79,7 +79,7 @@ export class ErrorBoundary extends Component<Props, State> {
             overflowWrap: "anywhere",
           }}
         >
-          {error.name}: {error.message}
+          {error.name}: {scrubSecrets(error.message)}
         </div>
         <div style={{ display: "flex", gap: "var(--sp-2)" }}>
           <Button variant="primary" onClick={this.reload} data-testid="error-boundary-reload">

@@ -759,9 +759,20 @@ impl Supervisor {
         let s = self.get(id)?;
         let pty = self.require_pty(&s, id)?;
         if let Some(pgid) = pty.pgid {
-            // SIGTERM the whole group (the shell + any un-`setsid`'d descendants).
-            unsafe {
-                libc::killpg(pgid, libc::SIGTERM);
+            // SIGTERM the whole group (the shell + any un-`setsid`'d descendants). BL-181: check
+            // the return — `ESRCH` (group already gone) is benign, but `EPERM` (no permission)
+            // means the signal did NOT land and the grace/SIGKILL escalation below is pointless;
+            // surface it so a genuine signaling failure isn't invisible.
+            let term = unsafe { libc::killpg(pgid, libc::SIGTERM) };
+            if term != 0
+                && std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != libc::ESRCH
+            {
+                tracing::warn!(
+                    session = id,
+                    pgid,
+                    errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+                    "killpg(SIGTERM) failed (non-ESRCH); the process group may not have been signaled"
+                );
             }
             let start = Instant::now();
             while start.elapsed() < KILL_GRACE {
@@ -772,8 +783,18 @@ impl Supervisor {
             }
             if *lock(&s.shared.is_active) {
                 // Grace elapsed and the child is still alive: escalate to SIGKILL on the group.
-                unsafe {
-                    libc::killpg(pgid, libc::SIGKILL);
+                // BL-181: surface a non-ESRCH failure (the group may have been re-parented/escaped).
+                let skull = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                if skull != 0
+                    && std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != libc::ESRCH
+                {
+                    tracing::warn!(
+                        session = id,
+                        pgid,
+                        errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+                        "killpg(SIGKILL) escalation failed (non-ESRCH); an escaped descendant may \
+                         outlive this kill"
+                    );
                 }
             }
         }

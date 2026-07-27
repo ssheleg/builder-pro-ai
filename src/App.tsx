@@ -235,7 +235,7 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
           if (disposed) return;
           const id = useAppStore.getState().activeSessionId;
           if (id !== null && manager.isOpened(id)) {
-            void manager.attach(id);
+            void manager.attach(id).catch(() => {});
           }
         });
       }),

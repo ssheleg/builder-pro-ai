@@ -61,7 +61,7 @@ export function TerminalPane(props: {
     // Call unconditionally: the manager dedupes per-session (A1). This is what makes the
     // second-and-later tabs live — the old per-instance latch never reset across the
     // reused instance's sessionId change, so later tabs were dead panes.
-    void manager.attach(sessionId); // wires Replay-before-open + Output firehose (deduped)
+    void manager.attach(sessionId).catch(() => {}); // wires Replay-before-open + Output firehose (deduped)
     manager.open(sessionId, container);
 
     return () => {
@@ -132,7 +132,7 @@ export function TerminalPane(props: {
           <button
             type="button"
             data-testid="terminal-attach-retry"
-            onClick={() => void manager.attach(sessionId)}
+            onClick={() => void manager.attach(sessionId).catch(() => {})}
             style={{
               border: "none",
               borderRadius: "var(--r-sm)",
