@@ -1,7 +1,7 @@
 # Builder Pro AI
 
 [![ci](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/ssheleg/builder-pro-ai/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-0.10.2-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.10.4-blue)](CHANGELOG.md)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](docs/build-macos.md)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
 [![built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
@@ -24,12 +24,14 @@ Built with **Tauri 2** (Rust core + React 19 / TypeScript UI). Ships as a univer
   <em>Placeholder — a real screenshot lands here before the first public release.</em>
 </p>
 
-> **Status: `0.10.2`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
+> **Status: `0.10.4`, pre-1.0, macOS-only, source-available under a noncommercial license.** Everything
 > below the "Shipped" line is implemented, tested, and documented; everything under "Planned" is
 > not built yet and is labelled as such. **Signed + notarized universal binaries are published on
-> [Releases](https://github.com/ssheleg/builder-pro-ai/releases)** (or build from source — see
-> [Getting started](#getting-started)). The UI is **English**, **light + dark** (system-default with
-> a manual toggle).
+> [Releases](https://github.com/ssheleg/builder-pro-ai/releases)** — and from `0.10.2` onward the
+> app **auto-updates** itself (checks GitHub Releases on launch, verifies the signature, installs
+> with all data/settings/Keychain secrets preserved; see [Auto-update](docs/auto-update.md)). Or
+> build from source — see [Getting started](#getting-started). The UI is **English**, **light +
+> dark** (system-default with a manual toggle).
 
 ---
 
@@ -177,8 +179,8 @@ bash scripts/final-suite.sh   # → "ALL GATES PASSED"
 
 | Suite | Command | Covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1260 tests** (`[Unreleased]`; `0.10.0` had 1170) |
-| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **1270 tests, 71 files** (`[Unreleased]`; `0.10.0` had 1130/63) |
+| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1306 tests** (`0.10.4`; `0.10.0` had 1170) |
+| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **1273 tests, 71 files** (`0.10.4`; `0.10.0` had 1130/63) |
 | e2e (terminals) | `npm run e2e:survive` | create → run → status → quit client → daemon+shell survive → reattach + scrollback |
 | e2e (app domain) | `npm run e2e:orchd` | create → drain-restart → data intact → export → wipe → re-import → graph/MCP/research survival |
 | Coverage gate | `bash scripts/coverage-gate.sh` | ≥80% line coverage on both daemon crates (needs `cargo install cargo-llvm-cov`) |
@@ -241,6 +243,10 @@ next starts. Versions are the git tags in [`CHANGELOG.md`](CHANGELOG.md).
 | `0.9.1` | Diagnostics + contrast (S-DIAG / S-DESIGN) | a secret-scrubbed error log + error boundary + copyable support bundle; a measured WCAG-AA contrast pass with a regression test |
 | `0.9.2` | Boot-race fix (BL-101) | `AppState` managed synchronously in `setup()` so a first-frame command returns an honest `Disconnected`, never the raw Tauri "state not managed" error — caught by the new diagnostics log on a live install |
 | `0.10.0` | Soft Control Room v2 + the autonomy/analytics slice + UX audit remediation | a warm fill-model visual base (36 views migrated, `SegmentedPill`/`Heatmap` atoms); keep-awake, task priority, a file-backed Docs tab, CEO delegation **config** (S6b honesty boundary — it persists scope, it does not act), and a usage/output Stats dashboard; then a deep audit of SCN-045..057 whose every finding was fixed — first-run terminals now open in the picked folder (they were landing in `$HOME`), stats gained a request-epoch guard, a cancellable scan and a per-model-family cut, and every failed/loading source shows "—" instead of a zero that looks like data |
+| `0.10.1` | Audit remediation sweep — security, reliability, data integrity | REL-1 (every GUI launch was killing both daemons + all live terminals via a stray `bootout`), SEC-1/SEC-2 (MCP consent bypass: HTTP tool calls not re-gated per-call; stdio fingerprint ignored args/env), GRAPH-1 (ghost graph nodes read-only), DOM-3/SES-4/SES-6/SEC-6/FS-3 (data-integrity: rank finiteness, workspace validation, LastRoot, tool-allowlist preservation, root-delete guard) + BL-102/106/107/108 (test determinism + CI honesty) |
+| `0.10.2` | **Auto-update from GitHub Releases** + P1 hardening | Tauri v2 updater: on launch the app checks `latest.json`, verifies the bundle against the embedded pubkey, and installs with all data/settings/secrets preserved; `reconcile_daemon_version` reloads both daemons from the new `.app` after an update. Plus the deferred P1 hardening cluster (degraded-write gate, artifact caps, consent revoke). |
+| `0.10.3` | First auto-update target | code-identical to 0.10.2 — the first release an existing 0.10.2 install auto-updates to (end-to-end proof of the chain). |
+| `0.10.4` | BL-3: database permissions | `bpa.db` + `orchd.db` (scrollback/secrets + connector/consent/audit rows) locked to owner-only (`0600` + dir `0700`) — they were world-readable (`0644` in a `0755` dir). |
 
 ### Planned (not built yet)
 

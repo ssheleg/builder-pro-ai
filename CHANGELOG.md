@@ -2,10 +2,52 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
-## [0.10.2] — P1 hardening: locks, boundaries, degraded-write gate (2026-07-26)
+## [0.10.4] — BL-3: lock the databases to owner-only (2026-07-27)
 
-Second wave of the 2026-07-24 audit follow-up — the deferred P2 correctness/security cluster
-(`docs/backlog.md` BL-123/BL-124/BL-125/BL-134/BL-138/BL-139). Every fix ships with regression
+### Fixed — security (P1)
+
+- **BL-3:** `bpa.db` and `orchd.db` were created at the process umask (`0644`) inside the default-`0755`
+  `Application Support` directory, so the `scrollback`/`command_events` tables (echoed secrets —
+  tokens, commands) and the connector/consent/audit rows were **world-readable** on a multi-user Mac.
+  Both `Db::open_inner` paths now tighten the db file + WAL/SHM sidecars to `0600` and the parent
+  directory to `0700` after open. The dir-`0700` is load-bearing (blocks world traversal even if a
+  mid-run sidecar is created at umask); the file-`0600` is defense-in-depth. Best-effort (logged,
+  never fatal). Tests in both crates assert `0600`/`0700`.
+
+## [0.10.3] — first auto-update target (2026-07-27)
+
+Code-identical to 0.10.2 (a version-bump release) — the **first release an existing 0.10.2 install
+auto-updates to**, end-to-end proof of the auto-update chain added in 0.10.2 (detect via
+`latest.json` → signature-verify against the embedded pubkey → download + install → relaunch →
+reload both daemons from the new `.app`). No behavioral change.
+
+## [0.10.2] — auto-update from GitHub Releases + P1 hardening (2026-07-26)
+
+### Added — auto-update (Tauri v2 Updater)
+
+End-to-end self-update so a published GitHub Release is detected, signature-verified, and installed
+— with all data, settings, and Keychain secrets preserved (nothing user-owned lives inside the
+`.app`; the DB schema migrates forward on the reloaded daemon's boot). See
+[`docs/auto-update.md`](docs/auto-update.md).
+
+- `tauri.conf.json`: `bundle.createUpdaterArtifacts=true` + `plugins.updater` (embedded pubkey,
+  endpoint → `releases/latest/download/latest.json`, dialog off).
+- `src-tauri`: `tauri-plugin-updater` + `tauri-plugin-process`; capabilities grant
+  `updater:default` + `process:default/restart/exit`.
+- `reconcile_daemon_version` (`lib.rs`): after the updater swaps the `.app` and relaunches, launchd
+  is still running the OLD daemon (REL-1: no auto-bootout); a persisted version marker triggers
+  exactly one `kickstart_force` (`-k`) per daemon to reload it from the new `.app` — inert on
+  normal launches, seeds the marker on first launch. 3 tests.
+- `src/updater.ts` + `App.tsx`: one non-blocking check on mount; if a newer version exists, a confirm
+  dialog (honest about terminal restart) → `downloadAndInstall` → `relaunch`.
+- `release.yml`: `TAURI_SIGNING_PRIVATE_KEY` drives the signed `.app.tar.gz` + `.sig`; a new step
+  emits `latest.json` (both `darwin-{aarch64,x86_64}` → one universal bundle). The pubkey is
+  embedded in `tauri.conf.json`; the private key is the repo secret `TAURI_SIGNING_PRIVATE_KEY`.
+
+### Fixed — P1 hardening (deferred cluster)
+
+Second wave of the 2026-07-24 audit follow-up — `docs/backlog.md`
+BL-123/BL-124/BL-125/BL-134/BL-138/BL-139. Every fix ships with regression
 tests; `final-suite.sh` ALL GATES PASSED.
 
 ### Fixed — security & data integrity
