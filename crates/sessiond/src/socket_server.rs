@@ -1343,6 +1343,34 @@ fn err(code: &str, e: impl std::fmt::Display) -> Response {
     }
 }
 
+/// The user's INTERACTIVE PATH — what Terminal.app/iTerm would set — resolved ONCE per daemon
+/// process (cached in `OnceLock`). The launchd-managed daemon inherits only the minimal system
+/// PATH, so without this a spawned shell misses Homebrew (`/opt/homebrew/bin`), npm/pnpm globals
+/// (`claude`, `codex`, `tsx`…), nvm/volta, `~/.cargo/bin`, asdf, etc. — `claude: command not found`
+/// even though it works in the user's own Terminal. Resolved by running the user's default login
+/// shell (`$SHELL -l -c 'printf %s "$PATH"'`), which sources `/etc/paths` (via `path_helper`) +
+/// `~/.zprofile`/`~/.zshrc` exactly like a login Terminal. Falls back to the process PATH / the
+/// minimal system PATH if the resolution fails (never blocks session creation).
+fn user_login_path() -> &'static str {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let resolved = std::process::Command::new(&shell)
+            .args(["-l", "-c", "printf %s \"$PATH\""])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty() && s.contains('/'));
+        match resolved {
+            Some(p) => p,
+            None => {
+                std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
+            }
+        }
+    })
+}
+
 /// Validate a workspace root / session cwd via the shared `bpa-paths` validator (spec §16):
 /// absolute + exists + is-a-directory + no symlink-escape of the lexical parent — byte-for-byte
 /// the same rule the core enforces. Returns the canonical path string on success.
@@ -1424,13 +1452,17 @@ fn resolve_session_spec(
         }
     };
     push_env("TERM", Some("xterm-256color"));
-    push_env("PATH", Some("/usr/bin:/bin:/usr/sbin:/sbin"));
     push_env("HOME", None);
     push_env("USER", None);
     push_env("LOGNAME", None);
     push_env("LANG", None);
     push_env("SHELL", Some(&shell_path));
     push_env("SSH_AUTH_SOCK", None);
+    // PATH: the user's REAL interactive PATH (Homebrew, npm/pnpm globals → `claude`/`codex`, nvm,
+    // cargo…), resolved from their login shell so spawned shells match Terminal.app — NOT the
+    // daemon's minimal launchd PATH (which made `claude`/`brew` "command not found"). See
+    // `user_login_path`.
+    env.push(("PATH".to_string(), user_login_path().to_string()));
 
     // ---- Shell integration: OSC-133/OSC-7 injection via per-session assets, when recognized. ----
     let mut program = shell_path.clone();
