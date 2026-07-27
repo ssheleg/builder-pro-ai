@@ -328,6 +328,7 @@ deliberately keeps that restriction. Full terms in [`LICENSE`](LICENSE).
 ## Documentation index
 
 - **Platform overview & roadmap:** [`2026-07-01-builderpro-platform-overview.md`](docs/superpowers/specs/2026-07-01-builderpro-platform-overview.md)
+- **UX source of truth (scenarios / flows / personas):** [`docs/ux/scenarios.md`](docs/ux/scenarios.md) · [`docs/ux/flows.md`](docs/ux/flows.md) · [`docs/ux/foundation.md`](docs/ux/foundation.md)
 - **Architecture summary:** [`docs/architecture.md`](docs/architecture.md)
 - **Contract → test traceability:** [`docs/traceability.md`](docs/traceability.md)
 - **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)

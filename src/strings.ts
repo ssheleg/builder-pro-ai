@@ -267,6 +267,10 @@ export const strings = {
       newTerminalFailed: (msg: string) => `Failed to open a new terminal: ${msg}`,
       closeTerminalFailed: (msg: string) => `Failed to close the terminal: ${msg}`,
     },
+    /** Pane-level empty/loading placeholders (AUD2-2026-07-19-04: were inline literals in App.tsx,
+     *  outside the central strings catalog). */
+    noTerminals: "No terminals yet — pick a workspace and press + New terminal.",
+    selectTerminalTab: "Select a terminal tab.",
   },
 
   // ── project panel + create-project dialog ────────────────────────────────────────────────────

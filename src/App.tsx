@@ -689,8 +689,8 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
                         of its own but sessions elsewhere told the owner to "select a terminal tab"
                         while the strip beside it was empty. */}
                     {workspaceSessions.length === 0
-                      ? "No terminals yet — pick a workspace and press + New terminal."
-                      : "Select a terminal tab."}
+                      ? strings.terminal.noTerminals
+                      : strings.terminal.selectTerminalTab}
                   </div>
                 )}
               </div>
