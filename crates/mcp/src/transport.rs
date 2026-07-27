@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
+use std::process::Stdio;
 use tokio::process::Command;
 
 /// How to reach an MCP server: a remote **Streamable HTTP** endpoint or a local **stdio**
@@ -104,6 +105,12 @@ fn configure_stdio_command(
     // Clear BEFORE merging: the child gets EXACTLY `env`, never orchd's ambient env.
     cmd.env_clear();
     cmd.envs(env);
+    // BL-69: a stdio MCP server is third-party / untrusted — its stderr MUST NOT be inherited into
+    // orchd's own log stream (the `TokioChildProcess` default), or it can forge orchd's structured
+    // log lines / smuggle attacker-influenced content into operator logs. Discard it. Bounded,
+    // secret-scrubbed piped capture is a future enhancement (would need a reader task to avoid
+    // deadlock on a chatty stderr); `null` is the safe minimum that kills the log-injection vector.
+    cmd.stderr(Stdio::null());
     cmd
 }
 
@@ -230,5 +237,33 @@ mod tests {
         std::env::remove_var("DYLD_INSERT_LIBRARIES");
         std::env::remove_var("LD_PRELOAD");
         std::env::remove_var("BPA_AMBIENT_MARKER");
+    }
+
+    // ---- BL-69: a stdio MCP child's stderr is discarded (`Stdio::null()`), never inherited into
+    // orchd's log stream — an untrusted server cannot forge orchd's structured log lines or smuggle
+    // content into operator logs. The security guarantee is the explicit `cmd.stderr(Stdio::null())`
+    // in `configure_stdio_command` (the default `TokioChildProcess` inherits stderr); this test is a
+    // functional non-regression: a child that writes to stderr still spawns and runs to completion
+    // under the production config (the discard never breaks the child). (`.output()` overrides
+    // stderr to piped here purely so the test can OBSERVE the canary the child emitted — production
+    // discards it.)
+    #[tokio::test]
+    async fn stdio_child_writing_to_stderr_still_runs_under_the_production_config() {
+        let env = BTreeMap::new();
+        let mut cmd = configure_stdio_command(
+            "/bin/sh",
+            &["-c".to_string(), "echo bl69-canary >&2".to_string()],
+            &env,
+        );
+        let output = cmd.output().await.expect("/bin/sh should spawn and exit");
+        assert!(
+            output.status.success(),
+            "stderr write must not break the child"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("bl69-canary"),
+            "the child did write to stderr (observable only because the test piped it; production null-discards): {stderr:?}"
+        );
     }
 }
