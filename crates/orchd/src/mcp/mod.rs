@@ -53,7 +53,7 @@ pub enum McpAuthKind {
 /// `enabled` INTEGER decoded into `bool` — mirrors `graph::GraphNodeRow::into_node`'s decode
 /// shape). Doubles as both the raw-row AND the public read type (no separate wire DTO exists yet
 /// — that's T3's job to build on top of this).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct McpServerRow {
     pub id: String,
     pub name: String,
@@ -79,7 +79,7 @@ pub struct McpServerRow {
 /// assigned by the insert itself — `uuid v4` / `now_ms()` — never supplied by the caller;
 /// `protocol_version` starts `NULL` ("last negotiated; null until first connect", spec §4) and is
 /// set later by a connect-flow verb this task doesn't implement).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NewMcpServer {
     pub name: String,
     pub transport: McpTransport,
@@ -106,7 +106,7 @@ pub struct NewMcpServer {
 /// would risk violating that CHECK; `url` itself CAN be patched (to a new non-empty value, never
 /// cleared), but `Db::update_mcp_server` rejects patching it on a `stdio`-transport server so the
 /// CHECK can never be violated through this path either.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct McpServerPatch {
     pub name: Option<String>,
     pub url: Option<String>,
@@ -118,6 +118,82 @@ pub struct McpServerPatch {
     pub account_id: Option<String>,
     pub timeout_ms: Option<i64>,
     pub max_retries: Option<i64>,
+}
+
+/// Hand-written rather than derived: a stdio server's `env` is the COMPLETE child environment and
+/// is the channel secrets travel through (e.g. `OPENAI_API_KEY=sk-…`) — a derived `Debug` would
+/// dump every secret env var the moment any `tracing::debug!(?server)` / `#[instrument]` lands on
+/// an MCP path. Mirrors `AccountToken`/`OAuthProviderConfig`'s redacting `Debug` (BL-20). `args`
+/// is kept visible (command-line flags, not credentials); `secret_ref`/`account_id` are Keychain
+/// REFERENCE strings, never the secret bytes themselves.
+fn redacted_env(env: &BTreeMap<String, String>) -> String {
+    format!("<{} entries [REDACTED]>", env.len())
+}
+
+impl std::fmt::Debug for McpServerRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerRow")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("url", &self.url)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &redacted_env(&self.env))
+            .field("scope", &self.scope)
+            .field("project_id", &self.project_id)
+            .field("auth_kind", &self.auth_kind)
+            .field("secret_ref", &self.secret_ref)
+            .field("account_id", &self.account_id)
+            .field("enabled", &self.enabled)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field("protocol_version", &self.protocol_version)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for NewMcpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewMcpServer")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("url", &self.url)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &redacted_env(&self.env))
+            .field("scope", &self.scope)
+            .field("project_id", &self.project_id)
+            .field("auth_kind", &self.auth_kind)
+            .field("secret_ref", &self.secret_ref)
+            .field("account_id", &self.account_id)
+            .field("enabled", &self.enabled)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for McpServerPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerPatch")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field(
+                "env",
+                &self.env.as_ref().map(redacted_env).unwrap_or_default(),
+            )
+            .field("auth_kind", &self.auth_kind)
+            .field("secret_ref", &self.secret_ref)
+            .field("account_id", &self.account_id)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
 }
 
 /// Full `mcp_tool` row, decoded (spec §4 columns; `enabled` INTEGER decoded into `bool` — mirrors
@@ -610,6 +686,76 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::trust::Action;
+
+    #[test]
+    fn mcp_server_debug_redacts_env_secret_values() {
+        // A stdio server's `env` is the complete child environment — the channel secrets travel
+        // through (e.g. OPENAI_API_KEY). The hand-written Debug must never render a value.
+        let mut env = BTreeMap::new();
+        env.insert("OPENAI_API_KEY".to_string(), "sk-leak-canary".to_string());
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        let row = McpServerRow {
+            id: "srv-1".into(),
+            name: "echo".into(),
+            transport: McpTransport::Stdio,
+            url: None,
+            command: Some("/bin/echo".into()),
+            args: vec![],
+            env,
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            secret_ref: None,
+            account_id: None,
+            enabled: true,
+            timeout_ms: 30_000,
+            max_retries: 2,
+            protocol_version: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let dbg = format!("{row:?}");
+        assert!(
+            !dbg.contains("sk-leak-canary"),
+            "McpServerRow Debug leaked an env secret: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "McpServerRow Debug did not mark env redacted: {dbg}"
+        );
+        assert!(dbg.contains("2 entries"), "entry count missing: {dbg}");
+
+        // NewMcpServer + McpServerPatch share the discipline — prove neither leaks.
+        let new = NewMcpServer {
+            name: "echo".into(),
+            transport: McpTransport::Stdio,
+            url: None,
+            command: Some("/bin/echo".into()),
+            args: vec![],
+            env: BTreeMap::from([("TOKEN".into(), "tok-leak-canary".into())]),
+            scope: McpScope::Global,
+            project_id: None,
+            auth_kind: McpAuthKind::None,
+            secret_ref: None,
+            account_id: None,
+            enabled: true,
+            timeout_ms: 30_000,
+            max_retries: 2,
+        };
+        assert!(
+            !format!("{new:?}").contains("tok-leak-canary"),
+            "NewMcpServer Debug leaked an env secret"
+        );
+
+        let patch = McpServerPatch {
+            env: Some(BTreeMap::from([("KEY".into(), "patch-leak-canary".into())])),
+            ..Default::default()
+        };
+        assert!(
+            !format!("{patch:?}").contains("patch-leak-canary"),
+            "McpServerPatch Debug leaked an env secret"
+        );
+    }
 
     #[test]
     fn effective_timeout_defaults_nonpositive_but_passes_small_positive() {
