@@ -1877,3 +1877,147 @@ pub fn encode_orchd_frame(frame: &OrchdFrame) -> Result<Vec<u8>, bpa_protocol::F
 /// Thin instantiation of `bpa_protocol::CborFrameDecoder<T>` over `OrchdFrame` (mirrors
 /// `bpa_protocol::FrameDecoder` over `Frame`).
 pub type OrchdFrameDecoder = bpa_protocol::CborFrameDecoder<OrchdFrame>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `OrchdRequest::verb_name()`'s match is compile-enforced exhaustive (no `_` wildcard), so a
+    /// new verb cannot ship UNnamed — but nothing checked the STRING literal itself, and the
+    /// daemon's per-request completion trace + the core's `orchd_client` are keyed on it. A typo
+    /// (`"CreateProjct"`) compiles fine under the exhaustive match and silently mislabels every
+    /// completion-trace/audit row for that verb. Pin the spelling of every unit variant, every
+    /// tail-appended verb (the highest-risk set — recently added, least exercised), and a sample of
+    /// core fielded verbs across every domain. Mirrors `bpa_protocol`'s
+    /// `remove_workspace_has_a_stable_trace_verb_name` discipline, scaled to orchd's 92-verb surface.
+    #[test]
+    fn verb_name_strings_are_pinned_for_every_tail_verb_and_a_core_sample() {
+        // Unit (field-less) verbs — every one.
+        assert_eq!(OrchdRequest::Ping.verb_name(), "Ping");
+        assert_eq!(OrchdRequest::ListProjects.verb_name(), "ListProjects");
+        assert_eq!(OrchdRequest::ExportAll.verb_name(), "ExportAll");
+        assert_eq!(
+            OrchdRequest::ConnectorListAccounts.verb_name(),
+            "ConnectorListAccounts"
+        );
+        assert_eq!(
+            OrchdRequest::TrustListPolicies.verb_name(),
+            "TrustListPolicies"
+        );
+        assert_eq!(
+            OrchdRequest::GetStorageStatus.verb_name(),
+            "GetStorageStatus"
+        );
+        assert_eq!(
+            OrchdRequest::ConnectorListProviders.verb_name(),
+            "ConnectorListProviders"
+        );
+
+        // Tail-appended verbs (append-only wire rule, highest typo risk — recently added).
+        assert_eq!(
+            OrchdRequest::UnarchiveProject { id: "p1".into() }.verb_name(),
+            "UnarchiveProject"
+        );
+        assert_eq!(
+            OrchdRequest::GraphUpdateEdge {
+                id: "e1".into(),
+                kind: GraphEdgeKind::Relates,
+            }
+            .verb_name(),
+            "GraphUpdateEdge"
+        );
+        assert_eq!(
+            OrchdRequest::SetTaskPriority {
+                id: "t1".into(),
+                priority: TaskPriority::Normal,
+            }
+            .verb_name(),
+            "SetTaskPriority"
+        );
+        assert_eq!(
+            OrchdRequest::UpsertDoc {
+                project_id: "p1".into(),
+                name: "doc".into(),
+                md_content: "".into(),
+            }
+            .verb_name(),
+            "UpsertDoc"
+        );
+        assert_eq!(
+            OrchdRequest::ListDocs {
+                project_id: "p1".into()
+            }
+            .verb_name(),
+            "ListDocs"
+        );
+        assert_eq!(
+            OrchdRequest::WorkflowList {
+                scope: None,
+                project_id: None,
+            }
+            .verb_name(),
+            "WorkflowList"
+        );
+        assert_eq!(
+            OrchdRequest::WorkflowGet { id: "wf1".into() }.verb_name(),
+            "WorkflowGet"
+        );
+        assert_eq!(
+            OrchdRequest::WorkflowUpsert {
+                id: "wf1".into(),
+                name: "n".into(),
+                description: "".into(),
+                scope: WorkflowScope::Global,
+                project_id: None,
+                default_agent: "claude-code".into(),
+                stages: vec![],
+                global_skill_ids: vec![],
+                supervisor: SupervisorConfig::default(),
+            }
+            .verb_name(),
+            "WorkflowUpsert"
+        );
+        assert_eq!(
+            OrchdRequest::WorkflowDelete { id: "wf1".into() }.verb_name(),
+            "WorkflowDelete"
+        );
+        assert_eq!(
+            OrchdRequest::TrustRevokeConsent {
+                server_id: "s1".into()
+            }
+            .verb_name(),
+            "TrustRevokeConsent"
+        );
+
+        // Core fielded verbs — a cross-domain sample (project / mcp / research).
+        assert_eq!(
+            OrchdRequest::CreateProject {
+                name: "n".into(),
+                description: "".into(),
+                workspace_ids: vec!["w1".into()],
+            }
+            .verb_name(),
+            "CreateProject"
+        );
+        assert_eq!(
+            OrchdRequest::McpCallTool {
+                server_id: "s1".into(),
+                tool_name: "echo".into(),
+                args_json: "{}".into(),
+                project_id: None,
+            }
+            .verb_name(),
+            "McpCallTool"
+        );
+        assert_eq!(
+            OrchdRequest::ResearchStartRun {
+                idea_id: "i1".into(),
+                server_id: "s1".into(),
+                tool_name: "echo".into(),
+                args_json: "{}".into(),
+            }
+            .verb_name(),
+            "ResearchStartRun"
+        );
+    }
+}
