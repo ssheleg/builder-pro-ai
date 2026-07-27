@@ -134,6 +134,11 @@ fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
 /// actionable to report than "the file this row points at cannot be read right now" (same
 /// honest-degradation stance `ruleset_files::read_state` documents for itself).
 pub fn compute_file_state(md_path: &str, stored_hash: &str) -> SkillFileState {
+    // BL-77: an oversized file folds into `Missing` (cannot be read safely right now) instead of
+    // being buffered into memory wholesale — mirrors `ruleset_files::read_state`.
+    if crate::ruleset_files::exceeds_read_cap(std::path::Path::new(md_path)) {
+        return SkillFileState::Missing;
+    }
     match std::fs::read_to_string(md_path) {
         Ok(content) => {
             if crate::ruleset_files::sha256_hex(&content) == stored_hash {
@@ -196,6 +201,13 @@ impl Db {
     pub fn add_skill(&self, new: NewSkill) -> Result<SkillRow, OrchdPersistError> {
         validate_new_skill_scope(&new)?;
         let canonical_path = validate_md_path(&new.md_path)?;
+        // BL-77: refuse an oversized SKILL.md at add time rather than buffering it into memory.
+        if crate::ruleset_files::exceeds_read_cap(&canonical_path) {
+            return Err(OrchdPersistError::Validation(format!(
+                "skill md_path exceeds the {} byte read cap",
+                crate::ruleset_files::MAX_MD_READ_BYTES
+            )));
+        }
         let content = std::fs::read_to_string(&canonical_path).map_err(|e| {
             OrchdPersistError::Validation(format!("skill md_path cannot be read: {e}"))
         })?;

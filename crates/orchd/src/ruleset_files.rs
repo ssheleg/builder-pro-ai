@@ -25,6 +25,27 @@ pub fn sha256_hex(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
 }
 
+/// BL-77: hard ceiling on a single ruleset/doc/skill markdown read. These files are owner-authored
+/// markdown (rules, docs, SKILL.md) — naturally small. A hostile or corrupted file pointed at via
+/// `md_path` (which IS symlink-escape-guarded, but not size-guarded) would otherwise be read to
+/// completion into a `String` → unbounded memory + latency (a DoS vector against orchd). Mirrors
+/// `fs_explorer::read_file_preview`'s 1 MiB stat-before-read cap. `read_state` /
+/// `skills::compute_file_state` fold an oversized file into their existing `Missing` honest-
+/// degradation state (the file cannot be read safely right now); `skills::add_skill` surfaces it
+/// as a typed `Validation`.
+pub const MAX_MD_READ_BYTES: u64 = 1024 * 1024;
+
+/// True when `path`'s stat'd size exceeds [`MAX_MD_READ_BYTES`]. A stat failure (missing file, a
+/// directory at `path`, permission denied) returns `false` so the caller's normal read path still
+/// runs and surfaces the right state (`Missing`/`Validation`) for THAT failure — this gate only
+/// answers the oversized question.
+pub fn exceeds_read_cap(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => m.len() > MAX_MD_READ_BYTES,
+        Err(_) => false,
+    }
+}
+
 /// `<path>` with a `.tmp` suffix appended to its final component — [`write_atomic`]'s staging
 /// file.
 fn tmp_path_for(path: &Path) -> PathBuf {
@@ -69,6 +90,11 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<String> {
 /// which only wants the `Option<String>` content half). Also exercised directly by this module's
 /// own tests (and `persistence::ruleset_tests`).
 pub fn read_state(path: &Path, stored_hash: &str) -> (Option<String>, RuleFileState) {
+    // BL-77: an oversized file folds into `Missing` (the existing honest-degradation "cannot be
+    // read right now" state) instead of being buffered into memory wholesale.
+    if exceeds_read_cap(path) {
+        return (None, RuleFileState::Missing);
+    }
     match std::fs::read_to_string(path) {
         Ok(content) => {
             if sha256_hex(&content) == stored_hash {
@@ -160,6 +186,24 @@ mod tests {
         let (content, state) = read_state(&path, "irrelevant-hash");
 
         assert_eq!(content, None);
+        assert_eq!(state, RuleFileState::Missing);
+    }
+
+    // BL-77: an oversized markdown file must NOT be buffered into memory — it folds into the
+    // existing `Missing` honest-degradation state (the file cannot be read safely right now),
+    // never reaching `read_to_string`.
+    #[test]
+    fn read_state_oversized_file_folds_to_missing_without_reading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.md");
+        std::fs::write(&path, "a".repeat(MAX_MD_READ_BYTES as usize + 1024)).unwrap();
+
+        let (content, state) = read_state(&path, "irrelevant-hash");
+
+        assert_eq!(
+            content, None,
+            "an oversized file must not be read into memory"
+        );
         assert_eq!(state, RuleFileState::Missing);
     }
 
