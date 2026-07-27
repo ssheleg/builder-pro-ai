@@ -176,6 +176,20 @@ jobs:
           path: dist-release/*
           if-no-files-found: error
 
+      # BL-105: verify the signed+notarized .app BEFORE publishing — codesign --deep --strict +
+      # each embedded sidecar + the real Gatekeeper (spctl) policy check. `sign-verify.sh` degrades
+      # honestly (exit 0) when the build was unsigned/dev-signed, but FAILS the release when
+      # notarization creds WERE present (the artifact was supposed to be the distributable thing) and
+      # spctl rejects it. Catches a broken staple / entitlement / missed deep-sign before it ships.
+      - name: Verify signature + notarization (pre-publish gate)
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          app="$(find target src-tauri/target -path '*universal-apple-darwin/release/bundle/macos/*.app' -type d 2>/dev/null | head -n1)"
+          [ -n "$app" ] || { echo "::error::no .app to verify"; exit 1; }
+          bash scripts/sign-verify.sh "$app"
+
       - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

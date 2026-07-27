@@ -293,6 +293,8 @@ export interface AppState {
   researchRunsFetched: Record<string, true>;
   mcpServersFetched: boolean;
   mcpArtifactsFetched: boolean;
+  accountsFetched: boolean;
+  skillsFetched: boolean;
 
   /**
    * Workflow-authoring slice (SW1, docs/ux/plans/2026-07-24-workflow-authoring.md). Every reusable
@@ -838,7 +840,14 @@ export const useAppStore = create<AppState>((set, get) => {
   // UX-1 first-fetch flags (see the flags' doc on `AppState`): set on the FIRST settled fetch —
   // success or failure — and never reset. These helpers keep the `refresh*` bodies one-liners.
   const markFetched = (
-    field: "projectsFetched" | "ideasFetched" | "insightsFetched" | "mcpServersFetched" | "mcpArtifactsFetched",
+    field:
+      | "projectsFetched"
+      | "ideasFetched"
+      | "insightsFetched"
+      | "mcpServersFetched"
+      | "mcpArtifactsFetched"
+      | "accountsFetched"
+      | "skillsFetched",
   ): void => {
     if (!get()[field]) set({ [field]: true } as Partial<AppState>);
   };
@@ -893,6 +902,8 @@ export const useAppStore = create<AppState>((set, get) => {
     researchRunsFetched: {},
     mcpServersFetched: false,
     mcpArtifactsFetched: false,
+    accountsFetched: false,
+    skillsFetched: false,
     workflows: [],
     orchdDown: false,
     orchdIncompatible: false,
@@ -1370,6 +1381,8 @@ export const useAppStore = create<AppState>((set, get) => {
           set({ accounts });
         } catch (e) {
           get().reportError("refreshAccounts", e);
+        } finally {
+          markFetched("accountsFetched"); // BL-194 (UX-1): no false "No accounts" flash
         }
       });
     },
@@ -1384,6 +1397,8 @@ export const useAppStore = create<AppState>((set, get) => {
           set({ skills });
         } catch (e) {
           get().reportError("refreshSkills", e);
+        } finally {
+          markFetched("skillsFetched"); // BL-194 (UX-1): no false "No skills" flash
         }
       });
     },

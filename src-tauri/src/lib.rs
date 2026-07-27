@@ -823,16 +823,25 @@ pub fn run() {
             let orchd_slot: OrchdClientSlot = Arc::new(std::sync::RwLock::new(None));
             let orchd_status: OrchdStatusSlot =
                 Arc::new(std::sync::Mutex::new(OrchdStatus::Disconnected));
-            let orchd_agent = Arc::new(match build_orchd_launchd_agent(&handle) {
-                Ok(agent) => agent,
+            // BL-191: `orchd_ok` mirrors `sessiond_ok` — `false` when the orchd binary path/dirs
+            // couldn't be resolved (dev bundle, etc.): AppState is still managed (with the
+            // always-`Err` stub agent so `upgrade_orchd` fails honestly), but there's nothing to
+            // kickstart, so we emit `orchd://down` instead of spawning `bring_up_orchd` (which would
+            // otherwise run `install_agent` on the stub's `tempdir` paths, littering
+            // `$TMPDIR/LaunchAgents` + `$TMPDIR/AppSupport` before `bootstrap` fails).
+            let (orchd_agent, orchd_ok) = match build_orchd_launchd_agent(&handle) {
+                Ok(agent) => (Arc::new(agent), true),
                 Err(e) => {
                     error!(
                         error = %e,
                         "failed to resolve the orchd launchd agent (bundled daemon path/dirs)"
                     );
-                    unreachable_launchd_agent(crate::launchd::ORCHD_LABEL)
+                    (
+                        Arc::new(unreachable_launchd_agent(crate::launchd::ORCHD_LABEL)),
+                        false,
+                    )
                 }
-            });
+            };
 
             let sessiond_slot: commands::ClientSlot = Arc::new(std::sync::RwLock::new(None));
             let sessiond_status: StatusSlot =
@@ -885,13 +894,19 @@ pub fn run() {
             } else {
                 emit_disconnected(&handle, "could not resolve the background service binary");
             }
-            tauri::async_runtime::spawn(bring_up_orchd(
-                handle,
-                orchd_agent,
-                broker,
-                orchd_slot,
-                orchd_status,
-            ));
+            if orchd_ok {
+                tauri::async_runtime::spawn(bring_up_orchd(
+                    handle,
+                    orchd_agent,
+                    broker,
+                    orchd_slot,
+                    orchd_status,
+                ));
+            } else {
+                // BL-191: no resolvable orchd binary — emit orchd://down instead of spawning
+                // bring_up_orchd (which would litter $TMPDIR via the stub agent's install_agent).
+                emit_orchd_down(&handle, "could not resolve the orchestrator service binary");
+            }
 
             Ok(())
         })

@@ -379,6 +379,13 @@ export function App(props?: { manager?: TerminalManager }): JSX.Element {
         void s.refreshSkills();
         void s.refreshPolicies();
         void s.refreshInvocations();
+        // BL-193 (BL-92 residual): the per-server tool cache + the audit log were NOT rehydrated on
+        // reconnect — an open Tools sub-view or the Log/audit tab stayed stale until the next
+        // `McpToolsChanged`/`InvocationLogged` push. Re-fetch every loaded server's tools + the audit.
+        for (const server of s.mcpServers) {
+          void s.refreshMcpTools(server.id);
+        }
+        void s.refreshAuditRows();
         // SW1: the workflow library is whole-store, project-independent — rehydrate it on every
         // reconnect exactly like the Extensions slices above (a `WorkflowsChanged` push during the
         // outage is lost, so a held list can be stale until re-read).

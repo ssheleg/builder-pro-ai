@@ -683,6 +683,8 @@ export const strings = {
       deleteConfirm: (label: string) => `delete account "${label}"?`,
       accountsTitle: "Accounts",
       noAccounts: "no accounts",
+      /** BL-194 (UX-1): shown until `accountsFetched` flips — never flashes the false empty state. */
+      loading: "Loading accounts…",
       scopesLabel: "scopes:",
       expiresLabel: "expires:",
       operationFor: (label: string) => `Operation for ${label}`,
@@ -760,6 +762,8 @@ export const strings = {
       chooseSkillMd: "choose SKILL.md",
       addSkill: "+ skill",
       empty: "no skills",
+      /** BL-194 (UX-1): shown until `skillsFetched` flips — never flashes the false empty state. */
+      loading: "Loading skills…",
     },
     log: {
       limitMustBeNumber: "the limit must be a number",

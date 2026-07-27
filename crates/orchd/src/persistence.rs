@@ -1230,13 +1230,24 @@ fn load_goal(conn: &Connection, id: &str) -> Result<Goal, OrchdPersistError> {
 /// under `new_parent_id` is only safe if `new_parent_id` is NOT `id` itself and NOT already a
 /// descendant of `id` — which is exactly "walking up from `new_parent_id` eventually reaches
 /// `id`" (spec §5.2 "cycles rejected (walk-up check)").
+/// Max depth of an ancestor-chain walk (BL-183). A real goal/task tree is bounded by the schema's
+/// realistic depth (single digits); this cap is a safety bound so a hand-edited CYCLE in the
+/// `parent_id` chain (unreachable through any live verb, but possible via a direct SQLite edit)
+/// cannot make [`ancestor_chain_contains`] infinite-loop and wedge orchd's single sequential
+/// dispatch. Hitting it surfaces a `Validation` error instead of hanging.
+const MAX_ANCESTOR_DEPTH: usize = 4096;
+
 fn ancestor_chain_contains(
     conn: &Connection,
     start_id: &str,
     target_id: &str,
 ) -> Result<bool, OrchdPersistError> {
     let mut current = Some(start_id.to_string());
-    while let Some(cur) = current {
+    // BL-183: bounded walk — a hand-edited `parent_id` cycle would otherwise loop forever.
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        let Some(cur) = current else {
+            return Ok(false);
+        };
         if cur == target_id {
             return Ok(true);
         }
@@ -1249,7 +1260,11 @@ fn ancestor_chain_contains(
             .optional()?
             .flatten();
     }
-    Ok(false)
+    // Exceeded the depth bound: the chain is cyclic (only reachable via a direct DB edit — no live
+    // verb can create a cycle, and import rejects them). Fail honestly instead of looping forever.
+    Err(OrchdPersistError::Validation(format!(
+        "ancestor chain from {start_id} exceeded {MAX_ANCESTOR_DEPTH} (cycle in parent_id?)"
+    )))
 }
 
 /// Raw `idea` row (text-encoded `lifecycle`) before decoding into the wire [`Idea`] type —
@@ -1458,7 +1473,11 @@ fn task_ancestor_chain_contains(
     target_id: &str,
 ) -> Result<bool, OrchdPersistError> {
     let mut current = Some(start_id.to_string());
-    while let Some(cur) = current {
+    // BL-183: bounded walk (same rationale as `ancestor_chain_contains`).
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        let Some(cur) = current else {
+            return Ok(false);
+        };
         if cur == target_id {
             return Ok(true);
         }
@@ -1471,7 +1490,9 @@ fn task_ancestor_chain_contains(
             .optional()?
             .flatten();
     }
-    Ok(false)
+    Err(OrchdPersistError::Validation(format!(
+        "task ancestor chain from {start_id} exceeded {MAX_ANCESTOR_DEPTH} (cycle in parent_id?)"
+    )))
 }
 
 impl Db {

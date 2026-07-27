@@ -167,7 +167,10 @@ function formatScopes(scopes: string[]): string {
  * banner exactly.
  */
 export function ConnectorsTab(): JSX.Element {
+  /** BL-194 (UX-1): first-fetch placeholder — same dim muted register as ServersTab's. */
+  const loadingTextStyle: CSSProperties = { color: "var(--muted)", fontSize: "var(--fs-md)" };
   const accounts = useAppStore((s) => s.accounts);
+  const accountsFetched = useAppStore((s) => s.accountsFetched);
   const orchdDown = useAppStore((s) => s.orchdDown);
   const refreshAccounts = useAppStore((s) => s.refreshAccounts);
   const showToast = useAppStore((s) => s.showToast);
@@ -380,7 +383,13 @@ export function ConnectorsTab(): JSX.Element {
     <div data-testid="connectors-tab" style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
       <Panel title={strings.ext.connectors.accountsTitle}>
         {accounts.length === 0 ? (
-          <EmptyState data-testid="accounts-empty" title={strings.ext.connectors.noAccounts} />
+          accountsFetched ? (
+            <EmptyState data-testid="accounts-empty" title={strings.ext.connectors.noAccounts} />
+          ) : (
+            <div data-testid="accounts-loading" style={loadingTextStyle}>
+              {strings.ext.connectors.loading}
+            </div>
+          )
         ) : (
           <div role="list">
             {accounts.map((account) => {

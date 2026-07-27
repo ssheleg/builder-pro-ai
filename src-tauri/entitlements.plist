@@ -2,13 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- BL-174: Tauri v2 WKWebView-JIT minimum (allow-jit + allow-unsigned-executable-memory).
+       Verifying whether Tauri's bundler re-injects disable-library-validation +
+       allow-dyld-environment-variables on top of this narrowed plist (if so, BL-174 needs a
+       post-build codesign override; if not, this 2-key plist is the whole fix). -->
   <key>com.apple.security.cs.allow-jit</key>
   <true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-  <true/>
-  <key>com.apple.security.cs.disable-library-validation</key>
-  <true/>
-  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
 </dict>
 </plist>

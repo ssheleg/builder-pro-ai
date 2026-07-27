@@ -2339,6 +2339,14 @@ pub async fn orchd_import_from_file(
     )
 }
 
+/// BL-189: re-entry guard for `orchd_reconnect`. Each [Retry] click otherwise spawns a fresh
+/// `bring_up_orchd` racing the same `slot`/`status` Arcs — duplicate `orchd://down|up` events +
+/// a wasted `BOOT_CONNECT_ATTEMPTS×500ms` budget per click (benign, last-writer-wins, but noisy).
+/// Set while a reconnect is in flight; a second click is a no-op. Cleared when the spawned task
+/// completes (success or failure). Single-instance app → a module static is sufficient.
+static ORCHD_RECONNECTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Drops the current orchd client slot, then re-runs `lib.rs`'s `bring_up_orchd` connect sequence
 /// from scratch (spec §9's locked flow — the [Retry] button's target, T19). Spawned via
 /// `tauri::async_runtime::spawn` rather than awaited inline: `bring_up_orchd`'s bounded retry can
@@ -2351,12 +2359,21 @@ pub async fn orchd_reconnect(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), CommandError> {
+    // BL-189: no-op if a reconnect is already in flight (rapid [Retry] clicks).
+    if ORCHD_RECONNECTING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return Ok(());
+    }
     write(&state.orchd).take();
     let agent = state.orchd_launchd.clone();
     let broker = state.broker.clone();
     let slot = state.orchd.clone();
     let status = state.orchd_status.clone();
-    tauri::async_runtime::spawn(crate::bring_up_orchd(app, agent, broker, slot, status));
+    tauri::async_runtime::spawn(async move {
+        crate::bring_up_orchd(app, agent, broker, slot, status).await;
+        // Always clear the guard — a panic inside bring_up_orchd is already guarded against, but the
+        // finally-clear ensures a future [Retry] works even if the connect path ever early-returns.
+        ORCHD_RECONNECTING.store(false, std::sync::atomic::Ordering::Release);
+    });
     Ok(())
 }
 

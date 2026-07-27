@@ -909,11 +909,14 @@ async fn dispatch_inner(
             let db = deps.db.lock().await;
             match db.upsert_workspace(&w) {
                 Ok(()) => {
-                    // Broadcast to every client (spec §7). The awaiting caller still gets the
-                    // Response below; other clients learn via the Push.
-                    let _ = push_sink.try_send(Push::WorkspaceCreated {
+                    // BL-178: broadcast to EVERY client (consistent with AddWorkspaceRoot/
+                    // RemoveWorkspaceRoot/RemoveWorkspace). Pre-BL-178 this only `try_send`'d on the
+                    // requester's own `push_sink`, so a second concurrently-connected window never
+                    // learned of a new workspace until it re-listed. The requester still gets the
+                    // `Response::Workspace` below; everyone (incl. the requester) gets the Push.
+                    broadcaster.broadcast(Frame::Push(Push::WorkspaceCreated {
                         workspace: w.clone(),
-                    });
+                    }));
                     Response::Workspace(w)
                 }
                 Err(e) => err("DbError", e),

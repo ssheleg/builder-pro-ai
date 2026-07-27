@@ -127,6 +127,7 @@ const SCOPE_LABEL: Record<Skill["scope"], string> = {
  */
 export function SkillsTab(): JSX.Element {
   const skills = useAppStore((s) => s.skills);
+  const skillsFetched = useAppStore((s) => s.skillsFetched);
   const orchdDown = useAppStore((s) => s.orchdDown);
   const refreshSkills = useAppStore((s) => s.refreshSkills);
   const showToast = useAppStore((s) => s.showToast);
@@ -250,7 +251,13 @@ export function SkillsTab(): JSX.Element {
       </div>
 
       {skills.length === 0 ? (
-        <EmptyState data-testid="skills-empty" title={strings.ext.skills.empty} />
+        skillsFetched ? (
+          <EmptyState data-testid="skills-empty" title={strings.ext.skills.empty} />
+        ) : (
+          <div data-testid="skills-loading" style={{ color: "var(--muted)", fontSize: "var(--fs-md)" }}>
+            {strings.ext.skills.loading}
+          </div>
+        )
       ) : (
         <div role="list">
           {skills.map((skill) => {
