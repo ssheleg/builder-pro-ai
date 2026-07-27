@@ -154,9 +154,15 @@ impl Db {
     /// file (test-support + graceful-shutdown helper; spec §11 "flush + WAL
     /// checkpoint on graceful shutdown"). Best-effort: any failure is a typed error,
     /// never a panic.
+    ///
+    /// Uses `PASSIVE` (not `TRUNCATE`): `TRUNCATE` blocks until every reader drains and was
+    /// measured to hang past the e2e graceful-shutdown timeout on a contended db — the same
+    /// liveness regression `bpa-orchd`'s `checkpoint()` already downgraded away from. A
+    /// best-effort shutdown checkpoint must never block the shutdown ack; SQLite replays the
+    /// un-checkpointed WAL tail on the next open anyway, so `PASSIVE` loses nothing on correctness.
     pub fn checkpoint(&self) -> Result<(), PersistError> {
         self.conn
-            .pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .pragma_update(None, "wal_checkpoint", "PASSIVE")
             .map_err(classify)?;
         Ok(())
     }
@@ -289,6 +295,12 @@ fn migrate_v2(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
 /// single `root_path` becomes its ord=0 root; `workspace.root_path` stays as a compat mirror
 /// (kept in sync by `upsert_workspace`/`remove_workspace_root`). Body moved verbatim from the
 /// pre-extraction inline `migrate` (S3 phase 1, spec §3).
+///
+/// The backfill `INSERT … SELECT` carries a `WHERE NOT EXISTS` guard so it is idempotent: paired
+/// with `CREATE TABLE IF NOT EXISTS`, a hand-edited / inconsistently-rolled-back DB whose
+/// `user_version` is ≤2 but whose `workspace_root` already holds ord=0 rows re-runs the migration
+/// as a clean no-op instead of a PRIMARY KEY violation. (Mirrors `bpa-orchd`'s `migrate_v2`
+/// strategic-goal backfill discipline.)
 fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS workspace_root (
@@ -297,7 +309,10 @@ fn migrate_v3(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
            path         TEXT NOT NULL,
            PRIMARY KEY (workspace_id, ord));
          INSERT INTO workspace_root (workspace_id, ord, path)
-           SELECT id, 0, root_path FROM workspace;",
+           SELECT id, 0, root_path FROM workspace
+           WHERE NOT EXISTS (
+             SELECT 1 FROM workspace_root w
+             WHERE w.workspace_id = workspace.id AND w.ord = 0);",
     )
 }
 
@@ -1670,6 +1685,84 @@ mod tests {
             list[1].roots,
             vec!["/tmp/two".to_string()],
             "w2 got its ord=0 backfill row"
+        );
+    }
+
+    #[test]
+    fn migration_v2_to_v3_is_idempotent_when_workspace_root_already_populated() {
+        // Edge: a hand-edited / inconsistently-rolled-back DB whose `user_version` is 2 BUT whose
+        // `workspace_root` table already exists and holds the ord=0 backfill rows. Paired with the
+        // migration's `CREATE TABLE IF NOT EXISTS`, the old `INSERT … SELECT` without a guard would
+        // PK-violate here; the `WHERE NOT EXISTS` guard makes the re-run a clean no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workspace (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
+                 CREATE TABLE session (
+                   id TEXT PRIMARY KEY,
+                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
+                   title TEXT NOT NULL, shell TEXT NOT NULL, cwd TEXT NOT NULL,
+                   cols INTEGER NOT NULL, rows INTEGER NOT NULL,
+                   lifecycle TEXT NOT NULL,
+                   exit_code INTEGER, exit_signal TEXT,
+                   created_at INTEGER NOT NULL);
+                 CREATE TABLE scrollback (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq INTEGER NOT NULL, bytes BLOB NOT NULL, ts INTEGER NOT NULL,
+                   PRIMARY KEY (session_id, seq));
+                 CREATE TABLE command_events (
+                   session_id TEXT NOT NULL REFERENCES session(id),
+                   seq        INTEGER NOT NULL,
+                   ts         INTEGER NOT NULL,
+                   kind       TEXT NOT NULL,
+                   exit_code  INTEGER,
+                   origin     TEXT NOT NULL DEFAULT 'gui',
+                   PRIMARY KEY (session_id, seq));
+                 CREATE TABLE workspace_root (
+                   workspace_id TEXT NOT NULL REFERENCES workspace(id),
+                   ord          INTEGER NOT NULL,
+                   path         TEXT NOT NULL,
+                   PRIMARY KEY (workspace_id, ord));
+                 INSERT INTO workspace (id, name, root_path) VALUES ('w1', 'ws-w1', '/tmp/one');
+                 INSERT INTO workspace_root (workspace_id, ord, path) VALUES ('w1', 0, '/tmp/one');",
+            )
+            .unwrap();
+            // Simulate the inconsistent state: table populated, but user_version still 2.
+            conn.pragma_update(None, "user_version", 2_i64).unwrap();
+        }
+
+        // Open with the v3 daemon: the v2->v3 step re-runs, must NOT PK-violate on the pre-existing
+        // ord=0 row, and must reach SCHEMA_VERSION with the row intact and un-duplicated.
+        let db = Db::open(&path).unwrap();
+        let uv: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, SCHEMA_VERSION);
+
+        let list = db.list_workspaces().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "w1");
+        assert_eq!(
+            list[0].roots,
+            vec!["/tmp/one".to_string()],
+            "the pre-existing ord=0 row survived without duplication"
+        );
+
+        let root_rows: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_root WHERE workspace_id='w1' AND ord=0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            root_rows, 1,
+            "exactly one ord=0 row — the backfill was a no-op, not a duplicate"
         );
     }
 
