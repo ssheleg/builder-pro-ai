@@ -101,10 +101,15 @@ pub trait ConnectorAdapter {
 /// typed it), a `generic-rest` call's target URL IS exactly what the owner typed into the
 /// «invoke» op form (spec §8 UI) for an account THEY explicitly added. Reaching an
 /// owner-specified arbitrary URL is the entire point of a generic REST connector, not a bug to
-/// guard against — so this client keeps reqwest's default (bounded, following) redirect policy,
-/// same as any other user-driven outbound call in this app. The bearer is still only ever sent to
-/// wherever `args["url"]` (and any redirect target `args["url"]` itself points at) resolves to —
-/// the owner's own choice of target, at both hops.
+/// guard against.
+///
+/// Even so, the account bearer is sent ONLY to the literal `args["url"]` the owner typed: this
+/// client disables redirect-following (`redirect::Policy::none()`), so a redirecting endpoint
+/// surfaces honestly as `ConnectorError::UpstreamStatus(3xx)` instead of silently forwarding the
+/// `Authorization: Bearer` to a target the owner did NOT type (M2). reqwest's default policy
+/// already strips `Authorization` on cross-HOST redirects but KEEPS it on same-host redirects —
+/// a compromised owner-chosen endpoint that 302s within its own host would otherwise receive the
+/// live bearer at the redirect target. The owner can always invoke the final URL directly.
 pub struct GenericRestAdapter {
     client: reqwest::Client,
 }
@@ -116,6 +121,10 @@ impl GenericRestAdapter {
     pub fn new() -> Result<Self, ConnectorError> {
         let client = reqwest::Client::builder()
             .timeout(GENERIC_REST_TIMEOUT)
+            // M2: never follow redirects — the bearer goes ONLY to the literal `args["url"]`. A
+            // redirecting endpoint surfaces as `UpstreamStatus(3xx)` (handled by the `!is_success`
+            // branch in `invoke`) instead of forwarding `Authorization` to an untyped target.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ConnectorError::Http(e.to_string()))?;
         Ok(Self { client })
@@ -569,6 +578,18 @@ mod tests {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
 
+    /// M2: returns 302 → `/get`, so a test can prove the adapter does NOT follow the redirect (the
+    /// bearer would otherwise be re-sent to the untyped target).
+    async fn redirect_handler() -> (
+        axum::http::StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+    ) {
+        (
+            axum::http::StatusCode::FOUND,
+            [(axum::http::header::LOCATION, "/get")],
+        )
+    }
+
     /// Returns a 200 body larger than `MAX_CONNECTOR_BODY` so the adapter's capped read must reject
     /// it (B1) rather than buffer it whole.
     async fn big_handler() -> String {
@@ -582,6 +603,7 @@ mod tests {
             .route("/post", axum::routing::post(post_handler))
             .route("/error", axum::routing::get(error_handler))
             .route("/big", axum::routing::get(big_handler))
+            .route("/redirect", axum::routing::get(redirect_handler))
             .with_state(captured.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -678,6 +700,39 @@ mod tests {
         assert!(
             matches!(err, ConnectorError::UpstreamStatus(500)),
             "expected UpstreamStatus(500), got {err:?}"
+        );
+    }
+
+    // M2: the adapter MUST NOT follow redirects — the account bearer goes only to the literal
+    // `args["url"]`, never to an (attacker-influenced) Location target. reqwest's default policy
+    // keeps `Authorization` on same-host redirects; `Policy::none()` surfaces the 3xx honestly.
+    #[tokio::test]
+    async fn generic_rest_adapter_does_not_follow_redirects_with_the_bearer() {
+        let (base, captured) = spawn_rest_stub().await;
+        let adapter = GenericRestAdapter::new().unwrap();
+        let err = adapter
+            .invoke(
+                &token("leak-canary"),
+                "get",
+                json!({"url": format!("{base}/redirect")}),
+            )
+            .await
+            .expect_err("a redirect must surface as an error, not be followed");
+        match err {
+            ConnectorError::UpstreamStatus(code) => {
+                assert!(
+                    (300..400).contains(&code),
+                    "expected a 3xx surfaced (not followed), got {code}"
+                );
+            }
+            other => panic!("expected UpstreamStatus(3xx), got {other:?}"),
+        }
+        // `/get` (the redirect target) was never hit, so its handler captured no Authorization.
+        let captured_lock = captured.lock().unwrap();
+        let target_auth = captured_lock.auth_header.clone();
+        assert!(
+            target_auth.is_none(),
+            "the bearer leaked to the redirect target's handler: {target_auth:?}"
         );
     }
 
