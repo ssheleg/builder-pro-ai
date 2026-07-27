@@ -202,6 +202,21 @@ fn ensure_node_project(
     }
 }
 
+/// DOM-3 graph-verb guard (BL-176): `add_node` / `add_entity_ref_node` / `move_node` must reject
+/// non-finite (`NaN` / `±Infinity`) positions. A stored non-finite `pos_x`/`pos_y` makes
+/// `serde_json` refuse to serialize the next `ExportAll` / `ExportProject` → an un-backupable store
+/// (the exact DOM-3 failure class, reachable here via a crafted CBOR frame). Mirrors
+/// `set_task_rank`'s finiteness guard (BL-112).
+fn ensure_finite_graph_pos(pos_x: f64, pos_y: f64) -> Result<(), OrchdPersistError> {
+    if pos_x.is_finite() && pos_y.is_finite() {
+        Ok(())
+    } else {
+        Err(OrchdPersistError::Validation(
+            "graph node position must be finite (reject +inf/-inf/NaN)".to_string(),
+        ))
+    }
+}
+
 /// Maps a `graph_node_one_per_entity` partial-unique-index hit to `Conflict` (S4 spec §5:
 /// "duplicate (type,id) ⇒ Conflict"), otherwise passes the raw SQL error through unchanged.
 ///
@@ -371,6 +386,7 @@ impl Db {
                 "add_node: entityRef nodes can only be created via add_entity_ref_node".to_string(),
             ));
         }
+        ensure_finite_graph_pos(pos_x, pos_y)?; // BL-176 (DOM-3 class for graph positions)
         let tx = self.conn().unchecked_transaction()?;
         ensure_project_active(&tx, project_id)?;
         let id = Uuid::new_v4().to_string();
@@ -426,6 +442,7 @@ impl Db {
         pos_x: f64,
         pos_y: f64,
     ) -> Result<GraphNode, OrchdPersistError> {
+        ensure_finite_graph_pos(pos_x, pos_y)?; // BL-176
         let tx = self.conn().unchecked_transaction()?;
         ensure_project_active(&tx, project_id)?;
         let id = Uuid::new_v4().to_string();
@@ -495,6 +512,7 @@ impl Db {
         pos_y: f64,
         expected_project: Option<&str>,
     ) -> Result<GraphNode, OrchdPersistError> {
+        ensure_finite_graph_pos(pos_x, pos_y)?; // BL-176
         let tx = self.conn().unchecked_transaction()?;
         let project_id = node_project_id(&tx, id)?;
         ensure_node_project(&project_id, expected_project)?;
@@ -2627,6 +2645,38 @@ mod tests {
             "`%` must match a literal percent, not everything"
         );
         assert!(percent[0].label.contains("50%"));
+    }
+
+    #[test]
+    fn add_node_and_move_node_reject_non_finite_positions_so_the_store_stays_backupable() {
+        // BL-176 (DOM-3 class for graph positions): a stored NaN/±Infinity pos makes the next
+        // ExportAll fail to serialize → an un-backupable store. Must be rejected as Validation.
+        let db = Db::open_in_memory().unwrap();
+        let pid = new_project(&db);
+        for (x, y) in [
+            (f64::INFINITY, 0.0),
+            (0.0, f64::NAN),
+            (f64::NEG_INFINITY, 1.0),
+        ] {
+            match db.add_node(&pid, GraphNodeKind::Concept, "n", "", x, y) {
+                Err(OrchdPersistError::Validation(_)) => {}
+                other => panic!("add_node pos ({x},{y}) must be Validation, got {other:?}"),
+            }
+        }
+        // A finite node is created + its move is guarded too.
+        let n = db
+            .add_node(&pid, GraphNodeKind::Concept, "n", "", 1.0, 2.0)
+            .unwrap();
+        for (x, y) in [(f64::INFINITY, 0.0), (0.0, f64::NAN)] {
+            match db.move_node(&n.id, x, y, None) {
+                Err(OrchdPersistError::Validation(_)) => {}
+                other => panic!("move_node pos ({x},{y}) must be Validation, got {other:?}"),
+            }
+        }
+        // A finite move still works.
+        let moved = db.move_node(&n.id, 10.0, 20.0, None).unwrap();
+        assert_eq!(moved.pos_x, 10.0);
+        assert_eq!(moved.pos_y, 20.0);
     }
 
     #[test]

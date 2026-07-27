@@ -33,6 +33,15 @@ BL-198 (orchd broadcast overflow-notify); the S6b-gated remainder stays at BL-21
   `add_skill` surfaces a typed `Validation`.
 
 ### Fixed — reliability & data integrity
+- **graph node positions must be finite** (BL-176): `add_node`/`add_entity_ref_node`/`move_node`
+  reject `NaN`/`±Infinity` positions as `Validation`. A stored non-finite `pos_x`/`pos_y` made
+  `serde_json` refuse to serialize the next `ExportAll`/`ExportProject` → an un-backupable store
+  (the DOM-3 class, reachable via a crafted CBOR frame). Mirrors `set_task_rank`'s finiteness guard.
+- **bounded reader-thread join in `kill()`** (BL-172): an escaped (`setsid`'d) descendant holding
+  the PTY slave keeps the reader's `read()` from ever EOFing, and SIGKILL on the group can't reach
+  a descendant in a foreign process group — so a plain `join()` could block forever and wedge
+  `kill()`/`shutdown_all` (SIGTERM never completes → daemon needs `kill -9`). `join_bounded`
+  (3 s) orphans the reader on timeout instead of hanging the daemon.
 - **sessiond `wal_checkpoint` TRUNCATE → PASSIVE** (M8): TRUNCATE blocks until all readers drain and
   was measured to hang past the e2e graceful-shutdown timeout (the same liveness regression orchd's
   `checkpoint()` already downgraded away from). PASSIVE never blocks the shutdown ack; SQLite replays

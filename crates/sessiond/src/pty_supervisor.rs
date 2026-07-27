@@ -67,9 +67,36 @@ const READ_BUF: usize = 32 * 1024;
 const QUIESCENT: Duration = Duration::from_millis(150);
 /// Grace between SIGTERM and SIGKILL on a process-group kill (spec §9.8).
 const KILL_GRACE: Duration = Duration::from_secs(2);
+/// Bounded wait for the reader thread to exit during `kill()` (BL-172). An escaped (`setsid`'d)
+/// descendant holding the PTY slave keeps the reader's `read()` from ever EOFing, and SIGKILL on
+/// the group can't reach a descendant in a foreign process group — so a plain `join()` would block
+/// forever and wedge `kill()` / `shutdown_all` (SIGTERM never completes → daemon needs `kill -9`).
+/// This bounds the wait; on timeout the reader is orphaned (it reaps itself when the slave finally
+/// closes, or at process exit) instead of hanging the daemon.
+const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Status-ticker cadence: surfaces waiting-for-input flips without new bytes (the quiet-`cat`
 /// case, spec §10.4).
 const TICK: Duration = Duration::from_millis(200);
+
+/// Join `h` with a bounded `timeout` (BL-172). Rust's `JoinHandle::join` has no timeout, so run the
+/// join on a watcher thread and `recv_timeout` on a channel. Returns `true` if the handle exited in
+/// time, `false` if it timed out — in which case BOTH the watcher and the underlying thread are
+/// orphaned (the watcher reaps the handle whenever the blocked op returns; the blocked op returns
+/// when the PTY slave finally closes or the process exits). Never panics, never blocks indefinitely.
+fn join_bounded(h: JoinHandle<()>, timeout: Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::Builder::new()
+        .name("bpa-reader-join-watcher".into())
+        .spawn(move || {
+            let _ = h.join();
+            let _ = tx.send(());
+        })
+        .ok();
+    match rx.recv_timeout(timeout) {
+        Ok(()) => true,
+        Err(_) => false,
+    }
+}
 
 /// Max attempts to acquire a PTY (`openpty`) before giving up (A1 / BL-40). `openpty` can
 /// transiently fail with an OS resource-exhaustion error (EAGAIN/ENFILE/EMFILE) when many PTYs
@@ -757,7 +784,18 @@ impl Supervisor {
             let _ = h.join();
         }
         if let Some(h) = lock(&pty.reader_thread).take() {
-            let _ = h.join();
+            // BL-172: the reader thread blocks on `read()` against the PTY master; an escaped
+            // (`setsid`'d) descendant holding the slave keeps that read from ever EOFing, so a plain
+            // `join()` could hang forever. Bound it — on timeout, orphan the reader (it self-reaps
+            // when the slave closes) rather than wedging `kill()` / `shutdown_all`.
+            if !join_bounded(h, READER_JOIN_TIMEOUT) {
+                tracing::warn!(
+                    session = id,
+                    timeout = ?READER_JOIN_TIMEOUT,
+                    "kill: reader thread did not exit in time — an escaped descendant likely holds \
+                     the PTY slave; orphaning the reader (BL-172)"
+                );
+            }
         }
         if let Some(h) = lock(&pty.ticker_thread).take() {
             let _ = h.join();
@@ -949,6 +987,41 @@ mod tests {
     // oversubscription. `retry_transient` recovers from a transient failure instead of hard-
     // failing session creation; these tests pin its retry/give-up semantics deterministically
     // (zero backoff, no real fds) so the behavior can't regress. ----
+    #[test]
+    fn join_bounded_returns_true_when_the_handle_exits_in_time() {
+        // BL-172: a fast-exiting handle must join within the bound → true.
+        let h = std::thread::Builder::new()
+            .name("fast".into())
+            .spawn(|| {})
+            .unwrap();
+        assert!(join_bounded(h, Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn join_bounded_returns_false_and_does_not_hang_when_the_handle_blocks_forever() {
+        // BL-172: the whole point — a handle whose thread blocks forever (the reader thread when an
+        // escaped descendant holds the PTY slave) must NOT hang kill(); the bounded wait returns
+        // false within ~the timeout and orphans the thread instead of wedging the caller.
+        let h = std::thread::Builder::new()
+            .name("stuck".into())
+            .spawn(|| {
+                let forever = std::sync::Arc::new(());
+                let _ = forever.clone(); // a thread that never exits for the test's lifetime
+                loop {
+                    std::thread::park();
+                }
+            })
+            .unwrap();
+        let start = std::time::Instant::now();
+        let joined = join_bounded(h, Duration::from_millis(300));
+        let elapsed = start.elapsed();
+        assert!(!joined, "a forever-blocked handle must time out, not join");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "join_bounded must return promptly (took {elapsed:?}), not block the caller"
+        );
+    }
+
     #[test]
     fn retry_transient_first_success_does_not_retry() {
         let mut calls = 0u32;
