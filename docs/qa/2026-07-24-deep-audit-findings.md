@@ -1,42 +1,28 @@
 # Deep Audit Findings — 2026-07-24
 
-> **Validity re-check 2026-07-27 (post-0.10.4).** This report was written against the 0.10.0 tree.
-> Since then THREE remediation waves landed: **`0.10.1`** (audit sweep, reports
-> `docs/qa/2026-07-24-full-audit-report.md` + `2026-07-24-comprehensive-qa-report.md`), **`0.10.2`**
-> P1-hardening (`BL-123/124/125/134/138/139`, schema bump to **v8**), and **`0.10.4`**
-> (`fix(BL-3)` — owner-only DB file mode). Every row re-verified against the current 0.10.4 tree:
+> **Validity re-check 2026-07-27 (post-0.10.5, MERGED to `main` `b3b810f`).** This report was
+> written against the 0.10.0 tree. FOUR remediation waves have now landed: **`0.10.1`** (audit
+> sweep), **`0.10.2`** (P1-hardening, schema v8), **`0.10.4`** (BL-3 db mode), and **`0.10.5`**
+> (this pass — the deep-audit's own findings, `final-suite.sh` ALL GATES PASSED, merged to `main`).
 >
-> - **STILL VALID & OPEN (re-confirmed 0.10.4):** C1, H1, H3, H6, M1, M2, M3, M4, M5, M7, M8, L1,
->   L2, L3, L4, L5, L6, L9, L12, L13, L15. Each re-checked against current code:
->   - C1 `csp:null` still (`tauri.conf.json:23`); H1 stdio stderr still inherited (no `cmd.stderr`
->     override); H6 orchd-proto `verb_name` still zero pinning tests;
->   - M1 `Broadcaster::broadcast` still `let _ = tx.try_send(...)` silent-skip
->     (`broadcast.rs:66`); M2 GenericRest still follows redirects with bearer;
->   - M7 sessiond `migrate_v3` backfill still non-idempotent (`INSERT … SELECT` w/o `WHERE NOT
->     EXISTS`, `persistence.rs:299`); M8 sessiond still `wal_checkpoint TRUNCATE` (`:159`);
->   - L1 `McpServerRow`/`NewMcpServer`/`McpServerPatch` still `#[derive(Debug)]` carrying `env`
->     (`mcp/mod.rs:56,82,109`).
-> - **CLOSED by 0.10.1:** H4, H5, L8 (UX-2 archived-filtered-from-pickers), L11, E1/E2
->   (BL-102 non-hermetic tests take `ENV_TEST_LOCK`+isolated XDG; BL-107 keychain probe bounded),
->   L10 (coverage cites swept + `docs/ux/lint.py` now a blocking gate stage).
-> - **CLOSED by 0.10.2:** **M6 / BL-103** (fs commands no longer trust webview-supplied roots —
->   BL-123 `WorkspaceRootsCache` + `ensure_fs_root`/`ensure_registered_root`, fail-closed).
-> - **CLOSED by 0.10.4:** **H2 / BL-3** — `bpa.db` + `orchd.db` (+`-wal`/`-shm` sidecars) now
->   `set_permissions(0o600)`, parent dir `0o700`, in both `sessiond/persistence.rs:174-183` and
->   `orchd/persistence.rs:239`.
-> - **CORRECTIONS:** **L7** — protocol `verb_name` pinning regressed from 4/15 to **1/15** (only
->   `ListWorkspaces` asserted now); finding is stronger, not weaker. **L14** — sessiond
->   `CreateWorkspace` push-reach deviation is a **documented-accepted** spec §7 carve-out → info.
->   **L16** — `McpDisconnect` no-op is by Phase-1 connect-per-call design → info.
-> - **Coverage gap in THIS audit (honest):** 0.10.1 found+fixed severe bugs this pass did NOT flag —
->   **REL-1** (every GUI launch ran `bootout`, killing both daemons + all live terminals — a
->   data-loss class), **SEC-1/SEC-2** (MCP consent bypass: HTTP tool calls not re-gated per-call;
->   stdio fingerprint didn't cover args+env), **GRAPH-1** (cross-project graph damage),
->   **SES-1** (`RemoveWorkspace` × `CreateSession` race). The launchd-bootstrap and consent-recheck
->   surfaces deserve a dedicated re-audit.
+> **Rows closed by THIS pass (0.10.5):** **C1** (restrictive CSP), **H1** (stdio stderr → `null`),
+> **L1** (`McpServer*` redacting `Debug`), **M2** (GenericRest no redirect), **M5** (markdown 1 MiB
+> cap), **M7** (sessiond migrate_v3 idempotent), **M8** (sessiond PASSIVE checkpoint), **H6**
+> (orchd-proto `verb_name` pinning), **L9** (terminal strings centralized), **L12** (README UX
+> index). Each shipped with a regression test.
 >
-> Read the per-row "Tracked?" column below together with this banner; rows marked **NEW** are still
-> actionable unless listed as fixed above.
+> **Still open (re-confirmed against `main` @ 0.10.5):** M3 (BL-68 TOCTOU), M4 (BL-81 — no live
+> trigger; no `DeleteProject` verb), M1 (filed as **BL-198** — orchd broadcast overflow-notify;
+> sessiond D4 is the port template), and the S6b-gated remainder (H3/BL-74 mediation, L3/BL-27
+> keychain-when-locked) + the LOW polish cluster (BL-21 log rotation, L5/L6/L13/L15/L16).
+>
+> **Coverage gap in THIS audit (honest):** 0.10.1 found+fixed severe bugs this pass did NOT flag —
+> **REL-1** (every GUI launch ran `bootout`, killing both daemons + all live terminals), **SEC-1/2**
+> (MCP consent bypass), **GRAPH-1**, **SES-1**. The launchd-bootstrap and consent-recheck surfaces
+> deserve a dedicated re-audit.
+>
+> Read the per-row "Tracked?" column below together with this banner; rows marked **NEW** that are
+> not listed as closed above remain actionable.
 
 A full-pass static + dynamic audit (Phases 0–3): behavioral matrix, contract registry,
 business-rules map, security/concurrency/migration/degradation/wire-parity audits, UX-scenario

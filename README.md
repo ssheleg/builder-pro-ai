@@ -73,7 +73,7 @@ Design tenets the whole codebase is held to:
 
 ## Highlights
 
-What works today (`0.10.0`):
+What works today (`0.10.5`):
 
 - 🖥️ **Daemon-owned terminals** — real PTYs supervised by `launchd`, so live shells survive the GUI
   closing, crashing, or restarting (tmux-style reattach + sanitized scrollback replay). OSC-133/OSC-7
@@ -179,8 +179,8 @@ bash scripts/final-suite.sh   # → "ALL GATES PASSED"
 
 | Suite | Command | Covers |
 |---|---|---|
-| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1306 tests** (`0.10.4`; `0.10.0` had 1170) |
-| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **1273 tests, 71 files** (`0.10.4`; `0.10.0` had 1130/63) |
+| Rust workspace | `cargo test --workspace` | both daemons + shared crates + Tauri core — **1312 tests** (`0.10.5`; `0.10.0` had 1170) |
+| TypeScript | `npx vitest run` | store, IPC, hooks, design tokens/contrast, diagnostics, and every UI component — **1273 tests, 71 files** (`0.10.5`; `0.10.0` had 1130/63) |
 | e2e (terminals) | `npm run e2e:survive` | create → run → status → quit client → daemon+shell survive → reattach + scrollback |
 | e2e (app domain) | `npm run e2e:orchd` | create → drain-restart → data intact → export → wipe → re-import → graph/MCP/research survival |
 | Coverage gate | `bash scripts/coverage-gate.sh` | ≥80% line coverage on both daemon crates (needs `cargo install cargo-llvm-cov`) |

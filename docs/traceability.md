@@ -269,21 +269,22 @@ primitives + theme suites, the WCAG-AA contrast guard, the diagnostics ring / `r
 crate's existing boot-path tests (the single row with no dedicated named test, honestly flagged as
 such above). This completeness sweep now extends through `[0.9.2]`.
 
-## Test totals — current (audit remediation sweep, `[Unreleased]`, 2026-07-24)
+## Test totals — current (`[0.10.5]`, deep-audit remediation, 2026-07-27)
 
-- Rust workspace (`cargo test --workspace`): **1260 tests**, 0 failed — measured on
-  `audit-remediation-2026-07-24` (the `[0.10.0]` baseline measured 1170; the audit remediation
-  adds ~90: workspace guards, SEC/DOM/FS regression tests, the flipped fs pin-tests).
-- TypeScript (`npx vitest run`): **1270 tests**, **71 test files**, 0 failed — measured on the same
-  branch (`[0.10.0]` had 1130/63; +140 tests incl. the refresh-guard suite and the flipped UX
+- Rust workspace (`cargo test --workspace`): **1312 tests**, 0 failed — measured on `main` @ `0.10.5`
+  (the `[0.10.0]` baseline measured 1170; the audit remediation waves 0.10.1/0.10.2/0.10.4/0.10.5
+  add ~142: workspace guards, SEC/DOM/FS regression tests, the flipped fs pin-tests, the
+  verb_name pinning suite, the redacting-Debug/markdown-cap/PASSIVE-checkpoint/migrate-v3 suites).
+- TypeScript (`npx vitest run`): **1273 tests**, **71 test files**, 0 failed — measured on the same
+  commit (`[0.10.0]` had 1130/63; +143 tests incl. the refresh-guard suite and the flipped UX
   probes, +8 files).
-- E2E: `npm run e2e:survive` and `npm run e2e:orchd` — ALL PHASES PASSED on the branch.
+- E2E: `npm run e2e:survive` and `npm run e2e:orchd` — ALL PHASES PASSED on `main` @ `0.10.5`.
 - Coverage: `bpa-sessiond` and `bpa-orchd` both ≥ 80% lines (`scripts/coverage-gate.sh`).
-- `scripts/final-suite.sh` is **11 stages** since the sweep (blocking `docs/ux/lint.py` added as
-  stage 2). The completeness sweep above extends through `[0.9.2]`; `[0.10.0]` contracts are
-  covered by `crates/sessiond/tests/remove_workspace.rs`, the stats epoch/family-cut tests, the
-  Docs panel tests, and the SW1 workflow tests — adding their rows here is tracked in the
-  audit's DOC-4 follow-up.
+- `scripts/final-suite.sh` is **11 stages** since the 0.10.1 sweep (blocking `docs/ux/lint.py` as
+  stage 2). The completeness sweep extends through `[0.9.2]`; `[0.10.0]` contracts are covered by
+  `crates/sessiond/tests/remove_workspace.rs`, the stats epoch/family-cut tests, the Docs panel
+  tests, and the SW1 workflow tests — adding their rows here is tracked in the audit's DOC-4
+  follow-up.
 
 ## Test totals — historical (S-UXR/S-DESIGN/S-DIAG/BL-101, `[0.9.2]`, 2026-07-19)
 
