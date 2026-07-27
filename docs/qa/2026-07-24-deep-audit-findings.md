@@ -1,5 +1,30 @@
 # Deep Audit Findings — 2026-07-24
 
+> **Validity re-check 2026-07-26 (post-0.10.1).** This report was written against the 0.10.0 tree.
+> A parallel full-audit remediation landed as **`0.10.1`** (CHANGELOG `[0.10.1]`, commits
+> `f4eb946`/`2f82899`/`3772438`; reports `docs/qa/2026-07-24-full-audit-report.md` +
+> `2026-07-24-comprehensive-qa-report.md`). Re-verification of every row against the current tree:
+>
+> - **STILL VALID & OPEN (20):** C1, H1, H2, H3, H6, M1, M2, M3, M4, M5, M6, M7, M8, L1, L2, L3, L4,
+>   L5, L6, L9, L12, L13, L15 — all re-confirmed against current code.
+> - **FIXED by 0.10.1 (6):** H4, H5, L8 (UX-2 archived-filtered-from-pickers), L11, E1/E2
+>   (BL-102 non-hermetic tests take `ENV_TEST_LOCK`+isolated XDG; BL-107 keychain probe bounded),
+>   L10 (coverage cites swept + `docs/ux/lint.py` now a blocking gate stage).
+> - **CORRECTIONS:** **L7** — protocol `verb_name` pinning regressed from 4/15 to **1/15** (only
+>   `ListWorkspaces` asserted now); finding is stronger, not weaker. **L14** — sessiond
+>   `CreateWorkspace` push-reach deviation is a **documented-accepted** spec §7 carve-out, not a
+>   defect → downgrade to info. **L16** — `McpDisconnect` no-op is by Phase-1 connect-per-call
+>   design → info.
+> - **Coverage gap in THIS audit (honest):** 0.10.1 found+fixed severe bugs this pass did NOT flag —
+>   **REL-1** (every GUI launch ran `bootout`, killing both daemons + all live terminals — a
+>   data-loss class), **SEC-1/SEC-2** (MCP consent bypass: HTTP tool calls not re-gated per-call;
+>   stdio fingerprint didn't cover args+env), **GRAPH-1** (cross-project graph damage),
+>   **SES-1** (`RemoveWorkspace` × `CreateSession` race). The launchd-bootstrap and consent-recheck
+>   surfaces deserve a dedicated re-audit.
+>
+> Read the per-row "Tracked?" column below together with this banner; rows marked **NEW** are still
+> actionable unless listed as fixed above.
+
 A full-pass static + dynamic audit (Phases 0–3): behavioral matrix, contract registry,
 business-rules map, security/concurrency/migration/degradation/wire-parity audits, UX-scenario
 compliance trace, and a live gate run. **Research-only** — no code was modified in this pass.
