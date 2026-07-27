@@ -161,6 +161,29 @@ impl Db {
         Ok(())
     }
 
+    /// BL-3: lock the SQLite database files to owner-only (`0600`) and their directory to `0700`.
+    /// `bpa.db`'s `scrollback`/`command_events` tables hold echoed secrets (tokens, commands), and
+    /// `orchd.db` holds connector/consent/audit rows — neither may be world-readable. SQLite creates
+    /// the main file + WAL/SHM sidecars with the process umask (typically `0644`), and the parent dir
+    /// is `Application Support`'s default `0755` (world-traversable), so WITHOUT this the files are
+    /// world-readable on a multi-user mac. The dir `0700` is load-bearing: a mid-run WAL/SHM created at
+    /// `0644` is still protected by the non-traversable dir; the file `0600` is defense-in-depth.
+    /// Best-effort: a chmod failure (e.g. a read-only fs) is logged, never fatal — opening the db
+    /// always succeeds even if tightening perms is impossible.
+    fn restrict_db_permissions(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let file_mode = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(path, file_mode.clone());
+        for suffix in ["-wal", "-shm"] {
+            let mut side = path.as_os_str().to_os_string();
+            side.push(suffix);
+            let _ = std::fs::set_permissions(std::path::PathBuf::from(side), file_mode.clone());
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
     fn open_inner(path: &Path) -> Result<Db, PersistError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -182,6 +205,8 @@ impl Db {
 
         let db = Db { conn };
         db.migrate(user_version)?;
+        // BL-3: tighten the db file + WAL/SHM + dir to owner-only (see `restrict_db_permissions`).
+        Self::restrict_db_permissions(path);
         info!(?path, "database opened (WAL, schema v{SCHEMA_VERSION})");
         Ok(db)
     }
@@ -945,6 +970,46 @@ mod tests {
             is_active: true,
             created_at: 1_700_000_000,
         }
+    }
+
+    #[test]
+    fn open_locks_the_db_files_and_dir_to_owner_only_bl3() {
+        use std::os::unix::fs::PermissionsExt;
+        // BL-3: bpa.db's scrollback holds echoed secrets, so it must NOT be world-readable. SQLite
+        // creates the file (+ WAL/SHM) at the process umask (0644) inside a default-0755 dir, so the
+        // open path must tighten both the files (0600) and the dir (0700).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bpa.db");
+        let _db = Db::open(&path).unwrap();
+        // a WAL write forces the -wal sidecar to exist, then re-open to re-run the chmod
+        _db.upsert_workspace(&ws("w1")).unwrap();
+        drop(_db);
+        let _ = Db::open(&path).unwrap();
+        let file_mode =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode(&path),
+            0o600,
+            "bpa.db must be owner-only (0600), not world-readable"
+        );
+        for suffix in ["-wal", "-shm"] {
+            let mut side = path.as_os_str().to_os_string();
+            side.push(suffix);
+            let side = std::path::PathBuf::from(side);
+            if side.exists() {
+                assert_eq!(
+                    file_mode(&side),
+                    0o600,
+                    "WAL/SHM sidecar {:?} must be owner-only (0600)",
+                    side
+                );
+            }
+        }
+        assert_eq!(
+            file_mode(dir.path()),
+            0o700,
+            "the db directory must be owner-only (0700) — it is the load-bearing guard"
+        );
     }
 
     #[test]

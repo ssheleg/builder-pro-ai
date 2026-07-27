@@ -231,6 +231,24 @@ impl Db {
         &self.conn
     }
 
+    /// BL-3: lock `orchd.db` (connector/consent/audit rows — never world-readable) + its WAL/SHM
+    /// sidecars to owner-only (`0600`) and the directory to `0700`. SQLite creates these at the
+    /// process umask (`0644`) inside a default-`0755` dir, so without this the rows ARE
+    /// world-readable. The dir `0700` is load-bearing; file `0600` is defense-in-depth. Best-effort.
+    fn restrict_db_permissions(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let file_mode = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(path, file_mode.clone());
+        for suffix in ["-wal", "-shm"] {
+            let mut side = path.as_os_str().to_os_string();
+            side.push(suffix);
+            let _ = std::fs::set_permissions(std::path::PathBuf::from(side), file_mode.clone());
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
     fn open_inner(path: &Path) -> Result<Db, PersistError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -252,6 +270,8 @@ impl Db {
 
         let db = Db { conn };
         db.migrate(user_version)?;
+        // BL-3: tighten the db file + WAL/SHM + dir to owner-only (see `restrict_db_permissions`).
+        Self::restrict_db_permissions(path);
         info!(?path, "database opened (WAL, schema v{SCHEMA_VERSION})");
         Ok(db)
     }
@@ -4008,6 +4028,35 @@ mod tests {
     fn user_version(conn: &Connection) -> i64 {
         conn.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn open_on_disk_locks_the_db_and_dir_to_owner_only_bl3() {
+        use std::os::unix::fs::PermissionsExt;
+        // BL-3: orchd.db holds connector/consent/audit rows — must be owner-only. The on-disk open
+        // path tightens the file + WAL/SHM to 0600 and the dir to 0700.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchd.db");
+        let db = Db::open(&path).unwrap();
+        // a write forces the WAL sidecar; re-open re-runs the chmod over all three files.
+        db.create_project("A", "", &["w1".to_string()]).unwrap();
+        drop(db);
+        let _ = Db::open(&path).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "orchd.db must be owner-only (0600)");
+        for suffix in ["-wal", "-shm"] {
+            let mut side = path.as_os_str().to_os_string();
+            side.push(suffix);
+            let side = std::path::PathBuf::from(side);
+            if side.exists() {
+                assert_eq!(mode(&side), 0o600, "orchd sidecar {side:?} must be 0600");
+            }
+        }
+        assert_eq!(
+            mode(dir.path()),
+            0o700,
+            "orchd db dir must be owner-only (0700)"
+        );
     }
 
     #[test]
