@@ -2,6 +2,55 @@
 
 All notable changes to Builder Pro AI. Format: keepachangelog.com; versioning: semver.
 
+## [0.10.5] — deep-audit remediation: security, reliability, traceability (2026-07-27)
+
+Third wave of the 2026-07-24 deep audit (`docs/qa/2026-07-24-deep-audit-findings.md`) — the
+findings not closed by 0.10.1/0.10.2/0.10.4 and not structurally blocked on S6b. Every change ships
+with a regression test; `final-suite.sh` ALL GATES PASSED (11 stages). Deferred items filed as
+BL-198 (orchd broadcast overflow-notify); the S6b-gated remainder stays at BL-21/27/74/81.
+
+### Fixed — security
+- **Restrictive CSP** (BL-2, C1): the webview shipped with `csp: null`. Replaced with the
+  Tauri-v2-official-template CSP narrowed to the app (`connect-src ipc: http://ipc.localhost` +
+  dev server for HMR; `default-src 'self' customprotocol: asset:`; `style-src 'self' 'unsafe-inline'`;
+  `font-src 'self'`; `img-src … blob: data:`). **GUI SMOKE REQUIRED before release** — the updater
+  auto-ships to every installed user, and jsdom/e2e cannot catch a wrong `connect-src` bricking the
+  webview IPC; an operator must launch the app and verify terminals/files/project panels/commands.
+- **stdio MCP child stderr discarded** (BL-69, H1): `TokioChildProcess` defaulted stderr to
+  `Stdio::inherit()`, so a third-party stdio server could forge orchd's structured log lines / smuggle
+  content into operator logs. `configure_stdio_command` now sets `Stdio::null()`.
+- **`McpServerRow`/`NewMcpServer`/`McpServerPatch` redact `env` from `Debug`** (L1): a stdio server's
+  `env` is the complete child environment and the channel secrets travel through; the next
+  `tracing::debug!(?server)` would have leaked them. Hand-written `Debug` renders `<N entries
+  [REDACTED]>`.
+- **GenericRest never follows redirects with the bearer** (M2): the generic-rest adapter kept
+  reqwest's default policy, which holds `Authorization` on same-host redirects. Switched to
+  `redirect::Policy::none()` — the bearer goes only to the literal `args["url"]`; a redirecting
+  endpoint surfaces honestly as `UpstreamStatus(3xx)`.
+- **skills/ruleset/doc markdown reads capped at 1 MiB** (BL-77, M5): `read_to_string` had no ceiling
+  (a hostile/corrupted `md_path` was a DoS vector). New `MAX_MD_READ_BYTES` + `exceeds_read_cap()`;
+  `read_state`/`compute_file_state` fold oversized into their existing `Missing` degradation,
+  `add_skill` surfaces a typed `Validation`.
+
+### Fixed — reliability & data integrity
+- **sessiond `wal_checkpoint` TRUNCATE → PASSIVE** (M8): TRUNCATE blocks until all readers drain and
+  was measured to hang past the e2e graceful-shutdown timeout (the same liveness regression orchd's
+  `checkpoint()` already downgraded away from). PASSIVE never blocks the shutdown ack; SQLite replays
+  the WAL tail on next open anyway.
+- **sessiond `migrate_v3` backfill idempotent** (M7): `INSERT … SELECT` had no `WHERE NOT EXISTS`
+  guard; paired with `CREATE TABLE IF NOT EXISTS`, a hand-edited/inconsistently-rolled-back DB whose
+  `user_version` ≤2 but whose `workspace_root` already holds ord=0 rows would PK-violate. Mirrors
+  orchd's `migrate_v2` discipline.
+
+### Fixed — traceability
+- **orchd-proto `verb_name` strings pinned** (H6): `verb_name()` was compile-exhaustive but no test
+  pinned the STRING literals, so a typo (`"CreateProjct"`) shipped silently and mislabeled every
+  completion-trace row. Added the crate's first `#[cfg(test)]`, pinning all 7 unit verbs, every
+  tail-appended verb, and a cross-domain core sample.
+- **Terminal-area placeholders centralized** (L9): "No terminals yet…" / "Select a terminal tab."
+  were inline literals in `App.tsx` → moved into `strings.terminal`.
+- **README docs index lists the UX source of truth** (L12): added `docs/ux/{scenarios,flows,foundation}.md`.
+
 ## [0.10.4] — BL-3: lock the databases to owner-only (2026-07-27)
 
 ### Fixed — security (P1)
