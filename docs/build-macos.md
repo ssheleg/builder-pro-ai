@@ -101,6 +101,8 @@ configured) actually executes the pipeline.
 | `APPLE_API_KEY_PATH` | Notarization (API key path, preferred) | Absolute path to the downloaded `AuthKey_<KEY_ID>.p8`. |
 | `APPLE_ID` | Notarization (Apple ID path, alternative) | Apple ID email. |
 | `APPLE_PASSWORD` | Notarization (Apple ID path, alternative) | App-specific password (not your Apple ID password). |
+| `TAURI_SIGNING_PRIVATE_KEY` | **Auto-update** (`0.10.2+`) | Contents of the Tauri updater private key (`…key`). When set, `tauri build` (with `bundle.createUpdaterArtifacts=true`) additionally emits the signed `.app.tar.gz` + `.app.tar.gz.sig`; `release.yml` then writes `latest.json`. Absent it, the build still succeeds but auto-update is disabled for that release. See [auto-update.md](auto-update.md). The matching **public** key is committed in `tauri.conf.json > plugins.updater.pubkey`. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Auto-update (optional) | Password for the private key above (omit if generated without one). |
 
 `scripts/build-universal.sh` accepts **either** the `APPLE_API_*` triple **or** the
 `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` triple as "notarization creds present";
