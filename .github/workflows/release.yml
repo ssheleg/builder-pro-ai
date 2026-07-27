@@ -179,12 +179,10 @@ jobs:
       # BL-105: verify the signed+notarized .app BEFORE publishing — codesign --deep --strict +
       # each embedded sidecar + the real Gatekeeper (spctl) policy check. `sign-verify.sh` degrades
       # honestly (exit 0) when the build was unsigned/dev-signed, but FAILS the release when
-      # notarization creds WERE present and spctl rejects it. `continue-on-error: true` TEMPORARILY
-      # (the script produced no output + failed in 0.1s on the 0.10.7 run — under remote diagnosis):
-      # it still RUNS so the output is visible, but a failure won't block the release until the
-      # script is confirmed correct on a known-good signed build. Flip back to blocking once verified.
+      # notarization creds WERE present and spctl rejects it — it CAUGHT the BL-174 entitlements
+      # break on the 0.10.7 run (a narrowed-entitlements build fails the deep-sign/notarization of
+      # the embedded sidecars) and passes on the known-good 4-key set. Blocking (not continue-on-error).
       - name: Verify signature + notarization (pre-publish gate)
-        continue-on-error: true
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
