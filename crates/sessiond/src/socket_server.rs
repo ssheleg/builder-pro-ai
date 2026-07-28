@@ -4643,6 +4643,12 @@ mod tests {
                     res: Response::Ack,
                 } => break,
                 Frame::Push(_) => continue,
+                // The id=4 collection loop above consumed only Output frames, not id=4's Ack, so
+                // that Ack can still arrive here — a harmless reordering, not a teardown bug.
+                // Tolerate any late Ack instead of flaking under response/Output interleaving.
+                Frame::Response {
+                    res: Response::Ack, ..
+                } => continue,
                 other => panic!("B expected Ack for post-disconnect write, got {other:?}"),
             }
         }
